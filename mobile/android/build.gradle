@@ -30,7 +30,9 @@ def singzAndroidCmakePolicyDigest = java.security.MessageDigest.getInstance("SHA
 [
     singzAndroidCmakeInit,
     file("../scripts/android-ccache-launcher.sh"),
-    file("../scripts/android-ccache-launcher.ps1")
+    file("../scripts/android-ccache-launcher.ps1"),
+    file("../../scripts/ccache-launcher.sh"),
+    file("../../scripts/ccache-launcher.ps1")
 ].each { policyFile -> singzAndroidCmakePolicyDigest.update(policyFile.bytes) }
 def singzAndroidCmakePolicyHash = singzAndroidCmakePolicyDigest.digest()
     .encodeHex().toString().take(16)

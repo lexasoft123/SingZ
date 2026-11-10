@@ -1,0 +1,31 @@
+extends: electron-builder.yml
+appId: com.lexasoft.singz.box
+productName: singz-box
+extraMetadata:
+  productName: SingZ Box
+  name: singz-box
+  singzProduct: box
+  desktopName: singz-box.desktop
+directories:
+  output: dist/box
+files:
+  - '!electron-builder.box.yml'
+  # The Box CEC/audio support files ship once, outside the asar, as
+  # resources/box-audio (extraResources below). Only unpackaged development
+  # runs read resources/linux from the checkout.
+  - '!resources/linux{,/**/*}'
+artifactName: SingZ-Box-${version}-linux-${arch}.${ext}
+extraResources:
+  - from: resources/linux
+    to: box-audio
+publish: null
+linux:
+  executableName: singz-box
+  desktop:
+    entry:
+      Name: SingZ Box
+deb:
+  packageName: singz-box
+  depends:
+    - python3
+    - fonts-noto-cjk

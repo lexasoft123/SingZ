@@ -55,7 +55,8 @@ async function checkViaGithub(): Promise<void> {
       log('updater', `update available: ${tag} (running ${appVersion()})`)
       set({ state: 'available', version: tag.replace(/^v/, ''), url: rel.html_url ?? 'https://github.com/lexasoft123/SingZ/releases/latest' })
     } else {
-      log('updater', `up to date (${appVersion()}, latest ${tag || 'unknown'})`)
+      if (tag) log('updater', `up to date (${appVersion()}, latest ${tag})`)
+      else log('updater', 'check returned no release version — update status unknown', 'warn')
       set({ state: 'none' })
     }
   } catch (err) {

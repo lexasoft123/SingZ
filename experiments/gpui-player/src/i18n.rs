@@ -37,10 +37,14 @@ pub enum Locale {
     Ms,
     #[serde(rename = "zh-TW")]
     ZhTw,
+    #[serde(rename = "es-419")]
+    Es419,
+    #[serde(rename = "pt-BR")]
+    PtBr,
 }
 impl Locale {
     /// Source LOCALES menu order (distinct from registration order).
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::En,
         Self::Tr,
         Self::Ru,
@@ -54,6 +58,8 @@ impl Locale {
         Self::Fil,
         Self::Ms,
         Self::ZhTw,
+        Self::Es419,
+        Self::PtBr,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -70,6 +76,8 @@ impl Locale {
             Self::Fil => "fil",
             Self::Ms => "ms",
             Self::ZhTw => "zh-TW",
+            Self::Es419 => "es-419",
+            Self::PtBr => "pt-BR",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -92,6 +100,8 @@ impl Locale {
             Self::Fil => "Filipino",
             Self::Ms => "Bahasa Melayu",
             Self::ZhTw => "繁體中文",
+            Self::Es419 => "Español (Latinoamérica)",
+            Self::PtBr => "Português (Brasil)",
         }
     }
     pub fn code(self) -> &'static str {
@@ -109,6 +119,8 @@ impl Locale {
             Self::Fil => "FIL",
             Self::Ms => "MS",
             Self::ZhTw => "ZH-TW",
+            Self::Es419 => "ES",
+            Self::PtBr => "PT",
         }
     }
 }
@@ -119,7 +131,7 @@ pub enum Language {
     Locale(Locale),
 }
 impl Language {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 16] = [
         Self::System,
         Self::Locale(Locale::En),
         Self::Locale(Locale::Tr),
@@ -134,6 +146,8 @@ impl Language {
         Self::Locale(Locale::Fil),
         Self::Locale(Locale::Ms),
         Self::Locale(Locale::ZhTw),
+        Self::Locale(Locale::Es419),
+        Self::Locale(Locale::PtBr),
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -175,6 +189,8 @@ pub fn from_tag(tag: &str) -> Option<Locale> {
         "ru" => Locale::Ru,
         "hi" => Locale::Hi,
         "tr" => Locale::Tr,
+        "es" => Locale::Es419,
+        "pt" => Locale::PtBr,
         "tl" | "fil" => Locale::Fil,
         "in" | "id" => Locale::Id,
         "ja" => Locale::Ja,
@@ -251,6 +267,14 @@ pub fn plural_form(locale: Locale, n: f64) -> &'static str {
         return "other";
     }
     let a = (n.abs() * 1000.).round() / 1000.;
+    if locale == Locale::PtBr && a < 2. {
+        return "one";
+    }
+    if matches!(locale, Locale::Es419 | Locale::PtBr)
+        && a != 0. && a % 1_000_000. == 0.
+    {
+        return "many";
+    }
     if locale == Locale::Hi {
         return if a <= 1. { "one" } else { "other" };
     }

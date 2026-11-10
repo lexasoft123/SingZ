@@ -8,6 +8,13 @@ import type {
   NativePlaybackViewState
 } from '../src/projects'
 
+// The stage stack is rendered directly below; supply its navigation lifecycle.
+jest.mock('@react-navigation/native', () => ({
+  ...jest.requireActual('@react-navigation/native'),
+  useIsFocused: () => true,
+  useNavigation: () => ({ addListener: () => () => {}, getParent: () => undefined })
+}))
+
 jest.mock('@react-navigation/native-stack', () => {
   const React = require('react')
   const navigation = {
@@ -45,6 +52,8 @@ jest.mock('react-native-reanimated', () => {
     runOnUI: (work: (...args: unknown[]) => unknown) => work,
     scrollTo: jest.fn(),
     useAnimatedRef: () => React.useRef(null),
+    useReducedMotion: () => false,
+    useDerivedValue: (fn: () => unknown) => ({ value: fn() }),
     useFrameCallback: () => React.useRef({ setActive: jest.fn() }).current,
     useScrollOffset: jest.fn(),
     useSharedValue: (value: unknown) => React.useRef({ value }).current
@@ -316,15 +325,15 @@ test('hands the singer\'s latency trim to the native backend', async () => {
 test('does not draw a mixer row for a lane the core reports silent', async () => {
   const h = nativePlayerHarness()
   ;(h.project.nativePlayback!.lanePeaks as jest.Mock).mockResolvedValue({
-    bucketCount: 2,
+    bucketCount: 96,
     lanes: [
       // Silent, but NOT a lane the rule may hide: an instrumental has no
       // singing, and the singer still gets to see and unmute that fader.
-      { id: 'vocals', peaksValid: true, peaks: [0, 0] },
+      { id: 'vocals', peaksValid: true, peaks: Array(96).fill(0) },
       // A song with no guitar still gets a guitar stem from the splitter.
-      { id: 'guitar', peaksValid: true, peaks: [0, 0.0001] },
+      { id: 'guitar', peaksValid: true, peaks: Array(96).fill(0.0001) },
       // A track the singer added themselves is never hidden either.
-      { id: 'custom-harmony', peaksValid: true, peaks: [0, 0] }
+      { id: 'custom-harmony', peaksValid: true, peaks: Array(96).fill(0) }
     ]
   })
   const legacy = {} as MultitrackEngine
@@ -405,4 +414,66 @@ test('leaving the Songs tab pauses the native graph and keeps it prepared', asyn
   await ReactTestRenderer.act(async () => {
     tree.unmount()
   })
+})
+
+test('iPad workspace resizes without replacing the song or losing loop marks, and keeps mixer controls live', async () => {
+  const { t } = require('../src/i18n')
+  const layoutHook = jest.spyOn(require('../src/ui/uiKit'), 'useMobileLayout').mockReturnValue({
+    width: 1194, height: 740, fontScale: 1, top: 0, compact: true, wide: true
+  })
+  const h = nativePlayerHarness()
+  const legacy = {} as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(
+      <PlayerScreen engine={legacy} project={h.project} route={null} trimMs={0}
+        onTrim={jest.fn()} onBack={jest.fn()} />
+    )
+    await Promise.resolve()
+  })
+  const hooks = (globalThis as Record<string, any>).__test
+  const resize = async (width: number, height: number): Promise<void> => {
+    await ReactTestRenderer.act(async () => {
+      tree.root.findByProps({ testID: 'player-stage' }).props.onLayout({ nativeEvent: { layout: { width, height } } })
+    })
+  }
+  const panels = () => tree.root.findAllByProps({ testID: 'player-mixer-panel' }, { deep: false })
+  const mixerButton = () => tree.root.findByProps({ label: t('phone.player.transport.mixer') })
+
+  try {
+    await resize(1194, 740)
+    expect(panels()).toHaveLength(1)
+    const { StyleSheet } = require('react-native')
+    const panel = StyleSheet.flatten(panels()[0].props.style)
+    const lyrics = StyleSheet.flatten(tree.root.findByProps({ testID: 'player-lyrics' }).props.style)
+    expect(panel.left + panel.width).toBeLessThan(lyrics.left)
+    expect(lyrics.width).toBeGreaterThan(450)
+
+    await ReactTestRenderer.act(async () => {
+      const mute = tree.root.findAll(node => node.props.accessibilityLabel === t('phone.player.mixer.mute', { label: 'Vocals' }) && typeof node.props.onPress === 'function')[0]
+      mute.props.onPress()
+      await hooks.cycleLoop()
+    })
+    expect(h.project.nativePlayback!.setLaneControl).toHaveBeenCalled()
+    expect(hooks.loopMarks).toEqual({ a: 1, b: null })
+
+    await ReactTestRenderer.act(async () => { mixerButton().props.onPress() })
+    expect(panels()).toHaveLength(0)
+    await ReactTestRenderer.act(async () => { mixerButton().props.onPress() })
+    expect(panels()).toHaveLength(1)
+
+    await resize(600, 800)
+    expect(panels()).toHaveLength(0)
+    await ReactTestRenderer.act(async () => { mixerButton().props.onPress() })
+    expect(hooks.sheet).toBe('mixer')
+    await resize(1194, 740)
+    expect(hooks.sheet).toBe('none')
+    expect(panels()).toHaveLength(1)
+    expect(hooks.loopMarks).toEqual({ a: 1, b: null })
+    expect(h.project.nativePlayback!.unload).not.toHaveBeenCalled()
+    expect(h.project.nativePlayback!.start).not.toHaveBeenCalled()
+  } finally {
+    await ReactTestRenderer.act(async () => { tree.unmount() })
+    layoutHook.mockRestore()
+  }
 })

@@ -1,4 +1,5 @@
 import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
+import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
 import type {
   DesktopAudioHostDevice,
   DesktopPlaybackLaneConfig,
@@ -140,7 +141,9 @@ export function selectDesktopPlaybackBackend(
       ? (features.requestedProvider === 'asio' ? 'asio'
         : features.requestedProvider === undefined || features.requestedProvider === 'wasapi'
           ? 'wasapi' : null)
-      : null
+      : platform === 'linux'
+        ? (!features.requestedProvider || features.requestedProvider === 'alsa' ? 'alsa' : null)
+        : null
   if (!provider) return { backend: 'legacy', reason: 'no native desktop provider for this platform' }
   if (!validRuntime(features.runtime)) {
     return { backend: 'legacy', reason: 'native playback runtime capability is unavailable' }
@@ -180,6 +183,9 @@ export interface DesktopNativePlaybackPrepare {
   preferredOutputUid?: string
   preferredOutputChannels?: number[]
   graphDocument?: ParsedGraphDocument
+  retainedProject?: { dir: string; songPath: string }
+  /** In-memory policy resolved from the engine request; Desktop default is undefined. */
+  streamLanes?: boolean
 }
 
 export interface DesktopNativePlaybackLease {
@@ -228,6 +234,10 @@ export interface DesktopNativePlaybackEngineRequest {
   nativeAudioProvider: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
   /** Full verified renderer document; opaque fields never cross native IPC. */
   graphDocument: ParsedGraphDocument | null
+  retainedProject?: { dir: string; songPath: string }
+  /** Optional in-memory surface policy, absent for ordinary Desktop. */
+  nativePlaybackEnabled?: boolean
+  streamLanes?: boolean
 }
 
 /** Renderer-engine adapter kept in this lazy chunk so the ordinary Web Audio
@@ -258,13 +268,13 @@ export async function decideDesktopNativePlayback(
     return null
   }
   const decision = selectDesktopPlaybackBackend(platform, {
-    enabled: desktopNativePlaybackPreferred(platform),
+    enabled: desktopNativePlaybackPreferred(platform, request.nativePlaybackEnabled),
     playbackRate: request.playbackRate,
     transpose: request.transpose,
     training: request.training,
     lanes: request.lanes,
     runtime,
-    requestedProvider: platform === 'win32' ? request.nativeAudioProvider : 'coreaudio'
+    requestedProvider: platform === 'win32' ? request.nativeAudioProvider : platform === 'linux' ? 'alsa' : 'coreaudio'
   })
   if (decision.backend !== 'native') return null
   return {
@@ -288,6 +298,8 @@ export async function decideDesktopNativePlayback(
     transpose: request.transpose,
     training: request.training,
     loop: request.loop,
+    streamLanes: request.streamLanes,
+    ...(request.retainedProject ? { retainedProject: { ...request.retainedProject } } : {}),
     ...(request.graphDocument ? { graphDocument: request.graphDocument } : {})
   }
 }
@@ -639,6 +651,8 @@ export class DesktopNativePlaybackClient {
   private request: DesktopNativePlaybackPrepare | null = null
   private route: PreparedRoute | null = null
   private mutationTail: Promise<void> = Promise.resolve()
+  private detachedPersistentHost = false
+  private detachPending: Promise<void> | null = null
   /** Transport-boundary bookkeeping for the generation being polled. A host
    * route/stream/clock boundary, or a rising adapter render-failure count
    * while the transport is advancing, means the callback is refusing every
@@ -948,7 +962,9 @@ export class DesktopNativePlaybackClient {
    * diagnosis, but neither makes Pause a valid next command. */
   get transportActive(): boolean {
     const state = this.last?.transportState
-    return this.ownsOutput && this.started && (state === 'playing' || state === 'pre-roll')
+    return this.ownsOutput && this.started &&
+      this.last?.state !== 'terminal' && this.last?.state !== 'quarantined' &&
+      (state === 'playing' || state === 'pre-roll')
   }
 
   /** Chromium's sink is still released and recovery owns the next action.
@@ -967,7 +983,11 @@ export class DesktopNativePlaybackClient {
   }
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const current = this.mutationTail.then(operation, operation)
+    const admitted = (): Promise<T> => {
+      if (this.detachedPersistentHost) throw new Error('Native playback UI is detached.')
+      return operation()
+    }
+    const current = this.mutationTail.then(admitted, admitted)
     this.mutationTail = current.then(() => undefined, () => undefined)
     return current
   }
@@ -1068,7 +1088,7 @@ export class DesktopNativePlaybackClient {
             await this.lease.releaseLegacyOutput()
             this.ownsOutput = true
             const activated = await this.activate(
-              request, ahead.route, request.provider !== 'asio', undefined, undefined, ahead.generation
+              request, ahead.route, request.provider !== 'asio' && request.provider !== 'alsa', undefined, undefined, ahead.generation
             )
             if (activated) {
               this.recoveryProvider = null
@@ -1087,7 +1107,7 @@ export class DesktopNativePlaybackClient {
           await this.lease.releaseLegacyOutput()
           this.ownsOutput = true
         }
-        const activated = await this.activate(request, route, request.provider !== 'asio')
+        const activated = await this.activate(request, route, request.provider !== 'asio' && request.provider !== 'alsa')
         if (activated) {
           this.recoveryProvider = null
           this.recoveryKind = null
@@ -1096,7 +1116,7 @@ export class DesktopNativePlaybackClient {
         }
         return activated
       } catch (error) {
-        if (request.provider === 'asio' &&
+        if ((request.provider === 'asio' || request.provider === 'alsa') &&
             !(error instanceof DesktopNativeProviderError) &&
             !(error instanceof DesktopNativeRecoveryError)) {
           throw new DesktopNativeProviderError(request.provider, error)
@@ -1116,7 +1136,14 @@ export class DesktopNativePlaybackClient {
       throw new Error('Native output inventory belongs to a different provider.')
     }
     let output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
-    if (request.browserOutputId && request.browserOutputId !== 'default') {
+    if (request.provider === 'alsa') {
+      const uid = request.browserOutputId?.startsWith('native:')
+        ? request.browserOutputId.slice(7) : request.preferredOutputUid
+      output = uid
+        ? inventory.devices.find(device => device.uid === uid && device.outputChannels > 0) ?? null
+        : inventory.devices.find(device => device.uid === inventory.defaultOutputUid && device.outputChannels > 0) ?? null
+      if (!output) throw new Error('Select an available ALSA output in Settings.')
+    } else if (request.browserOutputId && request.browserOutputId !== 'default') {
       const browserOutputs = await navigator.mediaDevices.enumerateDevices()
       const selected = browserOutputs.find(device => device.kind === 'audiooutput' && device.deviceId === request.browserOutputId)
       if (!selected) throw new Error('The selected output is no longer connected.')
@@ -1130,7 +1157,13 @@ export class DesktopNativePlaybackClient {
       outputDeviceUid: output.uid,
       outputChannels,
       sampleRate: Math.round(output.nominalSampleRate || request.sampleRate),
-      bufferFrames: Math.max(1, output.bufferFrames.preferredFrames || 512)
+      // ALSA bufferFrames requests the period, not the ring. Native negotiates
+      // the nearest supported period and validates it against its 4096-frame
+      // maximum; the ring is sized separately. Ignore cached inventory caps
+      // because an active Chromium/preview stream can constrain them to 1024.
+      bufferFrames: request.provider === 'alsa'
+        ? 256
+        : Math.max(1, output.bufferFrames.preferredFrames || 512)
     }
   }
 
@@ -1253,7 +1286,7 @@ export class DesktopNativePlaybackClient {
     return {
       capability: DESKTOP_PLAYBACK_CAPABILITY,
       provider: request.provider,
-      accessMode: request.provider === 'asio' ? 'exclusive' : 'shared',
+      accessMode: request.provider === 'asio' || request.provider === 'alsa' ? 'exclusive' : 'shared',
       outputDeviceUid: route.outputDeviceUid,
       outputChannels: route.outputChannels,
       sampleRate: route.sampleRate,
@@ -1284,12 +1317,15 @@ export class DesktopNativePlaybackClient {
         ...(loop ? { loop } : {})
       },
       ...(graphDocument ? { graphDocument } : {}),
+      ...(typeof window !== 'undefined' && window.singz?.boxAudioPersistent === true && request.retainedProject
+        ? { retainedProject: { ...request.retainedProject } }
+        : {}),
       // In EVERY prepare — ahead, Play and seam alike — so it is part of the
       // ahead signature and a toggle between prepares is a rebuild, never a
       // silent mismatch. On by default on macOS and Windows, as on the
       // phones (see the preference for the Windows read-path history); the
       // core falls back to decoding any lane it cannot stream.
-      streamLanes: desktopStreamLanesPreferred(detectedDesktopPlatform())
+      streamLanes: desktopStreamLanesPreferred(detectedDesktopPlatform(), request.streamLanes)
     }
   }
 
@@ -1339,6 +1375,7 @@ export class DesktopNativePlaybackClient {
       this.transportIntent = initialTransport?.state === 'paused' ? 'paused' : 'playing'
       this.edgeAtMs = Date.now()
       await this.refresh(generation)
+      if (this.recoveryKind === 'cleanup-required') this.assertCommandableGeneration()
       this.startPolling()
       return true
     } catch (error) {
@@ -1991,6 +2028,178 @@ export class DesktopNativePlaybackClient {
     })
   }
 
+  attachRetained(
+    recovery: BoxRetainedPlaybackRecovery,
+    graphDocument: ParsedGraphDocument | null
+  ): DesktopNativePlaybackPrepare {
+    if (window.singz.boxAudioPersistent !== true) throw new Error('Persistent Box audio is not configured.')
+    if (this.detachedPersistentHost || this.generation || this.ahead || this.ownsOutput || this.recoveryPending) {
+      throw new Error('Native playback already has a renderer owner.')
+    }
+    const { descriptor, status, generation } = recovery
+    if (generation === '0' || status.generation !== generation ||
+        status.capability !== DESKTOP_PLAYBACK_CAPABILITY) {
+      throw new Error('Retained native playback identity does not match its status.')
+    }
+    if (status.state === 'prepared' || status.state === 'preparing') {
+      throw new Error('Retained prepared-ahead playback is unsupported; use explicit Stop before reopening the song.')
+    }
+    const transportCommandable = status.transportState === 'playing' || status.transportState === 'pre-roll' ||
+      status.transportState === 'paused' || status.transportState === 'completed'
+    const terminal = status.terminalReason !== 'none' && status.terminalReason !== ''
+    if (status.state !== 'running' || status.hostState !== 'running' || !transportCommandable ||
+        terminal || status.error !== '') {
+      throw new Error('Retained native playback is not a commandable opened transport; use explicit Stop.')
+    }
+    const config = descriptor.config
+    const sampleRate = status.format.sampleRate
+    const durationFrames = finiteSignedFrame(status.durationFrames, 'Retained duration')
+    const positionFrame = finiteSignedFrame(
+      status.audibleProjectionQuality === 'current' ? status.audibleProjectFrame : status.renderedProjectFrame,
+      'Retained position'
+    )
+    if (!Number.isFinite(sampleRate) || sampleRate <= 0 || config.sampleRate !== sampleRate || durationFrames < 0) {
+      throw new Error('Retained native playback has an invalid timeline.')
+    }
+    if (!Number.isFinite(status.masterGain) || status.masterGain < 0 || status.masterGain > 1 ||
+        !Number.isFinite(status.playbackRate) || status.playbackRate < 0.5 || status.playbackRate > 1.5 ||
+        !Number.isInteger(status.transposeSemitones) || Math.abs(status.transposeSemitones) > 12) {
+      throw new Error('Retained native playback controls are invalid.')
+    }
+    const currentLanes = new Map(status.lanes.map(lane => [lane.id, lane]))
+    if (currentLanes.size !== descriptor.lanes.length || status.lanes.length !== descriptor.lanes.length) {
+      throw new Error('Retained native lane status is incomplete.')
+    }
+    const lanes = descriptor.lanes.map(lane => {
+      const current = currentLanes.get(lane.id)
+      if (!current) throw new Error(`Retained native lane ${lane.id} has no current status.`)
+      if (!Number.isFinite(current.gain) || current.gain < 0 || current.gain > 1) {
+        throw new Error(`Retained native lane ${lane.id} has an invalid gain.`)
+      }
+      return {
+        id: lane.id,
+        path: lane.path,
+        gain: current.gain,
+        muted: current.muted,
+        solo: current.solo
+      }
+    })
+    const cues = config.playback.cues
+    const grid = cues.beatGrid
+    const beat: BeatInfo | null = grid ? {
+      ...grid,
+      beats: [...grid.beats],
+      downbeats: [...grid.downbeats],
+      source: 'manual',
+      bpm: grid.beats.length > 1 && grid.beats.at(-1)! > grid.beats[0]
+        ? 60 * (grid.beats.length - 1) / (grid.beats.at(-1)! - grid.beats[0])
+        : 120
+    } : null
+    const loopStart = finiteSignedFrame(status.loopStartFrame, 'Retained loop start')
+    const loopEnd = finiteSignedFrame(status.loopEndFrame, 'Retained loop end')
+    if (status.loopEnabled && (loopStart < 0 || loopEnd <= loopStart)) {
+      throw new Error('Retained native loop bounds are invalid.')
+    }
+    let training: DesktopNativeTrainingIntent | null = null
+    if (status.trainingEnabled) {
+      const plan = config.training
+      if (!plan?.enabled) throw new Error('Retained native training status has no prepared plan.')
+      training = plan.mode === 'period'
+        ? { mode: 'period', periodSec: Number(plan.periodFrames) / sampleRate, stems: [...status.trainingLanes] }
+        : {
+            mode: 'windows',
+            windows: (plan.windows ?? []).map(window => ({
+              s: window.startProjectFrame / sampleRate,
+              e: window.endProjectFrame / sampleRate
+            })),
+            stems: [...status.trainingLanes]
+          }
+    }
+    const request: DesktopNativePlaybackPrepare = {
+      provider: config.provider,
+      lanes,
+      beat,
+      metronome: {
+        click: cues.click,
+        countInBars: cues.countInBars,
+        volume: cues.volume,
+        accent: cues.accent,
+        grid: grid !== undefined
+      },
+      countIn: cues.countInBars > 0,
+      positionSeconds: Math.max(0, positionFrame / sampleRate),
+      durationSeconds: durationFrames / sampleRate,
+      sampleRate,
+      masterGain: status.masterGain,
+      playbackRate: status.playbackRate,
+      transpose: status.transposeSemitones,
+      training,
+      loop: status.loopEnabled ? { start: loopStart / sampleRate, end: loopEnd / sampleRate } : null,
+      preferredOutputUid: config.outputDeviceUid,
+      preferredOutputChannels: [...config.outputChannels],
+      ...(config.provider === 'alsa' ? { browserOutputId: `native:${config.outputDeviceUid}` } : {}),
+      ...(graphDocument ? { graphDocument } : {}),
+      retainedProject: { dir: descriptor.project.dir, songPath: descriptor.project.songPath },
+      streamLanes: config.streamLanes
+    }
+    const route: PreparedRoute = {
+      outputDeviceUid: config.outputDeviceUid,
+      outputChannels: [...config.outputChannels],
+      sampleRate: config.sampleRate,
+      bufferFrames: config.bufferFrames
+    }
+    this.stopPolling()
+    this.forgetTransport()
+    this.request = request
+    this.route = route
+    this.generation = generation
+    this.last = status
+    this.lastAtMs = Date.now()
+    this.ownsOutput = true
+    this.started = true
+    this.transportIntent = status.transportState === 'playing' || status.transportState === 'pre-roll'
+      ? 'playing'
+      : 'paused'
+    this.recoveryProvider = null
+    this.recoveryKind = null
+    this.countInLandingSeconds = cues.countInBars > 0 && Number(status.preRollFrames) > 0
+      ? config.playback.transport.countInAnchorSeconds ?? 0
+      : null
+    this.countInSeen = Number(status.renderedProjectFrame) < 0
+    this.run = { generation, floor: null, lap: status.loopCount }
+    this.activityAtMs = Date.now()
+    this.startPolling()
+    return request
+  }
+
+  /** Release renderer bookkeeping after queued commands, retaining the
+   * service-owned generation and output lease in the independent audio host. */
+  detachPersistentPlayback(): Promise<void> {
+    if (window.singz.boxAudioPersistent !== true) return Promise.reject(new Error('Persistent Box audio is not configured.'))
+    if (this.detachPending) return this.detachPending
+    this.stopPolling()
+    const operation = this.serialize(async () => {
+      this.stopPolling()
+      await this.statusReadTail
+      this.detachedPersistentHost = true
+      this.generation = ''
+      this.ahead = null
+      this.started = false
+      this.last = null
+      this.ownsOutput = false
+      this.request = null
+      this.route = null
+      this.forgetTransport()
+      this.stopPolling()
+    })
+    this.detachPending = operation
+    // A failed detach stays retryable instead of replaying its rejection forever.
+    void operation.catch(() => {
+      if (this.detachPending === operation) this.detachPending = null
+    })
+    return operation
+  }
+
   async unload(): Promise<void> {
     return this.serialize(async () => {
       this.stopPolling()
@@ -2253,8 +2462,15 @@ export class DesktopNativePlaybackClient {
         this.lastAtMs = Date.now()
         this.followRun(status)
         this.observeTransportBoundary(expectedGeneration, status)
+        if (status.state === 'terminal' || status.state === 'quarantined') {
+          // Last transport telemetry may still say Playing after the device stops.
+          // Retain ownership until exact cleanup; an explicit Play can recover.
+          this.started = false
+          this.recoveryProvider = this.request?.provider ?? this.recoveryProvider ?? 'coreaudio'
+          this.recoveryKind = 'cleanup-required'
+          this.stopPolling()
+        }
         this.onStateChange(status)
-        if (status.state === 'terminal' || status.state === 'quarantined') this.stopPolling()
         return status
       } catch (error) {
         // Publish a current polling failure before the serialized status lane
@@ -2278,6 +2494,7 @@ export class DesktopNativePlaybackClient {
     try {
       const status = await this.readStatus(generation, { requireCommandable: true })
       if (!status) throw new Error('Native playback status belongs to a retired generation.')
+      this.assertCommandableGeneration()
       return status
     } catch (error) {
       if (error instanceof DesktopNativeRecoveryError) throw error

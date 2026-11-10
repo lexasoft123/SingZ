@@ -15,7 +15,7 @@ use std::{
     },
 };
 
-pub const CURRENT_VERSION: &str = "0.26.5";
+pub const CURRENT_VERSION: &str = "0.26.7";
 const CONTENT: &str = include_str!("../../../src/shared/release-content.json");
 const NAME: &str = "release-highlights.json";
 const LIMIT: u64 = 64 * 1024;

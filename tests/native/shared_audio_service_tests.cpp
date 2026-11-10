@@ -40,6 +40,9 @@ class TestBackend final : public AudioHostBackend {
         return {false, AudioHostError::InvalidConfiguration, AudioHostState::Error,
                 {}, {}, "Output channel map exceeds active route"};
     current.state = AudioHostState::Open;
+    current.terminalReason = AudioHostTerminalReason::None;
+    current.terminalOrdinal = 0;
+    current.xruns = 0;
     current.format = {config.requestedSampleRate ? config.requestedSampleRate : 48000, config.maximumFrames, 512, 0, static_cast<uint32_t>(config.outputChannels.size())};
     return {true, AudioHostError::None, current.state, current.format, {}, {}};
   }
@@ -69,6 +72,43 @@ bool cue(void*, const AudioHostRenderBlock& block) noexcept {
   return true;
 }
 int main() {
+  // A terminal physical stream does not prevent proving song callback
+  // quiescence, and does not force retirement of a training owner's stream.
+  for (auto failedState : {AudioHostState::Error, AudioHostState::DeviceLost}) {
+    auto failedOwned = std::make_unique<TestBackend>();
+    auto* failedBackend = failedOwned.get();
+    SharedAudioService failedService(std::move(failedOwned));
+    auto failedClient = failedService.playbackBackend(std::make_unique<TestBackend>(), "");
+    AudioHostConfig failedConfig;
+    failedConfig.outputDeviceUid = "selected";
+    failedConfig.outputChannels = {0, 1};
+    failedConfig.requestedSampleRate = 48000;
+    CHECK(failedClient->open(failedConfig, song, nullptr).ok);
+    CHECK(failedClient->start().ok);
+    failedService.setTrainingRenderer(cue, nullptr);
+    failedBackend->current.state = failedState;
+    failedBackend->current.terminalReason = AudioHostTerminalReason::ProviderFailure;
+    failedBackend->current.terminalOrdinal = 42;
+    failedBackend->current.xruns = 1;
+    CHECK(failedClient->status().state == failedState);
+    const auto physicalStops = failedBackend->stops;
+    failedClient->stop();
+    const auto retired = failedClient->status();
+    CHECK(retired.state == AudioHostState::Stopped);
+    CHECK(retired.terminalReason == AudioHostTerminalReason::ProviderFailure);
+    CHECK(retired.terminalOrdinal == 42 && retired.xruns == 1);
+    CHECK(failedBackend->current.state == failedState);
+    CHECK(failedBackend->stops == physicalStops);
+    failedBackend->render(0.5F); // late shared callback cannot call the retired song
+    const auto opens = failedBackend->opens;
+    CHECK(failedClient->open(failedConfig, song, nullptr).ok);
+    CHECK(failedClient->start().ok);
+    CHECK(failedBackend->opens > opens);
+    CHECK(failedClient->status().state == AudioHostState::Running);
+    CHECK(failedClient->status().terminalReason == AudioHostTerminalReason::None);
+    failedClient->stop();
+    failedService.clearTrainingRenderer();
+  }
   auto owned = std::make_unique<TestBackend>(); auto* backend = owned.get();
   SharedAudioService service(std::move(owned));
   CHECK(service.initialize().ok);

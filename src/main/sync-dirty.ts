@@ -1,3 +1,4 @@
+import { isDriveProject } from './drive-storage'
 import { existsSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { log } from './log'
@@ -62,6 +63,7 @@ function bump(state: DirtyState, reason: string): DirtyState {
 }
 
 export function markProjectDirty(dir: string, reason: string): void {
+  if (isDriveProject(dir)) return // Reader copies never drive the upload reconciler.
   const state = bump(dirtyState(), `${dir} (${reason})`)
   state.dirs = { ...state.dirs, [dir]: state.seq }
   // past the cap the individual list stops being useful; the library is dirty

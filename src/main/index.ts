@@ -2,9 +2,10 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, type Me
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type {
+  CaptureStartConfig,
   DesktopMonitorConfig,
-  DesktopPlaybackLaneConfig,
   DesktopPlaybackLaneMeasureRequest,
   DesktopPlaybackLaneMeasureResult,
   DesktopPlaybackPrepareConfig,
@@ -32,7 +33,7 @@ import {
   setProjectsRoot,
   writeProjectGraph
 } from './projects'
-import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync, gdriveCancelSync } from './gdrive'
+import { gdriveProjects, gdriveDownload, gdriveCancelDownload, gdriveDeviceConfigured, gdriveBrowserConfigured, gdriveSignInMode, gdriveDeviceStart, gdriveDeviceStatus, gdriveDeviceCancel, gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync, gdriveCancelSync } from './gdrive'
 import { readSettings, writeSettings } from './settings'
 import { registerLocale } from './locale'
 import { registerWhatsNew } from './whats-new'
@@ -42,7 +43,7 @@ import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
 import { t } from '../shared/i18n'
 import { registerSource, registerTrack } from './source'
-import { log, logEntries, logSessions, readLogSession, saveLog, startSessionLog } from './log'
+import { attachRendererLogs, log, logEntries, logSessions, readLogSession, saveLog, startSessionLog } from './log'
 import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
 import { syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
@@ -63,10 +64,18 @@ import { Separator } from './separation'
 import { registerVocalSeparation, vocalSeparator } from './vocal-separation'
 import { registerAnalyze } from './analyze'
 import { registerStemExport } from './stem-export'
-import { registerDesktopAudioInput } from './audio-input'
+import { registerDesktopAudioInput, stopDesktopAudioInput } from './audio-input'
 import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
-import { CaptureOwner, playbackCodecSupportsPath } from './capture'
+import { boxKioskRequested, desktopUpdaterEnabled, developmentRendererUrl, requestedRendererSurface } from './launch-surface'
+import { shouldDeferBoxApplicationQuit } from './box-close-policy'
+import { BoxQuitCoordinator, fromOwnMainFrame, settleWithin } from './box-quit-coordinator'
+import { registerBoxIpc } from './box/ipc'
+import { BoxCecService, boxCecEnabled } from './box/cec'
+import { boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
+import { failedPlayback, playbackCodecSupportsPath } from './capture'
+import { createRemoteCaptureOwner } from './audio-process'
+import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -80,17 +89,28 @@ if (process.env.SINGZ_MUTE) {
   app.commandLine.appendSwitch('mute-audio')
 }
 
-// Test hook: isolate userData — concurrent E2E drivers (or a driver next to
-// a dev instance) sharing the default "Electron" profile crash each other's
-// renderers. Shared caches (models, GPU pack) stay in appData/SingZ.
-if (process.env.SINGZ_USERDATA_DIR) {
-  app.setPath('userData', resolve(process.env.SINGZ_USERDATA_DIR))
-}
-
 const separator = new Separator()
 const transcriber = new Transcriber()
 const modelManager = new ModelManager()
-const captureOwner = new CaptureOwner()
+const captureOwner = createRemoteCaptureOwner()
+const laneMeasureCache = new LaneMeasureCache({
+  cacheDir: join(app.getPath('userData'), 'lane-measure-cache-v1'),
+  measure: request => captureOwner.measurePlaybackLanes(request),
+  onBatch: batch => log('dsp', describeLaneMeasureBatch(batch))
+})
+let boxBackend: ReturnType<typeof registerBoxIpc> = null
+let boxBackendDisposeStarted = false
+let boxCec: BoxCecService | null = null
+// Box close/quit handshake bookkeeping lives in a tested pure module. Windows
+// are keyed by BrowserWindow, never webContents: a destroyed window's
+// webContents getter throws, and the fallback timers can outlive the window.
+const boxQuit = new BoxQuitCoordinator<BrowserWindow>({
+  isDestroyed: win => win.isDestroyed(),
+  requestRendererClose: win => win.webContents.send('box:close-request'),
+  closeWindow: win => win.close(),
+  resumeQuit: () => app.quit(),
+  warn: message => log('app', message, 'warn')
+})
 
 /** Every window hears about Drive: progress while a sync runs, and the state
  *  the badges read. One helper, because three copies of this loop drifted. */
@@ -150,30 +170,49 @@ const scheduler = new SyncScheduler({
 if (!process.env.SINGZ_NO_SYNC) onDirty(() => scheduler.notifyDirty())
 
 function createWindow(): void {
+  const surface = requestedRendererSurface(process.argv)
   const st = loadWindowState({ width: 1240, height: 820 })
+  // Cage needs a mapped Wayland surface before the first frame. Waiting for
+  // ready-to-show with an initially hidden window can leave startup blank.
+  // Preserve the explicit hidden-window contract used by automated drivers.
+  const showOnWayland = process.platform === 'linux'
+    && Boolean(process.env.WAYLAND_DISPLAY) && !process.env.SINGZ_E2E_HIDDEN
+  const kiosk = boxKioskRequested(surface, {
+    developmentUrl: process.env['ELECTRON_RENDERER_URL'],
+    hiddenTest: Boolean(process.env.SINGZ_E2E_HIDDEN),
+    windowed: process.env.SINGZ_BOX_WINDOWED === '1'
+  })
   const win = new BrowserWindow({
-    width: st.width,
-    height: st.height,
-    ...(st.x !== undefined && st.y !== undefined ? { x: st.x, y: st.y } : {}),
-    minWidth: 940,
-    minHeight: 600,
-    show: false,
-    ...(process.platform === 'darwin'
+    width: surface === 'box' ? 1600 : st.width,
+    height: surface === 'box' ? 900 : st.height,
+    ...(surface === 'desktop' && st.x !== undefined && st.y !== undefined ? { x: st.x, y: st.y } : {}),
+    minWidth: surface === 'box' ? 640 : 940,
+    minHeight: surface === 'box' ? 360 : 600,
+    show: showOnWayland,
+    ...(surface === 'box'
       ? {
-          backgroundColor: '#12100d',
-          titleBarStyle: 'hiddenInset' as const,
-          trafficLightPosition: { x: 18, y: 17 }
+          frame: false,
+          autoHideMenuBar: true,
+          fullscreen: kiosk,
+          kiosk,
+          backgroundColor: '#12100d'
         }
-      : process.platform === 'win32'
+      : process.platform === 'darwin'
         ? {
-            // Fully frameless + transparent so the renderer can draw rounded
-            // corners (Windows 10 never rounds native frames). Window buttons
-            // are ours, wired over IPC.
-            frame: false,
-            transparent: true,
-            backgroundColor: '#00000000'
+            backgroundColor: '#12100d',
+            titleBarStyle: 'hiddenInset' as const,
+            trafficLightPosition: { x: 18, y: 17 }
           }
-        : { backgroundColor: '#12100d' }),
+        : process.platform === 'win32'
+          ? {
+              // Fully frameless + transparent so the renderer can draw rounded
+              // corners (Windows 10 never rounds native frames). Window buttons
+              // are ours, wired over IPC.
+              frame: false,
+              transparent: true,
+              backgroundColor: '#00000000'
+            }
+          : { backgroundColor: '#12100d' }),
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.mjs'),
       sandbox: false,
@@ -185,7 +224,32 @@ function createWindow(): void {
     }
   })
 
-  trackWindowState(win)
+  attachRendererLogs(win.webContents)
+  boxBackend?.attachRenderer(win.webContents)
+  if (surface === 'box' && boxCec) {
+    let loaded = false
+    const cec = boxCec
+    cec.attach({
+      ready: () => loaded && !win.isDestroyed() && win.isFocused() && !boxQuit.isClosing(win),
+      send: input => { if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.sendInputEvent(input) }
+    })
+    win.webContents.on('did-start-navigation', (_event, _url, _inPlace, mainFrame) => {
+      if (mainFrame) { loaded = false; cec.releaseKeys() }
+    })
+    win.webContents.on('did-finish-load', () => { loaded = true })
+    win.webContents.on('render-process-gone', () => { loaded = false; cec.releaseKeys() })
+    win.on('blur', () => cec.releaseKeys())
+    win.once('closed', () => cec.detach())
+  }
+  if (surface === 'desktop') trackWindowState(win)
+  if (surface === 'box') {
+    win.on('close', (event) => {
+      if (!boxQuit.interceptClose(win)) return
+      event.preventDefault()
+      boxCec?.releaseKeys()
+    })
+    win.once('closed', () => boxQuit.windowClosed(win))
+  }
   win.on('maximize', () => win.webContents.send('win:maximized', true))
   win.on('unmaximize', () => win.webContents.send('win:maximized', false))
   win.on('ready-to-show', () => {
@@ -208,9 +272,12 @@ function createWindow(): void {
       readGpuSoon()
       return
     }
-    win.once('show', readGpuSoon)
-    if (st.maximized) win.maximize()
-    win.show()
+    if (surface === 'desktop' && st.maximized) win.maximize()
+    if (win.isVisible()) readGpuSoon()
+    else {
+      win.once('show', readGpuSoon)
+      win.show()
+    }
   })
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
@@ -234,9 +301,9 @@ function createWindow(): void {
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
-    void win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    void win.loadURL(developmentRendererUrl(process.env['ELECTRON_RENDERER_URL'], surface))
   } else {
-    void win.loadFile(join(import.meta.dirname, '../renderer/index.html'))
+    void win.loadFile(join(import.meta.dirname, surface === 'box' ? '../renderer/box/box.html' : '../renderer/index.html'))
   }
 }
 
@@ -250,9 +317,16 @@ function registerIpc(): void {
     else w.maximize()
   })
   ipcMain.on('win:close', (e) => BrowserWindow.fromWebContents(e.sender)?.close())
+  ipcMain.on('box:close-ready', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win.isDestroyed() || !fromOwnMainFrame(e, win.webContents)) return
+    boxQuit.acknowledge(win)
+  })
   ipcMain.handle('win:is-maximized', (e) => BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false)
   ipcMain.handle('update:state', () => updateState())
-  ipcMain.on('update:install', () => installUpdate())
+  ipcMain.on('update:install', () => {
+    if (desktopUpdaterEnabled(requestedRendererSurface(process.argv))) installUpdate()
+  })
 
   ipcMain.handle('splitter:mode', async () => {
     try {
@@ -341,6 +415,12 @@ function registerIpc(): void {
       return res
     }
   )
+
+  ipcMain.handle('lyrics:get-cached', async (_e, raw: string) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
+    return transcriber.readCached(full)
+  })
 
   ipcMain.handle('lyrics:align-caps', async () => ({ precise: await preciseCapable() }))
 
@@ -494,7 +574,13 @@ function registerIpc(): void {
   ipcMain.on('training-preferences:save-sync', (event, raw: unknown) => { event.returnValue = saveTrainingPreferences(raw) })
   ipcMain.handle('training-completion:record', (_e, raw: unknown) => recordTrainingCompletion(raw))
 
+  ipcMain.handle('gdrive:projects', () => gdriveProjects())
+  ipcMain.handle('gdrive:download', (_event, id: unknown) => typeof id === 'string' ? gdriveDownload(id, (msg, frac) => sendGdrive('gdrive:progress', { msg, frac })) : { ok: false, error: 'Invalid Drive project' })
+  ipcMain.handle('gdrive:cancel-download', () => gdriveCancelDownload())
   ipcMain.handle('gdrive:status', () => ({
+    signInMode: gdriveSignInMode(),
+    deviceSignInConfigured: gdriveDeviceConfigured(),
+    browserSignInConfigured: gdriveBrowserConfigured(),
     configured: gdriveConfigured(),
     signedIn: gdriveConfigured() && gdriveSignedIn(),
     lastSync: readSettings().gdriveLastSync ?? null,
@@ -505,8 +591,43 @@ function registerIpc(): void {
     const res = await gdriveSignIn()
     // the scheduler arms nothing while signed out; this is where a session that
     // started that way gets its launch reconcile and its sweep
-    if (res.ok) scheduler.start()
+    if (res.ok && !process.env.SINGZ_NO_SYNC) scheduler.start()
     return res
+  })
+  let deviceSignInOwner: { id: number; dispose: () => void } | null = null
+  const releaseDeviceOwner = (): void => { deviceSignInOwner?.dispose(); deviceSignInOwner = null }
+  ipcMain.handle('gdrive:device-start', async event => {
+    if (deviceSignInOwner && deviceSignInOwner.id !== event.sender.id) return { ok: false, code: 'cancelled' }
+    releaseDeviceOwner()
+    const owner = event.sender
+    const ownerId = owner.id
+    const record = { id: ownerId, dispose: (): void => { owner.removeListener('destroyed', destroy) } }
+    const destroy = (): void => {
+      if (deviceSignInOwner === record) { gdriveDeviceCancel(); releaseDeviceOwner() }
+    }
+    deviceSignInOwner = record
+    owner.once('destroyed', destroy)
+    try {
+      const result = await gdriveDeviceStart()
+      if (!result.ok && deviceSignInOwner === record) releaseDeviceOwner()
+      return result
+    } catch {
+      if (deviceSignInOwner === record) { gdriveDeviceCancel(); releaseDeviceOwner() }
+      return { ok: false, code: 'network' }
+    }
+  })
+  ipcMain.handle('gdrive:device-status', (event, id: unknown) => {
+    if (deviceSignInOwner?.id !== event.sender.id || typeof id !== 'string') return { phase: 'error', code: 'unknown-session' }
+    const state = gdriveDeviceStatus(id)
+    if (state.phase === 'complete' && !process.env.SINGZ_NO_SYNC) scheduler.start()
+    return state
+  })
+  ipcMain.handle('gdrive:device-cancel', (event, id?: unknown) => {
+    if (deviceSignInOwner?.id !== event.sender.id || (id !== undefined && typeof id !== 'string')) return { ok: false }
+    const complete = typeof id === 'string' && gdriveDeviceStatus(id).phase === 'complete'
+    const ok = gdriveDeviceCancel(typeof id === 'string' ? id : undefined)
+    if (ok) releaseDeviceOwner()
+    return { ok, complete: ok && complete }
   })
   ipcMain.handle('gdrive:signout', () => {
     gdriveSignOut()
@@ -572,33 +693,39 @@ function registerIpc(): void {
 
   ipcMain.handle('mic:ask', () => askMicrophoneAccess())
 
-  ipcMain.handle('capture:devices', () => {
+  ipcMain.handle('capture:devices', async () => {
     try {
-      return captureOwner.devices()
+      return await captureOwner.devices()
     } catch (error) {
       return { ok: false, devices: [], error: String(error) }
     }
   })
-  const bindNativeAudioCleanup = (sender: WebContents): void => {
-    if (!captureOwner.bindRendererCleanup(sender.id)) return
-    const rendererId = sender.id
-    const gone = (): void => captureOwner.rendererGone(rendererId)
-    sender.once('destroyed', gone)
-    // A crashed or reloaded renderer can keep the same webContents. These
-    // listeners retire native output before a replacement document inherits it.
-    sender.on('render-process-gone', gone)
-    sender.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
-      if (isMainFrame) gone()
-    })
+  const audioLifetimes = new WeakMap<WebContents, { epoch: number }>()
+  const bindNativeAudioCleanup = (sender: WebContents): (() => boolean) => {
+    let lifetime = audioLifetimes.get(sender)
+    if (!lifetime) {
+      lifetime = { epoch: 0 }
+      audioLifetimes.set(sender, lifetime)
+      const tracked = lifetime
+      const rendererId = sender.id
+      const detached = (): void => { ++tracked.epoch; captureOwner.rendererDetached(rendererId) }
+      sender.on('render-process-gone', detached)
+      sender.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+        if (isMainFrame && !inPlace) detached()
+      })
+      sender.once('destroyed', () => { ++tracked.epoch; captureOwner.rendererGone(rendererId) })
+    }
+    const epoch = lifetime.epoch
+    return () => !sender.isDestroyed() && lifetime.epoch === epoch
   }
   ipcMain.handle(
     'capture:begin',
-    (e, config: { deviceUid?: string; inputChannel: number; ringBlocks?: number }, generation: string) => {
+    async (e, config: CaptureStartConfig, generation: string) => {
       try {
-        const result = captureOwner.begin(e.sender.id, config, String(generation), (window) => {
+        bindNativeAudioCleanup(e.sender)
+        const result = await captureOwner.begin(e.sender.id, config, String(generation), (window) => {
           if (!e.sender.isDestroyed()) e.sender.send('capture:window', window)
         })
-        if (result.ok) bindNativeAudioCleanup(e.sender)
         return result
       } catch (error) {
         return {
@@ -618,23 +745,23 @@ function registerIpc(): void {
       }
     }
   )
-  ipcMain.handle('capture:cancel', (e, generation: string) => {
+  ipcMain.handle('capture:cancel', async (e, generation: string) => {
     try {
-      return captureOwner.cancel(e.sender.id, String(generation))
+      return await captureOwner.cancel(e.sender.id, String(generation))
     } catch (error) {
       return { ok: false, error: String(error) }
     }
   })
-  ipcMain.handle('capture:state', () => {
+  ipcMain.handle('capture:state', async () => {
     try {
-      return captureOwner.state()
+      return await captureOwner.state()
     } catch (error) {
       return { state: 'error', ownershipGeneration: '', error: String(error) }
     }
   })
-  ipcMain.handle('capture:stats', () => {
+  ipcMain.handle('capture:stats', async () => {
     try {
-      return captureOwner.stats()
+      return await captureOwner.stats()
     } catch {
       return {
         deliveredBlocks: '0', deliveredFrames: '0', overruns: '0',
@@ -645,15 +772,13 @@ function registerIpc(): void {
 
   ipcMain.handle('audio-host:devices', (_event, provider: unknown) =>
     captureOwner.hostDevices(
-      provider === 'coreaudio' || provider === 'wasapi' || provider === 'asio'
+      provider === 'coreaudio' || provider === 'wasapi' || provider === 'asio' || provider === 'alsa'
         ? provider
         : undefined
     ))
-  ipcMain.handle('audio-host:monitor-begin', (event, raw: unknown) => {
-    const result = captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
-    // A failed native begin may intentionally retain a quarantined generation
-    // for teardown retry. Binding cleanup is harmless when nothing was retained.
+  ipcMain.handle('audio-host:monitor-begin', async (event, raw: unknown) => {
     bindNativeAudioCleanup(event.sender)
+    const result = await captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
     return result
   })
   ipcMain.handle(
@@ -666,6 +791,15 @@ function registerIpc(): void {
       return captureOwner.setMonitorGain(event.sender.id, generation, gainDb, enabled)
     }
   )
+
+  ipcMain.handle('audio-host:microphone-mix-configure', async (event, config: unknown) => {
+    bindNativeAudioCleanup(event.sender)
+    const result = await captureOwner.configureMicrophoneMix(event.sender.id, config)
+    return result
+  })
+  ipcMain.handle('audio-host:microphone-mix-stop', event => captureOwner.stopMicrophoneMix(event.sender.id))
+  ipcMain.handle('audio-host:microphone-mix-status', () => captureOwner.microphoneMixStatus())
+
   ipcMain.handle('audio-host:monitor-status', () => captureOwner.monitorStatus())
   ipcMain.handle('audio-host:monitor-end', (event, generation: unknown) =>
     captureOwner.endMonitor(event.sender.id, typeof generation === 'string' ? generation : '')
@@ -689,18 +823,11 @@ function registerIpc(): void {
         }
       }
       const config = rawConfig as DesktopPlaybackPrepareConfig
-      const lanes = rawLanes as DesktopPlaybackLaneConfig[]
-      if (
-        lanes.length < 1 || lanes.length > 16 ||
-        lanes.some((lane) =>
-          !lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
-          lane.id.length < 1 || lane.id.length > 96 || typeof lane.path !== 'string' ||
-          typeof lane.gain !== 'number' || !Number.isFinite(lane.gain) ||
-          typeof lane.muted !== 'boolean' || typeof lane.solo !== 'boolean')
-      ) {
+      const lanes = parseDesktopPlaybackLaneConfigs(rawLanes)
+      if (!lanes) {
         log(
           'dsp',
-          `graph refused · invalid-configuration · a lane in a list of ${lanes.length} failed schema validation`,
+          `graph refused · invalid-configuration · a lane in a list of ${rawLanes.length} failed schema validation`,
           'warn'
         )
         return {
@@ -714,7 +841,10 @@ function registerIpc(): void {
         }
       }
       const authorized = lanes.map((lane) => ({ ...lane, path: resolve(lane.path) }))
-      const codecCapability = captureOwner.playbackCapability()
+      const callerIsCurrent = bindNativeAudioCleanup(event.sender)
+      const codecCapability = await captureOwner.playbackCapability()
+      if (!callerIsCurrent())
+        return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
       const unauthorized = authorized.find((lane) =>
         !isAllowed(lane.path) || !codecCapability.available ||
         !playbackCodecSupportsPath(codecCapability, lane.path))
@@ -737,11 +867,18 @@ function registerIpc(): void {
           latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
         }
       }
-      // Bound BEFORE the await: the graph is claimed inside the addon the
-      // moment the call is made, so a renderer that dies while it decodes
-      // must already have its cleanup wired.
-      bindNativeAudioCleanup(event.sender)
-      const result = await captureOwner.preparePlayback(event.sender.id, config, authorized)
+      const seeded = config.streamLanes === true
+        ? await laneMeasureCache.seedPlaybackLanes(authorized)
+        : authorized
+      if (!callerIsCurrent())
+        return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
+      // Lifecycle is already bound and fenced across capability discovery and seed lookup.
+      const persistentBox = process.env.SINGZ_SURFACE === 'box' && Boolean(process.env.SINGZ_BOX_AUDIO_SOCKET)
+      const result = persistentBox
+        ? await boxPrepareRetainedPlayback(event.sender.id, config, seeded, {
+            libraryRoot: projectsRoot(), driveProjectsRoot: join(app.getPath('userData'), 'drive-projects')
+          })
+        : await captureOwner.preparePlayback(event.sender.id, config, seeded)
       // Both outcomes are logged by the owner, which is where the timing, the
       // seam and the negotiated format are known. Saying it twice here only
       // made the log harder to read.
@@ -819,17 +956,22 @@ function registerIpc(): void {
         !wholeNumber(request.maximumPeaks, request.minimumPeaks, 1_000_000) ||
         request.lanes.some((lane) =>
           !lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
-          lane.id.length < 1 || lane.id.length > 96 || typeof lane.path !== 'string')
+          lane.id.length < 1 || Buffer.byteLength(lane.id, 'utf8') > 96 || lane.id.includes('\0') ||
+          typeof lane.path !== 'string' || lane.path.length < 1 ||
+          Buffer.byteLength(lane.path, 'utf8') > 32768 || lane.path.includes('\0'))
       ) {
         return refused('a measure request failed schema validation')
       }
+      if (new Set(request.lanes.map(lane => lane.id)).size !== request.lanes.length) {
+        return refused('a measure request has duplicate lane ids')
+      }
       const lanes = request.lanes.map((lane) => ({ id: lane.id, path: resolve(lane.path) }))
-      const codecCapability = captureOwner.playbackCapability()
+      const codecCapability = await captureOwner.playbackCapability()
       const unauthorized = lanes.find((lane) =>
         !isAllowed(lane.path) || !codecCapability.available ||
         !playbackCodecSupportsPath(codecCapability, lane.path))
       if (unauthorized) return refused(`unauthorized-path · ${unauthorized.id}`)
-      return captureOwner.measurePlaybackLanes({
+      return laneMeasureCache.measurePlaybackLanes({
         lanes,
         peaksPerSecond: request.peaksPerSecond,
         minimumPeaks: request.minimumPeaks,
@@ -883,11 +1025,13 @@ app.whenReady().then(async () => {
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
   logHardwareInfo()
-  startUpdater((st) => {
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('update:state', st)
-    }
-  })
+  if (desktopUpdaterEnabled(requestedRendererSurface(process.argv))) {
+    startUpdater((st) => {
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('update:state', st)
+      }
+    })
+  }
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   await migrateProjects()
@@ -898,6 +1042,39 @@ app.whenReady().then(async () => {
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
   registerIpc()
+  boxCec = new BoxCecService({
+    enabled: boxCecEnabled(process.platform, requestedRendererSurface(process.argv), process.env),
+    helperPath: app.isPackaged ? join(process.resourcesPath, 'box-audio/cec-input.py')
+      : join(app.getAppPath(), 'resources/linux/cec-input.py'),
+    device: process.env.SINGZ_BOX_CEC_DEVICE
+  })
+  boxCec.start()
+  boxBackend = registerBoxIpc({
+    userDataDir: app.getPath('userData'),
+    log: message => log('box', message, 'warn'),
+    appVersion: app.isPackaged ? app.getVersion() : 'dev',
+    rendererURL: process.env.ELECTRON_RENDERER_URL
+      ? developmentRendererUrl(process.env.ELECTRON_RENDERER_URL, 'box')
+      : pathToFileURL(join(import.meta.dirname, '../renderer/box/box.html')).toString(),
+    socketPath: process.env.SINGZ_BOX_PLATFORM_SOCKET,
+    retainedPlaybackSnapshot: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRetainedPlaybackSnapshot : undefined,
+    stopRetainedPlayback: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxStopRetainedPlayback : undefined,
+    restoreRetainedPlayback: process.env.SINGZ_BOX_AUDIO_SOCKET ? async (expected) => {
+      const { restoreBoxRetainedPlayback } = await import('./box-audio/retained-recovery')
+      const restored = await restoreBoxRetainedPlayback(expected, {
+        libraryRoot: projectsRoot(),
+        driveProjectsRoot: join(app.getPath('userData'), 'drive-projects'),
+        snapshot: boxRetainedPlaybackSnapshot
+      })
+      allowRoot(restored.project.dir)
+      return restored
+    } : undefined,
+    routingRequest: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRoutingRequest : undefined,
+    routingReconcile: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRoutingReconcile : undefined,
+    cecStatus: () => boxCec!.snapshot(),
+    audioInputs: () => captureOwner.devices(),
+    audioHost: () => captureOwner.hostDevices()
+  })
   createWindow()
 
   // Signed-in libraries reconcile on launch, not only after saves: analysis
@@ -917,17 +1094,57 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('before-quit', () => {
-  captureOwner.stop()
+let audioQuitPending = false
+let audioQuitComplete = false
+app.on('before-quit', event => {
+  void boxCec?.dispose()
+  if (audioQuitComplete) return
+  if (shouldDeferBoxApplicationQuit(requestedRendererSurface(process.argv), boxQuit.cleanupFinished) &&
+      boxQuit.beforeQuit(BrowserWindow.getAllWindows())) {
+    event.preventDefault()
+    return
+  }
+  if (boxBackend && !boxBackendDisposeStarted) {
+    event.preventDefault()
+    boxBackendDisposeStarted = true
+    const backend = boxBackend
+    // A hung phone server or controller cannot hold the appliance open.
+    const disposal = backend.dispose().catch(error => log('app', `Box backend shutdown failed · ${String(error)}`, 'warn'))
+    void settleWithin(disposal, 5000, () => log('app', 'Box backend shutdown exceeded 5 seconds; quitting', 'warn')).finally(() => {
+      boxBackend = null
+      app.quit()
+    })
+    return
+  }
+  event.preventDefault()
+  if (audioQuitPending) return
+  audioQuitPending = true
   scheduler.stop()
   separator.cancel()
   vocalSeparator.cancel()
   transcriber.cancel()
   cancelBeatsMl()
+  let finishing = false
+  const finish = async (): Promise<void> => {
+    if (finishing) return
+    finishing = true
+    await captureOwner.stop()
+    await boxCec?.dispose()
+    audioQuitComplete = true
+    app.quit()
+  }
+  // A dead driver cannot indefinitely prevent quitting. Normal shutdown first
+  // finishes an active take and confirms private microphone cancellation.
+  const deadline = setTimeout(() => void finish(), 5000)
+  void stopDesktopAudioInput().then(result => {
+    if (!result.ok) log('mic', `shutdown cleanup failed · ${result.error}`, 'warn')
+  }, error => log('mic', `shutdown cleanup failed · ${String(error)}`, 'warn')).finally(() => {
+    clearTimeout(deadline)
+    void finish()
+  })
 })
 
 app.on('window-all-closed', () => {
-  captureOwner.stop()
   separator.cancel()
   vocalSeparator.cancel()
   transcriber.cancel()

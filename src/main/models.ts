@@ -2,24 +2,25 @@ import { app, net } from 'electron'
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { access, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { ModelId, ModelInfo, ModelsProgress } from '../shared/types'
 import { log } from './log'
 import { t } from '../shared/i18n'
 import { onChildSettled } from './child-exit'
 import { VOCAL_MODEL_FILE } from './vocal-model'
+import { productProfileDir } from '../shared/product-identity'
 
 /**
- * Shared local model cache, identical for every way the app runs (dev,
- * packaged, tests) so weights download exactly once. Override: SINGZ_MODELS_DIR.
+ * Product-local model cache for dev, packaged and test runs. Override:
+ * SINGZ_MODELS_DIR to share or relocate it explicitly.
  */
 export function modelsDir(): string {
-  return process.env.SINGZ_MODELS_DIR ?? join(app.getPath('appData'), 'SingZ', 'models')
+  return process.env.SINGZ_MODELS_DIR ?? join(app.getPath('appData'), productProfileDir(process.env.SINGZ_SURFACE), 'models')
 }
 
 /** Optional GPU splitter pack (relocatable Python + torch/MPS + demucs). */
 export function packDir(): string {
-  return process.env.SINGZ_PACK_DIR ?? join(app.getPath('appData'), 'SingZ', 'gpu-splitter')
+  return process.env.SINGZ_PACK_DIR ?? join(app.getPath('appData'), productProfileDir(process.env.SINGZ_SURFACE), 'gpu-splitter')
 }
 
 export function packPython(root = packDir()): string {
@@ -108,7 +109,7 @@ export async function packOnnxModel(
 // pdb/tcl pruned, fp16 beat model.
 // v10 ONNX / v6 torch update ORT to 1.30.0 on supported architectures.
 // Intel macOS keeps its last published ORT wheel (1.23.2).
-export const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 10 : 6
+export const PACK_FORMAT_REQUIRED = process.platform === 'win32' || process.platform === 'linux' ? 10 : 6
 
 /** The UVR vocal model, inside the pack since format 5 (torch) / 9 (onnx). */
 export function packVocalModel(root = packDir()): string {
@@ -155,6 +156,15 @@ export async function packComplete(root = packDir()): Promise<boolean> {
   // an incoming copy too, where the dialog says the opposite.
   const which = root === packDir() ? 'installed splitter pack' : 'downloaded splitter pack'
   if (!(await exists(packPython(root)))) return false
+  if (process.platform === 'linux') {
+    try {
+      const manifest = JSON.parse(await readFile(join(root, 'python', 'pack.json'), 'utf8'))
+      if (manifest.target !== `linux-${process.arch}`) {
+        log('models', `${which} targets ${String(manifest.target)}, expected linux-${process.arch}`, 'warn')
+        return false
+      }
+    } catch { return false }
+  }
   const version = await packFormatVersion(root)
   if (version < PACK_FORMAT_REQUIRED) {
     log('models', `${which} is format v${version}, app needs v${PACK_FORMAT_REQUIRED}`, 'warn')
@@ -206,9 +216,10 @@ export async function cleanupObsoleteModels(): Promise<void> {
   }
 }
 
-/** Packs on Windows and Intel Macs run demucs-onnx (Apple Silicon: torch). */
+/** Windows, Intel Macs and Linux run demucs-onnx (Apple Silicon: torch). */
 export function isOnnxPack(): boolean {
-  return process.platform === 'win32' || (process.platform === 'darwin' && process.arch === 'x64')
+  return process.platform === 'win32' || process.platform === 'linux' ||
+    (process.platform === 'darwin' && process.arch === 'x64')
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -268,21 +279,30 @@ export async function downloadFile(
     onPct(100)
   } catch (err) {
     await rm(part, { force: true })
-    log('models', `download failed: ${err instanceof Error ? err.message : String(err)}`, 'error')
+    if (signal?.aborted) log('models', `download cancelled: ${basename(dest)}`)
+    else log('models', `download failed: ${basename(dest)} · ${err instanceof Error ? err.message : String(err)}`, 'error')
     throw err
   }
 }
 
-function untar(archive: string, destDir: string): Promise<void> {
+function untar(archive: string, destDir: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted()
   log('models', `extracting ${archive}`)
   return new Promise((resolve, reject) => {
     let tail = ''
     const child = spawn('tar', ['-xzf', archive, '-C', destDir])
+    const cancel = (): void => { child.kill('SIGTERM') }
+    signal?.addEventListener('abort', cancel, { once: true })
     child.stderr?.on('data', (c: Buffer) => {
       tail = (tail + c.toString('utf8')).slice(-2000)
     })
-    child.on('error', reject)
+    child.on('error', (error) => {
+      signal?.removeEventListener('abort', cancel)
+      reject(error)
+    })
     onChildSettled(child, 'models', (code) => {
+      signal?.removeEventListener('abort', cancel)
+      if (signal?.aborted) { reject(new Error('cancelled')); return }
       if (code === 0) {
         resolve()
       } else {
@@ -518,26 +538,39 @@ export function gpuSplitterPackUrl(
   return `https://github.com/lexasoft123/SingZ/releases/download/v${version}/gpu-splitter-${platform}-${arch}.tar.gz`
 }
 
+/**
+ * Which splitter description fits this machine. The "Apple Silicon" text is
+ * darwin-arm64 only: Linux ARM64 boards (Orange Pi 5 et al) run the CPU ONNX
+ * pack, and claiming an Apple GPU there is how a board owner learns the label
+ * is a lie.
+ */
+export function splitterDescriptionId(
+  platform = process.platform,
+  arch = process.arch
+): 'descriptionWin' | 'descriptionAppleSilicon' | 'descriptionGeneric' {
+  if (platform === 'win32') return 'descriptionWin'
+  if (platform === 'darwin' && arch === 'arm64') return 'descriptionAppleSilicon'
+  return 'descriptionGeneric'
+}
+
 const REGISTRY: RegistryEntry[] = [
   {
     id: 'gpu-splitter',
     label: () => t('main.model.splitter.label'),
-    description: () =>
-      process.platform === 'win32'
-        ? t('main.model.splitter.descriptionWin')
-        : process.arch === 'arm64'
-          ? t('main.model.splitter.descriptionAppleSilicon')
-          : t('main.model.splitter.descriptionGeneric'),
+    description: () => t(`main.model.splitter.${splitterDescriptionId()}`),
     // Measured on the tarballs CI actually built (run 35390756585, the first
     // build carrying the vocal model): 344/336/273 MiB → the decimal MB this
     // field is in. Was 296/272/259 before the model moved inside the pack.
-    sizeMb: process.platform === 'win32' ? 361 : process.arch === 'arm64' ? 352 : 286,
+    // The Linux number was measured on x64; the ARM64 pack is the same
+    // pipeline and content, so this stays an estimate until an ARM64 tarball
+    // is measured (the field only sizes the progress bar).
+    sizeMb: process.platform === 'linux' ? 366 : process.platform === 'win32' ? 361 : process.arch === 'arm64' ? 352 : 286,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
       gpuSplitterPackUrl(),
     optional: false,
-    platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
+    platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64', 'linux-x64', 'linux-arm64']
   },
   {
     id: 'qwen-asr',
@@ -568,7 +601,7 @@ const REGISTRY: RegistryEntry[] = [
     file: 'mms-fa.onnx',
     url: 'https://github.com/lexasoft123/SingZ/releases/download/models-1/mms-fa.onnx',
     optional: true,
-    platforms: ['win32-x64', 'darwin-x64']
+    platforms: ['win32-x64', 'darwin-x64', 'linux-x64', 'linux-arm64']
   },
 ]
 
@@ -690,10 +723,10 @@ export async function restoreInterruptedPackSwap(dir = packDir()): Promise<void>
     // update — when they most need it to start.
     log('models', `could not settle an interrupted pack update: ${String(err)}`, 'warn')
   }
-  // `${dir}.incoming` is deliberately NOT swept: packDir() is shared by every
-  // userData identity on this machine, so it may be another instance's live
-  // staging directory mid-unpack. swapInVerifiedPack clears it before its own
-  // download, which reclaims a genuinely stale one without racing anybody.
+  // `${dir}.incoming` is deliberately NOT swept: another instance using this
+  // product's packDir() (or an explicit shared override) may own a live staging
+  // directory mid-unpack. swapInVerifiedPack clears it before its own download,
+  // which reclaims a genuinely stale one without racing anybody.
 }
 
 export class ModelManager {
@@ -780,23 +813,34 @@ export class ModelManager {
           log('models', `${entry.id} installed (${entry.file})`)
           onProgress({ id: entry.id, percent: 100 })
         } else {
-          const archive = join(packDir(), '..', `${entry.id}.tar.gz`)
-          await downloadFile(
-            entry.url as string,
-            archive,
-            entry.sizeMb * 1e6,
-            (pct) => onProgress({ id: entry.id, percent: pct * 0.9 }),
-            this.abort.signal
-          )
+          // The first Linux installer includes its CPU runtime and weights.
+          // Extract through the same verified, recoverable swap as a download;
+          // installation must never delete the archive inside app resources.
+          const bundled = app.isPackaged && process.platform === 'linux' && entry.id === 'gpu-splitter'
+          const archive = bundled
+            ? join(process.resourcesPath, 'engines', `gpu-splitter-linux-${process.arch}.tar.gz`)
+            : join(packDir(), '..', `${entry.id}.tar.gz`)
+          if (bundled) {
+            if (!(await exists(archive))) throw new Error('The included stem splitter is missing. Reinstall SingZ.')
+            log('models', `installing included Linux stem splitter from ${archive}`)
+          } else {
+            await downloadFile(
+              entry.url as string,
+              archive,
+              entry.sizeMb * 1e6,
+              (pct) => onProgress({ id: entry.id, percent: pct * 0.9 }),
+              this.abort.signal
+            )
+          }
           onProgress({ id: entry.id, percent: 92 })
           try {
             await swapInVerifiedPack(
               packDir(),
-              (staging) => untar(archive, staging),
+              (staging) => untar(archive, staging, this.abort!.signal),
               packComplete
             )
           } finally {
-            await rm(archive, { force: true })
+            if (!bundled) await rm(archive, { force: true })
           }
           // fresh pack → give the GPU engines another chance if disabled
           await rm(dmlFlagPath(), { force: true })

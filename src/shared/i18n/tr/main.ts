@@ -76,6 +76,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "Kaydedilecek herhangi bir şarkı yok.",
   "main.error.couldNotSaveLyrics": "Şarkı sözlerini kaydedemedi: {message}",
   "main.error.lyricsJobAlreadyRunning": "Şarkı sözü işi zaten devam ediyor.",
+  "main.error.existingLyricsUnreadable": "Kayıtlı şarkı sözleri okunamadı, bu yüzden değiştirilmedi. Şarkı sözü düzenleyicisinde açın veya yeniden yazıya dökün.",
   "main.error.noLinesToAlign": "Doğruluğu ayarlama çizgisi yok.",
   "main.error.splitFirstAlign": "Şarkıyı önce ses kanallarına ayırın — eşleme, vokal kanalıyla dinler.",
   "main.error.preciseNeedsPack": "Doğru hizalama, bölme paketinden geçiyor – öncelikle model yöneticisinde kurun.",

@@ -1,5 +1,5 @@
 /* 简体中文 — the `library` strings, typed against English. */
-import type { library as en } from '../en/library'
+import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {

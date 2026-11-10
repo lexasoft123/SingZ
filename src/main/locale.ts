@@ -1,6 +1,8 @@
 import { app, ipcMain } from 'electron'
 import { isLanguage, resolveLocale, setLocale, type Language, type Locale } from '../shared/i18n'
 import { register } from '../shared/i18n/core'
+import { es419 } from '../shared/i18n/es-419'
+import { ptBR } from '../shared/i18n/pt-BR'
 import { tr } from '../shared/i18n/tr'
 import { ru } from '../shared/i18n/ru'
 import { zhCN } from '../shared/i18n/zh-CN'
@@ -13,6 +15,9 @@ import { vi } from '../shared/i18n/vi'
 import { fil } from '../shared/i18n/fil'
 import { ms } from '../shared/i18n/ms'
 import { zhTW } from '../shared/i18n/zh-TW'
+import { box as enBox } from '../shared/i18n/en/box'
+import { box as ruBox } from '../shared/i18n/ru/box'
+import { box as zhBox } from '../shared/i18n/zh-CN/box'
 import { readSettings, writeSettings } from './settings'
 import { log } from './log'
 import type { LocaleState } from '../shared/types'
@@ -61,6 +66,8 @@ export function localeState(): LocaleState {
 
 // Main has no bundle budget and must answer synchronously: every language is
 // registered up front (the renderer loads them on demand instead).
+register('es-419', es419)
+register('pt-BR', ptBR)
 register('tr', tr)
 register('ru', ru)
 register('zh-CN', zhCN)
@@ -82,6 +89,9 @@ export function applyLocale(): Locale {
 }
 
 export function registerLocale(): void {
+  register('en', enBox)
+  register('ru', ruBox)
+  register('zh-CN', zhBox)
   applyLocale()
   const s = localeState()
   log('app', `language: ${s.language} → ${s.locale} (system ${s.systemLocale})`)

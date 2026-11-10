@@ -11,6 +11,10 @@ export function trainingReferenceCues(prompt: {
   readonly cues: readonly { readonly purpose?: TrainingCuePurpose; readonly articulation: 'together' | 'sequence'; readonly notes: readonly number[] }[]
   readonly targets: readonly { readonly midi: number }[]
 }, scalePresentation: 'guided' | 'phrase' = 'guided'): readonly TrainingReferenceCue[] {
+  if (prompt.kind === 'melody') {
+    const phrase: TrainingReferenceCue = { purpose: 'answer', articulation: 'sequence', notes: prompt.targets.map(t => t.midi), durationSeconds: 0.65 }
+    return [...prompt.cues.filter(c => c.purpose === 'context').map(c => ({ ...c, purpose: 'context' as const, durationSeconds: 0.7 })), phrase, { ...phrase }]
+  }
   const purpose = prompt.taskMode === 'imitate' ? 'answer' : 'question'
   if (prompt.kind === 'note' && prompt.taskMode === 'imitate')
     return prompt.targets[0] ? [{ purpose, articulation: 'sequence', notes: [prompt.targets[0].midi], durationSeconds: 2.75 }] : []
@@ -30,4 +34,9 @@ export function trainingTargetReference(kind: string, midi: number): TrainingRef
 
 export function needsTrainingTargetReference(kind: string, taskMode: string, scalePresentation: 'guided' | 'phrase' = 'guided'): boolean {
   return taskMode === 'imitate' && (kind === 'interval' || kind === 'scale' && scalePresentation === 'guided')
+}
+
+/** Reference voices map to ordered dots; context voices never select a note. */
+export function melodyReferenceTargetIndices(prompt: Parameters<typeof trainingReferenceCues>[0]): number[] {
+  return trainingReferenceCues(prompt).flatMap(cue => cue.notes.map((_, i) => cue.purpose === 'context' ? -1 : i))
 }

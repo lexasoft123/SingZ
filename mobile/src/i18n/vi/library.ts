@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'Đang kiểm tra…',
+  'phone.library.openingConnect': 'Đang kết nối…',
+  'phone.library.openingDownload': 'Đang tải xuống…',
+  'phone.library.openingVerify': 'Đang kiểm tra bản tải…',
+  'phone.library.openingRetry': 'Đang thử lại…',
   "phone.library.pickFailed": "Dữ liệu đó không thể mở được ({msg})",
   "phone.library.folderInactive": "Dữ liệu được chọn không còn hoạt động nữa.",
   "phone.library.folderIdentityUnavailable": "Tên thư mục được chọn không có sẵn. mở thư mục lại và thử lại.",
@@ -18,6 +23,16 @@ export const library: Translation<typeof en> = {
   "phone.library.delete": "Xóa",
   "phone.library.opening": "Mở...",
   "phone.library.decoding": "Khóa mã {id} · {i}/{n}",
+  'phone.library.downloadChecking': "Kiểm tra {label} đã lưu · {index}/{count}",
+  'phone.library.downloadTrack': "Đang tải {label} · {index}/{count}",
+  'phone.library.downloadVerifying': "Xác minh {label} · {index}/{count}",
+  'phone.library.downloadRetrying': "Thử lại {label} · lần {attempt}/{attempts}",
+  'phone.library.downloadInterrupted': "Kết nối bị gián đoạn. Các bản âm thanh đã tải vẫn được giữ lại. Nhấn Thử lại để tiếp tục.",
+  'phone.library.downloadMissing': "Không tìm thấy bản âm thanh này trên Drive. Hãy đồng bộ lại bài hát từ máy tính.",
+  'phone.library.downloadDenied': "Drive từ chối quyền truy cập. Hãy kiểm tra đăng nhập và thử lại.",
+  'phone.library.downloadStorage': "Không thể lưu bản âm thanh. Hãy kiểm tra dung lượng trống trên điện thoại.",
+  'phone.library.downloadRetry': "Thử lại",
+  'phone.library.downloadDamaged': "Bản âm thanh không đầy đủ hoặc bị hỏng. Các bản khác đã tải vẫn được giữ lại. Hãy thử lại.",
   "phone.library.fetchingStep": "Đưa {id} · {i}/{n}",
   "phone.library.decodingStep": "Khóa mã {id} · {i}/{n}",
   "phone.library.lyricsStep": "Lời bài hát…",

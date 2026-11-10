@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'Kontrol ediliyor…',
+  'phone.library.openingConnect': 'Bağlanıyor…',
+  'phone.library.openingDownload': 'İndiriliyor…',
+  'phone.library.openingVerify': 'İndirme doğrulanıyor…',
+  'phone.library.openingRetry': 'Yeniden deneniyor…',
   "phone.library.pickFailed": "Bu dosya açılamadı ({msg})",
   "phone.library.folderInactive": "Seçilen klasör artık etkin değil. Tekrar açın ve tekrar deneyin.",
   "phone.library.folderIdentityUnavailable": "Seçilen klasörün adı bulunamadı. Klasörü yeniden açıp tekrar deneyin.",
@@ -18,6 +23,16 @@ export const library: Translation<typeof en> = {
   "phone.library.delete": "Sil",
   "phone.library.opening": "Açılıyor…",
   "phone.library.decoding": "{id}’yi çözme · {i}/{n}",
+  "phone.library.downloadChecking": "Kayıtlı {label} kontrol ediliyor · {index}/{count}",
+  "phone.library.downloadTrack": "{label} indiriliyor · {index}/{count}",
+  "phone.library.downloadVerifying": "{label} doğrulanıyor · {index}/{count}",
+  "phone.library.downloadRetrying": "{label} yeniden deneniyor · deneme {attempt}/{attempts}",
+  "phone.library.downloadInterrupted": "Bağlantı kesildi. İndirilen ses kanalları saklandı. Devam etmek için Yeniden dene’ye dokunun.",
+  "phone.library.downloadMissing": "Bu ses kanalı Drive’da bulunamadı. Şarkıyı bilgisayarınızdan yeniden eşitleyin.",
+  "phone.library.downloadDenied": "Drive bu ses kanalına erişimi reddetti. Oturumunuzu kontrol edip yeniden deneyin.",
+  "phone.library.downloadStorage": "Bu ses kanalı kaydedilemiyor. Telefonunuzdaki boş alanı kontrol edin.",
+  "phone.library.downloadDamaged": "Bir ses kanalı eksik veya bozuk indirildi. İndirilen ses kanalları saklandı. Devam etmek için Yeniden dene’ye dokunun.",
+  "phone.library.downloadRetry": "Yeniden dene",
   "phone.library.fetchingStep": "{id} değerini getiriyor · {i}/{n}",
   "phone.library.decodingStep": "{id}’yi çözme · {i}/{n}",
   "phone.library.lyricsStep": "Şarkı sözleri…",

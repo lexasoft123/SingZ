@@ -12,9 +12,10 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { GlassHeader, HeaderAction } from '@singz/ui/native';
 import { nativePlayback } from '../playback/native';
 import { t, useLocale } from '../i18n';
-import { C } from './bits';
+import { C, CloseGlyph } from './bits';
 import { TEST } from './testhooks';
 
 export default function SettingsScreen({
@@ -70,15 +71,13 @@ export default function SettingsScreen({
   return (
     <View style={[s.root, { paddingTop: insets.top + 8 }]}>
       <View style={s.header}>
-        <Text style={s.title}>{t('phone.app.settings.title')}</Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={t('phone.app.settings.closeA11y')}
-          onPress={onClose}
-          hitSlop={12}
-        >
-          <Text style={s.close}>{t('phone.app.settings.done')}</Text>
-        </Pressable>
+        <GlassHeader
+          title={t('phone.app.settings.title')}
+          align="start"
+          trailing={<HeaderAction label={t('phone.app.settings.closeA11y')} onPress={onClose}>
+            <CloseGlyph color={C.amber} />
+          </HeaderAction>}
+        />
       </View>
       <ScrollView contentContainerStyle={s.content}>
         {onQuickStart && <Pressable accessibilityRole="button" onPress={onQuickStart} style={[s.card, { marginBottom: 18 }]}><Text style={s.name}>{quickStartCopy(getLocale()).title}</Text></Pressable>}
@@ -132,15 +131,12 @@ export default function SettingsScreen({
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
   header: {
-    minHeight: 52,
-    paddingHorizontal: 22,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    width: '100%',
+    maxWidth: 780,
+    alignSelf: 'center',
+    paddingHorizontal: 20,
   },
-  title: { color: C.text, fontSize: 28, fontWeight: '800' },
-  close: { color: C.amber, fontSize: 16, fontWeight: '700' },
-  content: { padding: 20, paddingBottom: 48 },
+  content: { padding: 20, paddingBottom: 48, width: '100%', maxWidth: 780, alignSelf: 'center' },
   section: {
     color: C.dim,
     fontSize: 12,

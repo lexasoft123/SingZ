@@ -59,3 +59,21 @@ test.each([
   await ReactTestRenderer.act(() => actionButton.props.onPress())
   expect(onNext).toHaveBeenCalledTimes(1)
 })
+
+test('melody grid keeps completed dots yellow and never marks playback as sung', async () => {
+  let state = initialTrainingState(defaultTrainingPreferences())
+  state = mobileTrainingReducer(state, { type: 'choose-exercise', exercise: 'melody' })
+  state = mobileTrainingReducer(state, { type: 'change-setup', patch: { melodyLength: 7, length: 1 } })
+  state = mobileTrainingReducer(state, { type: 'start', seed: 'melody-view' })
+  const render = (phase: 'cue' | 'respond') => <TrainingSessionView state={{ ...state, phase }} liveMidi={null} activeTarget={2} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(() => { tree = ReactTestRenderer.create(render('respond')) })
+  expect(tree.root.findByProps({ testID: 'melody-grid' })).toBeTruthy()
+  expect(tree.root.findByProps({ testID: 'melody-note-0' }).props.accessibilityLabel).toContain('locked')
+  expect(tree.root.findByProps({ testID: 'melody-note-1' }).props.accessibilityLabel).toContain('locked')
+  expect(tree.root.findByProps({ testID: 'melody-note-2' }).props.accessibilityLabel.toLowerCase()).toContain('current target')
+  await ReactTestRenderer.act(() => { tree.update(render('cue')) })
+  expect(tree.root.findByProps({ testID: 'melody-note-0' }).props.accessibilityLabel).not.toContain('locked')
+  expect(tree.root.findByProps({ testID: 'melody-note-1' }).props.accessibilityLabel).not.toContain('locked')
+  await ReactTestRenderer.act(() => tree.unmount())
+})

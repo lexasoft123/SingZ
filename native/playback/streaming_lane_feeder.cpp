@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
+#include <numeric>
+#include <thread>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -20,6 +23,28 @@ bool isPowerOfTwo(uint64_t value) noexcept {
 // One refill is bounded so a lane cannot monopolise the round: with six lanes
 // the thread should visit each of them often, not fill one to the brim first.
 constexpr uint64_t kRefillChunkFrames = 8192;
+
+// The standby handshake (see Lane::stage). Two low bits of phase; every
+// transition also bumps the generation above them.
+constexpr uint32_t kStageIdle = 0;
+constexpr uint32_t kStageArmed = 1;
+constexpr uint32_t kStageSwapping = 2;  // render thread mid-swap
+constexpr uint32_t kStageSwapped = 3;
+constexpr uint32_t kStagePhaseMask = 3;
+uint32_t stagePhase(uint32_t state) noexcept { return state & kStagePhaseMask; }
+uint32_t nextStage(uint32_t state, uint32_t phase) noexcept {
+  return (state & ~kStagePhaseMask) + (kStagePhaseMask + 1u) + phase;
+}
+
+// A wrap reads the loop's last frame INTERPOLATED toward the one after it, so
+// a loop's fill ends this far past its end — otherwise the window's leading
+// edge starves the final frame before every wrap.
+constexpr uint64_t kLoopTailFrames = 2;
+
+// A seek's stage that has not been swapped in after this long is not going to
+// be: its seek was refused, superseded or landed somewhere else. Long enough
+// to cover a time/pitch anchor primed after the stage and a slow callback.
+constexpr auto kStageStale = std::chrono::milliseconds(1000);
 
 }  // namespace
 
@@ -50,16 +75,24 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   const uint32_t outputRate =
       requiredSampleRate == 0 ? info.sampleRate : requiredSampleRate;
 
+  // Match decoded_audio's exactOutputFrames: round the resampled extent to
+  // the nearest frame using integer arithmetic. Truncation made a whole-song
+  // loop rounded from the measured duration exceed a streamed song by one
+  // frame when 44.1 kHz stems played through a 48 kHz output.
+  const uint64_t whole = info.frameCount / info.sampleRate;
+  const uint64_t remainder = info.frameCount % info.sampleRate;
+  if (whole > std::numeric_limits<uint64_t>::max() / outputRate)
+    return DecodedAudioStatus::LimitExceeded;
+  const uint64_t base = whole * outputRate;
+  const uint64_t partial =
+      (remainder * outputRate + info.sampleRate / 2) / info.sampleRate;
+  if (base > std::numeric_limits<uint64_t>::max() - partial)
+    return DecodedAudioStatus::LimitExceeded;
+  const uint64_t outputFrames = base + partial;
   // Never allocate a ring larger than the song it holds. A short stem would
   // otherwise be charged for a window it can never fill, and on a lane shorter
   // than the window the ring IS the whole lane — at which point streaming
   // costs the same as decoding and should at least not cost more.
-  const uint64_t outputFrames =
-      outputRate == info.sampleRate
-          ? info.frameCount
-          : static_cast<uint64_t>(static_cast<double>(info.frameCount) *
-                                  static_cast<double>(outputRate) /
-                                  static_cast<double>(info.sampleRate));
   uint64_t capacity = options_.windowFrames;
   if (outputFrames != 0 && outputFrames < capacity) {
     capacity = 1;
@@ -83,23 +116,24 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   lane->analysis = std::move(analysisSource);
   lane->stats.waveformSource.store(lane->analysis != nullptr, std::memory_order_relaxed);
   lane->capacityFrames = capacity;
-  lane->planes.assign(info.channels, std::vector<float>(capacity, 0.0F));
-  lane->pointers.resize(info.channels);
-  for (uint16_t channel = 0; channel < info.channels; ++channel)
-    lane->pointers[channel] = lane->planes[channel].data();
-  lane->window.channels = lane->pointers.data();
+  // Both rings up front, in the control domain: the standby is what lets a
+  // jump land on audio that is already there (see stageLane).
+  for (int ring = 0; ring < 2; ++ring) {
+    lane->planes[ring].assign(info.channels, std::vector<float>(capacity, 0.0F));
+    lane->rings[ring].resize(info.channels);
+    for (uint16_t channel = 0; channel < info.channels; ++channel)
+      lane->rings[ring][channel] = lane->planes[ring][channel].data();
+  }
+  lane->live = 0;
+  lane->window.channels = lane->rings[0].data();
+  lane->windowChannels.store(lane->rings[0].data(), std::memory_order_release);
   lane->window.channelCount = info.channels;
   lane->window.capacityFrames = capacity;
   lane->sourceRate = info.sampleRate;
   lane->outputRate = outputRate;
   // Everything the window and the graph deal in is OUTPUT frames; only the
   // decoder and the waveform pass speak the file's own rate.
-  lane->window.totalFrames =
-      outputRate == info.sampleRate
-          ? info.frameCount
-          : static_cast<uint64_t>(static_cast<double>(info.frameCount) *
-                                  static_cast<double>(outputRate) /
-                                  static_cast<double>(info.sampleRate));
+  lane->window.totalFrames = outputFrames;
   lane->window.sampleRate = {static_cast<double>(outputRate)};
   zdsp::streamingWindowInitialize(&lane->window, 0);
 
@@ -108,12 +142,17 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   return DecodedAudioStatus::Ok;
 }
 
-DecodedAudioStatus StreamingLaneGroup::prime(uint64_t startFrame) {
+DecodedAudioStatus StreamingLaneGroup::prime(uint64_t requestedStart) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (lanes_.empty())
     return DecodedAudioStatus::InvalidArgument;
   for (std::unique_ptr<Lane>& holder : lanes_) {
     Lane& lane = *holder;
+    // A lane shorter than the start is never read from there (its node clamps
+    // to its own end), and its decoder cannot seek past its end: prime it at
+    // the top rather than fail the whole group over it.
+    const uint64_t startFrame =
+        requestedStart < lane.window.totalFrames ? requestedStart : 0;
     // Everything about the FEEDER resets with a prime; nothing about the
     // waveform pass does. They are independent, and priming used to assign a
     // whole fresh StreamingLaneStats — which wiped the pass's fields too, and
@@ -128,14 +167,26 @@ DecodedAudioStatus StreamingLaneGroup::prime(uint64_t startFrame) {
     lane.stats.seeks.store(0, std::memory_order_relaxed);
     lane.stats.framesDecoded.store(0, std::memory_order_relaxed);
     lane.stats.waitedForGuard.store(0, std::memory_order_relaxed);
+    lane.stats.stages.store(0, std::memory_order_relaxed);
+    lane.stats.swaps.store(0, std::memory_order_relaxed);
+    lane.stats.stagesAbandoned.store(0, std::memory_order_relaxed);
+    // A prime happens before any block of this window runs (or after the
+    // last one), so the standby handshake is simply reset: whatever was
+    // staged is dropped and the window goes back to ring 0.
+    lane.stage.store(nextStage(lane.stage.load(std::memory_order_acquire),
+                               kStageIdle),
+                     std::memory_order_release);
+    lane.live = 0;
+    lane.window.channels = lane.rings[0].data();
+    lane.windowChannels.store(lane.rings[0].data(), std::memory_order_release);
     // starvedBlocks and ended are deliberately absent: stats() reads those
     // from the window's own atomic and from lane.ended, so resetting a copy
     // of them here only ever wrote a value nothing went on to read.
-    if (!seekLane(lane, startFrame))
+    if (!repositionDecoder(lane, startFrame))
       return DecodedAudioStatus::IoError;
     lane.residentStart = startFrame;
     lane.residentEnd = startFrame;
-    lane.ended.store(false, std::memory_order_relaxed);
+    lane.staleDemandValid = false;
     // Demand starts where playback will, so the first service round has
     // somewhere to chase even before a block has run.
     zdsp::streamingWindowInitialize(&lane.window, startFrame);
@@ -167,9 +218,31 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   // decoder hits the end of the file before the filter's flushed tail fills
   // the ring. Once the ring holds the end and nothing wants anything else,
   // the `want` test below already makes this a no-op.
+  //
+  // The standby handshake comes first: a ring the render thread swapped in is
+  // now the live one, and everything below must be judged against it.
+  const uint32_t state = lane.stage.load(std::memory_order_acquire);
+  if (stagePhase(state) == kStageSwapped) {
+    adoptSwap(lane, state);
+    return true;
+  }
+  if (stagePhase(state) == kStageSwapping)
+    return false;
+  const bool armed = stagePhase(state) == kStageArmed;
+
   uint64_t demand = lane.residentStart;
   if (!zdsp::streamingWindowDemand(&lane.window, &demand))
     demand = lane.residentStart;
+  // A swap moved the window to where the transport went; the demand still
+  // names where it WAS until a block plays there. Chasing it would undo the
+  // jump — a seek applied while paused would play its first block of silence
+  // after all, and decode the old position for nothing.
+  if (lane.staleDemandValid) {
+    if (demand == lane.staleDemand)
+      demand = lane.residentStart;
+    else
+      lane.staleDemandValid = false;
+  }
 
   // A demand outside what is resident is a seek: a scrub, a loop re-anchor, or
   // the very first block. Filling forward from where the decoder happens to be
@@ -182,22 +255,84 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   if (!inside || tooFarBehind) {
     if (demand >= lane.window.totalFrames)
       return false;
-    if (!seekLane(lane, demand)) {
+    // Playback went somewhere the stage did not anticipate (a stage that
+    // did hold it would have been swapped in by the transport). Take the
+    // decoder back and chase it the old way. Lost to a swap that landed in
+    // the meantime: adopt it and look again next round.
+    if (armed && !reclaimStage(lane))
+      return true;
+    if (!repositionDecoder(lane, demand)) {
       lane.ended.store(true, std::memory_order_relaxed);
       return false;
     }
     lane.residentStart = demand;
     lane.residentEnd = demand;
-    lane.ended.store(false, std::memory_order_relaxed);
     zdsp::streamingWindowPublishResident(&lane.window, demand, demand);
     lane.stats.seeks.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
 
-  const uint64_t want =
-      std::min(demand + options_.targetAheadFrames, lane.window.totalFrames);
-  if (lane.residentEnd >= want)
+  // Inside a loop nothing past its end will ever be played before the wrap,
+  // so the fill stops there — and the loop's HEAD is what the wrap needs.
+  // When the live ring cannot hold it (the loop is longer than the ring, or
+  // the window had already moved past it) it is staged in the standby once
+  // the live ring holds everything up to the wrap, which is also the moment
+  // the decoder has nothing else to do.
+  const uint64_t total = lane.window.totalFrames;
+  bool looping = false;
+  uint64_t loopFill = total;
+  if (loopEnabled_ && loopStart_ < total) {
+    const uint64_t loopEnd = std::min(loopEnd_, total);
+    if (demand >= loopStart_ && demand < loopEnd) {
+      looping = true;
+      loopFill = std::min(loopEnd + kLoopTailFrames, total);
+    }
+  }
+  uint64_t want = std::min(demand + options_.targetAheadFrames, total);
+  if (looping)
+    want = std::min(want, loopFill);
+  if (lane.residentEnd >= want) {
+    if (!looping || lane.residentEnd < loopFill)
+      return false;
+    const uint64_t head = loopStart_;
+    const bool headResident =
+        head >= lane.residentStart &&
+        (head + 1u < lane.residentEnd ||
+         (head < lane.residentEnd && head + 1u >= total));
+    if (headResident)
+      return false;
+    if (armed) {
+      if (lane.stageStart.load(std::memory_order_relaxed) == head)
+        return false;
+      // Somebody else's stage — a seek about to land. Leave it alone unless
+      // it has plainly been abandoned.
+      if (std::chrono::steady_clock::now() - lane.stagedAt < kStageStale)
+        return false;
+      if (!reclaimStage(lane))
+        return true;
+    }
+    lane.stageRequest.store(0, std::memory_order_relaxed);
+    return stageLane(lane, head);
+  }
+
+  // The decoder belongs to an armed stage. A seek's stage is swapped in
+  // within a callback or two, and the live ring has seconds in hand, so wait
+  // for it — unless the live ring is running low or the stage was abandoned.
+  if (armed) {
+    const uint64_t ahead =
+        lane.residentEnd > demand ? lane.residentEnd - demand : 0;
+    if (ahead > options_.targetAheadFrames / 4u &&
+        std::chrono::steady_clock::now() - lane.stagedAt < kStageStale)
+      return false;
+    if (!reclaimStage(lane))
+      return true;
+  }
+  // Staging moved the decoder; bring it back to where the live ring ends.
+  if (lane.decoderAt != lane.residentEnd &&
+      !repositionDecoder(lane, lane.residentEnd)) {
+    lane.ended.store(true, std::memory_order_relaxed);
     return false;
+  }
 
   // The guard: frames within safetyFrames behind the render position are never
   // overwritten, so the furthest the ring may reach is that line plus its
@@ -238,12 +373,13 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
     const uint64_t index = at & (lane.window.capacityFrames - 1u);
     const uint64_t room =
         std::min(chunk - written, lane.window.capacityFrames - index);
-    const uint64_t got = fillLane(lane, index, room);
+    const uint64_t got = fillLane(lane, lane.rings[lane.live].data(), index, room);
     written += got;
     if (got < room)
       break;
   }
 
+  lane.decoderAt += written;
   if (written == 0)
     return false;
   lane.residentEnd += written;
@@ -254,27 +390,40 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   return true;
 }
 
-// Put the decoder, and the resampler with it, at an OUTPUT frame.
-//
-// The decoder is positioned at the corresponding INPUT frame; a fresh
-// resampler follows, because its history belongs to the audio before the jump.
-// Its priming delay is then dropped so the first frame handed to the ring is
-// the frame that was asked for — every lane computes this the same way from
-// the same rates, so lanes cannot drift apart even where the rounding is not
-// exact to the sample.
+// Restart on the global rational resampling lattice, with enough preceding
+// audio to rebuild the FIR history. Flooring outputFrame * sourceRate /
+// outputRate and resetting phase to zero loses its fractional input position:
+// at 44.1 -> 48 kHz, seeks 256 frames apart can shift lanes by 0.2 input frames.
+// An anchor at a multiple of up has an integral input position and the same
+// polyphase as a continuous decode. Discard its preroll as well as the ordinary
+// latency, so the ring still begins at exactly the requested output frame.
 bool StreamingLaneGroup::seekLane(Lane& lane, uint64_t outputFrame) {
   lane.pending.clear();
   lane.pendingRead = 0;
   lane.dropOutputFrames = 0;
   uint64_t inputFrame = outputFrame;
   if (lane.sourceRate != lane.outputRate) {
-    inputFrame = static_cast<uint64_t>(static_cast<double>(outputFrame) *
-                                       static_cast<double>(lane.sourceRate) /
-                                       static_cast<double>(lane.outputRate));
     lane.resampler = std::make_unique<Resampler>(
         static_cast<int>(lane.sourceRate), static_cast<int>(lane.outputRate),
         static_cast<int>(lane.window.channelCount));
-    lane.dropOutputFrames = lane.resampler->latencyOutFrames();
+    const uint64_t latency =
+        static_cast<uint64_t>(lane.resampler->latencyOutFrames());
+    const uint32_t divisor = std::gcd(lane.sourceRate, lane.outputRate);
+    const uint64_t up = lane.outputRate / divisor;
+    const uint64_t down = lane.sourceRate / divisor;
+    // One latency plus one output frame covers the filter's preceding input
+    // support, including latencyOutFrames' integer truncation. Rounding down
+    // to a lattice anchor adds fewer than up output frames: bounded by one
+    // second for supported 8--192 kHz media, independent of the seek distance.
+    const uint64_t periods = outputFrame > latency + 1
+        ? (outputFrame - latency - 1) / up : 0;
+    if (periods > std::numeric_limits<uint64_t>::max() / down)
+      return false;
+    inputFrame = periods * down;
+    const uint64_t preroll = outputFrame - periods * up;
+    if (preroll > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - latency)
+      return false;
+    lane.dropOutputFrames = static_cast<int64_t>(latency + preroll);
   }
   if (lane.source->seek(inputFrame) != DecodedAudioStatus::Ok)
     return false;
@@ -282,16 +431,340 @@ bool StreamingLaneGroup::seekLane(Lane& lane, uint64_t outputFrame) {
   return true;
 }
 
-// Hand `frames` output frames to the ring at `index`, decoding and resampling
+bool StreamingLaneGroup::repositionDecoder(Lane& lane, uint64_t outputFrame) {
+  if (!seekLane(lane, outputFrame))
+    return false;
+  lane.decoderAt = outputFrame;
+  lane.ended.store(false, std::memory_order_relaxed);
+  return true;
+}
+
+// Decode the region a jump will land on into the STANDBY ring and arm it for
+// the render thread. Nothing here is visible to the node until the transport
+// swaps the window over, so it may take as long as the decoder needs.
+// Precondition: the stage is Idle (the feeder owns both rings).
+bool StreamingLaneGroup::stageLane(Lane& lane, uint64_t frame) {
+  if (options_.beforeStageDecode != nullptr)
+    options_.beforeStageDecode(options_.stageDecodeContext);
+  const uint64_t total = lane.window.totalFrames;
+  if (frame >= total)
+    return false;
+  const uint64_t capacity = lane.window.capacityFrames;
+  // A short lane fits completely. Keep it complete in either ring, including
+  // its loop head: a Start/seek two frames before B can wrap in this very
+  // callback, before the feeder could stage a second region after the swap.
+  const bool wholeLane = total <= capacity;
+  if (wholeLane) frame = 0;
+  if (!repositionDecoder(lane, frame)) {
+    lane.ended.store(true, std::memory_order_relaxed);
+    return false;
+  }
+  const uint64_t span = wholeLane ? total :
+      std::max<uint64_t>(2, std::min(options_.stageFrames, capacity));
+  const uint64_t end = std::min(frame + span, total);
+  float* const* ring = lane.rings[1 - lane.live].data();
+  uint64_t written = 0;
+  while (frame + written < end) {
+    const uint64_t at = frame + written;
+    const uint64_t index = at & (capacity - 1u);
+    const uint64_t room = std::min(end - at, capacity - index);
+    const uint64_t got = fillLane(lane, ring, index, room);
+    written += got;
+    if (got < room)
+      break;
+  }
+  lane.decoderAt = frame + written;
+  if (written == 0)
+    return false;
+  lane.stageStart.store(frame, std::memory_order_relaxed);
+  lane.stageEnd.store(frame + written, std::memory_order_relaxed);
+  lane.stageChannels.store(ring, std::memory_order_relaxed);
+  lane.stagedAt = std::chrono::steady_clock::now();
+  // Release: the ring's contents and the three fields above are complete
+  // before the render thread can see Armed.
+  lane.stage.store(nextStage(lane.stage.load(std::memory_order_relaxed),
+                             kStageArmed),
+                   std::memory_order_release);
+  lane.stats.stages.fetch_add(1, std::memory_order_relaxed);
+  lane.stats.framesDecoded.fetch_add(written, std::memory_order_relaxed);
+  return true;
+}
+
+bool StreamingLaneGroup::reclaimStage(Lane& lane) {
+  uint32_t state = lane.stage.load(std::memory_order_acquire);
+  for (;;) {
+    switch (stagePhase(state)) {
+      case kStageIdle:
+        return true;
+      case kStageArmed:
+        if (lane.stage.compare_exchange_weak(
+                state, nextStage(state, kStageIdle), std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+          lane.stats.stagesAbandoned.fetch_add(1, std::memory_order_relaxed);
+          return true;
+        }
+        break;
+      case kStageSwapping:
+        // Two stores and a publish on the render thread; never long.
+        std::this_thread::yield();
+        state = lane.stage.load(std::memory_order_acquire);
+        break;
+      default:
+        adoptSwap(lane, state);
+        return false;
+    }
+  }
+}
+
+// The render thread swapped the window to the standby ring and published the
+// stage as resident. That ring is the live one now; the decoder is where the
+// stage left it, so ordinary refills continue from the stage's end with no
+// seek at all. The ring that was live becomes the standby: the render thread
+// stopped reading it the slice it swapped.
+void StreamingLaneGroup::adoptSwap(Lane& lane, uint32_t state) {
+  lane.live = 1 - lane.live;
+  lane.residentStart = lane.stageStart.load(std::memory_order_relaxed);
+  lane.residentEnd = lane.stageEnd.load(std::memory_order_relaxed);
+  uint64_t demand = 0;
+  lane.staleDemandValid =
+      zdsp::streamingWindowDemand(&lane.window, &demand) &&
+      (demand < lane.residentStart || demand >= lane.residentEnd);
+  lane.staleDemand = demand;
+  lane.stats.swaps.fetch_add(1, std::memory_order_relaxed);
+  lane.stage.store(nextStage(state, kStageIdle), std::memory_order_release);
+}
+
+void StreamingLaneGroup::transportJumped(uint64_t sourceFrame) noexcept {
+  for (const std::unique_ptr<Lane>& holder : lanes_) {
+    Lane& lane = *holder;
+    uint32_t state = lane.stage.load(std::memory_order_acquire);
+    if (stagePhase(state) != kStageArmed)
+      continue;
+    const uint64_t total = lane.window.totalFrames;
+    const uint64_t start = lane.stageStart.load(std::memory_order_relaxed);
+    const uint64_t end = lane.stageEnd.load(std::memory_order_relaxed);
+    // The node interpolates toward the next frame, so the stage must hold it
+    // too — except at the very end of the song, where there is none.
+    if (sourceFrame >= total || sourceFrame < start || sourceFrame >= end ||
+        (sourceFrame + 1u >= end && end < total))
+      continue;
+    float* const* channels = lane.stageChannels.load(std::memory_order_relaxed);
+    // A stage re-armed between the load above and here changed generation,
+    // so this exchange fails rather than swapping in fields it did not check.
+    if (!lane.stage.compare_exchange_strong(state,
+                                            nextStage(state, kStageSwapping),
+                                            std::memory_order_acq_rel,
+                                            std::memory_order_relaxed))
+      continue;
+    lane.window.channels = channels;
+    lane.windowChannels.store(channels, std::memory_order_release);
+    zdsp::streamingWindowPublishResident(&lane.window, start, end);
+    lane.stage.store(nextStage(state, kStageSwapped), std::memory_order_release);
+  }
+}
+
+size_t StreamingLaneGroup::stageJump(uint64_t sourceFrame) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t staged = 0;
+  for (std::unique_ptr<Lane>& holder : lanes_) {
+    Lane& lane = *holder;
+    const uint64_t total = lane.window.totalFrames;
+    if (sourceFrame >= total)
+      continue;
+    // Settle the handshake: adopt a swap that already happened, and wait out
+    // one that is happening.
+    uint32_t state = lane.stage.load(std::memory_order_acquire);
+    while (stagePhase(state) == kStageSwapping || stagePhase(state) == kStageSwapped) {
+      if (stagePhase(state) == kStageSwapped)
+        adoptSwap(lane, state);
+      else
+        std::this_thread::yield();
+      state = lane.stage.load(std::memory_order_acquire);
+    }
+    // Already where the live ring stands, with room to carry on: the jump
+    // needs nothing. "Room" allows for the refills that may still retire the
+    // window's tail before the transport gets there.
+    const uint64_t slack =
+        lane.residentEnd - lane.residentStart + 2u * kRefillChunkFrames >
+                lane.window.capacityFrames
+            ? 2u * kRefillChunkFrames
+            : 0u;
+    const bool resident =
+        sourceFrame >= lane.residentStart + slack &&
+        sourceFrame + 1u < lane.residentEnd &&
+        (lane.residentEnd - sourceFrame >= kRefillChunkFrames ||
+         lane.residentEnd >= total);
+    if (resident) {
+      // A stage armed for an EARLIER seek must not be swapped in when both
+      // seeks drain in one callback: it would replace the ring this one lands
+      // in. Take it back.
+      if (stagePhase(state) == kStageArmed)
+        (void)reclaimStage(lane);
+      continue;
+    }
+    if (stagePhase(state) == kStageArmed) {
+      if (lane.stageStart.load(std::memory_order_relaxed) == sourceFrame) {
+        ++staged;
+        continue;
+      }
+      // False when the render thread swapped the old stage in after all; it
+      // has been adopted, and the ring that was live is free to stage into.
+      (void)reclaimStage(lane);
+    }
+    if (stageLane(lane, sourceFrame))
+      ++staged;
+  }
+  wake_.notify_all();
+  return staged;
+}
+
+size_t StreamingLaneGroup::stagePreparedStart(uint64_t sourceFrame) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t staged = 0;
+  for (auto& lane : lanes_)
+    if (stageLane(*lane, sourceFrame)) ++staged;
+  return staged;
+}
+
+uint64_t StreamingLaneGroup::requestJump(uint64_t sourceFrame) noexcept {
+  const uint64_t token = jumpSequence_.load(std::memory_order_relaxed) + 2;
+  jumpSequence_.store(token - 1, std::memory_order_seq_cst);
+  jumpFrame_.store(sourceFrame, std::memory_order_seq_cst);
+  jumpSequence_.store(token, std::memory_order_seq_cst);
+  wake_.notify_all();
+  return token;
+}
+
+void StreamingLaneGroup::cancelJump(uint64_t token) noexcept {
+  completedJump_.store(token, std::memory_order_release);
+}
+
+bool StreamingLaneGroup::serviceJumpRequest() {
+  const uint64_t token = jumpSequence_.load(std::memory_order_seq_cst);
+  if (token == 0 || (token & 1u) ||
+      completedJump_.load(std::memory_order_acquire) == token)
+    return false;
+  const uint64_t frame = jumpFrame_.load(std::memory_order_seq_cst);
+  if (jumpSequence_.load(std::memory_order_seq_cst) != token)
+    return false;
+  for (auto& holder : lanes_) {
+    Lane& lane = *holder;
+    if (frame >= lane.window.totalFrames) continue;
+    uint32_t state = lane.stage.load(std::memory_order_acquire);
+    if (stagePhase(state) == kStageSwapping) return false;
+    if (stagePhase(state) == kStageSwapped) adoptSwap(lane, state);
+    state = lane.stage.load(std::memory_order_acquire);
+    if (stagePhase(state) == kStageArmed &&
+        lane.stageRequest.load(std::memory_order_relaxed) == token)
+      continue;
+    if (!reclaimStage(lane)) return true;
+    // Only one lane per round: visit/refill the live lanes between decodes,
+    // and observe a superseding drag request before starting another decoder.
+    lane.stageRequest.store(token, std::memory_order_relaxed);
+    return stageLane(lane, frame);
+  }
+  return false;
+}
+
+bool StreamingLaneGroup::commitJump(uint64_t token, uint64_t frame) noexcept {
+  if (jumpSequence_.load(std::memory_order_acquire) != token) return false;
+  size_t claimed = 0;
+  for (; claimed < lanes_.size(); ++claimed) {
+    Lane& lane = *lanes_[claimed];
+    if (frame >= lane.window.totalFrames) continue;
+    uint32_t state = lane.stage.load(std::memory_order_acquire);
+    if (stagePhase(state) != kStageArmed ||
+        lane.stageRequest.load(std::memory_order_relaxed) != token ||
+        lane.stageStart.load(std::memory_order_relaxed) > frame ||
+        (lane.stageEnd.load(std::memory_order_relaxed) <= frame + 1u &&
+         lane.stageEnd.load(std::memory_order_relaxed) < lane.window.totalFrames) ||
+        !lane.stage.compare_exchange_strong(state,
+            nextStage(state, kStageSwapping), std::memory_order_acq_rel,
+            std::memory_order_relaxed))
+      break;
+  }
+  if (claimed != lanes_.size()) {
+    for (size_t i = 0; i < claimed; ++i) {
+      Lane& lane = *lanes_[i];
+      if (frame >= lane.window.totalFrames) continue;
+      const uint32_t state = lane.stage.load(std::memory_order_relaxed);
+      lane.stage.store(nextStage(state, kStageArmed), std::memory_order_release);
+    }
+    return false;
+  }
+  for (auto& holder : lanes_) {
+    Lane& lane = *holder;
+    if (frame >= lane.window.totalFrames) continue;
+    const uint32_t state = lane.stage.load(std::memory_order_relaxed);
+    auto channels = lane.stageChannels.load(std::memory_order_relaxed);
+    lane.window.channels = channels;
+    lane.windowChannels.store(channels, std::memory_order_release);
+    zdsp::streamingWindowPublishResident(&lane.window,
+        lane.stageStart.load(std::memory_order_relaxed),
+        lane.stageEnd.load(std::memory_order_relaxed));
+    lane.stage.store(nextStage(state, kStageSwapped), std::memory_order_release);
+  }
+  completedJump_.store(token, std::memory_order_release);
+  return true;
+}
+
+void StreamingLaneGroup::setLoop(uint64_t startFrame, uint64_t endFrame) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    loopEnabled_ = endFrame > startFrame;
+    loopStart_ = startFrame;
+    loopEnd_ = endFrame;
+  }
+  wake_.notify_all();
+}
+
+void StreamingLaneGroup::clearLoop() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  loopEnabled_ = false;
+  loopStart_ = 0;
+  loopEnd_ = 0;
+}
+
+bool StreamingLaneGroup::sampleAt(size_t index, uint32_t channel,
+                                  uint64_t frame, float* value) const noexcept {
+  if (index >= lanes_.size() || value == nullptr)
+    return false;
+  const Lane& lane = *lanes_[index];
+  if (channel >= lane.window.channelCount || frame >= lane.window.totalFrames)
+    return false;
+  // A seqlock read over the handshake: every render-thread change to the
+  // window's ring and range happens inside Swapping/Swapped and moves the
+  // generation, so an unchanged Idle/Armed state on both sides means the ring
+  // and the range read in between belong together.
+  const uint32_t before = lane.stage.load(std::memory_order_acquire);
+  if (stagePhase(before) == kStageSwapping || stagePhase(before) == kStageSwapped)
+    return false;
+  float* const* channels = lane.windowChannels.load(std::memory_order_acquire);
+  uint64_t start = 0;
+  uint64_t end = 0;
+  if (channels == nullptr ||
+      !zdsp::streamingWindowResident(&lane.window, &start, &end) ||
+      frame < start || frame >= end)
+    return false;
+  const float sample =
+      channels[channel][frame & (lane.window.capacityFrames - 1u)];
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (lane.stage.load(std::memory_order_relaxed) != before)
+    return false;
+  *value = sample;
+  return true;
+}
+
+// Hand `frames` output frames to `ring` at `index`, decoding and resampling
 // as much as that takes. Returns how many were actually placed; short means
 // the lane ended.
-uint64_t StreamingLaneGroup::fillLane(Lane& lane, uint64_t index,
-                                      uint64_t frames) {
+uint64_t StreamingLaneGroup::fillLane(Lane& lane, float* const* ring,
+                                      uint64_t index, uint64_t frames) {
   const uint32_t channels = lane.window.channelCount;
   if (lane.sourceRate == lane.outputRate) {
     std::vector<float*> destination(channels);
     for (uint32_t channel = 0; channel < channels; ++channel)
-      destination[channel] = lane.pointers[channel] + index;
+      destination[channel] = ring[channel] + index;
     size_t got = 0;
     const DecodedAudioStatus status =
         lane.source->read(destination.data(), static_cast<size_t>(frames), &got);
@@ -329,7 +802,7 @@ uint64_t StreamingLaneGroup::fillLane(Lane& lane, uint64_t index,
       const uint64_t take = std::min<uint64_t>(frames - placed, availableFrames);
       for (uint64_t frame = 0; frame < take; ++frame)
         for (uint32_t channel = 0; channel < channels; ++channel)
-          lane.pointers[channel][index + placed + frame] =
+          ring[channel][index + placed + frame] =
               lane.pending[lane.pendingRead +
                            static_cast<size_t>(frame) * channels + channel];
       lane.pendingRead += static_cast<size_t>(take) * channels;
@@ -370,7 +843,7 @@ uint64_t StreamingLaneGroup::fillLane(Lane& lane, uint64_t index,
 
 bool StreamingLaneGroup::serviceOnceForTesting() {
   std::lock_guard<std::mutex> lock(mutex_);
-  bool progressed = false;
+  bool progressed = serviceJumpRequest();
   for (std::unique_ptr<Lane>& lane : lanes_)
     progressed = serviceLane(*lane) || progressed;
   return progressed;
@@ -503,8 +976,8 @@ void StreamingLaneGroup::waveformLoop() {
       buckets[bucket] =
           counted[bucket] == 0
               ? 0.0F
-              : static_cast<float>(std::sqrt(
-                    energy[bucket] / static_cast<double>(counted[bucket])));
+              : static_cast<float>(std::min(1.0, std::sqrt(
+                    energy[bucket] / static_cast<double>(counted[bucket]))));
     {
       std::lock_guard<std::mutex> lock(mutex_);
       lane.waveformBuckets = std::move(buckets);
@@ -571,6 +1044,7 @@ void StreamingLaneGroup::loop() {
     bool progressed = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      progressed = serviceJumpRequest();
       for (std::unique_ptr<Lane>& lane : lanes_)
         progressed = serviceLane(*lane) || progressed;
     }
@@ -615,7 +1089,8 @@ const StreamingAudioInfo* StreamingLaneGroup::info(size_t lane) const noexcept {
 size_t StreamingLaneGroup::retainedBytes(size_t lane) const noexcept {
   if (lane >= lanes_.size())
     return 0;
-  return static_cast<size_t>(lanes_[lane]->capacityFrames) *
+  // Both rings: the standby is as real as the live one.
+  return 2u * static_cast<size_t>(lanes_[lane]->capacityFrames) *
          lanes_[lane]->window.channelCount * sizeof(float);
 }
 
@@ -637,6 +1112,9 @@ StreamingLaneStats StreamingLaneGroup::stats(size_t lane) const noexcept {
   copy.seeks = live.stats.seeks.load(R);
   copy.framesDecoded = live.stats.framesDecoded.load(R);
   copy.waitedForGuard = live.stats.waitedForGuard.load(R);
+  copy.stages = live.stats.stages.load(R);
+  copy.swaps = live.stats.swaps.load(R);
+  copy.stagesAbandoned = live.stats.stagesAbandoned.load(R);
   copy.waveformSource = live.stats.waveformSource.load(R);
   copy.waveformStarted = live.stats.waveformStarted.load(R);
   copy.waveformDone = live.stats.waveformDone.load(R);

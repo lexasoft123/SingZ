@@ -50,11 +50,16 @@ float SingzStretchNode::getLatencySeconds() const {
 void SingzStretchNode::meterOutput(const std::shared_ptr<DSPAudioBuffer> &buffer,
                                   int frames, float sampleRate) {
   float peak = 0;
+  double energy = 0;
   for (size_t channel = 0; channel < buffer->getNumberOfChannels(); ++channel) {
     const float *samples = buffer->getChannel(channel)->begin();
-    for (int frame = 0; frame < frames; ++frame)
+    for (int frame = 0; frame < frames; ++frame) {
       peak = std::max(peak, std::fabs(samples[frame]));
+      energy += static_cast<double>(samples[frame]) * samples[frame];
+    }
   }
+  const double sampleCount = static_cast<double>(frames) * buffer->getNumberOfChannels();
+  outputRms_.store(sampleCount > 0 ? static_cast<float>(std::sqrt(energy / sampleCount)) : 0, std::memory_order_relaxed);
   const float release = sampleRate > 0 ? std::pow(10.0f, -frames / sampleRate) : 0;
   outputPeak_.store(std::max(peak, outputPeak() * release), std::memory_order_relaxed);
   const uint32_t count = clippedBlocks();

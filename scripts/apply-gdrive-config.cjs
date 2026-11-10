@@ -41,6 +41,8 @@ fs.writeFileSync(
 export default {
   clientId: ${val('clientId')},
   clientSecret: ${val('clientSecret')},
+  tvClientId: ${val('tvClientId')},
+  tvClientSecret: ${val('tvClientSecret')},
   authBase: ${val('authBase')},
   apiBase: ${val('apiBase')},
   uploadBase: ${val('uploadBase')}
@@ -48,7 +50,7 @@ export default {
 `
 );
 console.log(
-  raw.clientId
+  (raw.clientId || raw.tvClientId)
     ? 'gdrive config: applied to src/main/gdrive-config.ts'
     : 'gdrive config: none present — EMPTY module written, Drive stays hidden' + worktreeHint('mobile/gdrive.config.json')
 );

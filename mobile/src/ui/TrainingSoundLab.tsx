@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { AppState, Linking, ScrollView, Text, View } from 'react-native'
-import { GlassSurface, PrimaryAction } from '@singz/ui/native'
+import { GlassHeader, GlassSurface, PrimaryAction } from '@singz/ui/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine } from '../engine'
 import { midiNoteName, TRAINING_SOUNDS, type TrainingSound } from '../gen/training-lib'
@@ -45,8 +45,7 @@ export function TrainingSoundLab({ engine, active, onBack }: { engine: Multitrac
   }, [instrument, midi, busy, error])
   const copy = { color: C.dim, fontSize: 16 }
   return <ScrollView contentContainerStyle={{ padding: 20, paddingTop: insets.top + 12, gap: 18, paddingBottom: 40 }}>
-    <Chip active={false} label={t('phone.training.soundLabBack')} onPress={onBack} />
-    <Text style={{ color: C.text, fontSize: 32, fontWeight: '900' }}>{t('phone.training.soundLabTitle')}</Text>
+    <GlassHeader title={t('phone.training.soundLabTitle')} onBack={onBack} backLabel={t('phone.training.soundLabBack')} />
     <Text style={copy}>{t('phone.training.soundLabHelp')}</Text>
     <GlassSurface radius={26} style={{ padding: 22, gap: 18 }}>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>{TRAINING_SOUNDS.map(sound => <Chip key={sound} label={t(`phone.training.sound.${sound}`)} active={instrument === sound} onPress={() => { stop(); setInstrument(sound) }} />)}</View>

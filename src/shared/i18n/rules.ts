@@ -5,11 +5,11 @@
  * without the dictionaries.
  */
 
-export type Locale = 'en' | 'ru' | 'zh-CN' | 'hi' | 'ja' | 'ko' | 'th' | 'id' | 'vi' | 'fil' | 'ms' | 'zh-TW' | 'tr'
+export type Locale = 'en' | 'ru' | 'zh-CN' | 'hi' | 'ja' | 'ko' | 'th' | 'id' | 'vi' | 'fil' | 'ms' | 'zh-TW' | 'tr' | 'es-419' | 'pt-BR'
 /** What the preference stores: a locale, or `system` to follow the machine. */
 export type Language = Locale | 'system'
 
-export const LOCALE_VALUES: readonly Locale[] = ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW', 'tr']
+export const LOCALE_VALUES: readonly Locale[] = ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW', 'tr', 'es-419', 'pt-BR']
 
 export function isLanguage(v: unknown): v is Language {
   return v === 'system' || (typeof v === 'string' && (LOCALE_VALUES as readonly string[]).includes(v))
@@ -29,6 +29,8 @@ export function fromTag(tag: string): Locale | null {
   if (lang === 'ru') return 'ru'
   if (lang === 'hi') return 'hi'
   if (lang === 'tr') return 'tr'
+  if (lang === 'es') return 'es-419'
+  if (lang === 'pt') return 'pt-BR'
   if (lang === 'tl' || lang === 'fil') return 'fil'
   if (lang === 'in') return 'id'
   if (lang === 'ja') return 'ja'
@@ -91,6 +93,11 @@ export function pluralForm(locale: Locale, n: number): PluralForm {
 export function cldrPlural(locale: Locale, n: number): PluralForm {
   if (!Number.isFinite(n)) return 'other'
   const a = Math.round(Math.abs(n) * 1000) / 1000
+  if (locale === 'es-419' || locale === 'pt-BR') {
+    if (Number.isInteger(a) && a !== 0 && a % 1_000_000 === 0) return 'many'
+    if (locale === 'pt-BR') return Math.floor(a) <= 1 ? 'one' : 'other'
+    return a === 1 ? 'one' : 'other'
+  }
   if (locale === 'hi') return a < 1 || a === 1 ? 'one' : 'other'
   if (locale === 'fil') {
     const fraction = String(a).split('.')[1] ?? ''

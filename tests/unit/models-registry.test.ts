@@ -11,6 +11,7 @@ import {
   qwenModelMb,
   registryEntryFor,
   removeWhisperIfQwenReady,
+  splitterDescriptionId,
   whisperModelOnDisk
 } from '../../src/main/models'
 import { net } from './electron-stub'
@@ -26,11 +27,16 @@ describe('registryEntryFor', () => {
     expect(gpuSplitterPackUrl('0.24.0-test1', 'darwin', 'arm64')).toBe(
       'https://github.com/lexasoft123/SingZ/releases/download/v0.24.0-test1/gpu-splitter-darwin-arm64.tar.gz'
     )
+    expect(gpuSplitterPackUrl('0.24.0', 'linux', 'arm64')).toBe(
+      'https://github.com/lexasoft123/SingZ/releases/download/v0.24.0/gpu-splitter-linux-arm64.tar.gz'
+    )
   })
 
-  it('gives Windows and Intel Macs the ONNX aligner', () => {
+  it('gives Windows, Intel Macs and Linux (both architectures) the ONNX aligner', () => {
     expect(registryEntryFor('aligner', 'win32-x64')?.url).toContain('mms-fa.onnx')
     expect(registryEntryFor('aligner', 'darwin-x64')?.url).toContain('mms-fa.onnx')
+    expect(registryEntryFor('aligner', 'linux-x64')?.url).toContain('mms-fa.onnx')
+    expect(registryEntryFor('aligner', 'linux-arm64')?.url).toContain('mms-fa.onnx')
   })
 
   it('gives Apple Silicon the torch aligner', () => {
@@ -41,9 +47,23 @@ describe('registryEntryFor', () => {
   })
 
   it('resolves the splitter pack everywhere it exists', () => {
-    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64']) {
       expect(registryEntryFor('gpu-splitter', here)?.id).toBe('gpu-splitter')
     }
+  })
+
+  /**
+   * The "Apple Silicon" splitter blurb names a GPU that does not exist on a
+   * Linux ARM64 board (Orange Pi 5 and friends run the CPU ONNX pack), so the
+   * platform test must be darwin-specific — not `arch === 'arm64'`.
+   */
+  it('reserves the Apple Silicon description for darwin-arm64', () => {
+    expect(splitterDescriptionId('darwin', 'arm64')).toBe('descriptionAppleSilicon')
+    expect(splitterDescriptionId('linux', 'arm64')).toBe('descriptionGeneric')
+    expect(splitterDescriptionId('darwin', 'x64')).toBe('descriptionGeneric')
+    expect(splitterDescriptionId('linux', 'x64')).toBe('descriptionGeneric')
+    expect(splitterDescriptionId('win32', 'x64')).toBe('descriptionWin')
+    expect(splitterDescriptionId('win32', 'arm64')).toBe('descriptionWin')
   })
 
   /**
@@ -53,7 +73,7 @@ describe('registryEntryFor', () => {
    * every platform — and no whisper tile anywhere.
    */
   it('offers the lyrics speech model everywhere, as one tile of three parts, and no whisper', () => {
-    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64']) {
       const entry = registryEntryFor('qwen-asr', here)
       expect(entry?.parts?.map((p) => p.file)).toEqual([
         'Qwen3-ASR-1.7B-Q8_0.gguf',

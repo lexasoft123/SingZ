@@ -1,4 +1,5 @@
 import { sampleAuditionGain, trainingOrganCurve, TRAINING_INSTRUMENT_BOOST } from '../../../shared/training-sound-levels'
+import type { TrainingReferenceCue } from '../../../shared/training-reference'
 import type { TrainingSound } from '../../../shared/training-sound'
 import type { TrainingCue, TrainingCuePurpose } from '../../../shared/training-types'
 import { createTrainingVoices } from './training-voices'
@@ -14,9 +15,10 @@ export async function renderTrainingPhrase(context: AudioContext, samples: Map<s
     assertCurrent()
     let cursor = 0
     const planned: ScheduledTrainingCue[] = cues.map((cue, cueIndex) => {
+      const duration = (cue as Partial<TrainingReferenceCue>).durationSeconds ?? timing.noteDurationSec
       const notes = cue.notes.map((midi, index) => {
-        const startTime = cursor + (cue.articulation === 'together' ? 0 : index * (timing.noteDurationSec + timing.sequenceGapSec))
-        return { midi, startTime, endTime: startTime + timing.noteDurationSec }
+        const startTime = cursor + (cue.articulation === 'together' ? 0 : index * (duration + timing.sequenceGapSec))
+        return { midi, startTime, endTime: startTime + duration }
       })
       const endTime = notes.reduce((end, note) => Math.max(end, note.endTime), cursor)
       const scheduled = { cueIndex, purpose: cue.purpose, startTime: cursor, endTime, notes }

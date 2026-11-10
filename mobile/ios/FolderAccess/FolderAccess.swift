@@ -22,6 +22,37 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
   private var trainingUtterance: AVSpeechUtterance?
   private var trainingSpeechResolve: RCTPromiseResolveBlock?
 
+  /** Fabric can detach a popped sheet's event emitter before UIKit finishes
+   * dismissing it. Confirm the actual native presentation state before tabs
+   * change, including sheets whose underlying controller stays visible. */
+  @objc(waitForNavigationModals:resolver:rejecter:)
+  func waitForNavigationModals(_ maximumCount: Int,
+                               resolver resolve: @escaping RCTPromiseResolveBlock,
+                               rejecter reject: @escaping RCTPromiseRejectBlock) {
+    let deadline = Date().addingTimeInterval(4.5)
+    func check() {
+      var count = 0
+      var transitioning = false
+      for scene in UIApplication.shared.connectedScenes {
+        guard let windowScene = scene as? UIWindowScene else { continue }
+        for window in windowScene.windows where window.isKeyWindow {
+          var controller = window.rootViewController
+          while let current = controller {
+            transitioning = transitioning || current.isBeingDismissed || current.isBeingPresented
+              || current.transitionCoordinator != nil
+            if current.presentingViewController != nil,
+               NSStringFromClass(type(of: current)).contains("RNSScreen") { count += 1 }
+            controller = current.presentedViewController
+          }
+        }
+      }
+      if count <= max(0, maximumCount) && !transitioning { resolve(true); return }
+      if Date() >= deadline { resolve(false); return }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.016, execute: check)
+    }
+    DispatchQueue.main.async(execute: check)
+  }
+
   @objc(speakTrainingInterval:language:resolver:rejecter:)
   func speakTrainingInterval(_ text: String, language: String,
                              resolver resolve: @escaping RCTPromiseResolveBlock,
@@ -476,14 +507,51 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
       try ensureDownloaded(src, timeout: 300)
       let srcSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
       let dstSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
-      if srcSize != dstSize {
+      // Read provider-backed source bytes fresh. Destination reuse requires
+      // strong inode/device/size/mtime+ctime identity, never a document hash.
+      let current = srcSize == dstSize && SingzFolderContentMatches(src, dst)
+      if !current {
         try fm.createDirectory(at: dstDir, withIntermediateDirectories: true)
         let data = try coordinatedRead(src)
         try data.write(to: dst, options: .atomic)
+        UserDefaults.standard.removeObject(forKey: "singz.hash.\(dst.path)")
       }
       resolve(dst.path)
     } catch {
       reject("local_failed", "\(file): \(error.localizedDescription)", error)
+    }
+  }
+
+  /** Actual identity of a path this module owns. Reuse requires nanosecond
+   * ctime as well as mtime, inode, device and size; restored mtime is insufficient. */
+  @objc func fileIdentity(
+    _ path: NSString,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.global(qos: .utility).async {
+      let candidate = URL(fileURLWithPath: path as String)
+        .standardizedFileURL.resolvingSymlinksInPath()
+      let roots = [self.cacheRootURL(), self.documentsURL()].map {
+        $0.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+      }
+      guard roots.contains(where: { candidate.path.hasPrefix($0) }) else {
+        reject("identity", "Not a file this app owns", nil)
+        return
+      }
+      guard let identity = SingzContentIdentityStore.shared.identity(candidate, authorized: { actual in
+        roots.contains(where: { actual.hasPrefix($0) })
+      }) else {
+        reject("identity", "The file is missing, changing or unreadable", nil)
+        return
+      }
+      resolve([
+        "path": path as String,
+        "md5": identity.md5,
+        "size": NSNumber(value: identity.stamp.size),
+        "mtimeMs": Double(identity.stamp.mtimeSeconds) * 1000 +
+          Double(identity.stamp.mtimeNanoseconds) / 1_000_000
+      ])
     }
   }
 
@@ -542,26 +610,13 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
     }
   }
 
-  /** md5 of a file, remembered against its own identity (size + mtime) so a
-   *  song hashes once and not on every open. A rewrite moves the mtime, so a
-   *  stale row cannot outlive the bytes it describes. The read is chunked —
-   *  these are whole stems, and a song's worth will not fit in memory twice. */
-  private func hashOf(_ url: URL, _ attrs: [FileAttributeKey: Any]) -> String {
-    let size = (attrs[.size] as? Int64) ?? 0
-    let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-    let stamp = "\(size):\(Int64(mtime * 1000))"
-    let key = "singz.hash.\(url.path)"
-    let kept = UserDefaults.standard.string(forKey: key)?.split(separator: ":", maxSplits: 2)
-    if let kept, kept.count == 3, "\(kept[0]):\(kept[1])" == stamp { return String(kept[2]) }
-    guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
-    defer { try? handle.close() }
-    var md5 = Insecure.MD5()
-    while let chunk = try? handle.read(upToCount: 1 << 16), !chunk.isEmpty {
-      md5.update(data: chunk)
-    }
-    let hex = md5.finalize().map { String(format: "%02x", $0) }.joined()
-    UserDefaults.standard.set("\(stamp):\(hex)", forKey: key)
-    return hex
+  /** Shared strong identity: currency and waveform handoff hash a file once.
+   * The legacy persistent size+mtime memo is deliberately ignored. */
+  private func hashOf(_ url: URL, _ attrs: [FileAttributeKey: Any], memoize: Bool = true) -> String {
+    // Temporary downloads may bypass reuse, but still need the same stable-FD
+    // proof and throwing read path. They are not trusted from document hashes.
+    let store = memoize ? SingzContentIdentityStore.shared : SingzContentIdentityStore(capacity: 1)
+    return store.identity(url)?.md5 ?? ""
   }
 
   /** Drop one project's downloaded files, or everything when project is "". */
@@ -734,65 +789,134 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
    * The copy on disk is served whenever it IS the wanted file — see isCurrent;
    * the URL is not touched then, so a downloaded song opens with no signal.
    */
+  private final class DriveTransfer {
+    let lock = NSLock()
+    var task: URLSessionDownloadTask?
+    var cancelled = false
+    var verifying = false
+    let expected: Int64
+    init(_ expected: Int64) { self.expected = expected }
+  }
+  private let driveTransfersLock = NSLock()
+  private var driveTransfers: [String: DriveTransfer] = [:]
+
+  @objc func driveFetchProgress(
+    _ request: String, resolver resolve: RCTPromiseResolveBlock,
+    rejecter reject: RCTPromiseRejectBlock
+  ) {
+    driveTransfersLock.lock()
+    let state = driveTransfers[request]
+    driveTransfersLock.unlock()
+    guard let state else { resolve(nil); return }
+    state.lock.lock()
+    let got = state.task?.countOfBytesReceived ?? 0
+    let total = state.expected > 0 ? state.expected : (state.task?.countOfBytesExpectedToReceive ?? 0)
+    let verifying = state.verifying
+    state.lock.unlock()
+    resolve(["got": NSNumber(value: got), "total": NSNumber(value: total), "verifying": verifying])
+  }
+
+  @objc func cancelDriveFetch(
+    _ request: String, resolver resolve: RCTPromiseResolveBlock,
+    rejecter reject: RCTPromiseRejectBlock
+  ) {
+    driveTransfersLock.lock()
+    let state = driveTransfers[request]
+    driveTransfersLock.unlock()
+    state?.lock.lock()
+    state?.cancelled = true
+    let task = state?.task
+    state?.lock.unlock()
+    task?.cancel()
+    resolve(state != nil)
+  }
+
   @objc func fetchToCache(
-    _ project: String,
-    file: String,
-    url: String,
-    auth: String,
-    expectedMd5: String,
-    expectedBytes: NSNumber,
+    _ project: String, file: String, url: String, auth: String,
+    expectedMd5: String, expectedBytes: NSNumber,
     resolver resolve: @escaping RCTPromiseResolveBlock,
     rejecter reject: @escaping RCTPromiseRejectBlock
   ) {
-    let out = cacheRootURL().appendingPathComponent(project, isDirectory: true)
-      .appendingPathComponent(file)
-    let fm = FileManager.default
-    if isCurrent(out, expectedMd5, expectedBytes.int64Value) {
-      resolve(["path": out.path, "downloaded": false])
-      return
+    fetchDriveFile(project, file, url, auth, expectedMd5, expectedBytes.int64Value,
+                   UUID().uuidString, resolve, reject)
+  }
+
+  @objc func fetchToCacheTracked(
+    _ project: String, file: String, url: String, auth: String,
+    expectedMd5: String, expectedBytes: NSNumber, request: String,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    fetchDriveFile(project, file, url, auth, expectedMd5, expectedBytes.int64Value,
+                   request, resolve, reject)
+  }
+
+  private func fetchDriveFile(
+    _ project: String, _ file: String, _ url: String, _ auth: String,
+    _ expectedMd5: String, _ expectedBytes: Int64, _ request: String,
+    _ resolve: @escaping RCTPromiseResolveBlock, _ reject: @escaping RCTPromiseRejectBlock
+  ) {
+    guard ProjectPaths.plainChild(project), ProjectPaths.relOk(file) else {
+      reject("fetch", "Bad project or file path", nil); return
     }
-    guard !url.isEmpty else {
-      reject("cacheMiss", "Drive cache miss for \(file)", nil)
-      return
+    let out = cacheRootURL().appendingPathComponent(project, isDirectory: true).appendingPathComponent(file)
+    if isCurrent(out, expectedMd5, expectedBytes) {
+      resolve(["path": out.path, "downloaded": false]); return
     }
-    guard let remote = URL(string: url) else {
-      reject("fetch", "Bad download URL for \(file)", nil)
-      return
-    }
+    guard !url.isEmpty else { reject("cacheMiss", "Drive cache miss for \(file)", nil); return }
+    guard let remote = URL(string: url) else { reject("fetch", "Bad download URL", nil); return }
+    let state = DriveTransfer(expectedBytes)
+    driveTransfersLock.lock()
+    driveTransfers[request] = state
+    driveTransfersLock.unlock()
     var req = URLRequest(url: remote)
     req.setValue(auth, forHTTPHeaderField: "Authorization")
-    req.timeoutInterval = 120
+    req.timeoutInterval = 20
     let task = URLSession.shared.downloadTask(with: req) { tmp, response, error in
-      if let error {
-        reject("fetch", "\(file): \(error.localizedDescription)", error)
-        return
+      defer {
+        self.driveTransfersLock.lock()
+        self.driveTransfers.removeValue(forKey: request)
+        self.driveTransfersLock.unlock()
       }
+      state.lock.lock()
+      let cancelled = state.cancelled
+      state.verifying = true
+      state.lock.unlock()
+      if cancelled { reject("cancelled", "Download cancelled", nil); return }
+      if let error { reject("fetch", "\(file): \(error.localizedDescription)", error); return }
       let status = (response as? HTTPURLResponse)?.statusCode ?? 0
       guard status / 100 == 2, let tmp else {
-        reject("fetch", "Drive download failed (\(status)) for \(file)", nil)
-        return
+        reject("http\(status)", "Drive download failed (\(status)) for \(file)", nil); return
       }
       do {
-        try fm.createDirectory(
-          at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fm.fileExists(atPath: out.path) { try fm.removeItem(at: out) }
-        try fm.moveItem(at: tmp, to: out)
-        // What landed must be what was asked for — a connection cut halfway
-        // leaves a plausible file, and caching it would poison every later
-        // open with audio that decodes to silence or noise.
-        if !expectedMd5.isEmpty,
-          let attrs = try? fm.attributesOfItem(atPath: out.path),
-          self.hashOf(out, attrs) != expectedMd5
-        {
-          try? fm.removeItem(at: out)
-          reject("fetch", "\(file) arrived damaged — try again", nil)
-          return
+        let attrs = try self.fm.attributesOfItem(atPath: tmp.path)
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? -1
+        // Validate the temporary file BEFORE replacing a durable copy. A short
+        // 200 response is damage even when an old document has no checksum.
+        if (expectedBytes > 0 && size != expectedBytes) ||
+           (!expectedMd5.isEmpty && self.hashOf(tmp, attrs, memoize: false) != expectedMd5) {
+          reject("integrity", "\(file) arrived incomplete or damaged", nil); return
         }
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        if state.cancelled { reject("cancelled", "Download cancelled", nil); return }
+        try self.fm.createDirectory(at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if self.fm.fileExists(atPath: out.path) {
+          _ = try self.fm.replaceItemAt(out, withItemAt: tmp, options: [.usingNewMetadataOnly])
+        } else {
+          try self.fm.moveItem(at: tmp, to: out)
+        }
+        UserDefaults.standard.removeObject(forKey: "singz.hash.\(out.path)")
         resolve(["path": out.path, "downloaded": true])
       } catch {
-        reject("fetch", "Cannot cache \(file): \(error.localizedDescription)", error)
+        reject("cacheWrite", "Cannot cache \(file): \(error.localizedDescription)", error)
       }
     }
+    state.lock.lock()
+    state.task = task
+    let cancelled = state.cancelled
+    state.lock.unlock()
+    if cancelled { task.cancel() }
     task.resume()
   }
 

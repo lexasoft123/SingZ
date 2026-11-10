@@ -18,8 +18,48 @@ LogPanel (diagnostics)                            log.ts       ring-buffer app l
 App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ projects
 ```
 
-Desktop song playback and training now attach to a process-lifetime native audio
-service. Its output host remains prepared when individual clients stop; capture
+Desktop song playback, training cues, native microphone capture and the FLOW 8
+microphone/main-mix → HDMI relay run in **SingZ Audio**, a dedicated Electron
+Node utility process (`src/main/audio-service.ts`). The UI-owning Electron main
+process never loads `singz-capture.node`. `audio-process.ts` sends asynchronous control requests;
+the service retains the existing `CaptureOwner`, native shared service, device
+hosts and DSP engine. This is an address-space boundary, not a worker thread:
+Chromium launching camera/helper processes must not hold the audio workers'
+process memory-map lock.
+
+SingZ Box can instead connect to its separately supervised `--box-audio-host`
+process over a private Unix socket. This headless process loads the same verified
+native addon only after establishing its isolated profile and exclusive owner
+capability. LoopZ owns physical routes; native song rendering feeds a bounded
+history source inside that process. UI disconnects preserve public routing and
+playback; uncertain commands require canonical reconciliation rather than helper
+termination or replay. The trusted TV configures routes; phone guests keep their
+transport, mix and queue scope. Private input analysis uses the native LoopZ tap to share routed captures
+without a second device owner. See the
+[Box integration contract](specs/singz-box/loopz-integration.md).
+
+For the Desktop utility path, the Electron main process owns the service lifetime and file authorization.
+Playback and relay survive a renderer reload; renderer-owned microphone
+analysis and headphone monitoring release on detach. Destroying the owning
+webContents releases all of its native ownership; app quit closes the service.
+A replacement screen shows top-bar Stop controls for retained song playback
+and active relay audio, even before a song document has been reopened. This is not a system daemon: restarting Electron main stops audio,
+and a crashed audio helper requires an app restart rather than automatically
+resuming playback. Generation checks inside the existing native owner remain
+in force, and a per-helper epoch rejects replies from a previous lifetime.
+
+Control requests are bounded to 64 outstanding calls and 64 MiB of aggregate
+request payload, with a 120-second deadline.
+A deadline failure terminates the helper and rejects pending calls so a late
+command cannot silently start sound. Capture analysis uses one acknowledged,
+coalesced telemetry packet at a time, rather than sending raw microphone PCM.
+No IPC was added to the native real-time callbacks. Helper errors and identity
+receipts feed the existing application log. Stem export snapshots authorized
+open descriptors into private scratch files before the helper opens its own
+descriptors; descriptor integers never cross process boundaries.
+
+The native audio service's output host remains prepared when individual
+clients stop; capture
 is activated only on demand. On macOS, stopping capture retains a prepared
 audio unit while stopping hardware recording; the next matching device/channel
 activation creates fresh delivery state and restarts that unit. Device discovery is cached and refreshed by native

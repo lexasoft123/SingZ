@@ -14,9 +14,8 @@
 	     helpers run the same V8 under Hardened Runtime.
 
 	     device.audio-input is here because the main executable is not the
-	     only process that opens the microphone. The training mic spawns
-	     `singz-analyze live-input`, a child process that opens the HAL
-	     AudioUnit itself (src/main/audio-input.ts); the pitch strip's
+	     only process that opens the microphone. The SingZ Audio utility process loads the native capture addon
+	     and opens the HAL AudioUnit itself (src/main/audio-service.ts); the pitch strip's
 	     getUserMedia goes through Chromium's audio service, which may live
 	     in a helper. Which signature TCC holds to the entitlement — the
 	     process opening the device, or the app responsible for it — is not

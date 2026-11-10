@@ -24,6 +24,52 @@ TARGET=$1
 BIN=$2
 BUILD=${3:-}
 
+if [[ "$TARGET" == linux-* ]]; then
+  # Linux helpers are static with respect to GGML and the engine itself.
+  # Only the distribution runtime libraries declared by the Debian package
+  # may remain dynamic; build-tree runpaths would hide a missing payload.
+  if ! command -v readelf >/dev/null 2>&1; then
+    rm -f "$BIN"
+    echo "assert-portable-binary: readelf is required to check $BIN" >&2
+    exit 1
+  fi
+  # ELF identity before library hygiene: a cache link or a copy-paste can
+  # bless an x86-64 helper into vendor/linux-arm64 (or the reverse). On the
+  # matching host every NEEDED/RPATH check below then passes — the binary is
+  # only useless the moment a real board tries to exec it. readelf output is
+  # localized, so parse it under LC_ALL=C.
+  if ! HEADER=$(LC_ALL=C readelf -h "$BIN"); then
+    rm -f "$BIN"
+    echo "assert-portable-binary: could not inspect $BIN" >&2
+    exit 1
+  fi
+  ELF_CLASS=$(printf '%s\n' "$HEADER" | sed -n 's/^[[:space:]]*Class:[[:space:]]*//p')
+  ELF_DATA=$(printf '%s\n' "$HEADER" | sed -n 's/^[[:space:]]*Data:[[:space:]]*//p')
+  ELF_MACHINE=$(printf '%s\n' "$HEADER" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')
+  WANT_MACHINE="Advanced Micro Devices X86-64"
+  [[ "$TARGET" == linux-arm64 ]] && WANT_MACHINE="AArch64"
+  if [ "$ELF_CLASS" != "ELF64" ] ||
+     [[ "$ELF_DATA" != "2's complement, little endian"* ]] ||
+     [[ "$ELF_MACHINE" != "$WANT_MACHINE"* ]]; then
+    rm -f "$BIN"
+    echo "$(basename "$BIN"): ELF identity is '$ELF_CLASS'/'$ELF_MACHINE' ($ELF_DATA), expected ELF64/$WANT_MACHINE little endian for $TARGET" >&2
+    exit 1
+  fi
+  if ! DYNAMIC=$(LC_ALL=C readelf -d "$BIN"); then
+    rm -f "$BIN"
+    echo "assert-portable-binary: could not inspect $BIN" >&2
+    exit 1
+  fi
+  STRAY=$(printf '%s\n' "$DYNAMIC" | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p' |
+    grep -Ev '^(lib(c|m|pthread|dl|rt)\.so\.[0-9]+|libstdc\+\+\.so\.6|libgcc_s\.so\.1|libgomp\.so\.1|libatomic\.so\.1|libasound\.so\.2|libudev\.so\.1|ld-linux-x86-64\.so\.2|ld-linux-aarch64\.so\.1)$' || true)
+  if [ -n "$STRAY" ] || printf '%s\n' "$DYNAMIC" | grep -Eq '\((RPATH|RUNPATH)\).*\[[^]]+\]'; then
+    rm -f "$BIN"
+    echo "$(basename "$BIN"): undeclared runtime libraries or build-tree search paths:" >&2
+    printf '%s\n' "$DYNAMIC" >&2
+    exit 1
+  fi
+  exit 0
+fi
 case "$TARGET" in darwin-*) ;; *) exit 0 ;; esac
 # A darwin target that just produced a Mach-O and has no otool is not a
 # machine to skip the check on — this whole check exists because something

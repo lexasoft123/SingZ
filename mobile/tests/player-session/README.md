@@ -147,7 +147,7 @@ its own latency inside every number.
 | open → player screen | `openProject()` → `__test.screen === 'player'` |
 | open → ready to play | … → the backend reports a duration |
 | Play → position advancing | `backend.play()` → the transport has moved |
-| Play → first audible | native: the app log's `first audible callback`. **Legacy has no such line** and the transport moving is the best it can say, so its column repeats "advancing" — the two columns are not the same measurement, and a legacy win here means nothing. **Not compared** — printed only |
+| Play → presentation observed | native: the app log's `presentation counter first observed`, a polled latency-adjusted frame estimate, not detected sound onset. Status/bridge scheduling delays are included. **Legacy has no such line** and the transport moving is the best it can say, so its column repeats "advancing" — the two columns are not the same measurement, and a legacy win here means nothing. **Not compared** — printed only |
 | metronome touches → advancing again | after the three touches and the count-in restore, how long until the transport moves again. A metronome touch is a **cue rebuild** under the native graph, and the transport is not Running while it is in flight |
 | seek → position reads target | worst of four seeks: from wanting to seek to the transport reading within \[t−0.5, t+1.5\]. The seek is issued the moment `capabilities.seek` goes true — the screen greys the scrub rail out while a structural graph swap owns the transport, so a driver that seeks through that window measures something no singer can do, and the wait is inside the number because it is inside the singer's second |
 | lane ramp → applied | worst of three: `setVolume`/`setMuted` → `getTrackStates()` agrees |
@@ -199,9 +199,9 @@ while the legacy engine suspends, and "still rendering six lanes" against
 about whether the transport was running, the backgrounded row is printed as
 NOT compared, with each side's transport state named.
 
-Two METRICS are exempt as well. The first is **first audible**, which is
+Two METRICS are exempt as well. The first is **presentation observed**, which is
 printed and never gated: legacy times it from its own position clock and
-native from the core's first audible callback, so the columns measure
+native from the core's sampled presentation-frame estimate, so the columns measure
 different events and a legacy win means nothing.
 
 The second is the **pitch change**. Under the native graph a

@@ -11,6 +11,7 @@ import {
   type TrainingExerciseSelection,
   type TrainingPreferences,
   type TrainingAttemptResult,
+  type MelodyLevel,
   type TrainingPrompt,
   type TrainingSessionData,
   type TrainingTaskMode
@@ -29,6 +30,8 @@ export interface MobileTrainingSetup {
   readonly length: number
   readonly lowMidi: number
   readonly highMidi: number
+  readonly melodyLevel?: MelodyLevel
+  readonly melodyLength?: 3 | 5 | 7
   readonly scalePresentation?: 'guided' | 'phrase'
   readonly intervalSemitones?: number
   readonly intervalSizes: readonly number[]
@@ -98,6 +101,8 @@ export type MobileTrainingAction =
 
 export function setupFromPreferences(profile: TrainingPreferences): MobileTrainingSetup {
   return {
+    melodyLevel: profile.melodyLevel,
+    melodyLength: profile.melodyLength,
     scalePresentation: profile.scalePresentation,
     tonicPc: profile.tonicPc,
     keyMode: profile.keyMode,
@@ -140,7 +145,7 @@ export function mobileTrainingReducer(
           ...state.setup,
           exercise: action.exercise,
           length: action.exercise === 'interval' && ![3, 6, 10, 15].includes(state.setup.length) ? 6 : state.setup.length,
-          taskMode: action.exercise === 'note' || action.exercise === 'scale' ? 'imitate' : state.setup.taskMode,
+          taskMode: action.exercise === 'note' || action.exercise === 'scale' || action.exercise === 'melody' ? 'imitate' : state.setup.taskMode,
           mixedKinds: undefined
         },
         preparation: null,
@@ -222,6 +227,8 @@ function createSessionState(state: MobileTrainingState, seed: string | number): 
       key: { tonicPc: state.setup.tonicPc, mode: state.setup.keyMode },
       range: { lowMidi: state.setup.lowMidi, highMidi: state.setup.highMidi },
       exercise: state.setup.exercise,
+      melodyLevel: state.setup.melodyLevel,
+      melodyLength: state.setup.melodyLength,
       scalePresentation: state.setup.scalePresentation,
       taskMode: state.setup.taskMode,
       length: state.setup.length * (state.setup.exercise === 'interval' && state.setup.taskMode === 'imitate' ? 3 : 1),

@@ -4,8 +4,8 @@
 // lane before a song was on screen: the lane waveform (computePeaks), the
 // phones' seek-bar envelope (laneEnvelope, the port of summarizeLanePeaks)
 // and the silent-lane test. `measureLanes` takes the same three off the FILE
-// through the streaming source, in blocks, on a thread per lane. This suite
-// holds it to the up-front decode: the references below are the renderer's
+// through the streaming source, in blocks, with at most two scans in flight.
+// This suite holds it to the up-front decode: the references below are the renderer's
 // two algorithms transcribed literally over `prepareDecodedAudio`'s samples,
 // partition and accumulation order included, so a bucket that lands one
 // frame over fails here rather than as a lane that redraws when the singer
@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -339,6 +340,31 @@ void compareLane(const singz::LaneMeasure& lane, const std::string& path,
 
 bool alwaysCancel(void*) noexcept { return true; }
 
+struct WorkerParticipants {
+  std::mutex mutex;
+  std::array<uint64_t, 16> tokens{};
+  size_t count{0};
+  bool overflow{false};
+};
+
+std::atomic<uint64_t> participantSerial{0};
+
+bool observeWorkerParticipant(void* context) noexcept {
+  static thread_local const uint64_t token =
+      participantSerial.fetch_add(1, std::memory_order_relaxed);
+  auto& participants = *static_cast<WorkerParticipants*>(context);
+  std::lock_guard<std::mutex> lock(participants.mutex);
+  const auto begin = participants.tokens.begin();
+  const auto end = begin + participants.count;
+  if (std::find(begin, end, token) == end) {
+    if (participants.count == participants.tokens.size())
+      participants.overflow = true;
+    else
+      participants.tokens[participants.count++] = token;
+  }
+  return false;
+}
+
 }  // namespace
 
 int main() {
@@ -476,14 +502,16 @@ int main() {
     }
   }
 
-  // 8. Several lanes at once: one thread each, results in request order, a
-  //    refused lane beside measured ones.
+  // 8. The bounded batch API: ordered values, per-lane errors, cancellation,
+  //    and the empty/single-lane boundaries.
   {
     const std::string a = encodeFlac(44100 * 5, 44100, 2);
     const std::string b = encodeFlac(48000 * 3, 48000, 2);
     const std::string w = writeFloatWav(44100 * 2, 44100);
     const std::string c = encodeFlac(44100 * 2, 44100, 1);
     const std::string x = writeNotAudio();
+    const std::vector<singz::LaneMeasure> empty = singz::measureLanes({}, {});
+    check(empty.empty(), "an empty batch answers with no lanes");
     if (!a.empty() && !b.empty() && !w.empty() && !c.empty() && !x.empty()) {
       std::vector<singz::LaneMeasureRequest> requests;
       requests.push_back(request("vocals", a));
@@ -491,8 +519,15 @@ int main() {
       requests.push_back(request("custom-backing-vocals", w));
       requests.push_back(request("other", x));
       requests.push_back(request("bass", c));
+      WorkerParticipants participants;
+      singz::DecodeCancellation participantCancel;
+      participantCancel.context = &participants;
+      participantCancel.requested = observeWorkerParticipant;
       const std::vector<singz::LaneMeasure> lanes =
-          singz::measureLanes(std::move(requests), {});
+          singz::measureLanes(std::move(requests), participantCancel);
+      check(participants.count > 0 && participants.count <= 2,
+            "a batch uses at most two decode participants");
+      check(!participants.overflow, "participant observation stays within its fixed capacity");
       check(lanes.size() == 5, "every lane answers");
       if (lanes.size() == 5) {
         check(lanes[0].id == "vocals" && lanes[1].id == "drums" &&
@@ -504,6 +539,39 @@ int main() {
         compareLane(lanes[2], w, 44100, 2, "parallel float WAV backing");
         check(!lanes[3].ok, "the file that is not audio is refused in the middle of the set");
         compareLane(lanes[4], c, 44100, 1, "parallel bass");
+      }
+
+      std::vector<singz::LaneMeasureRequest> cancelledRequests;
+      cancelledRequests.push_back(request("vocals", a));
+      cancelledRequests.push_back(request("other", x));
+      cancelledRequests.push_back(request("drums", b));
+      singz::DecodeCancellation cancel;
+      cancel.requested = alwaysCancel;
+      const std::vector<singz::LaneMeasure> cancelled =
+          singz::measureLanes(std::move(cancelledRequests), cancel);
+      check(cancelled.size() == 3, "every cancelled lane answers");
+      if (cancelled.size() == 3) {
+        check(cancelled[0].id == "vocals" && cancelled[1].id == "other" &&
+                  cancelled[2].id == "drums",
+              "cancellation preserves request order");
+        check(!cancelled[0].ok &&
+                  cancelled[0].status == singz::DecodedAudioStatus::Cancelled &&
+                  !cancelled[2].ok &&
+                  cancelled[2].status == singz::DecodedAudioStatus::Cancelled,
+              "every valid lane in a cancelled batch reports Cancelled");
+        check(!cancelled[1].ok &&
+                  cancelled[1].status == singz::DecodedAudioStatus::UnsupportedFormat,
+              "a refusal beside cancelled lanes keeps its own status");
+      }
+
+      std::vector<singz::LaneMeasureRequest> singleRequest;
+      singleRequest.push_back(request("single", c));
+      const std::vector<singz::LaneMeasure> single =
+          singz::measureLanes(std::move(singleRequest), {});
+      check(single.size() == 1, "a one-lane batch answers with one lane");
+      if (single.size() == 1) {
+        check(single[0].id == "single", "a one-lane batch keeps its id");
+        compareLane(single[0], c, 44100, 1, "single lane");
       }
     } else {
       check(false, "the parallel fixtures encode");

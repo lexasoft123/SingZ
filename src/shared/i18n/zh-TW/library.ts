@@ -1,5 +1,5 @@
 /** 繁體中文：使用台灣慣用詞。 */
-import type { library as en } from '../en/library'
+import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {

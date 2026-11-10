@@ -40,7 +40,7 @@ export class PlaybackOutputSelectionError extends Error {
 
 interface PlaybackOutputArbiterDependencies {
   setOutput: (sinkId: string) => Promise<void>
-  enumerateOutputs: () => Promise<readonly MediaDeviceInfo[]>
+  enumerateOutputs: () => Promise<readonly Pick<MediaDeviceInfo, 'kind' | 'deviceId'>[]>
   commit: (outputId: PlaybackOutputId) => void
 }
 
@@ -170,7 +170,7 @@ export class PlaybackOutputArbiter {
       const version = this.intentVersion
       const outputId = this.desiredOutputId
       if (outputId) {
-        let devices: readonly MediaDeviceInfo[]
+        let devices: readonly Pick<MediaDeviceInfo, 'kind' | 'deviceId'>[]
         try {
           devices = await this.dependencies.enumerateOutputs()
         } catch (error) {
@@ -246,7 +246,7 @@ export class PlaybackOutputArbiter {
     this.reconcileRequest += 1
     const outputId = this.desiredOutputId
     if (outputId) {
-      let devices: readonly MediaDeviceInfo[]
+      let devices: readonly Pick<MediaDeviceInfo, 'kind' | 'deviceId'>[]
       try {
         devices = await this.dependencies.enumerateOutputs()
       } catch (error) {

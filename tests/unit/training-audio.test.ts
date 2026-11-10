@@ -13,6 +13,7 @@ import {
   type DesktopPlaybackStatus,
   type SingzApi
 } from '../../src/shared/types'
+import type { TrainingReferenceCue } from '../../src/shared/training-reference'
 import type { TrainingCue } from '../../src/shared/training-types'
 
 const signalsmithFactory = vi.hoisted(() => vi.fn())
@@ -168,6 +169,35 @@ beforeEach(() => {
 
 describe('shared native training cues', () => {
   afterEach(() => vi.unstubAllGlobals())
+  it.each(['refused', 'rejected'] as const)('reports %s cue commands at error severity instead of info timing', async mode => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const error = new Error('fixture native cue failure')
+    const gain = vi.spyOn(window.singz, 'setDesktopTrainingCueGain')
+    try {
+      if (mode === 'refused') {
+        nativeSchedule.mockResolvedValueOnce({ ok: false, error: error.message } as never)
+        nativeCancel.mockResolvedValueOnce({ ok: false, error: error.message } as never)
+        gain.mockResolvedValueOnce({ ok: false, error: error.message })
+      } else {
+        nativeSchedule.mockRejectedValueOnce(error)
+        nativeCancel.mockRejectedValueOnce(error)
+        gain.mockRejectedValueOnce(error)
+      }
+      const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
+      controller.latch()
+      controller.cancel()
+      controller.setOutputGain(0.5)
+      await flushPlaybackRequest()
+      const detail = mode === 'refused' ? error.message : error
+      expect(report).toHaveBeenCalledWith('Training latch failed:', detail)
+      expect(report).toHaveBeenCalledWith('Training cue cancellation failed:', detail)
+      expect(report).toHaveBeenCalledWith('Training cue gain failed:', detail)
+    } finally {
+      gain.mockRestore()
+      report.mockRestore()
+    }
+  })
+
   it('prepares sampled notes offline and schedules only PCM on the native output', async () => {
     const fetcher = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(1) }))
     vi.stubGlobal('fetch', fetcher)
@@ -186,6 +216,20 @@ describe('shared native training cues', () => {
     // is applied once by the training countdown.
     expect(controller.outputLatency).toBe(.175)
     controller.dispose()
+  })
+  it('honors different context and melody note durations', async () => {
+    const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
+    controller.setSound('organ')
+    try {
+      const mixedCues: readonly TrainingReferenceCue[] = [
+        { purpose: 'context', articulation: 'together', notes: [60,64,67], durationSeconds: .7 },
+        { purpose: 'answer', articulation: 'sequence', notes: [60,62], durationSeconds: .65 }
+      ]
+      const timeline = await controller.schedule(mixedCues)
+      expect(timeline.cues[0].endTime - timeline.cues[0].startTime).toBeCloseTo(.7)
+      expect(timeline.cues[1].notes[0].endTime - timeline.cues[1].notes[0].startTime).toBeCloseTo(.65)
+      expect(timeline.cues[1].notes[1].startTime - timeline.cues[1].notes[0].startTime).toBeCloseTo(.75)
+    } finally { controller.dispose() }
   })
   it('excludes native scheduling work from the IPC clock estimate', async () => {
     let now = 1000
@@ -263,14 +307,29 @@ describe('engine-owned training audio', () => {
     context.resumeGate = resume.promise
 
     const pendingPlay = engine.play({ countIn: false })
+    expect(engine.starting).toBe(true)
     await Promise.resolve()
     expect(context.resumeCount).toBe(1)
     engine.pause()
     resume.resolve()
     await pendingPlay
+    expect(engine.starting).toBe(false)
 
     expect(engine.playing).toBe(false)
     expect(context.bufferSources).toHaveLength(0)
+  })
+
+  it('confirms the Linux browser default without opening an unselected ALSA training route', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const configure = vi.fn(async () => ({ ok: false, error: 'No output device is available' }))
+    Object.assign(navigator, { platform: 'Linux x86_64' })
+    Object.assign(window.singz, { configureDesktopTrainingOutput: configure })
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    await expect(engine.setOutput('')).resolves.toBeUndefined()
+    expect(configure).not.toHaveBeenCalled()
+    await expect(engine.setOutput('native:alsa:chosen')).rejects.toThrow('No output device is available')
+    expect(configure).toHaveBeenCalledWith('alsa:chosen', 'alsa')
   })
 
   it('releases the physical sink for native monitoring and restores readiness without playback', async () => {
@@ -569,7 +628,8 @@ describe('engine-owned training audio', () => {
 
     expect(engine.playbackError).toBeNull()
     expect(engine.playing).toBe(false)
-    expect(emissions).toHaveBeenCalledOnce()
+    // Preparing and teardown's pause are visible; the late rejection is silent.
+    expect(emissions).toHaveBeenCalledTimes(2)
     expect(logged).not.toHaveBeenCalledWith('Playback request failed:', expect.anything())
   })
 
@@ -1171,5 +1231,68 @@ describe('engine-owned training audio', () => {
     await controller.schedule([{ purpose: 'question', articulation: 'together', notes: [60] }])
     expect(engine.playing).toBe(false)
     controller.dispose()
+  })
+})
+
+describe('song to headphone-monitor handoff', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it.each([false, true])('retires playback before monitor acquisition; cleanup failure=%s', async (failed) => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
+    engine.setNativeAheadAllowed(false)
+    let active = true
+    const unload = vi.fn(async () => {
+      if (failed) throw new Error('native cleanup retained')
+      active = false
+    })
+    const client = {
+      get active() { return active }, preparedAhead: false, transportParked: true,
+      audibleSeconds: () => 1.5, discardAhead: vi.fn(async () => undefined), unload
+    }
+    ;(engine as unknown as { nativePlayback: typeof client }).nativePlayback = client
+    if (failed) {
+      await expect(engine.releaseOutputForHeadphoneMonitor()).rejects.toThrow('native cleanup retained')
+      expect(active).toBe(true)
+      expect((engine as unknown as { headphoneMonitorLease: boolean }).headphoneMonitorLease).toBe(false)
+      expect(FakeAudioContext.last!.sinkCalls).toHaveLength(0)
+    } else {
+      await engine.releaseOutputForHeadphoneMonitor()
+      expect(unload).toHaveBeenCalledOnce()
+      expect(engine.nativeActive).toBe(false)
+      expect(engine.position).toBe(1.5)
+      expect(engine.nativeMonitorOwnsOutput).toBe(true)
+      expect(FakeAudioContext.last!.sinkCalls.at(-1)).toEqual({ type: 'none' })
+      await engine.restoreOutputAfterHeadphoneMonitor()
+      expect(engine.nativeMonitorOwnsOutput).toBe(false)
+      expect(engine.playing).toBe(false)
+    }
+  })
+})
+
+
+describe('native terminal transport errors', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('stops the UI at the last audible frame and reports an underrun with empty provider text', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    engine.load([{ id: 'vocals', buffer: { duration: 20 } as AudioBuffer, duration: 20 }])
+    engine.setNativeAheadAllowed(false)
+    const client = { active: true, transportActive: true, recoveryProviderId: 'alsa', audibleSeconds: () => 4 }
+    const internal = engine as unknown as { nativePlayback: typeof client; _playing: boolean; startOffset: number; onNativeStatus: (status: DesktopPlaybackStatus) => void }
+    internal.nativePlayback = client
+    internal._playing = true
+    internal.onNativeStatus({ state: 'terminal', hostState: 'error', terminalReason: 'provider-failure',
+      transportState: 'playing', audibleProjectionQuality: 'current', audibleProjectFrame: '192000', format: { sampleRate: 48000 },
+      xruns: '1', error: '' } as DesktopPlaybackStatus)
+    expect(engine.playing).toBe(false)
+    expect(internal.startOffset).toBe(4)
+    expect(engine.playbackError).toMatchObject({ code: 'provider-failure', provider: 'alsa', message: expect.stringContaining('buffer underrun') })
+    expect(logged).toHaveBeenCalledWith('Native playback stopped:', expect.stringContaining('Press Play'))
   })
 })

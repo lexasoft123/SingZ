@@ -1,0 +1,25 @@
+[Unit]
+Description=SingZ Box persistent native audio host
+
+[Service]
+Type=simple
+ExecStart=/opt/singz-box/singz-box --box-audio-host --ozone-platform=headless
+Environment=SINGZ_SURFACE=box
+Environment=SINGZ_BOX_AUDIO_SOCKET=%t/singz-box-audio/control.sock
+Environment=ELECTRON_OZONE_PLATFORM_HINT=headless
+RuntimeDirectory=singz-box-audio
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
+UMask=0077
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillMode=control-group
+# zCore ALSA I/O (SCHED_FIFO 20) and the song producer request real-time
+# priority. A user manager can raise this soft limit only up to its own hard
+# limit (systemd clamps, never fails); grant that hard limit per appliance user
+# with singz-box-rtprio.conf. Without it the threads warn and run SCHED_OTHER.
+LimitRTPRIO=20
+
+[Install]
+WantedBy=default.target

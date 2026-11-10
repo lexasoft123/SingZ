@@ -154,7 +154,14 @@ for (const chunk of [
 // Track export entry, translations and bulk mixer controls; encoder stays native.
 // The update-dialog route and English launch copy add ~2.1 KB; the content and artwork stay lazy.
 // Release launch copy and platform-specific bundler output need a small margin.
-const ENTRY_RAW_BUDGET = 1_413_000
+// Immediate Play preparation feedback adds a small eager transport subscription.
+// Terminal audio failures must stop the eager transport and expose recovery feedback.
+// Shared native policy, accepted controls and persistent-host detach measure
+// 1,425,386 B. The detach lifecycle adds 994 B of shared player code; Box UI
+// assets remain in their separate renderer tree. Keep 4.6 kB of headroom so
+// small shared behavior additions do not require code golfing, while a lazy
+// feature pulled into the entry still exceeds this bounded limit.
+const ENTRY_RAW_BUDGET = 1_430_000
 // Desktop programs, their seven-day path, and explicit interval-set controls.
 const TRAINING_RAW_BUDGET = 94_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size

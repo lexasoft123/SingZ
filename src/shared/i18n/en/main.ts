@@ -113,6 +113,7 @@ export const main = {
   'main.error.noLinesToSave': 'There are no lines to save.',
   'main.error.couldNotSaveLyrics': 'Could not save the lyrics: {message}',
   'main.error.lyricsJobAlreadyRunning': 'A lyrics job is already running.',
+  'main.error.existingLyricsUnreadable': 'The saved lyrics could not be read, so they were left unchanged. Open them in the lyrics editor or transcribe again.',
   'main.error.noLinesToAlign': 'There are no lines to align.',
   'main.error.splitFirstAlign': 'Split the song into stems first — alignment listens to the vocals track.',
   'main.error.preciseNeedsPack': 'Precise alignment runs through the splitter pack — install it in the model manager first.',

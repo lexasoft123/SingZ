@@ -36,6 +36,10 @@ inline constexpr uint64_t kNativePlaybackMaximumJsSafeInteger =
 // publish it beside the lane arrays as `bucketCount`, in lanePeaks()'s
 // result — NOT in status(), and not under any other name.
 inline constexpr uint32_t kNativePlaybackLaneSummaryBuckets = 96;
+inline constexpr uint32_t kNativePlaybackWaveformSeedVersion = 1;
+inline constexpr char kNativePlaybackWaveformSeedPolicy[] =
+    "singz.native.streaming-envelope.rms96-v1";
+inline constexpr size_t kNativePlaybackMaximumMeasuredWaveforms = 64;
 // A swap's landing budget (see armSwap): Stretch prime costs under the floor
 // are ignored, and the budget never exceeds the cap — which must stay below
 // the facade's wait for a seam (mobile/src/playback/native.ts,
@@ -107,28 +111,28 @@ enum class NativePlaybackError : uint32_t {
 
 const char *nativePlaybackErrorName(NativePlaybackError error) noexcept;
 
+struct NativePlaybackLaneWaveformSeed {
+  uint32_t version{kNativePlaybackWaveformSeedVersion};
+  std::string policy{kNativePlaybackWaveformSeedPolicy};
+  // Content-bound source identity, equal to NativePlaybackLaneSource::sourceKey.
+  std::string contentKey;
+  std::array<float, kNativePlaybackLaneSummaryBuckets> peaks{};
+};
+
 struct NativePlaybackLaneSource {
   std::string id;
   OwnedFileDescriptor descriptor;
   float gain{1.0F};
   bool muted{false};
   bool solo{false};
-  // Opaque bridge-owned name for this source. The core never interprets,
-  // opens, resolves or logs it; its ONE use is deciding whether a lane parked
-  // by a retaining unload may be adopted by this prepare instead of decoded
-  // again, and an empty key never adopts — a bridge that does not set it
-  // simply keeps today's decode-every-time behaviour.
-  //
-  // BE CLEAR ABOUT WHAT IT IDENTIFIES: all three product bridges pass the
-  // authorized PATH they opened, which names a location, not the bytes. If
-  // the file at that path is rewritten between a parking unload and the
-  // prepare that adopts it, the adopted lane is the OLD audio and nothing
-  // here can tell. That is tolerable only because the window is one
-  // structural rebuild of a song already open, and every command other than
-  // the adopting prepare releases the parked lanes. A bridge that can cheaply
-  // name the bytes instead (a content hash, or size+mtime) should pass that,
-  // and the window closes.
+  // Opaque identity used only for comparisons, never to reopen the source.
+  // Mobile supplies md5:<actual-content-hash> when FolderAccess can prove it;
+  // Desktop supplies measure:<verified-stat-cache-key>. Path-only callers may
+  // retain decoded lanes, but cannot reuse waveform measurements.
   std::string sourceKey;
+  // Optional persisted RMS96 measurement. Invalid or mismatched seeds are
+  // ignored and the ordinary background measurement supplies the lane.
+  std::optional<NativePlaybackLaneWaveformSeed> waveform{};
 };
 
 // Opt-in decoded-lane retention across a structural rebuild. Release is
@@ -379,12 +383,19 @@ struct NativePlaybackLaneStatus {
   // Whether the lane plays out of a window the streaming feeder keeps ahead
   // (a decoded lane holds the whole song and never misses), and how many
   // render blocks this generation wanted a frame outside that window and
-  // played silence instead. One or two per seek is the design. One per block
-  // is a lane nobody is feeding any more — a song that plays its metronome
-  // and none of its stems, which is how a singer met it: nothing else in
-  // status or in the log could tell that apart from a healthy song.
+  // played silence instead. ZERO is the design at seeks, loop wraps and
+  // starts: jumps are staged before the transport moves (see
+  // StreamingLaneGroup). One per block is a lane nobody is feeding any more —
+  // a song that plays its metronome and none of its stems, which is how a
+  // singer met it: nothing else in status or in the log could tell that
+  // apart from a healthy song.
   bool streamed{false};
   uint64_t starvedBlocks{0};
+  // Jumps this generation (seeks, loop wraps) that landed on a region the
+  // feeder had staged for them and the transport swapped in. The positive
+  // half of the starvation signal: it moves when the feeder ANSWERED a jump,
+  // so a driver can tell "fed after the jump" from "nothing counted".
+  uint64_t stagedJumps{0};
 };
 
 // One lane's prepared level envelope: the RMS of every sample of every
@@ -864,9 +875,11 @@ struct NativePlaybackTestHooks {
       nullptr};
   // Pretend priming a Stretch stage took this long (a phone's price, where
   // the host suite's takes microseconds): a swap's landing budget grows by
-  // twice it. Zero measures. Last on purpose: the hooks are brace-initialized
+  // twice it. Zero measures. Keep its position: the hooks are brace-initialized
   // positionally throughout the suite.
   uint64_t timePitchPrimeNs{0};
+  // Test-only slow/blocked streaming decoder, called on the staging thread.
+  void (*beforeStreamingStageDecode)(void*) noexcept {nullptr};
 };
 
 // Reusable ordinary-thread composition owner. It accepts only already-opened
@@ -1003,6 +1016,7 @@ public:
     uint64_t generation{0};
     float peak{0};
     uint32_t clippedBlocks{0};
+    float rms{0};
   };
   // A bounded observation for the mobile UI: never waits behind prepare.
   OutputMeter outputMeter() const noexcept;

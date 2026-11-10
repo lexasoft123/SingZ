@@ -1,12 +1,15 @@
 import { quickStartTitle } from '../../../src/shared/quick-start/meta'
 import { GuideTarget, useGuideAnchor, useQuickStart } from './QuickStart'
+import { tabModalListeners } from './tab-modal-dismissal'
+import { ScreenScrim } from './ScreenBackground'
 import { SongOutputMonitor, SongOutputMeterButton, SongOutputControls } from './SongOutput'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { sanitizeSongVolume } from '../../../src/shared/song-volume'
 import { useMobileLayout } from './uiKit'
+import { playerWorkspaceLayout } from './layout'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { laneSliverLevels, LANE_LEVEL_CHUNK, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
-import { Alert, AppState, DeviceEventEmitter, Image, PixelRatio, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { Alert, AppState, DeviceEventEmitter, PixelRatio, Platform, Pressable, StyleSheet, Text, View, ScrollView } from 'react-native'
 import {
   createNativeStackNavigator,
   type NativeStackNavigationProp,
@@ -25,6 +28,7 @@ import { syncFrameCallbackVisibility } from './frame-visibility'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import type { RouteLatency } from '../latency'
 import { log } from '../log'
+import { waveformReadyMessage } from '../waveform-diagnostics'
 import {
   ANALYSIS_EVENT,
   analysisPending,
@@ -62,6 +66,13 @@ import {
 import type { ProjectDoc } from '../model'
 import { writeProjectWaveform } from '../writer'
 import {
+  cachedWaveform,
+  mergeWaveformLanes,
+  mixWaveformEnvelope,
+  waveformCacheFor,
+  type NativeLaneEnvelope
+} from '../waveform-cache'
+import {
   b,
   Bar,
   C,
@@ -83,7 +94,7 @@ import {
   white
 } from './bits'
 import { KIT } from './tokens'
-import { BlurMask, Canvas, Circle, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
+import { BlurMask, Canvas, Circle } from '@shopify/react-native-skia'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -93,7 +104,7 @@ import SkiaLyrics, {
 } from './SkiaLyrics'
 import { sheetRowState, stemFormatLine } from './song-sheet-copy'
 import { TEST } from './testhooks'
-import { nativeGlassStyle, nightStudioNativeTheme } from '@singz/ui/native'
+import { GlassHeader, HeaderAction, nativeGlassStyle, nightStudioNativeTheme } from '@singz/ui/native'
 import { mobileMetronomePersistence } from '../playback/metronome-persistence'
 import {
   createPlaybackBackend,
@@ -105,8 +116,6 @@ import { iosNativePlayback } from '../playback/native'
 import { nowPlaying } from '../playback/now-playing'
 import { getLocale, t, tn, type Key } from '../i18n'
 
-const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
-const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 const isBackingVocalLane = (id: string): boolean => /^custom-backing-vocals(?:-\d+)?$/.test(id)
 
 /** The kit's STEM_META labels (TRACK_META) are English constants — translate
@@ -203,15 +212,7 @@ const CUE_BAR_GAP = 8 * PixelRatio.getFontScale()
 /** Ring for a beat not yet landed; the stroke straddles r, hence the inset. */
 const CUE_RING_W = 1.5 * PixelRatio.getFontScale()
 
-type NativeLaneEnvelope = {
-  readonly bucketCount: number
-  readonly lanes: readonly {
-    readonly id: string
-    readonly peaksValid: boolean
-    readonly peaks: readonly number[]
-  }[]
-  readonly waveformDiagnostics?: string
-}
+export { cachedWaveform, laneHashes, waveformCacheFor } from '../waveform-cache'
 
 /** A streamed lane's envelope arrives from a background pass over the whole
  *  stem — a second or two per song on a phone, once ever, because the answer is
@@ -227,58 +228,6 @@ const WAVEFORM_SLOW_ATTEMPTS = 30
 /** ~6 s in: long enough that a healthy pass has finished, early enough to be
  *  in a log a singer sends before closing the song. */
 const WAVEFORM_DIAGNOSTIC_ATTEMPT = 15
-
-/** lane id -> the md5 of the stem it is drawn from. The doc keys stemHashes by
- *  FILE name (`vocals.flac`) and the envelope keys lanes by id (`vocals`), so
- *  this is where the two meet. A lane with no recorded hash is not cacheable:
- *  there would be nothing to invalidate it with. */
-export function laneHashes(doc: ProjectDoc): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const [file, hash] of Object.entries(doc.stemHashes ?? {})) {
-    const dot = file.lastIndexOf('.')
-    const id = dot > 0 ? file.slice(0, dot) : file
-    if (hash?.md5) out[id] = hash.md5
-  }
-  return out
-}
-
-/** The cached envelope, but ONLY when every lane in it was measured from the
- *  bytes the project has now. A partly stale cache is discarded whole: a bar
- *  drawn half from one split and half from another is worse than waiting. */
-export function cachedWaveform(
-  doc: ProjectDoc,
-  wanted: Record<string, string>
-): NativeLaneEnvelope | null {
-  const cache = doc.waveforms
-  if (!cache) return null
-  const ids = Object.keys(wanted)
-  if (ids.length === 0) return null
-  const lanes: { id: string; peaksValid: boolean; peaks: number[] }[] = []
-  let buckets = 0
-  for (const id of ids) {
-    const entry = cache[id]
-    if (!entry || entry.md5 !== wanted[id] || entry.peaks.length === 0) return null
-    if (buckets === 0) buckets = entry.peaks.length
-    if (entry.peaks.length !== buckets) return null
-    lanes.push({ id, peaksValid: true, peaks: entry.peaks })
-  }
-  return { bucketCount: buckets, lanes }
-}
-
-/** What to keep from an envelope the core just produced: only lanes whose bytes
- *  we can name, so nothing is stored that cannot later be invalidated. */
-export function waveformCacheFor(
-  envelope: NativeLaneEnvelope,
-  wanted: Record<string, string>
-): Record<string, { md5: string; peaks: number[] }> {
-  const out: Record<string, { md5: string; peaks: number[] }> = {}
-  for (const lane of envelope.lanes) {
-    const md5 = wanted[lane.id]
-    if (!md5 || !lane.peaksValid || lane.peaks.length === 0) continue
-    out[lane.id] = { md5, peaks: Array.from(lane.peaks) }
-  }
-  return out
-}
 
 export default function PlayerScreen({
   active = true,
@@ -439,8 +388,36 @@ export default function PlayerScreen({
   }, [project.doc.stemHashes])
   const insets = useSafeAreaInsets()
   const layout = useMobileLayout()
+  const [scene, setScene] = useState<{ width: number; height: number } | null>(null)
+  const workspace = playerWorkspaceLayout(scene?.width ?? layout.width, scene?.height ?? layout.height, layout.fontScale)
+  const [mixerVisible, setMixerVisible] = useState(true)
+  const mixerScrollRef = useRef<ScrollView>(null)
+  const embeddedMixer = workspace.sideBySide && mixerVisible
+  const sceneWidth = scene?.width ?? layout.width
+  const workspaceLeft = Math.max(0, (sceneWidth - workspace.workspaceWidth) / 2)
+  const lyricsWidth = embeddedMixer ? workspace.lyricsWidth : Math.max(0, Math.min(workspace.workspaceWidth - 24, 780))
+  const lyricsLeft = embeddedMixer ? workspaceLeft + workspace.mixerWidth + 24 : (sceneWidth - lyricsWidth) / 2
+  const openMixer = (): void => {
+    if (workspace.sideBySide) setMixerVisible(true)
+    else setSheet('mixer')
+  }
+  const openOutput = (): void => {
+    if (workspace.sideBySide) {
+      setMixerVisible(true)
+      requestAnimationFrame(() => mixerScrollRef.current?.scrollToEnd({ animated: true }))
+    } else setSheet('mixer')
+  }
+  // A sheet opened in a narrow window becomes the inspector when it fits.
+  // Keep the same backend and song ownership through the resize.
+  useEffect(() => {
+    if (workspace.sideBySide && sheet === 'mixer') {
+      setMixerVisible(true)
+      setSheet('none')
+    }
+  }, [workspace.sideBySide, sheet, setSheet])
   const [dockHeight, setDockHeight] = useState(180)
-  const lyricTop = layout.compact ? 48 : 250
+  const [chromeHeight, setChromeHeight] = useState(62)
+  const lyricTop = layout.compact ? 48 : Math.max(250, layout.top + chromeHeight + 12)
   const lyricBottom = layout.compact ? 80 : 300
   /* Android 15 draws edge-to-edge: keep controls clear of the system bar.
    * iOS keeps its hand-tuned paddings. */
@@ -801,12 +778,6 @@ export default function PlayerScreen({
     [project, nativeSilent]
   )
   const stemIds = useMemo(() => visibleLanes.map(lane => lane.id), [visibleLanes])
-  /* Live window size for the tint washes — Android rotates and split-screens
-     and the iPad target allows all four orientations, so a module-load
-     capture would strand portrait extents on a landscape canvas. Still
-     nothing on the clock: the Canvas repaints only when these actually
-     change. */
-  const winDims = useWindowDimensions()
   /* The same hue the catalog gave this song's card, so the artwork carries
      over from the shelf to the stage (the sample and dir-less loads take 0,
      matching their cards). */
@@ -848,144 +819,113 @@ export default function PlayerScreen({
     setNativeSilent([])
     const stems = project.stems
     if (stems.length === 0) {
-      // Native playback never decodes in JS, so there are no buffers to
-      // scan. The core summarised the same audio while it decoded, once per
-      // prepared generation; ask it rather than leaving the rail blank.
+      // Native playback exposes envelopes without JS PCM. Project values can
+      // draw immediately; the native response may contain accepted seeds,
+      // in-memory reuse, or progressively measured missing lanes. This UI
+      // observes availability, not which native work produced each value.
       const native = project.nativePlayback
       if (!native) return
-      // The project's own cache first. A streamed song has no decoded PCM to
-      // summarise, so its envelope arrives from a background pass seconds
-      // after the song starts — but only ever ONCE per file, because the
-      // answer is kept here against the stem's md5. On every later open the
-      // bar is drawn before the first frame plays.
-      const wanted = laneHashes(project.doc)
+      const wanted = native.laneContentMd5 ?? {}
       const cachedEnvelope = cachedWaveform(project.doc, wanted)
+      let best = new Map<string, NativeLaneEnvelope['lanes'][number]>()
+      const persisted = new Set<string>()
+      for (const lane of cachedEnvelope?.lanes ?? []) {
+        best.set(lane.id, lane)
+        persisted.add(lane.id)
+      }
+      const merged = (diagnostics?: string): NativeLaneEnvelope => ({
+        bucketCount: 96,
+        lanes: [...best.values()],
+        ...(diagnostics ? { waveformDiagnostics: diagnostics } : {})
+      })
       const consume = (envelope: NativeLaneEnvelope | null): void => {
         if (cancelled || !envelope || envelope.lanes.length === 0) return
-          setNativeSilent(
-            envelope.lanes
-              .filter(
-                lane =>
-                  HIDEABLE_LANE_IDS.includes(lane.id) &&
-                  lane.peaksValid &&
-                  Math.max(...lane.peaks) < SILENT_LANE_LEVEL
-              )
-              .map(lane => lane.id)
-          )
-          const buckets = envelope.bucketCount
-          const raw: { level: number; color: string }[] = []
-          for (let i = 0; i < buckets; i++) {
-            let total = 0
-            let loudest = 0
-            let color: string = C.dim
-            for (const lane of envelope.lanes) {
-              if (!lane.peaksValid) continue
-              const level = lane.peaks[i] ?? 0
-              total += level * level
-              if (level > loudest) {
-                loudest = level
-                color = laneMeta[lane.id]?.color ?? C.dim
-              }
-            }
-            raw.push({ level: Math.sqrt(total), color })
-          }
-          const peak = Math.max(0.0001, ...raw.map(r => r.level))
-          setWave(
-            raw.map(r => ({ h: Math.max(0.1, Math.min(1, r.level / peak)), color: r.color }))
-          )
+        setNativeSilent(
+          envelope.lanes
+            .filter(
+              lane =>
+                HIDEABLE_LANE_IDS.includes(lane.id) &&
+                lane.peaksValid &&
+                Math.max(...lane.peaks) < SILENT_LANE_LEVEL
+            )
+            .map(lane => lane.id)
+        )
+        const raw = mixWaveformEnvelope(
+          envelope,
+          new Map<string, number>(native.lanes.map(lane => [lane.id, lane.totalFrames])),
+          id => laneMeta[id]?.color ?? C.dim,
+          C.dim
+        )
+        const peak = Math.max(0.0001, ...raw.map(r => r.level))
+        setWave(
+          raw.map(r => ({ h: Math.max(0.1, Math.min(1, r.level / peak)), color: r.color }))
+        )
       }
       if (cachedEnvelope) {
-        log('waveform', `from the project · ${cachedEnvelope.lanes.length} lanes · 0 ms`)
+        log('waveform', waveformReadyMessage('project', cachedEnvelope.lanes.length, native.lanes.length))
         consume(cachedEnvelope)
-        return () => {
-          cancelled = true
-        }
       }
-      // Not cached, or cached against different bytes: ask the core, and keep
-      // asking while a streamed song's background pass is still running. The
-      // interval is generous because nothing is waiting on it — the song is
-      // already playing.
+      const wantedCount = Object.keys(wanted).length
+      const persist = (envelope: NativeLaneEnvelope): void => {
+        const ref = project.metronomeRef
+        if (!project.dir || ref?.source !== 'phone' || ref.dir !== project.dir) return
+        const fresh = waveformCacheFor(envelope, wanted)
+        const pending = Object.fromEntries(
+          Object.entries(fresh).filter(([id]) => !persisted.has(id))
+        )
+        if (Object.keys(pending).length === 0) return
+        for (const id of Object.keys(pending)) persisted.add(id)
+        void writeProjectWaveform(ref, pending, Object.keys(wanted), () => !cancelled).catch(() => {
+          // A cache that cannot be written costs a repeat pass, not a wrong picture.
+        })
+      }
       let attempts = 0
-      // The best answer drawn so far. The pass measures lanes one at a time,
-      // so the envelope IMPROVES: draw each improvement rather than settling
-      // for the first one and stopping, which is what left a six-lane song
-      // drawn from a single lane.
-      let drawn = 0
+      let drawn = best.size
       const askedAt = Date.now()
       const ask = (): void => {
         void native
           .lanePeaks()
           .then(envelope => {
             if (cancelled) return
-            const ready =
-              envelope == null
-                ? 0
-                : envelope.lanes.filter(lane => lane.peaksValid).length
-            const total = envelope == null ? 0 : envelope.lanes.length
-            // EVERY lane, not merely one. The background pass measures the
-            // lanes one after another, so the first answer routinely has a
-            // single lane in it — and drawing that and never asking again is
-            // what a blank-looking seek bar actually was: "measured · 1/6
-            // lanes · 101 ms" in the app's own log, six lanes of song drawn
-            // from one. Past the quick attempts, take whatever exists rather
-            // than drawing nothing at all.
-            const complete = total > 0 && ready === total
-            // Draw as soon as there is anything, and keep drawing as more
-            // lanes land. On a Debug simulator build the core is compiled at
-            // -O0 and a lane takes seconds rather than milliseconds, so a
-            // deadline that gave up at twelve seconds reported "1/6" forever;
-            // on a release phone the whole set lands in about that many
-            // hundred milliseconds and the first draw is already complete.
+            if (envelope) {
+              best = mergeWaveformLanes(best, envelope, new Set(native.lanes.map(lane => lane.id)))
+              persist(envelope)
+            }
+            const ready = best.size
+            const total = Math.max(native.lanes.length, wantedCount, envelope?.lanes.length ?? 0)
+            const complete = total > 0 && ready === total && native.lanes.every(lane => best.has(lane.id))
             if (
               attempts === WAVEFORM_DIAGNOSTIC_ATTEMPT &&
               ready === 0 &&
               envelope?.waveformDiagnostics
             ) {
-              log('waveform', `still measuring · ${envelope.waveformDiagnostics}`, 'warn')
+              log('waveform', `waiting for native envelope · ${envelope.waveformDiagnostics}`, 'warn')
             }
-            if (envelope != null && ready > drawn) {
+            if (envelope != null && (ready > drawn || complete)) {
               drawn = ready
               log(
                 'waveform',
-                `measured · ${ready}/${total} lanes · ${Math.round(Date.now() - askedAt)} ms` +
+                waveformReadyMessage('native', ready, total, Date.now() - askedAt) +
                   (complete ? '' : ' · so far')
               )
-              consume(envelope)
-              // Cached only when every lane is in it: a partial envelope is
-              // refused on the next open anyway (cachedWaveform is
-              // all-or-nothing), so storing one buys nothing.
-              if (project.dir && complete)
-                void writeProjectWaveform(
-                  project.dir,
-                  waveformCacheFor(envelope, wanted)
-                ).catch(() => {
-                  // A cache that cannot be written costs a repeat pass, not a
-                  // wrong picture.
-                })
+              consume(merged(envelope.waveformDiagnostics))
             }
             if (complete) return
-            {
-              attempts += 1
-              if (attempts < WAVEFORM_ATTEMPTS + WAVEFORM_SLOW_ATTEMPTS) {
-                setTimeout(
-                  ask,
-                  attempts < WAVEFORM_ATTEMPTS
-                    ? WAVEFORM_RETRY_MS
-                    : WAVEFORM_SLOW_RETRY_MS
-                )
-              } else if (drawn === 0) {
-                // Said out loud, because a blank seek bar with a silent log is
-                // exactly what sent this back for a second look: nothing in
-                // the log named the waveform at all, so there was no way to
-                // tell a slow measurement from one that never started.
-                log(
-                  'waveform',
-                  `no waveform after ${Math.round((Date.now() - askedAt) / 1000)}s · ` +
-                    `${envelope == null ? 'the core returned none' : `0 of ${total} lanes measured`}`,
-                  'warn'
-                )
-              }
-              return
+            attempts += 1
+            if (attempts < WAVEFORM_ATTEMPTS + WAVEFORM_SLOW_ATTEMPTS) {
+              setTimeout(
+                ask,
+                attempts < WAVEFORM_ATTEMPTS
+                  ? WAVEFORM_RETRY_MS
+                  : WAVEFORM_SLOW_RETRY_MS
+              )
+            } else if (drawn === 0) {
+              log(
+                'waveform',
+                `no waveform after ${Math.round((Date.now() - askedAt) / 1000)}s · ` +
+                  `${envelope == null ? 'the core returned none' : `0 of ${total} lane envelopes ready`}`,
+                'warn'
+              )
             }
           })
       }
@@ -1058,6 +998,24 @@ export default function PlayerScreen({
   }, [project, laneMeta])
   /** Measured band width, for the played-clip's inner copy. */
   const [bandW, setBandW] = useState(0)
+
+  // Keep thin peaks close together as the rail widens. Resample the measured
+  // envelope once per width change; both playback layers use identical steps.
+  const displayWave = useMemo(() => {
+    if (!wave || wave.length < 2 || !workspace.sideBySide) return wave
+    const steps = Math.max(wave.length, Math.min(384, Math.floor((bandW - 8) / 3.5)))
+    if (steps === wave.length) return wave
+    return Array.from({ length: steps }, (_, index) => {
+      const at = index * (wave.length - 1) / (steps - 1)
+      const left = Math.floor(at)
+      const right = Math.min(left + 1, wave.length - 1)
+      const fraction = at - left
+      return {
+        h: wave[left].h + (wave[right].h - wave[left].h) * fraction,
+        color: wave[Math.round(at)].color
+      }
+    })
+  }, [wave, bandW, workspace.sideBySide])
 
   /* Mixer presets — one tap for the thing the app exists to do. They act on
    * mute/solo ONLY, never volumes: the volumes are the singer's mix. A chip
@@ -1619,11 +1577,12 @@ export default function PlayerScreen({
     TEST.trainingOn = training
     TEST.setTrainMode = (mode: 'time' | 'lines') => setTrainCfg((c) => ({ ...c, mode }))
     TEST.showTrainPanel = () => setSheet('practice')
-    TEST.openOutput = () => setSheet('mixer')
+    TEST.openOutput = openOutput
     TEST.songOutput = () => ({ gain: songGain, saveState: volumeSaveState, reading: outputMonitor.snapshot() })
     TEST.setSongGain = (gain: number) => changeSongGain(gain, true)
     TEST.resetOutputClip = () => outputMonitor.reset()
-    TEST.openMixer = () => setSheet('mixer')
+    TEST.openMixer = openMixer
+    TEST.playerWorkspace = { ...workspace, mixerVisible: embeddedMixer, scene, lyricsWidth }
     TEST.openPractice = () => setSheet('practice')
     TEST.closeSheets = () => setSheet('none')
     /* A-B repeat through the button's own path, not engine.setRegion — the
@@ -1782,77 +1741,149 @@ export default function PlayerScreen({
     return Math.abs(i - currentLine) === 1 ? white(0.52) : white(0.4)
   }
 
+  const songOutputControls = (
+    <SongOutputControls monitor={outputMonitor} gain={songGain}
+      onGain={gain => changeSongGain(gain)} onCommit={gain => changeSongGain(gain, true)} saveState={volumeSaveState} />
+  )
+
+  const mixerControls = (
+    <>
+      {/* One tap for the thing the app exists to do. Only offered when
+          the song has a vocal lane — an unsplit song has nothing to
+          mute. */}
+      {hasVocals && (
+        <View style={[b.segs, { marginBottom: 6 }]}>
+          <Chip label={t('phone.player.mixer.fullMix')} active={mixPreset === 'full'} onPress={() => applyMixPreset('full')} />
+          <Chip
+            label={t('phone.player.mixer.noVocals')}
+            active={mixPreset === 'novocals'}
+            onPress={() => applyMixPreset('novocals')}
+          />
+          <Chip
+            label={t('phone.player.mixer.vocalsOnly')}
+            active={mixPreset === 'vocalsonly'}
+            onPress={() => applyMixPreset('vocalsonly')}
+          />
+        </View>
+      )}
+      {/* The lane rows had no scroll container at all, so past roughly a
+          dozen lanes they clipped with no way to reach them — and the
+          44 pt fader targets below bring that cliff closer. */}
+      {tracks.map((track, i) => {
+        const meta = laneMeta[track.id] ??
+          (TRACK_META[track.id] ? { label: stemLabel(track.id) ?? TRACK_META[track.id].label, color: TRACK_META[track.id].color } : { label: track.id, color: C.dim })
+        const isDucked = ducked.includes(track.id)
+        /* Generated backing belongs beside vocals, without an Added
+           header dividing the song's stems. The header marks the
+           singer's own extra lanes. The
+           pre-split original lane is the app's, not the singer's —
+           the same exemption addedCount makes — or an unsplit song
+           would render an "Added" header over its own audio. */
+        const isCustom = !(track.id in TRACK_META) && track.id !== ORIGINAL_LANE_ID && !isBackingVocalLane(track.id)
+        const firstCustom = isCustom && (i === 0 || tracks[i - 1].id in TRACK_META || isBackingVocalLane(tracks[i - 1].id))
+        return (
+          <React.Fragment key={track.id}>
+            {firstCustom && (
+              <View style={s.addedRule}>
+                <Text style={s.addedLab}>{t('phone.player.mixer.added')}</Text>
+              </View>
+            )}
+            <View style={[s.mixRow, embeddedMixer && s.mixRowEmbedded]}>
+              <View style={[s.mixLaneHeader, embeddedMixer && s.mixLaneHeaderEmbedded]}>
+                <View style={[s.dot, { backgroundColor: meta.color }]} />
+                <Text style={s.mixName} numberOfLines={1}>
+                  {meta.label}
+                </Text>
+                {isDucked && (
+                  <View style={[s.youPill, { backgroundColor: meta.color }]}>
+                    <Text style={s.youPillText}>{t('phone.player.mixer.yourTurn')}</Text>
+                  </View>
+                )}
+              </View>
+              <View style={s.mixLaneControls}>
+                <View style={{ flex: 1 }}>
+                  <Bar
+                    value={track.volume}
+                    onChange={(v) => {
+                      if (engine.capabilities.mixer) {
+                        engine.setVolume(track.id, v)
+                        setDragVol({ id: track.id, v })
+                      }
+                    }}
+                    onCommit={() => setDragVol(null)}
+                    color={meta.color}
+                    height={22}
+                    track="rgba(255,255,255,0.14)"
+                    label={t('phone.player.mixer.volumeLabel', { label: meta.label })}
+                  />
+                  {/* The value while a finger drags; at rest, nothing. */}
+                  {dragVol?.id === track.id && (
+                    <View pointerEvents="none" style={[s.volWrap, { left: `${dragVol.v * 100}%` }]}>
+                      <View style={s.volBubble}>
+                        <Text style={s.volBubbleText}>{Math.round(dragVol.v * 100)}%</Text>
+                      </View>
+                      <View style={s.volCaret} />
+                    </View>
+                  )}
+                </View>
+                <Pressable
+                  onPress={() =>
+                    engine.capabilities.mixer
+                      ? engine.setMuted(track.id, !track.muted)
+                      : unsupported('mixer')
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={t('phone.player.mixer.mute', { label: meta.label })}
+                  accessibilityState={{ selected: track.muted }}
+                  style={[s.msBtn, track.muted && { backgroundColor: C.red, borderColor: C.red }]}
+                >
+                  {/* Drawn, not "M" — mixing-desk initials say nothing to a
+                      singer; a crossed speaker says what happened to the
+                      sound. */}
+                  <SpeakerGlyph color={track.muted ? '#1d0f0d' : white(0.55)} slashed={track.muted} />
+                </Pressable>
+                <Pressable
+                  onPress={() =>
+                    engine.capabilities.mixer
+                      ? engine.setSolo(track.id, !track.solo)
+                      : unsupported('mixer')
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={t('phone.player.mixer.solo', { label: meta.label })}
+                  accessibilityState={{ selected: track.solo }}
+                  style={[s.msBtn, track.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
+                >
+                  <HeadphonesGlyph color={track.solo ? C.amberInk : white(0.55)} />
+                </Pressable>
+              </View>
+            </View>
+          </React.Fragment>
+        )
+      })}
+    </>
+  )
+
   return (
     <PlayerStack.Navigator
+      screenListeners={tabModalListeners}
       initialRouteName="Stage"
-      screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}
+      screenOptions={{ headerShown: false, contentStyle: { backgroundColor: 'transparent' } }}
     >
       <PlayerStack.Screen name="Stage">
         {({ navigation }) => {
           sheetNavigation.current = navigation
           return (
             <Animated.View
-              style={{ flex: 1, backgroundColor: C.bg }}
+              testID="player-stage"
+              onLayout={event => {
+                const { width, height } = event.nativeEvent.layout
+                setScene(previous => previous?.width === width && previous.height === height ? previous : { width, height })
+              }}
+              style={{ flex: 1, backgroundColor: 'transparent' }}
               pointerEvents={active ? 'auto' : 'none'}
               accessibilityElementsHidden={!active}
               importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
             >
-      {/* The stage: a dusk room, fully out of focus — chosen from the design
-          canvas against the user's references. A defocused photograph of warm
-          light rather than a drawn pattern: a golden window glow upper-left,
-          soft amber air on the right, dark masses in the lower corners, and a
-          vignette. Nothing is in focus, so nothing competes with the lyrics.
-          ONE static Skia surface, painted once, nothing on the clock — a
-          radial gradient falling to transparent IS the defocused blob, no
-          blur filter needed. Same look for every song on purpose: the room
-          is the app's, the song shows in the stem tile and the seek bar. */}
-      <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <SkLinearGradient
-            start={vec(winDims.width * 0.15, 0)}
-            end={vec(winDims.width * 0.85, winDims.height)}
-            colors={['#3a2517', '#2a1c12', '#1c130d', '#120c09']}
-            positions={[0, 0.3, 0.58, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.25, winDims.height * 0.16)}
-            r={winDims.width * 0.62}
-            colors={['rgba(236,164,84,0.55)', 'rgba(210,130,60,0.22)', 'rgba(210,130,60,0)']}
-            positions={[0, 0.55, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.86, winDims.height * 0.34)}
-            r={winDims.width * 0.5}
-            colors={['rgba(190,120,60,0.3)', 'rgba(190,120,60,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.28, winDims.height * 0.93)}
-            r={winDims.width * 0.55}
-            colors={['rgba(28,16,10,0.85)', 'rgba(28,16,10,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.9, winDims.height * 0.9)}
-            r={winDims.width * 0.45}
-            colors={['rgba(52,28,14,0.75)', 'rgba(52,28,14,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.5, winDims.height * 0.46)}
-            r={winDims.width * 1.1}
-            colors={['rgba(10,7,5,0)', 'rgba(10,7,5,0)', 'rgba(10,7,5,0.5)']}
-            positions={[0, 0.42, 1]}
-          />
-        </Rect>
-      </Canvas>
 
       {/* Lyrics. The column is ONE canvas the size of the viewport, held
           still while a transform moves the lines under it — a canvas as tall as
@@ -1860,7 +1891,8 @@ export default function PlayerScreen({
           phones will allocate. What actually scrolls is a spacer carrying the
           tap targets, so the sweep costs no views at all. */}
       <View
-        style={layout.compact ? { position: 'absolute', top: layout.top + 74, left: 0, right: 0, bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8 } : { flex: 1 }}
+        testID="player-lyrics"
+        style={layout.compact ? { position: 'absolute', top: layout.top + chromeHeight + 12, left: lyricsLeft, width: lyricsWidth, bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8 } : { flex: 1 }}
         onLayout={(e) => {
           const { width, height } = e.nativeEvent.layout
           if (width !== view.w || height !== view.h)
@@ -1934,31 +1966,37 @@ export default function PlayerScreen({
         {lines.length === 0 && <Text style={s.noLyrics}>{t('phone.player.lyrics.empty')}</Text>}
       </View>
 
-      {/* header: a dark glass pill floating on the room (the references'
-          card material — charcoal translucency, hairline rim, warm light
-          bleeding around it). The scrim is shorter and softer than the old
-          full-bleed black: it only fades scrolled lyrics before they reach
-          the status bar, without flattening the window glow. */}
-      <View
-        pointerEvents="none"
+      {embeddedMixer && (
+        <View testID="player-mixer-panel" style={[s.mixerPanel, {
+          top: layout.top + chromeHeight + 12,
+          left: workspaceLeft + 12,
+          width: workspace.mixerWidth,
+          bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8
+        }]}>
+          <Text accessibilityRole="header" style={s.mixerTitle}>{t('phone.player.mixer.title')}</Text>
+          <ScrollView ref={mixerScrollRef} contentContainerStyle={s.mixerContent} showsVerticalScrollIndicator={false}>
+            {mixerControls}
+            {songOutputControls}
+          </ScrollView>
+        </View>
+      )}
+
+      <ScreenScrim
+        edge="top"
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 140, opacity: 0.8 }}
-      >
-        <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
-      </View>
-      <View pointerEvents="none" style={[s.hdrGlass, { top: layout.top }]} />
-      <View style={[s.hdr, { paddingTop: layout.top + 9 }]} pointerEvents="box-none">
-        <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel={t('phone.player.header.back')}>
-          <Text style={s.back}>‹</Text>
-        </Pressable>
-        <StemTile hue={tileHue} size={46} />
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={s.hTitle} numberOfLines={1}>
-            {splitSongName(project.name).title}
-          </Text>
-          {/* "SingZ project" used to lead here, spending the most prominent
-              line under the title telling the singer that this app's song is
-              this app's song. What is left is what varies between songs. */}
-          <Text style={s.hSub} numberOfLines={1}>
+      />
+      <View pointerEvents="box-none"
+        style={[s.hdr, { top: layout.top }, layout.compact && { left: workspaceLeft + 12, right: workspaceLeft + 12 }]}
+        onLayout={event => setChromeHeight(Math.ceil(event.nativeEvent.layout.height))}>
+        <GlassHeader
+        testID="player-header"
+        title={splitSongName(project.name).title}
+        align="start"
+        onBack={onBack}
+        backLabel={t('phone.player.header.back')}
+        leading={<StemTile hue={tileHue} size={28} />}
+        subtitle={
+          <Text style={s.hSub} numberOfLines={1} maxFontSizeMultiplier={1.2}>
             {splitSongName(project.name).artist != null
               ? `${splitSongName(project.name).artist} · `
               : ''}
@@ -1973,7 +2011,13 @@ export default function PlayerScreen({
                 }`
               : ''}
           </Text>
-        </View>
+        }
+        trailing={<>
+          <HeaderAction label={quickStartTitle(getLocale())} onPress={() => guide.start('player')}><Text style={s.songBtnText}>?</Text></HeaderAction>
+          <GuideTarget id="player-about"><HeaderAction label={t('phone.player.header.about')} onPress={() => setSheet('song')}><Text style={s.songBtnText}>•••</Text></HeaderAction></GuideTarget>
+        </>}
+      />
+        {(ktBadge.length > 0 || training && ducked.length > 0) && <View style={s.headerBadges}>
         {ktBadge.length > 0 && (
           <View style={s.ktBadge}>
             <Text style={s.ktBadgeText}>{ktBadge.join(' · ')}</Text>
@@ -1989,37 +2033,18 @@ export default function PlayerScreen({
             <Text style={s.youChipText}>{t('phone.player.header.youSing')}</Text>
           </View>
         )}
-        {/* Song sheet. Three dots rather than a gear: a gear glyph has no
-            guaranteed text presentation on Android and renders as a colour
-            emoji next to a monochrome header. */}
-        <Pressable accessibilityRole="button" accessibilityLabel={quickStartTitle(getLocale())} onPress={() => guide.start('player')} hitSlop={8} style={s.songBtn}><Text style={s.songBtnText}>?</Text></Pressable>
-        <GuideTarget id="player-about"><Pressable
-          onPress={() => setSheet('song')}
-          hitSlop={12}
-          style={s.songBtn}
-          accessibilityRole="button"
-          accessibilityLabel={t('phone.player.header.about')}
-        >
-          <Text style={s.songBtnText}>•••</Text>
-        </Pressable></GuideTarget>
+
+        </View>}
       </View>
 
-      {/* footer: the transport rides ONE floating dark glass dock — the
-          same card material as the header pill. A scrim still lives under
-          it, shorter and softer than the old 360px black: real glass blurs
-          what is behind it, and without a live blur the coming lines read
-          straight through the fill (photographed on the sim: three lines
-          legible through and BELOW the dock). The fade does the blur's job
-          of quieting them before they reach the glass. */}
-      <View
-        pointerEvents="none"
+      <ScreenScrim
+        edge="bottom"
         style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: layout.compact ? dockHeight + 24 : 340 }}
-      >
-        <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
-      </View>
+      />
       <View
+        testID="player-transport"
         onLayout={event => setDockHeight(Math.round(event.nativeEvent.layout.height))}
-        style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }, layout.compact && { width: layout.playerDockWidth, alignSelf: 'center', left: undefined, right: undefined, paddingTop: 8, paddingBottom: 8 }]}
+        style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }, layout.compact && { width: workspace.dockWidth, alignSelf: 'center', left: undefined, right: undefined, paddingTop: 8, paddingBottom: 8 }]}
       >
         {countInDisplay &&
           (countInDisplay.beatDots && countInSt?.kind === 'beats' ? (
@@ -2093,30 +2118,32 @@ export default function PlayerScreen({
                 style={s.waveBand}
                 onLayout={(e) => setBandW(Math.round(e.nativeEvent.layout.width))}
               >
-                {wave != null && bandW > 0 ? (
+                {displayWave != null && bandW > 0 ? (
                   <>
                     {/* Unplayed: every sliver in its loudest lane's hue, dim.
                         Played: the same slivers bright, revealed by a clip
                         whose width is the position — two static rows, no
                         per-sliver recolouring on the clock. */}
-                    <View pointerEvents="none" style={s.waveRow}>
-                      {wave.map((w, i) => (
+                    <View pointerEvents="none" style={[s.waveRow, workspace.sideBySide && s.waveRowWide]}>
+                      {displayWave.map((w, i) => (
                         <View
                           key={i}
                           style={[
                             s.waveBar,
+                            workspace.sideBySide && s.waveBarWide,
                             { height: `${Math.round(w.h * 100)}%`, backgroundColor: w.color, opacity: 0.35 }
                           ]}
                         />
                       ))}
                     </View>
                     <View pointerEvents="none" style={[s.waveClip, { width: bandW * pct }]}>
-                      <View style={[s.waveRow, { width: bandW }]}>
-                        {wave.map((w, i) => (
+                      <View style={[s.waveRow, workspace.sideBySide && s.waveRowWide, { width: bandW }]}>
+                        {displayWave.map((w, i) => (
                           <View
                             key={i}
                             style={[
                               s.waveBar,
+                              workspace.sideBySide && s.waveBarWide,
                               { height: `${Math.round(w.h * 100)}%`, backgroundColor: w.color }
                             ]}
                           />
@@ -2182,15 +2209,19 @@ export default function PlayerScreen({
             </Text>
           </Pressable>
           <View style={s.timeSide}>
-            <SongOutputMeterButton monitor={outputMonitor} gain={songGain} onPress={() => setSheet('mixer')} />
+            <SongOutputMeterButton monitor={outputMonitor} gain={songGain} onPress={openOutput} />
             <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
           </View>
         </View>
         <View style={s.btnRow}>
           <GuideTarget id="player-mixer"><RoundBtn
             onPress={() =>
-              engine.capabilities.mixer ? setSheet('mixer') : unsupported('mixer')
+              engine.capabilities.mixer
+                ? workspace.sideBySide ? setMixerVisible(value => !value) : openMixer()
+                : unsupported('mixer')
             }
+            bg={embeddedMixer ? KIT.accentSoft : C.btnBg}
+            selected={workspace.sideBySide ? embeddedMixer : undefined}
             label={t('phone.player.transport.mixer')}
           >
             <MixGlyph />
@@ -2258,116 +2289,8 @@ export default function PlayerScreen({
               contentInsetAdjustmentBehavior="never"
               showsVerticalScrollIndicator={false}
             >
-            <SongOutputControls monitor={outputMonitor} gain={songGain}
-              onGain={gain => changeSongGain(gain)} onCommit={gain => changeSongGain(gain, true)} saveState={volumeSaveState} />
-            {/* One tap for the thing the app exists to do. Only offered when
-                the song has a vocal lane — an unsplit song has nothing to
-                mute. */}
-            {hasVocals && (
-              <View style={[b.segs, { marginBottom: 6 }]}>
-                <Chip label={t('phone.player.mixer.fullMix')} active={mixPreset === 'full'} onPress={() => applyMixPreset('full')} />
-                <Chip
-                  label={t('phone.player.mixer.noVocals')}
-                  active={mixPreset === 'novocals'}
-                  onPress={() => applyMixPreset('novocals')}
-                />
-                <Chip
-                  label={t('phone.player.mixer.vocalsOnly')}
-                  active={mixPreset === 'vocalsonly'}
-                  onPress={() => applyMixPreset('vocalsonly')}
-                />
-              </View>
-            )}
-            {/* The lane rows had no scroll container at all, so past roughly a
-                dozen lanes they clipped with no way to reach them — and the
-                44 pt fader targets below bring that cliff closer. */}
-            {tracks.map((track, i) => {
-              const meta = laneMeta[track.id] ??
-                (TRACK_META[track.id] ? { label: stemLabel(track.id) ?? TRACK_META[track.id].label, color: TRACK_META[track.id].color } : { label: track.id, color: C.dim })
-              const isDucked = ducked.includes(track.id)
-              /* Generated backing belongs beside vocals, without an Added
-                 header dividing the song's stems. The header marks the
-                 singer's own extra lanes. The
-                 pre-split original lane is the app's, not the singer's —
-                 the same exemption addedCount makes — or an unsplit song
-                 would render an "Added" header over its own audio. */
-              const isCustom = !(track.id in TRACK_META) && track.id !== ORIGINAL_LANE_ID && !isBackingVocalLane(track.id)
-              const firstCustom = isCustom && (i === 0 || tracks[i - 1].id in TRACK_META || isBackingVocalLane(tracks[i - 1].id))
-              return (
-                <React.Fragment key={track.id}>
-                  {firstCustom && (
-                    <View style={s.addedRule}>
-                      <Text style={s.addedLab}>{t('phone.player.mixer.added')}</Text>
-                    </View>
-                  )}
-                  <View style={s.mixRow}>
-                  <View style={[s.dot, { backgroundColor: meta.color }]} />
-                  <Text style={s.mixName} numberOfLines={1}>
-                    {meta.label}
-                  </Text>
-                  {isDucked && (
-                    <View style={[s.youPill, { backgroundColor: meta.color }]}>
-                      <Text style={s.youPillText}>{t('phone.player.mixer.yourTurn')}</Text>
-                    </View>
-                  )}
-                  <View style={{ flex: 1 }}>
-                    <Bar
-                      value={track.volume}
-                      onChange={(v) => {
-                        if (engine.capabilities.mixer) {
-                          engine.setVolume(track.id, v)
-                          setDragVol({ id: track.id, v })
-                        }
-                      }}
-                      onCommit={() => setDragVol(null)}
-                      color={meta.color}
-                      height={22}
-                      track="rgba(255,255,255,0.14)"
-                      label={t('phone.player.mixer.volumeLabel', { label: meta.label })}
-                    />
-                    {/* The value while a finger drags; at rest, nothing. */}
-                    {dragVol?.id === track.id && (
-                      <View pointerEvents="none" style={[s.volWrap, { left: `${dragVol.v * 100}%` }]}>
-                        <View style={s.volBubble}>
-                          <Text style={s.volBubbleText}>{Math.round(dragVol.v * 100)}%</Text>
-                        </View>
-                        <View style={s.volCaret} />
-                      </View>
-                    )}
-                  </View>
-                  <Pressable
-                    onPress={() =>
-                      engine.capabilities.mixer
-                        ? engine.setMuted(track.id, !track.muted)
-                        : unsupported('mixer')
-                    }
-                    accessibilityRole="button"
-                    accessibilityLabel={t('phone.player.mixer.mute', { label: meta.label })}
-                    accessibilityState={{ selected: track.muted }}
-                    style={[s.msBtn, track.muted && { backgroundColor: C.red, borderColor: C.red }]}
-                  >
-                    {/* Drawn, not "M" — mixing-desk initials say nothing to a
-                        singer; a crossed speaker says what happened to the
-                        sound. */}
-                    <SpeakerGlyph color={track.muted ? '#1d0f0d' : white(0.55)} slashed={track.muted} />
-                  </Pressable>
-                  <Pressable
-                    onPress={() =>
-                      engine.capabilities.mixer
-                        ? engine.setSolo(track.id, !track.solo)
-                        : unsupported('mixer')
-                    }
-                    accessibilityRole="button"
-                    accessibilityLabel={t('phone.player.mixer.solo', { label: meta.label })}
-                    accessibilityState={{ selected: track.solo }}
-                    style={[s.msBtn, track.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
-                  >
-                    <HeadphonesGlyph color={track.solo ? C.amberInk : white(0.55)} />
-                  </Pressable>
-                  </View>
-                </React.Fragment>
-              )
-            })}
+            {songOutputControls}
+            {mixerControls}
             </SheetScrollView>
             </Sheet>
           </PlayerSheetRoute>
@@ -3020,15 +2943,6 @@ const KEY_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A',
 const meterName = (bpb: number): string => (bpb === 6 ? '6/8' : `${bpb}/4`)
 
 const s = StyleSheet.create({
-  songBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    borderWidth: 1.5,
-    borderColor: white(0.2),
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
   // The dots sit optically low in the box; lift them rather than centre them.
   songBtnText: { color: white(0.72), fontSize: 15, fontWeight: '800', marginTop: -3 },
   songVal: { color: C.bright, fontSize: 16, fontWeight: '700' },
@@ -3051,31 +2965,9 @@ const s = StyleSheet.create({
      inset from the edge, capped at a capsule. Pill: capsule (62/2). Dock:
      55 − 10 inset ≈ 44, continuous curve. Waveband: concentric would be
      44 − 12 padding = 32, capped at its own capsule (40/2). */
-  hdrGlass: {
-    ...nativeGlassStyle(nightStudioNativeTheme, 'surface'),
-    position: 'absolute',
-    left: 12,
-    right: 12,
-    top: 54,
-    height: 62,
-    borderRadius: 31,
-    borderCurve: 'continuous'
-  },
-  hdr: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingTop: 63,
-    paddingHorizontal: 26,
-    paddingBottom: 14
-  },
-  back: { color: white(0.85), fontSize: 30, fontWeight: '600', paddingRight: 4, marginTop: -4 },
-  hTitle: { color: C.bright, fontSize: 15.5, fontWeight: '700' },
-  hSub: { color: C.dim, fontSize: 12.5, marginTop: 1 },
+  hdr: { position: 'absolute', left: 12, right: 12 },
+  headerBadges: { paddingTop: 4, paddingHorizontal: 8, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  hSub: { color: C.dim, fontSize: 11, lineHeight: 14, marginTop: 1 },
   ktBadge: { backgroundColor: C.btnBg, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
   ktBadgeText: { color: white(0.8), fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
   youChip: { backgroundColor: C.amber, borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5 },
@@ -3143,6 +3035,8 @@ const s = StyleSheet.create({
     paddingVertical: 5
   },
   waveBar: { flex: 1, borderRadius: 1 },
+  waveRowWide: { justifyContent: 'space-between' },
+  waveBarWide: { maxWidth: 2 },
   waveClip: { position: 'absolute', left: 0, top: 0, bottom: 0, overflow: 'hidden' },
   waveFill: { position: 'absolute', left: 0, top: 0, bottom: 0, backgroundColor: white(0.22) },
   wavePlayhead: {
@@ -3216,6 +3110,10 @@ const s = StyleSheet.create({
      state, not the palette; C.amberInk already covers ink on the accent. */
 
   mixRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 9 },
+  mixRowEmbedded: { paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.hairline },
+  mixLaneHeaderEmbedded: { width: 118, flexWrap: 'wrap', gap: 6 },
+  mixLaneHeader: { flexDirection: 'row', alignItems: 'center', gap: 11 },
+  mixLaneControls: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 11 },
   /* Section header rows: the label plus the control that used to cost its
      own row (Reset, Training, the bpm fact). minHeight keeps headers level
      whether or not the right side is present. */
@@ -3276,6 +3174,14 @@ const s = StyleSheet.create({
     transform: [{ rotate: '45deg' }]
   },
   dot: { width: 11, height: 11, borderRadius: 6 },
+  mixerPanel: {
+    ...nativeGlassStyle(nightStudioNativeTheme, 'surface'),
+    position: 'absolute',
+    borderRadius: 24,
+    overflow: 'hidden'
+  },
+  mixerTitle: { color: C.text, fontSize: 18, fontWeight: '700', padding: 18, paddingBottom: 8 },
+  mixerContent: { paddingHorizontal: 14, paddingBottom: 20 },
   mixName: { color: C.text, fontSize: 14.5, fontWeight: '600', width: 96 },
   msBtn: {
     width: 44,

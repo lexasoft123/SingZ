@@ -1,20 +1,24 @@
 {
   "name": "singz",
-  "version": "0.26.5",
-  "description": "Practice app for singers — drop a song, split it into stems, toggle tracks while you sing.",
+  "version": "0.26.7",
+  "description": "Practice app for singers \u2014 drop a song, split it into stems, toggle tracks while you sing.",
   "author": "lexasoft <lexasoft@gmail.com>",
   "type": "module",
   "main": "./out/main/index.js",
   "private": true,
   "scripts": {
     "dev": "node scripts/check-installed-deps.cjs && electron-vite dev",
+    "dev:box": "node scripts/check-installed-deps.cjs && electron-vite dev -- --box",
+    "start:box": "electron . --box",
     "postinstall": "node scripts/apply-gdrive-config.cjs && node mobile/scripts/apply-gdrive-config.js",
-    "build": "node scripts/check-installed-deps.cjs && node scripts/apply-gdrive-config.cjs && electron-vite build && node scripts/check-renderer-split.mjs && node scripts/check-capture-addon.cjs",
+    "build": "node scripts/check-installed-deps.cjs && node scripts/apply-gdrive-config.cjs && node scripts/build-app.mjs && node scripts/check-renderer-split.mjs && node scripts/check-box-renderer.mjs && node scripts/check-capture-addon.cjs",
     "capture:addon:check": "node scripts/check-capture-addon.cjs --strict",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.renderer-tests.json",
     "dist": "node scripts/dist.cjs",
-    "test": "vitest run",
+    "dist:box": "node scripts/dist.cjs --box --linux",
+    "test": "npm run test:tooling && vitest run",
+    "test:tooling": "node --test --test-concurrency=1 tests/tooling/*.test.cjs",
     "gates": "scripts/run-parity-gates.sh",
     "icons": "electron node_modules/@singz/ui/recipes/app-icon/cut-icons.cjs build/icon/forge.html build && electron build/icon/cut-mobile.cjs build/icon/forge.html .",
     "store-notes": "node scripts/store-notes.cjs",
@@ -25,8 +29,9 @@
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
     "@fontsource-variable/martian-mono": "^5.3.0",
-    "@singz/ui": "https://github.com/lexasoft123/singz-ui/archive/refs/tags/v1.9.5.tar.gz",
+    "@singz/ui": "https://github.com/lexasoft123/singz-ui/archive/8d1d7f02ce8a0d4226f5370fde9951f33a05fef3.tar.gz",
     "@types/node": "^26.1.1",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
@@ -51,6 +56,7 @@
     "electron-updater": "^6.8.9",
     "libflacjs": "^5.6.0",
     "music-metadata": "^11.14.0",
+    "qrcode": "^1.5.4",
     "signalsmith-stretch": "^1.3.2"
   }
 }

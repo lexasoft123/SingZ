@@ -20,5 +20,5 @@
  * step prints what it saw — on a release build the field log is the only
  * evidence there is.
  */
-import RUNNER from '../../scripts/onnx_split_runner.py?raw'
+import RUNNER from '../../scripts/onnx_runner.py?raw'
 export const ONNX_RUNNER_PY = RUNNER

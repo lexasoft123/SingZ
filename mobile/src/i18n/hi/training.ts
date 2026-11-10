@@ -3,6 +3,23 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "धुन का स्तर",
+  "phone.training.melodyLevel.first-phrases": "पहली धुनें",
+  "phone.training.melodyLevel.five-notes": "पाँच स्वरों का समूह",
+  "phone.training.melodyLevel.motifs": "संगीत खंड",
+  "phone.training.melodyLevel.wide": "विस्तृत धुनें",
+  "phone.training.melodyLevel.chromatic": "क्रोमैटिक स्वर",
+  "phone.training.melodyLevel.first-phrases.help": "सीमित विस्तार में स्केल के तीन स्वर।",
+  "phone.training.melodyLevel.five-notes.help": "स्केल के पाँच स्वर, क्रमिक चाल और तृतीय अंतराल।",
+  "phone.training.melodyLevel.motifs.help": "छोटा संगीत खंड और उसके बदलाव याद करें।",
+  "phone.training.melodyLevel.wide.help": "नियंत्रित छलाँगों के साथ एक सप्तक तक।",
+  "phone.training.melodyLevel.chromatic.help": "स्केल के बाहर के बीच और पड़ोसी स्वर, जो अर्धस्वर से स्थिर स्वर पर लौटते हैं।",
+
+  "phone.training.exerciseMelodyTitle": "धुन",
+  "phone.training.melodyHelp": "पूरी धुन सुनें, फिर सुरों को क्रम से गाएँ। अपना समय लें — लय का मूल्यांकन नहीं होता।",
+  "phone.training.melodyLength": "हर धुन में सुर",
+  "phone.training.melodyGridCaption": "1 पंक्ति = 1 अर्धस्वर · संख्याएँ अंतराल दिखाती हैं",
+
   "phone.training.soundSettingsSaved": "आपकी आवाज और आवाज हर प्रशिक्षण अभ्यास पर लागू होती है।",
   "phone.training.soundLabBack": "वापस",
   "phone.training.soundLabTitle": "उपकरण ध्वनि प्रयोगशाला",

@@ -4,6 +4,10 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructStat
 import androidx.documentfile.provider.DocumentFile
 import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.Arguments
@@ -14,10 +18,13 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.WritableMap
 import java.io.File
+import java.io.FileInputStream
 import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.UUID
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
@@ -57,7 +64,8 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   private val prefs
     get() = ctx.getSharedPreferences("singz", Context.MODE_PRIVATE)
 
-  /** md5 per downloaded file, keyed by path and stamped with size + mtime. */
+  /** Legacy memo storage is retained for SHA-256/model bookkeeping. Its old
+   * MD5 rows are never trusted by currency or actual file identity. */
   private val hashPrefs
     get() = ctx.getSharedPreferences("singz-hashes", Context.MODE_PRIVATE)
 
@@ -279,34 +287,7 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   private fun isCurrent(f: File, md5: String, size: Long): Boolean =
     CacheCurrency.isCurrent(if (f.isFile) f.length() else -1L, size, md5) { hashOf(f) }
 
-  /** md5 of a file, remembered against its own identity (size + mtime) so a
-   *  song hashes once and not on every open. A rewrite moves the mtime, so a
-   *  stale row cannot outlive the bytes it describes. */
-  private fun hashOf(f: File): String? {
-    val stamp = "${f.length()}:${f.lastModified()}"
-    hashPrefs.getString(f.path, null)?.let {
-      val parts = it.split(":")
-      if (parts.size == 3 && "${parts[0]}:${parts[1]}" == stamp) return parts[2]
-    }
-    return try {
-      val digest = MessageDigest.getInstance("MD5")
-      f.inputStream().use { input ->
-        val buf = ByteArray(1 shl 16)
-        while (true) {
-          val n = input.read(buf)
-          if (n <= 0) break
-          digest.update(buf, 0, n)
-        }
-      }
-      val md5 = digest.digest().joinToString("") { "%02x".format(it) }
-      hashPrefs.edit().putString(f.path, "$stamp:$md5").apply()
-      md5
-    } catch (e: Exception) {
-      // present but unreadable is not the file we want — fetch it again,
-      // rather than failing the open the way a thrown exception would
-      null
-    }
-  }
+  private fun hashOf(f: File): String? = identities.identity(f.path)?.md5
 
   /** Drop one project's downloaded files, or everything when project is "". */
   @ReactMethod
@@ -473,17 +454,51 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
           ?: throw Exception("The picked folder is no longer reachable")
         val src = resolvePath(root, "$project/$file") ?: throw Exception("$file is missing")
         val out = cacheFile(project, file)
-        if (!out.isFile || out.length() != src.length()) {
+        // A restored mtime and equal size cannot prove these are the same
+        // bytes. Compare the provider stream and cached file directly.
+        val current = out.isFile && out.length() == src.length() &&
+          FolderMaterialization.sameContent({
+            ctx.contentResolver.openInputStream(src.uri)
+              ?: throw Exception("Cannot open $file")
+          }, out, ::hashOf)
+        if (!current) {
           out.parentFile?.mkdirs()
           val tmp = File(out.path + ".part")
           ctx.contentResolver.openInputStream(src.uri)?.use { input ->
             tmp.outputStream().use { output -> input.copyTo(output) }
           } ?: throw Exception("Cannot open $file")
           if (!tmp.renameTo(out)) throw Exception("Cannot cache $file")
+          hashPrefs.edit().remove(out.path).apply()
         }
         promise.resolve(out.absolutePath)
       } catch (e: Exception) {
         promise.reject("file", e.message ?: "Cannot fetch $file")
+      }
+    }
+  }
+
+  /** Actual content identity for a file this module owns or materialized. */
+  @ReactMethod
+  fun fileIdentity(path: String, promise: Promise) {
+    exec.execute {
+      try {
+        val file = File(path).canonicalFile
+        val roots = listOf(cacheRoot().canonicalPath, documentsDir().canonicalPath)
+        val owned = roots.any { root ->
+          file.path.startsWith(root + File.separator)
+        }
+        if (!owned || !file.isFile) throw Exception("Not a readable file this app owns")
+        val identity = identities.identity(file.path) { canonical ->
+          roots.any { root -> canonical.startsWith(root + File.separator) }
+        } ?: throw Exception("The file is unreadable or changed while hashing")
+        val result = Arguments.createMap()
+        result.putString("path", path)
+        result.putString("md5", identity.md5)
+        result.putDouble("size", identity.stamp.size.toDouble())
+        result.putDouble("mtimeMs", identity.stamp.modifiedSeconds * 1000.0 + identity.stamp.modifiedNanoseconds / 1e6)
+        promise.resolve(result)
+      } catch (e: Exception) {
+        promise.reject("identity", e.message ?: "Cannot identify the file")
       }
     }
   }
@@ -576,51 +591,121 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
    * stems are too big for the JS bridge). Same .part+rename discipline as
    * the SAF copies; skipped when the cached size already matches.
    */
+  // Downloads must not block listing/cacheUsage on the general file queue.
+  private val driveDownloadExec = Executors.newSingleThreadExecutor()
+  private class DriveTransfer(val expected: Long) {
+    @Volatile var cancelled = false
+    @Volatile var got = 0L
+    @Volatile var total = expected
+    @Volatile var verifying = false
+    @Volatile var connection: HttpURLConnection? = null
+  }
+  private class DriveFailure(val code: String, message: String) : Exception(message)
+  private val driveTransfers = ConcurrentHashMap<String, DriveTransfer>()
+
+  @ReactMethod
+  fun driveFetchProgress(request: String, promise: Promise) {
+    val state = driveTransfers[request]
+    if (state == null) { promise.resolve(null); return }
+    val m = Arguments.createMap()
+    m.putDouble("got", state.got.toDouble())
+    m.putDouble("total", state.total.toDouble())
+    m.putBoolean("verifying", state.verifying)
+    promise.resolve(m)
+  }
+
+  @ReactMethod
+  fun cancelDriveFetch(request: String, promise: Promise) {
+    val state = driveTransfers[request]
+    state?.cancelled = true
+    // disconnect may wait on a socket; never hold the React bridge behind it.
+    if (state != null) thread(name = "singz-drive-cancel") {
+      runCatching { state.connection?.disconnect() }
+    }
+    promise.resolve(state != null)
+  }
+
   @ReactMethod
   fun fetchToCache(
-    project: String,
-    file: String,
-    url: String,
-    auth: String,
-    expectedMd5: String,
-    expectedBytes: Double,
-    promise: Promise
+    project: String, file: String, url: String, auth: String,
+    expectedMd5: String, expectedBytes: Double, promise: Promise
+  ) = fetchDriveFile(project, file, url, auth, expectedMd5, expectedBytes,
+                    UUID.randomUUID().toString(), promise)
+
+  @ReactMethod
+  fun fetchToCacheTracked(
+    project: String, file: String, url: String, auth: String,
+    expectedMd5: String, expectedBytes: Double, request: String, promise: Promise
+  ) = fetchDriveFile(project, file, url, auth, expectedMd5, expectedBytes, request, promise)
+
+  private fun fetchDriveFile(
+    project: String, file: String, url: String, auth: String,
+    expectedMd5: String, expectedBytes: Double, request: String, promise: Promise
   ) {
-    exec.execute {
+    if (!ProjectPaths.plainChild(project) || !ProjectPaths.relOk(file)) {
+      promise.reject("fetch", "Bad project or file path"); return
+    }
+    val state = DriveTransfer(expectedBytes.toLong())
+    driveTransfers[request] = state
+    val queue = if (url.isEmpty()) exec else driveDownloadExec
+    queue.execute {
+      var tmp: File? = null
       try {
+        if (state.cancelled) throw DriveFailure("cancelled", "Download cancelled")
         val out = cacheFile(project, file)
         if (isCurrent(out, expectedMd5, expectedBytes.toLong())) {
-          promise.resolve(result(out, false))
-          return@execute
+          promise.resolve(result(out, false)); return@execute
         }
-        if (url.isEmpty()) {
-          promise.reject("cacheMiss", "Drive cache miss for $file")
-          return@execute
-        }
+        if (url.isEmpty()) throw DriveFailure("cacheMiss", "Drive cache miss for $file")
         val conn = URL(url).openConnection() as HttpURLConnection
+        state.connection = conn
         conn.setRequestProperty("Authorization", auth)
         conn.connectTimeout = 20000
-        conn.readTimeout = 60000
-        if (conn.responseCode / 100 != 2) {
-          throw Exception("Drive download failed (${conn.responseCode}) for $file")
+        conn.readTimeout = 20000
+        val status = conn.responseCode
+        if (status / 100 != 2) throw DriveFailure("http$status", "Drive download failed ($status) for $file")
+        if (state.total <= 0) state.total = conn.contentLengthLong
+        if (out.parentFile?.let { it.isDirectory || it.mkdirs() } != true)
+          throw DriveFailure("cacheWrite", "Cannot create the download folder")
+        val part = File(out.path + "." + UUID.randomUUID().toString() + ".part")
+        tmp = part
+        val digest = MessageDigest.getInstance("MD5")
+        conn.inputStream.use { input ->
+          val output = try { part.outputStream() } catch (e: Exception) {
+            throw DriveFailure("cacheWrite", "Cannot save $file: ${e.message}")
+          }
+          output.use { o ->
+            val buffer = ByteArray(65536)
+            while (true) {
+              if (state.cancelled) throw DriveFailure("cancelled", "Download cancelled")
+              val n = input.read(buffer)
+              if (n < 0) break
+              try { o.write(buffer, 0, n) } catch (e: Exception) {
+                throw DriveFailure("cacheWrite", "Cannot save $file: ${e.message}")
+              }
+              digest.update(buffer, 0, n)
+              state.got += n
+            }
+          }
         }
-        out.parentFile?.mkdirs()
-        val tmp = File(out.path + ".part")
-        conn.inputStream.use { input -> tmp.outputStream().use { o -> input.copyTo(o) } }
-        if (!tmp.renameTo(out)) throw Exception("Cannot cache $file")
-        // What landed must be what was asked for — a connection cut halfway
-        // leaves a plausible file, and caching it would poison every later
-        // open with audio that decodes to silence or noise.
-        if (expectedMd5.isNotEmpty() && hashOf(out) != expectedMd5) {
-          out.delete()
-          throw Exception("$file arrived damaged — try again")
-        }
+        state.verifying = true
+        val md5 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        if ((expectedBytes > 0 && state.got != expectedBytes.toLong()) ||
+            (expectedMd5.isNotEmpty() && md5 != expectedMd5))
+          throw DriveFailure("integrity", "$file arrived incomplete or damaged")
+        if (state.cancelled) throw DriveFailure("cancelled", "Download cancelled")
+        // Atomic replacement only AFTER verification; a failed update leaves
+        // the previous durable copy intact. Completed tracks survive retries.
+        if (!part.renameTo(out)) throw DriveFailure("cacheWrite", "Cannot cache $file")
+        hashPrefs.edit().remove(out.path).apply()
         promise.resolve(result(out, true))
       } catch (e: Exception) {
-        // a dead .part would otherwise sit there counting against nothing and
-        // be mistaken for progress on the next attempt
-        cacheFile(project, "$file.part").delete()
-        promise.reject("fetch", e.message ?: "Cannot fetch $file")
+        val code = if (state.cancelled) "cancelled" else (e as? DriveFailure)?.code ?: "fetch"
+        promise.reject(code, e.message ?: "Cannot fetch $file")
+      } finally {
+        tmp?.delete()
+        runCatching { state.connection?.disconnect() }
+        driveTransfers.remove(request, state)
       }
     }
   }
@@ -1154,5 +1239,28 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
     private const val PICK_REQUEST = 42901
     private const val PICK_FILE_REQUEST = 42902
     private val STEMS = listOf("vocals", "drums", "bass", "guitar", "piano", "other")
+
+    private fun strongStamp(info: StructStat): FolderFileStamp? =
+      if (!OsConstants.S_ISREG(info.st_mode)) null else FolderFileStamp(
+        info.st_dev, info.st_ino, info.st_size,
+        info.st_mtim.tv_sec, info.st_mtim.tv_nsec,
+        info.st_ctim.tv_sec, info.st_ctim.tv_nsec
+      )
+
+    // Shared by Drive currency, materialized destination comparison and the
+    // waveform identity handoff. No persisted size+mtime digest is trusted.
+    private val identities = FolderIdentityCache(
+      stampPath = { path -> strongStamp(Os.stat(path)) },
+      openFile = { path ->
+        val stream = FileInputStream(path)
+        object : FolderIdentityReader {
+          override val input = stream
+          override fun stamp(): FolderFileStamp? = strongStamp(Os.fstat(stream.fd))
+          override fun canonicalPath(): String? = ParcelFileDescriptor.dup(stream.fd).use {
+            Os.readlink("/proc/self/fd/${it.fd}")
+          }
+        }
+      }
+    )
   }
 }

@@ -77,6 +77,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "Không có đường nào để cứu.",
   "main.error.couldNotSaveLyrics": "Không thể lưu lời bài hát: {message}",
   "main.error.lyricsJobAlreadyRunning": "Một bài hát đã được thực hiện.",
+  "main.error.existingLyricsUnreadable": "Không đọc được lời bài hát đã lưu nên chưa thay đổi. Hãy mở trong trình chỉnh sửa lời hoặc chép lời lại.",
   "main.error.noLinesToAlign": "Không có đường thẳng nào.",
   "main.error.splitFirstAlign": "Chia bài hát thành các cây đầu tiên  sắp xếp lắng nghe bài hát ca khúc.",
   "main.error.preciseNeedsPack": "Sự sắp xếp chính xác chạy qua gói phân chia  cài đặt nó vào quản lý mô hình trước.",

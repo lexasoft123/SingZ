@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'Проверка…',
+  'phone.library.openingConnect': 'Подключение…',
+  'phone.library.openingDownload': 'Скачивание…',
+  'phone.library.openingVerify': 'Проверка загрузки…',
+  'phone.library.openingRetry': 'Повторная попытка…',
   // ── add-song errors ──
   'phone.library.pickFailed': 'Не удалось открыть этот файл ({msg})',
   'phone.library.folderInactive': 'Папка больше не активна. Откройте её заново и попробуйте снова.',
@@ -26,6 +31,16 @@ export const library: Translation<typeof en> = {
   // ── opening a song ──
   'phone.library.opening': 'Открытие…',
   'phone.library.decoding': 'Чтение {id} · {i}/{n}',
+  'phone.library.downloadChecking': "Проверяем сохранённую дорожку {label} · {index}/{count}",
+  'phone.library.downloadTrack': "Скачиваем {label} · {index}/{count}",
+  'phone.library.downloadVerifying': "Проверяем {label} · {index}/{count}",
+  'phone.library.downloadRetrying': "Повторяем {label} · попытка {attempt}/{attempts}",
+  'phone.library.downloadInterrupted': "Связь прервалась. Скачанные дорожки сохранены. Нажмите «Повторить», чтобы продолжить.",
+  'phone.library.downloadMissing': "Этой дорожки нет на Drive. Повторите синхронизацию песни на компьютере.",
+  'phone.library.downloadDenied': "Drive не разрешил доступ к дорожке. Проверьте вход в аккаунт и повторите попытку.",
+  'phone.library.downloadStorage': "Не удалось сохранить дорожку. Проверьте свободное место на телефоне.",
+  'phone.library.downloadDamaged': "Дорожка скачалась не полностью или повреждена. Остальные дорожки сохранены. Нажмите «Повторить».",
+  'phone.library.downloadRetry': "Повторить",
   'phone.library.fetchingStep': 'Загрузка {id} · {i}/{n}',
   'phone.library.decodingStep': 'Чтение {id} · {i}/{n}',
   'phone.library.lyricsStep': 'Текст…',

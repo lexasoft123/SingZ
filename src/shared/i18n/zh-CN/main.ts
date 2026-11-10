@@ -109,6 +109,7 @@ export const main: Translation<typeof en> = {
   'main.error.noLinesToSave': '没有可保存的歌词行。',
   'main.error.couldNotSaveLyrics': '无法保存歌词：{message}',
   'main.error.lyricsJobAlreadyRunning': '已经有一个歌词任务在运行。',
+  'main.error.existingLyricsUnreadable': '无法读取已保存的歌词，因此未做更改。请在歌词编辑器中打开，或重新转写。',
   'main.error.noLinesToAlign': '没有可对齐的歌词行。',
   'main.error.splitFirstAlign': '请先将歌曲拆分为分轨——对齐需要听取人声音轨。',
   'main.error.preciseNeedsPack': '精确对齐需要通过分离引擎包运行——请先在模型管理器中安装它。',

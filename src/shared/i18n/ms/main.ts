@@ -77,6 +77,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "Tiada garis untuk diselamatkan.",
   "main.error.couldNotSaveLyrics": "Tidak dapat menyimpan lirik: {message}",
   "main.error.lyricsJobAlreadyRunning": "Kerja lirik sudah berjalan.",
+  "main.error.existingLyricsUnreadable": "Lirik yang disimpan tidak dapat dibaca, jadi ia tidak diubah. Bukanya dalam editor lirik atau transkripsi semula.",
   "main.error.noLinesToAlign": "Tiada garis untuk disusun.",
   "main.error.splitFirstAlign": "Bahagikan lagu itu menjadi trek audio pertama  susunan mendengar lagu vokal.",
   "main.error.preciseNeedsPack": "Pergerakan yang tepat berjalan melalui pakej pembahagian  pasangnya di pengurus model terlebih dahulu.",

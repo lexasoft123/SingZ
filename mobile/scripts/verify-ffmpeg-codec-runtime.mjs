@@ -355,12 +355,20 @@ const optionSet = (relative, option) => {
   if (!match) return new Set()
   return new Set((match[1] || match[2] || match[3]).split(','))
 }
-const compatibilityDemuxers = optionSet(
-  'android/src/main/jniLibs/arm64-v8a/libavformat.so', 'demuxer')
-const compatibilityDecoders = optionSet(
-  'android/src/main/jniLibs/arm64-v8a/libavcodec.so', 'decoder')
-const compatibilityParsers = optionSet(
-  'android/src/main/jniLibs/arm64-v8a/libavcodec.so', 'parser')
+// Inspect only checksum-verified libraries selected for this build. An iOS
+// checkout has no Android JNI downloads, and an x86_64-only Android build need
+// not install arm64-v8a. Both platform formats embed the configuration string.
+const configurationArtifact = (component) => {
+  const entry = relevant.find(({ relative }) =>
+    relative.endsWith(`/lib${component}.so`) || relative.endsWith(`/lib${component}`))
+  if (!entry) throw new Error(`No pinned FFmpeg ${component} configuration artifact applies to this build`)
+  return entry.relative
+}
+const compatibilityFormat = configurationArtifact('avformat')
+const compatibilityCodec = configurationArtifact('avcodec')
+const compatibilityDemuxers = optionSet(compatibilityFormat, 'demuxer')
+const compatibilityDecoders = optionSet(compatibilityCodec, 'decoder')
+const compatibilityParsers = optionSet(compatibilityCodec, 'parser')
 const missing = []
 for (const name of profile.requiredDemuxers) {
   if (!compatibilityDemuxers.has(name)) missing.push(`demuxer:${name}`)

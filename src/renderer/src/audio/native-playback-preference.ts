@@ -26,19 +26,30 @@
  * every red is a marginal rule rather than a class of failure. Settings carries
  * the toggle for a singer who disagrees.
  *
- * Linux ('other') has never run the harness and stays on Web Audio.
+ * Linux has a native ALSA development path. It remains opt-in until the full session harness and physical hardware are qualified.
  *
  * A module of its own because the engine imports the facade lazily and as
  * types only.
  */
 export const DESKTOP_NATIVE_PLAYBACK_KEY = 'singz.desktop.native-playback'
 
-export function detectedDesktopPlatform(): 'darwin' | 'win32' | 'other' {
-  const p = typeof navigator === 'undefined' ? '' : navigator.platform
-  return /Mac/i.test(p) ? 'darwin' : /Win/i.test(p) ? 'win32' : 'other'
+export interface DesktopNativePlaybackPolicy {
+  playback?: boolean
+  streamLanes?: boolean
+  /** Refuse Web Audio when this surface requires the native backend. */
+  requireNative?: boolean
 }
 
-export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatform()): boolean {
+export function detectedDesktopPlatform(): 'darwin' | 'win32' | 'linux' | 'other' {
+  const p = typeof navigator === 'undefined' ? '' : navigator.platform
+  return /Mac/i.test(p) ? 'darwin' : /Win/i.test(p) ? 'win32' : /Linux/i.test(p) ? 'linux' : 'other'
+}
+
+export function desktopNativePlaybackPreferred(
+  platform = detectedDesktopPlatform(),
+  override?: boolean
+): boolean {
+  if (override !== undefined) return override
   const stored = typeof localStorage === 'undefined' ? null : localStorage.getItem(DESKTOP_NATIVE_PLAYBACK_KEY)
   if (stored === '1') return true
   if (stored === '0') return false
@@ -58,7 +69,7 @@ export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatfor
  *  Windows read was `_lseeki64` + `_read` on the shared file position, a
  *  race the two threads would have lost mid-song as malformed frames, and the
  *  reason the first cut of this preference defaulted win32 off. `readAt` is
- *  a positioned `ReadFile` there now (`zcore/src/media/media_io.cpp`),
+ *  a positioned `ReadFile` there now (`third_party/zcore/zcore/src/media/media_io.cpp`),
  *  pinned by a concurrent two-reader ctest, and the field laptop ran the
  *  session harness with streaming on before and after: the streamed pass is
  *  lighter (800 MB against 920 MB playing, 0.3% against 4.7% CPU) with a
@@ -66,7 +77,11 @@ export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatfor
  *  is the deliberate way to measure it there. */
 export const DESKTOP_STREAM_LANES_KEY = 'singz.desktop.stream-lanes'
 
-export function desktopStreamLanesPreferred(platform = detectedDesktopPlatform()): boolean {
+export function desktopStreamLanesPreferred(
+  platform = detectedDesktopPlatform(),
+  override?: boolean
+): boolean {
+  if (override !== undefined) return override
   const stored = typeof localStorage === 'undefined' ? null : localStorage.getItem(DESKTOP_STREAM_LANES_KEY)
   if (stored === '1') return true
   if (stored === '0') return false

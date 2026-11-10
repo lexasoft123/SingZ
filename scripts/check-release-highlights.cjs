@@ -18,7 +18,7 @@ for (const release of data.releases) {
     ids.add(item.id)
     assert(['news','export','mic','controls'].includes(item.icon), `unknown icon: ${item.icon}`)
     assert(Array.isArray(item.platforms) && item.platforms.length > 0 && new Set(item.platforms).size === item.platforms.length && item.platforms.every(p => ['desktop','ios','android'].includes(p)), `invalid platforms: ${item.id}`)
-    for (const locale of ['en','ru','zh-CN','hi','ja','ko','th','id','vi','fil','ms','zh-TW','tr']) {
+    for (const locale of ['en','ru','zh-CN','hi','ja','ko','th','id','vi','fil','ms','zh-TW','tr','es-419','pt-BR']) {
       for (const field of ['title','description']) {
         const value = item.text?.[locale]?.[field]
         assert(typeof value === 'string' && value.trim().length > 0, `missing ${locale}.${field}: ${item.id}`)

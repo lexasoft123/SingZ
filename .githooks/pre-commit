@@ -1,0 +1,5 @@
+#!/bin/sh
+# Git invokes this in the committing worktree, with its actual index in env.
+set -eu
+singz_root=$(git rev-parse --show-toplevel)
+exec node "$singz_root/scripts/check-staged-review.cjs"

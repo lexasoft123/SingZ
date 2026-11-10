@@ -1,4 +1,7 @@
 #include "shared_audio_service.h"
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+#include "box_routing_owner.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -7,6 +10,11 @@
 #include <thread>
 #include <utility>
 #include <zcore/device/audio_input_callback_gate.h>
+
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <libudev.h>
+#include <poll.h>
+#endif
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -46,7 +54,7 @@ struct SharedAudioService::Impl {
     std::atomic<bool> failed{false};
     std::atomic<uint64_t> callbacks{0};
     std::atomic<uint64_t> frames{0};
-  } playback, training;
+  } playback, training, microphone;
   mutable std::mutex mutex;
   std::unique_ptr<AudioHostBackend> backend;
   AudioHostInventory cached;
@@ -60,6 +68,7 @@ struct SharedAudioService::Impl {
   std::atomic<bool> quitting{false};
   std::thread watcher;
   std::atomic<uint64_t> frames{0};
+  std::atomic<uint64_t> outputGeneration{0};
   std::atomic<double> rate{0};
   std::atomic<uint64_t> revisions{0};
   std::atomic<uint64_t> enumerations{0};
@@ -179,6 +188,21 @@ struct SharedAudioService::Impl {
   void startWatcherLocked() {
     if (!watchDevices || watcher.joinable()) return;
     watcher = std::thread([this] {
+#if defined(__linux__) && !defined(__ANDROID__)
+      udev* deviceContext = udev_new();
+      udev_monitor* monitor = deviceContext ?
+          udev_monitor_new_from_netlink(deviceContext, "udev") : nullptr;
+      int monitorFd = -1;
+      if (monitor && udev_monitor_filter_add_match_subsystem_devtype(
+          monitor, "sound", nullptr) == 0 &&
+          udev_monitor_enable_receiving(monitor) == 0) {
+        monitorFd = udev_monitor_get_fd(monitor);
+        watchedDevices.store(1, std::memory_order_relaxed);
+        // Close the first-enumeration/monitor-registration race, including
+        // a device that was absent when the service was constructed.
+        dirty->store(true, std::memory_order_release);
+      }
+#endif
 #if defined(_WIN32)
       const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       IMMDeviceEnumerator* enumerator = nullptr;
@@ -189,6 +213,18 @@ struct SharedAudioService::Impl {
 #endif
       while (!quitting.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (monitorFd >= 0) {
+          pollfd descriptor{monitorFd, POLLIN, 0};
+          for (uint32_t events = 0; events < 64 &&
+               ::poll(&descriptor, 1, 0) > 0 && (descriptor.revents & POLLIN); ++events) {
+            udev_device* device = udev_monitor_receive_device(monitor);
+            if (!device) break;
+            udev_device_unref(device);
+            dirty->store(true, std::memory_order_release);
+          }
+        }
+#endif
         if (!dirty->exchange(false, std::memory_order_acq_rel)) continue;
         std::lock_guard<std::mutex> lock(mutex);
         try {
@@ -202,6 +238,10 @@ struct SharedAudioService::Impl {
           dirty->store(true, std::memory_order_release);
         }
       }
+#if defined(__linux__) && !defined(__ANDROID__)
+      if (monitor) udev_monitor_unref(monitor);
+      if (deviceContext) udev_unref(deviceContext);
+#endif
 #if defined(_WIN32)
       if (enumerator) {
         enumerator->UnregisterEndpointNotificationCallback(notifications);
@@ -220,8 +260,12 @@ struct SharedAudioService::Impl {
     {
       AudioInputCallbackScope scope(self.playback.gate);
       if (scope && self.playback.render &&
-          !self.playback.render(self.playback.context, block))
+          !self.playback.render(self.playback.context, block)) {
         self.playback.failed.store(true, std::memory_order_release);
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+        recordBoxSongFailure(block.callbackHostTimeNs, block.frames);
+#endif
+      }
       if (scope) {
         self.playback.callbacks.fetch_add(1, std::memory_order_relaxed);
         self.playback.frames.fetch_add(block.frames, std::memory_order_relaxed);
@@ -232,6 +276,12 @@ struct SharedAudioService::Impl {
       if (scope && self.training.render &&
           !self.training.render(self.training.context, block))
         self.training.failed.store(true, std::memory_order_release);
+    }
+    {
+      AudioInputCallbackScope scope(self.microphone.gate);
+      if (scope && self.microphone.render &&
+          !self.microphone.render(self.microphone.context, block))
+        self.microphone.failed.store(true, std::memory_order_release);
     }
     self.frames.fetch_add(block.frames, std::memory_order_relaxed);
     return true;
@@ -266,6 +316,7 @@ struct SharedAudioService::Impl {
       drain(playback.gate);
       playback.failed.store(true, std::memory_order_release);
     }
+    outputGeneration.fetch_add(1, std::memory_order_release);
     backend->stop();
     auto result = backend->open(config, render, this);
     if (result.ok) {
@@ -304,6 +355,12 @@ struct SharedAudioService::Impl {
     config.outputDeviceUid = selected;
     return config;
   }
+  void retireIdleBoxProducerLocked() noexcept {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (provider == "box-loopz" && !playback.render &&
+        !training.render && !microphone.render) backend->stop();
+#endif
+  }
   AudioHostResult ensureLocked() {
     parked = false;
     auto result = openLocked(preferredRouteLocked());
@@ -317,7 +374,11 @@ class SharedAudioService::Client final : public AudioHostBackend {
  public:
   Client(SharedAudioService& service, std::unique_ptr<AudioHostBackend> backend,
          std::string provider)
-      : service_(service), candidate_(std::move(backend)), provider_(std::move(provider)) {}
+      : service_(service), candidate_(std::move(backend)), provider_(std::move(provider)) {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (boxRoutingInitialized()) provider_ = "box-loopz";
+#endif
+  }
   ~Client() override { stop(); }
   AudioHostInventory enumerate() const override { return service_.inventory(); }
   std::optional<AudioHostDeviceInfo> describeOutputDevice(const std::string& uid) const override {
@@ -385,15 +446,24 @@ class SharedAudioService::Client final : public AudioHostBackend {
     self.playback.render = nullptr;
     self.playback.context = nullptr;
     self.playback.failed.store(false, std::memory_order_release);
+    self.retireIdleBoxProducerLocked();
     attached_ = false;
     state_ = AudioHostState::Stopped;
   }
   AudioHostStatus status() const noexcept override {
     auto result = service_.status();
-    if (result.state != AudioHostState::DeviceLost && result.state != AudioHostState::Error)
-      result.state = state_;
-    if (service_.impl_->playback.failed.load(std::memory_order_acquire))
-      result.state = AudioHostState::Error;
+    const auto clientState = state_.load(std::memory_order_acquire);
+    // stop() publishes Stopped only after this client's callback gate drains.
+    // The shared physical stream may retain an error for another owner, but
+    // that history cannot revoke proof that this song's callback is detached.
+    if (clientState == AudioHostState::Stopped) {
+      result.state = clientState;
+    } else {
+      if (result.state != AudioHostState::DeviceLost && result.state != AudioHostState::Error)
+        result.state = clientState;
+      if (service_.impl_->playback.failed.load(std::memory_order_acquire))
+        result.state = AudioHostState::Error;
+    }
     result.callbacks = service_.impl_->playback.callbacks.load(std::memory_order_acquire);
     result.renderedFrames = service_.impl_->playback.frames.load(std::memory_order_acquire);
     return result;
@@ -426,6 +496,8 @@ SharedAudioService::SharedAudioService()
   impl_->provider = "wasapi";
 #elif defined(__ANDROID__)
   impl_->provider = "oboe";
+#elif defined(__linux__)
+  impl_->provider = "alsa";
 #endif
 }
 SharedAudioService::SharedAudioService(std::unique_ptr<AudioHostBackend> backend)
@@ -455,15 +527,21 @@ AudioHostResult SharedAudioService::configureOutput(const std::string& preferred
 AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostBackend> backend,
                                                     const std::string& provider) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (impl_->provider == provider) {
+  const std::string effectiveProvider =
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+      boxRoutingInitialized() ? "box-loopz" :
+#endif
+      provider;
+  if (impl_->provider == effectiveProvider) {
     const auto status = impl_->backend->status();
     return {true,AudioHostError::None,status.state,status.format,status.latency,{}};
   }
   if (impl_->playback.render) return failure("Change the song output provider before starting training");
   if (!backend) return failure("The selected audio provider is unavailable");
+  impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
   impl_->removeListeners();
-  impl_->backend = std::move(backend); impl_->provider = provider;
+  impl_->backend = std::move(backend); impl_->provider = effectiveProvider;
   impl_->route = {}; impl_->preferredOutputUid.clear(); impl_->enumerated = false;
   return impl_->openLocked({});
 }
@@ -496,8 +574,19 @@ void SharedAudioService::setTrainingRenderer(AudioHostRender render, void* conte
   impl_->training.context = context;
   impl_->training.failed.store(false, std::memory_order_release);
   if (render) impl_->training.gate.open();
+  else impl_->retireIdleBoxProducerLocked();
 }
 void SharedAudioService::clearTrainingRenderer() { setTrainingRenderer(nullptr, nullptr); }
+void SharedAudioService::setMicrophoneRenderer(AudioHostRender render, void* context) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  drain(impl_->microphone.gate);
+  impl_->microphone.render = render;
+  impl_->microphone.context = context;
+  impl_->microphone.failed.store(false, std::memory_order_release);
+  if (render) impl_->microphone.gate.open();
+  else impl_->retireIdleBoxProducerLocked();
+}
+void SharedAudioService::clearMicrophoneRenderer() { setMicrophoneRenderer(nullptr, nullptr); }
 AudioHostStatus SharedAudioService::status() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->backend->status();
@@ -510,18 +599,28 @@ uint64_t SharedAudioService::watchedDeviceCount() const noexcept { return impl_-
 std::string SharedAudioService::providerId() const {
   std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->provider;
 }
+std::string SharedAudioService::activeOutputUid() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->route.outputDeviceUid;
+}
+uint64_t SharedAudioService::outputRouteGeneration() const noexcept {
+  return impl_->outputGeneration.load(std::memory_order_acquire);
+}
 void SharedAudioService::parkOutput() noexcept {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->parked = true;
+  impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
 }
 void SharedAudioService::shutdown() noexcept {
   impl_->quitting.store(true, std::memory_order_release);
   if (impl_->watcher.joinable()) impl_->watcher.join();
   std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
   drain(impl_->playback.gate);
   drain(impl_->training.gate);
+  drain(impl_->microphone.gate);
+  impl_->microphone.render = nullptr;
   impl_->playback.render = nullptr;
   impl_->training.render = nullptr;
   impl_->removeListeners();

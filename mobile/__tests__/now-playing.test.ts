@@ -19,6 +19,7 @@ import {
   type NowPlayingPort,
   type NowPlayingTimers
 } from '../src/playback/now-playing'
+import { onLogLine } from '../src/log'
 import type { PlaybackBackend } from '../src/playback/backend'
 
 class FakeClock implements NowPlayingTimers {
@@ -523,3 +524,24 @@ describe('parseNowPlayingCommand', () => {
     }
   })
 })
+
+
+it('warns once per background ownership failure episode and reports a later failure after recovery', async () => {
+  const lines: string[] = [];
+  const off = onLogLine(e => { if (e.source === 'now-playing' && e.level === 'warn') lines.push(e.line) });
+  const { clock, port, backend, controller, target } = setup();
+  const detach = controller.attach(target);
+  try {
+    await flush(); expect(lines).toEqual([]); backend.playing = true; port.background = false;
+    for (const rate of [0.9, 0.8]) {
+      backend.pitchTempo = { semitones: 0, rate }; backend.emit();
+      clock.advance(NOW_PLAYING_SETTLE_MS); await flush();
+    }
+    expect(lines.filter(line => line.startsWith('background playback unavailable'))).toHaveLength(1);
+    port.background = true; backend.pitchTempo = { semitones: 0, rate: 1 }; backend.emit();
+    clock.advance(NOW_PLAYING_SETTLE_MS); await flush();
+    port.background = false; backend.pitchTempo = { semitones: 0, rate: 0.7 }; backend.emit();
+    clock.advance(NOW_PLAYING_SETTLE_MS); await flush();
+    expect(lines.filter(line => line.startsWith('background playback unavailable'))).toHaveLength(2);
+  } finally { detach(); off(); }
+});

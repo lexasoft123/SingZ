@@ -1,7 +1,7 @@
 //! Strict extraction of source dictionary object literals; never executes TS.
 use std::{collections::BTreeMap, fs, path::Path};
-pub const LOCALES: [&str; 13] = [
-    "en", "ru", "zh-CN", "hi", "ja", "ko", "th", "id", "vi", "fil", "ms", "zh-TW", "tr",
+pub const LOCALES: [&str; 15] = [
+    "en", "ru", "zh-CN", "hi", "ja", "ko", "th", "id", "vi", "fil", "ms", "zh-TW", "tr", "es-419", "pt-BR",
 ];
 struct Parser<'a> {
     text: &'a str,
@@ -185,6 +185,28 @@ pub fn merge_order(text: &str) -> Result<Vec<String>, String> {
         text,
         pos: start + equal + 1,
     };
+    parser.skip()?;
+    if parser.peek() != Some('{') {
+        // The English entry exports a literal `base` dictionary with a
+        // type-only Box intersection. Resolve only a preceding const object;
+        // never evaluate an initializer or include type-only Box strings.
+        let alias_start = parser.pos;
+        while parser.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            parser.next()?;
+        }
+        let alias = &text[alias_start..parser.pos];
+        if alias.is_empty() {
+            return Err("Expected dictionary object or local const alias".into());
+        }
+        parser.skip()?;
+        if !parser.text[parser.pos..].starts_with(&format!("as typeof {alias}")) {
+            return Err("Expected type-only dictionary alias assertion".into());
+        }
+        let declaration = format!("const {alias} =");
+        let declaration_start = text[..start].find(&declaration)
+            .ok_or("Dictionary alias must name a preceding const object")?;
+        parser.pos = declaration_start + declaration.len();
+    }
     parser.expect('{')?;
     let mut parts = vec![];
     loop {

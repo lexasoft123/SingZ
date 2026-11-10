@@ -102,12 +102,15 @@ fn malformed_previous_is_current_only_and_malformed_current_is_unavailable() {
     }
     assert!(valid_version("00.026.005"));
     assert!(notes("00.026.005", None, "en").is_none());
-    assert!(notes(CURRENT_VERSION, Some("00.026.005"), "en").is_none());
+    let padded_current = CURRENT_VERSION.split('.')
+        .map(|part| format!("00{part}"))
+        .collect::<Vec<_>>().join(".");
+    assert!(notes(CURRENT_VERSION, Some(&padded_current), "en").is_none());
 }
 #[test]
 fn locale_resolution_preserves_supported_translations_and_falls_back_to_english() {
     let title = |locale| {
-        notes(CURRENT_VERSION, None, locale).unwrap().entries[0].highlights[0]
+        notes("0.26.5", None, locale).unwrap().entries[0].highlights[0]
             .title
             .clone()
     };

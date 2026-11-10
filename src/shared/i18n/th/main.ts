@@ -77,6 +77,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "ไม่มีเส้นทางที่จะช่วย",
   "main.error.couldNotSaveLyrics": "ไม่สามารถบันทึกบทเพลงได้ {message}",
   "main.error.lyricsJobAlreadyRunning": "งานเพลงเพลงกําลังดําเนินการอยู่",
+  "main.error.existingLyricsUnreadable": "ไม่สามารถอ่านเนื้อเพลงที่บันทึกไว้ได้ จึงไม่ได้เปลี่ยนแปลง เปิดในตัวแก้ไขเนื้อเพลงหรือถอดเสียงใหม่",
   "main.error.noLinesToAlign": "ไม่มีเส้นที่จะตรงกัน",
   "main.error.splitFirstAlign": "แบ่งเพลงเป็นต้นแรก  การจัดสรรฟังเพลงร้อง",
   "main.error.preciseNeedsPack": "การจัดสรรแม่นยําผ่านกระเป๋าแบ่ง  ตั้งมันในผู้จัดการแบบก่อน",

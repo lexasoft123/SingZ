@@ -25,8 +25,8 @@
  * the trace afterwards.
  *
  * TWO metrics are NOT compared, and the notes on each in METRICS say why.
- * First audible is reported only: legacy times it from its own position
- * clock and native from the core's first audible callback, so the columns
+ * Presentation observation is reported only: legacy times it from its own position
+ * clock and native from the core's sampled presentation-frame estimate, so the columns
  * are different events and a legacy win there means nothing.
  *
  * The other is the pitch change. Under the native
@@ -79,10 +79,10 @@ const METRICS = [
   { key: 'openReady', label: 'open → ready to play', rule: 'compare' },
   { key: 'playAdvance', label: 'Play → position advancing', rule: 'compare' },
   /* Reported, never compared. Legacy times this from its own position
-     clock and native from the core's first audible callback: they are
+     clock and native from the core's sampled presentation-frame estimate: they are
      not the same measurement, so a legacy win here means nothing and
      must not fail a rule. Same reasoning as the transpose. */
-  { key: 'playAudible', label: 'Play → first audible', rule: 'report' },
+  { key: 'playAudible', label: 'Play → presentation observed', rule: 'report' },
   { key: 'seekApply', label: 'seek → position reads target (worst of 4)', rule: 'compare' },
   { key: 'laneRamp', label: 'lane ramp → applied (worst of 3)', rule: 'compare' },
   { key: 'metSave', label: 'metronome save → accepted (worst of 3)', rule: 'compare' },
@@ -547,23 +547,23 @@ async function runPass(dev, { backend, expectKind, songs, log }) {
   if (play.hit === null) {
     notes.push(`Play never advanced the transport · outcome ${detail.playOutcome} · log: ${await logTail(dev, play.t0)}`)
   }
-  /* "First audible" has an honest answer only under the native graph, which
-     logs the first render callback that produced sound. Legacy has no such
+  /* A presented-frame estimate is available only under the native graph, which
+     logs the first sampled positive presentation estimate, not detected sound. Legacy has no such
      line; the transport moving is the best it can say, and the README says
      so rather than the table inventing a number. */
   if (backend === 'native') {
     const audible = await dev.val(
-      `__r('src/log.ts').logEntries().then(e => { const a = e.filter(x => /first audible callback/.test(x.line) && x.t >= ${play.t0}); return a.length ? a[0].t - ${play.t0} : null })`
+      `__r('src/log.ts').logEntries().then(e => { const a = e.filter(x => /presentation counter first observed/.test(x.line) && x.t >= ${play.t0}); return a.length ? a[0].t - ${play.t0} : null })`
     )
     m.playAudible = round(audible)
-    if (audible === null) notes.push('no "first audible callback" line after Play')
+    if (audible === null) notes.push('no "presentation counter first observed" line after Play')
   } else {
     m.playAudible = m.playAdvance
     detail.playAudibleIsProxy = true
   }
   flags.playStarted = play.hit !== null
   detail.playStarted = detail.playOutcome
-  say(`Play → advancing ${m.playAdvance} ms · first audible ${m.playAudible} ms (${detail.playOutcome})`)
+  say(`Play → advancing ${m.playAdvance} ms · presentation observed ${m.playAudible} ms (${detail.playOutcome})`)
   /* The NEGOTIATED callback size — the number to want first when one backend
      costs more CPU than the other. Native logs it when the host output opens
      (`zcore AudioHost open · … · N frame nominal buffer`); legacy logs

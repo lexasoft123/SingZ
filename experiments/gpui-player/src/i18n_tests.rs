@@ -43,6 +43,11 @@ fn source_tags_and_chinese_script_precedence_match_desktop_rules() {
         ("tl-PH", Locale::Fil),
         ("fil-PH", Locale::Fil),
         ("ms-MY", Locale::Ms),
+        ("es-419", Locale::Es419),
+        ("es-PE", Locale::Es419),
+        ("es-ES", Locale::Es419),
+        ("pt-BR", Locale::PtBr),
+        ("pt-PT", Locale::PtBr),
     ] {
         assert_eq!(from_tag(tag), Some(locale));
     }
@@ -144,6 +149,20 @@ fn cardinal_rules_match_source_vectors_including_fractions() {
     ] {
         assert_eq!(plural_form(Locale::Fil, n), want, "{n}");
     }
+    // Values captured from the source runtime's Intl.PluralRules.
+    for (n, spanish, portuguese) in [
+        (0., "other", "one"),
+        (0.6, "other", "one"),
+        (1., "one", "one"),
+        (1.2, "other", "one"),
+        (-1.9, "other", "one"),
+        (2., "other", "other"),
+        (1_000_000., "many", "many"),
+        (1_000_000.1, "other", "other"),
+    ] {
+        assert_eq!(plural_form(Locale::Es419, n), spanish, "es-419 {n}");
+        assert_eq!(plural_form(Locale::PtBr, n), portuguese, "pt-BR {n}");
+    }
     assert_eq!(plural_form(Locale::En, 1.), "one");
     assert_eq!(plural_form(Locale::Tr, 1.), "one");
     assert_eq!(plural_form(Locale::Ru, f64::NAN), "other");
@@ -155,7 +174,7 @@ fn every_bundled_dictionary_equals_current_source_extraction() {
     )
     .unwrap();
     assert_eq!(&source, dictionaries());
-    assert_eq!(source.len(), 13);
+    assert_eq!(source.len(), Locale::ALL.len());
     let english = &source["en"];
     assert!(english.len() > 500);
     for locale in Locale::ALL {
@@ -207,6 +226,11 @@ fn extractor_decodes_ts_literals_comments_and_unicode_without_executing_code() {
       'template': `literal
 multiline`,
     } satisfies Dict"#;
+    assert_eq!(
+        extraction::merge_order("const base = {...common, ...app}; export const en = base as typeof base & typeof box").unwrap(),
+        vec!["common", "app"]
+    );
+    assert!(extraction::merge_order("const base = run(); export const en = base as typeof base").is_err());
     let parsed = extraction::parse(raw).unwrap();
     assert_eq!(parsed["one"], "a\n\t'b");
     assert_eq!(parsed["two"], "🦀 😀 A");

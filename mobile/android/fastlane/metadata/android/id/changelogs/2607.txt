@@ -1,0 +1,1 @@
+Pemuatan lagu lebih andal: unduhan menampilkan byte dan kecepatan, mencoba lagi saat terjadi gangguan sementara, dan pemuatan yang macet dapat dibatalkan. File cache yang sudah lengkap dapat dipakai saat mencoba lagi. Ikon Pengaturan dan Log lebih ringkas.

@@ -54,6 +54,7 @@ const artifacts = require('../../scripts/capture-artifact.cjs') as {
   machCanonicalSha256(path: string): string
 }
 const captureBuilder = require('../../scripts/build-capture-addon.cjs') as {
+  captureBuildDirectory(root: string, target: string, override?: string): string
   findAddon(buildDir: string): string | null
 }
 const dist = require('../../scripts/dist.cjs') as {
@@ -100,6 +101,51 @@ const root = process.cwd()
 const read = (path: string): string =>
   readFileSync(resolve(root, path), 'utf8').replaceAll('\r\n', '\n')
 
+describe('capture CMake build reuse', () => {
+  function fixture() {
+    const checkout = mkdtempSync(join(tmpdir(), 'singz-capture-build-path-'))
+    const build = join(checkout, 'build', 'native', 'qualified')
+    mkdirSync(build, { recursive: true })
+    writeFileSync(join(build, 'CMakeCache.txt'), `CMAKE_HOME_DIRECTORY:INTERNAL=${checkout}\n`)
+    return { checkout, build }
+  }
+  it('keeps the default path and accepts an existing same-checkout build by relative or absolute path', () => {
+    const { checkout, build } = fixture()
+    try {
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64')).toBe(join(checkout, 'build', 'capture-linux-arm64'))
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/native/qualified')).toBe(build)
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', build)).toBe(build)
+    } finally { rmSync(checkout, { recursive: true, force: true }) }
+  })
+  it('rejects escaped paths, unconfigured directories and CMake trees belonging to a sibling', () => {
+    const { checkout, build } = fixture()
+    const sibling = mkdtempSync(join(tmpdir(), 'singz-capture-sibling-'))
+    try {
+      for (const path of ['../sibling-build', 'build/../outside', sibling, 'build'])
+        expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', path)).toThrow(/beneath/)
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/not-yet-created')).toThrow(/existing configured/)
+      writeFileSync(join(build, 'CMakeCache.txt'), `CMAKE_HOME_DIRECTORY:INTERNAL=${sibling}\n`)
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', build)).toThrow(/different source checkout/)
+    } finally {
+      rmSync(checkout, { recursive: true, force: true })
+      rmSync(sibling, { recursive: true, force: true })
+    }
+  })
+  it('rejects linked components even when the final requested directory does not exist', () => {
+    const { checkout, build } = fixture()
+    const sibling = mkdtempSync(join(tmpdir(), 'singz-capture-linked-build-'))
+    try {
+      symlinkSync(sibling, join(checkout, 'build', 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/linked/future')).toThrow(/symbolic links/)
+      symlinkSync(build, join(checkout, 'build', 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/alias')).toThrow(/symbolic links/)
+    } finally {
+      rmSync(checkout, { recursive: true, force: true })
+      rmSync(sibling, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('Electron capture addon build', () => {
   it('keeps desktop playback on the strict v4 prepare and complete status contract', () => {
     const bridge = read('native/electron/playback_addon_bridge.cpp')
@@ -133,7 +179,7 @@ describe('Electron capture addon build', () => {
       '{"mode", "periodFrames", "windows", "laneIds",',
       '{"startProjectFrame", "endProjectFrame"}',
       '{"state", "loop"}',
-      '{"id", "path", "gain", "muted", "solo"}',
+      '{"id", "path", "gain", "muted", "solo", "sourceKey", "waveform"}',
       '{"format", "engine", "nodes", "connections"}',
       '{"id", "type", "typeVersion", "execution",',
       '{"inputs", "outputs"}',
@@ -192,13 +238,44 @@ describe('Electron capture addon build', () => {
 
   it('retires capture and monitoring on renderer crash, navigation and app quit', () => {
     const main = read('src/main/index.ts')
-    expect(main).toContain("sender.on('render-process-gone', gone)")
+    expect(main).toContain("sender.on('render-process-gone', detached)")
     expect(main).toContain("sender.on('did-start-navigation'")
-    expect(main).toContain('if (isMainFrame) gone()')
+    expect(main).toContain('if (isMainFrame && !inPlace) detached()')
     expect(main).toContain("ipcMain.handle('audio-host:monitor-begin'")
     expect(main).toContain("ipcMain.handle('audio-host:monitor-end'")
-    expect(main).toContain("app.on('before-quit', () => {")
-    expect(main).toContain('captureOwner.stop()')
+    const quitHandler = main.slice(main.indexOf("app.on('before-quit',"), main.indexOf("app.on('window-all-closed',"))
+    expect(quitHandler).toMatch(/app\.on\('before-quit',\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/)
+    expect(quitHandler).toContain('captureOwner.stop()')
+  })
+
+  it('binds renderer cleanup before every asynchronous audio startup', () => {
+    const main = read('src/main/index.ts')
+    for (const [channel, invocation, sender] of [
+      ["'capture:begin'", 'await captureOwner.begin(', 'e.sender'],
+      ["'audio-host:monitor-begin'", 'await captureOwner.beginMonitor(', 'event.sender'],
+      ["'audio-host:microphone-mix-configure'", 'await captureOwner.configureMicrophoneMix(', 'event.sender']
+    ]) {
+      const start = main.indexOf(channel)
+      const call = main.indexOf(invocation, start)
+      const bind = main.indexOf(`bindNativeAudioCleanup(${sender})`, start)
+      expect(start).toBeGreaterThan(0)
+      expect(bind).toBeGreaterThan(start)
+      expect(bind).toBeLessThan(call)
+    }
+  })
+
+  it('fences playback ownership across asynchronous capability discovery', () => {
+    const main = read('src/main/index.ts')
+    const start = main.indexOf("'audio-host:playback-prepare'")
+    const bind = main.indexOf('const callerIsCurrent = bindNativeAudioCleanup(event.sender)', start)
+    const lookup = main.indexOf('await captureOwner.playbackCapability()', start)
+    const fence = main.indexOf('if (!callerIsCurrent())', lookup)
+    const prepare = main.indexOf('await captureOwner.preparePlayback(', lookup)
+    expect(bind).toBeGreaterThan(start)
+    expect(bind).toBeLessThan(lookup)
+    expect(fence).toBeGreaterThan(lookup)
+    expect(fence).toBeLessThan(prepare)
+    expect(main).toContain('return () => !sender.isDestroyed() && lifetime.epoch === epoch')
   })
 
   it('keeps only the latest scalar window instead of a deep TSFN FIFO', () => {
@@ -240,6 +317,42 @@ describe('Electron capture addon build', () => {
     )
     expect(built.status).toBe(0)
     expect(built.stdout.trim()).toBe(captureSourceFingerprint(root, electronVersion))
+    // Builder (explicit target) and loader agree for both the Linux Box build,
+    // which compiles LoopZ routing, and Desktop builds, which do not.
+    const byPlatform = new Map<string, string>()
+    for (const platform of ['linux', 'darwin', 'win32'] as const) {
+      const targeted = spawnSync(
+        process.execPath,
+        [resolve(root, 'scripts/build-capture-addon.cjs'), `${platform}-${process.arch}`, '--print-source-fingerprint'],
+        { cwd: root, encoding: 'utf8' }
+      )
+      expect(targeted.status, targeted.stderr).toBe(0)
+      expect(targeted.stdout.trim()).toBe(captureSourceFingerprint(root, electronVersion, platform))
+      byPlatform.set(platform, targeted.stdout.trim())
+    }
+    expect(byPlatform.get('darwin')).toBe(byPlatform.get('win32'))
+    expect(byPlatform.get('linux')).not.toBe(byPlatform.get('darwin'))
+  })
+
+  it('requires a clean LoopZ checkout only where Box LoopZ routing is compiled', () => {
+    const gitlink = require('../../scripts/zcore-gitlink.cjs') as {
+      boxLoopzRoutingEnabled(platform: string): boolean
+      loopzFingerprintInputs(root: string, platform: string): unknown
+    }
+    // An unrelated empty directory has no LoopZ submodule (nor any Git index).
+    const missing = mkdtempSync(join(tmpdir(), 'singz-no-loopz-'))
+    try {
+      expect(gitlink.boxLoopzRoutingEnabled('linux')).toBe(true)
+      for (const platform of ['darwin', 'win32']) {
+        expect(gitlink.boxLoopzRoutingEnabled(platform)).toBe(false)
+        expect(gitlink.loopzFingerprintInputs(missing, platform)).toBeNull()
+      }
+      expect(() => gitlink.loopzFingerprintInputs(missing, 'linux')).toThrow()
+    } finally {
+      rmSync(missing, { recursive: true, force: true })
+    }
+    expect(read('scripts/build-capture-addon.cjs'))
+      .toContain("-DSINGZ_BOX_LOOPZ_ROUTING=${boxLoopzRoutingEnabled(platform) ? 'ON' : 'OFF'}")
   })
 
   it('invalidates a checksummed artifact after its bytes are corrupted', () => {
@@ -266,6 +379,9 @@ describe('Electron capture addon build', () => {
   })
 
   it('maps package flags to every requested capture target', () => {
+    expect(artifacts.requestedCaptureTargets(['--linux', '--x64'], 'linux', 'x64')).toEqual(['linux-x64'])
+    expect(artifacts.requestedCaptureTargets(['-l', '--arm64'], 'linux', 'arm64')).toEqual(['linux-arm64'])
+    expect(() => artifacts.assertHostCanBuildTarget('linux-x64', 'linux')).not.toThrow()
     expect(artifacts.requestedCaptureTargets(['--mac', '--x64'], 'darwin', 'arm64')).toEqual([
       'darwin-x64'
     ])
@@ -293,6 +409,32 @@ describe('Electron capture addon build', () => {
       'Cross-OS capture builds are not configured'
     )
     expect(() => artifacts.assertHostCanBuildTarget('darwin-x64', 'darwin')).not.toThrow()
+  })
+
+  it('validates Linux ELF identity and refuses truncated, executable, and wrong-ISA artifacts', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'singz-elf-'))
+    const addon = join(dir, 'capture.node')
+    const bytes = Buffer.alloc(64)
+    bytes.set([0x7f, 69, 76, 70, 2, 1, 1])
+    bytes.writeUInt16LE(3, 16)
+    bytes.writeUInt16LE(62, 18)
+    bytes.writeUInt32LE(1, 20)
+    bytes.writeUInt16LE(64, 52)
+    try {
+      writeFileSync(addon, bytes)
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-x64')).not.toThrow()
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-arm64')).toThrow('ELF64')
+      bytes.writeUInt16LE(183, 18)
+      writeFileSync(addon, bytes)
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-arm64')).not.toThrow()
+      bytes.writeUInt16LE(2, 16)
+      writeFileSync(addon, bytes)
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-arm64')).toThrow('ELF64')
+      writeFileSync(addon, bytes.subarray(0, 30))
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-arm64')).toThrow('ELF64')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('rejects builder target syntax the capture pipeline cannot reproduce exactly', () => {
@@ -490,9 +632,9 @@ describe('Electron capture addon build', () => {
     expect(builder).toContain('from: build/capture-package/darwin-${arch}')
     expect(builder).toContain('from: build/capture-package/win32-x64')
     expect(builder).toContain("x64ArchFiles: '**/engines/singz-capture.node'")
-    expect(builder.match(/singz-capture\.node\.source-hash/g)).toHaveLength(2)
-    expect(builder.match(/singz-capture\.node\.sha256/g)).toHaveLength(2)
-    expect(builder.match(/singz-capture\.manifest\.json/g)).toHaveLength(2)
+    expect(builder.match(/singz-capture\.node\.source-hash/g)).toHaveLength(3)
+    expect(builder.match(/singz-capture\.node\.sha256/g)).toHaveLength(3)
+    expect(builder.match(/singz-capture\.manifest\.json/g)).toHaveLength(3)
     expect(smoke).toContain('verifyCaptureArtifact({')
     expect(smoke).toContain('expectedSourceStamp: expectsCurrentSource ? sourceFingerprint() : undefined')
     expect(smoke).toContain("assert.equal(addon.buildInfo.sourceStamp, manifest.sourceStamp")
@@ -509,7 +651,7 @@ describe('Electron capture addon build', () => {
     expect(smoke).toContain("capability: 'singz.native.playback-session.unknown.v99'")
     expect(smoke).toContain("Object.entries(strictPlaybackConfig).filter(([name]) => name !== 'capability')")
     expect(smoke).toContain("assert.equal(hostDevices.provider, expectedProvider)")
-    expect(smoke).toContain("assert.equal(device.accessMode, 'shared')")
+    expect(smoke).toContain("assert.equal(device.accessMode, process.platform === 'linux' ? 'exclusive' : 'shared')")
     expect(packageJson.scripts['capture:verify']).toContain('--current-source')
     expect(read('tests/e2e/capture-addon-hardware.cjs')).toContain(
       'expectedSourceStamp: sourceFingerprint()'
@@ -744,14 +886,15 @@ describe('Electron capture addon build', () => {
     }
   )
 
-  it('keys temporary CMake caches by the full checkout path', () => {
+  it('keeps producer CMake state under this checkout for compiler-cache reuse', () => {
     for (const path of [
       'scripts/build-analyze-host.sh',
       'scripts/run-core-host-tests.sh',
       'scripts/vendor-analyze.sh'
     ]) {
       const script = read(path)
-      expect(script).toContain('git -C "$ROOT" hash-object --stdin | cut -c1-12')
+      expect(script).toContain('$ROOT/build/native/')
+      expect(script).not.toContain('CHECKOUT_KEY=')
       expect(script).not.toContain('$(basename "$ROOT")')
     }
   })

@@ -51,7 +51,8 @@ export function mobileTrainingTargetCue(kind: string, midi: number): VocalTraini
 /** Give every audible reference event two seconds on the listening counter.
  * A simultaneous chord is one event; sequential notes are counted one by one.
  * Single-note practice keeps its established three-second countdown. */
-export function mobileTrainingCountdownSeconds(cues: readonly VocalTrainingCue[]): number {
+export function mobileTrainingCountdownSeconds(cues: readonly VocalTrainingCue[], kind?: string): number {
+  if (kind === 'melody') return 0 // The scheduled audio clock owns the listening phase.
   const events = cues.reduce(
     (total, cue) => total + (cue.articulation === 'sequence' ? cue.notes.length : 1),
     0

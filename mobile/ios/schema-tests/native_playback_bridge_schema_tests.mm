@@ -322,6 +322,68 @@ void testPlaybackStreamLanesSchema() {
   CHECK(!SingzParsePlaybackPrepare(bad, &parsed, &error));
 }
 
+void testPlaybackWaveformSeedSchema() {
+  NSMutableArray *peaks = [NSMutableArray arrayWithCapacity:96];
+  for (NSUInteger index = 0; index < 96; ++index)
+    [peaks addObject:@(index == 0 ? 0.25 : 0.5)];
+  NSDictionary *seed = @{
+    @"version" : @1,
+    @"policy" : @"singz.native.streaming-envelope.rms96-v1",
+    @"sourceMd5" : @"0123456789abcdef0123456789abcdef",
+    @"bucketCount" : @96,
+    @"peaks" : peaks,
+  };
+  NSMutableDictionary *lane = [((NSArray *)validRequest()[@"lanes"]).firstObject mutableCopy];
+  lane[@"contentMd5"] = @"0123456789abcdef0123456789abcdef";
+  lane[@"waveform"] = seed;
+  NSMutableDictionary *request = [validRequest() mutableCopy];
+  request[@"lanes"] = @[ lane ];
+  SingzParsedPlaybackPrepare parsed;
+  NSString *error = nil;
+  CHECK(SingzParsePlaybackPrepare(request, &parsed, &error));
+  CHECK(parsed.lanes.size() == 1 &&
+        parsed.lanes[0].contentMd5 == "0123456789abcdef0123456789abcdef" &&
+        parsed.lanes[0].waveform.has_value());
+  CHECK(parsed.lanes[0].waveform->contentKey ==
+            "md5:0123456789abcdef0123456789abcdef" &&
+        parsed.lanes[0].waveform->peaks[0] == 0.25F &&
+        parsed.lanes[0].waveform->peaks[95] == 0.5F);
+
+  NSMutableArray *nonfinite = [peaks mutableCopy];
+  nonfinite[47] = @(std::numeric_limits<double>::quiet_NaN());
+  NSArray *invalidSeeds = @[
+    replacingObjectKey(seed, @"version", @2),
+    replacingObjectKey(seed, @"policy", @"other-policy"),
+    replacingObjectKey(seed, @"sourceMd5", @"fedcba9876543210fedcba9876543210"),
+    replacingObjectKey(seed, @"bucketCount", @95),
+    replacingObjectKey(seed, @"peaks", @[]),
+    replacingObjectKey(seed, @"peaks", nonfinite),
+    replacingObjectKey(seed, @"extra", @YES),
+  ];
+  for (NSDictionary *invalid in invalidSeeds) {
+    NSMutableDictionary *candidateLane = [lane mutableCopy];
+    candidateLane[@"waveform"] = invalid;
+    request[@"lanes"] = @[ candidateLane ];
+    // A corrupt advisory seed must not prevent playback; it selects measurement.
+    CHECK(SingzParsePlaybackPrepare(request, &parsed, &error));
+    CHECK(!parsed.lanes[0].waveform.has_value());
+  }
+  NSMutableArray *outOfRange = [peaks mutableCopy];
+  outOfRange[47] = @1.01;
+  NSMutableDictionary *candidateLane = [lane mutableCopy];
+  candidateLane[@"waveform"] = replacingObjectKey(seed, @"peaks", outOfRange);
+  request[@"lanes"] = @[ candidateLane ];
+  CHECK(SingzParsePlaybackPrepare(request, &parsed, &error));
+  CHECK(!parsed.lanes[0].waveform.has_value());
+
+  candidateLane = [lane mutableCopy];
+  candidateLane[@"contentMd5"] = @"0123456789ABCDEF0123456789ABCDEF";
+  request[@"lanes"] = @[ candidateLane ];
+  CHECK(SingzParsePlaybackPrepare(request, &parsed, &error));
+  CHECK(parsed.lanes[0].contentMd5.empty() &&
+        !parsed.lanes[0].waveform.has_value());
+}
+
 void testWhatTheSchemaLeavesToTheCore() {
   NSMutableDictionary *duplicated = [validRequest() mutableCopy];
   NSDictionary *lane = @{
@@ -1500,6 +1562,7 @@ int main() {
     testPlaybackPreviewClickSchema();
     testPlaybackTransportCommandSchema();
     testPlaybackStreamLanesSchema();
+    testPlaybackWaveformSeedSchema();
     uint64_t generation = 0;
     CHECK(SingzParsePlaybackGeneration(@1, &generation) && generation == 1);
     for (id invalid in @[ @YES, @1.5, @0, @(-1), @"1", NSNull.null ]) {

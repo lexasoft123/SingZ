@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': '正在检查…',
+  'phone.library.openingConnect': '正在连接…',
+  'phone.library.openingDownload': '正在下载…',
+  'phone.library.openingVerify': '正在验证下载…',
+  'phone.library.openingRetry': '正在重试…',
   // ── add-song errors ──
   'phone.library.pickFailed': '无法打开该文件（{msg}）',
   'phone.library.folderInactive': '所选文件夹已失效。请重新打开它并重试。',
@@ -23,6 +28,16 @@ export const library: Translation<typeof en> = {
   // ── opening a song ──
   'phone.library.opening': '正在打开…',
   'phone.library.decoding': '正在解码 {id} · {i}/{n}',
+  'phone.library.downloadChecking': "检查已保存的{label} · {index}/{count}",
+  'phone.library.downloadTrack': "下载{label} · {index}/{count}",
+  'phone.library.downloadVerifying': "验证{label} · {index}/{count}",
+  'phone.library.downloadRetrying': "重试{label} · 第{attempt}/{attempts}次",
+  'phone.library.downloadInterrupted': "连接中断。已下载的音轨已保留。点按重试以继续。",
+  'phone.library.downloadMissing': "Drive 中缺少此音轨。请从电脑重新同步歌曲。",
+  'phone.library.downloadDenied': "Drive 拒绝访问此音轨。请检查登录状态后重试。",
+  'phone.library.downloadStorage': "无法保存此音轨。请检查手机的可用空间。",
+  'phone.library.downloadRetry': "重试",
+  'phone.library.downloadDamaged': "音轨下载不完整或已损坏。已下载的其他音轨已保留。请重试。",
   'phone.library.fetchingStep': '正在获取 {id} · {i}/{n}',
   'phone.library.decodingStep': '正在解码 {id} · {i}/{n}',
   'phone.library.lyricsStep': '歌词…',

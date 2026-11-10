@@ -15,7 +15,7 @@ import type { en } from './en'
 
 export type Key = keyof typeof en
 
-const DICTS: Record<Locale, Record<string, string>> = { en: {}, ru: {}, 'zh-CN': {}, hi: {}, 'ja': {}, 'ko': {}, 'th': {}, 'id': {}, 'vi': {}, 'fil': {}, 'ms': {}, 'zh-TW': {}, tr: {} }
+const DICTS: Record<Locale, Record<string, string>> = { en: {}, ru: {}, 'zh-CN': {}, hi: {}, 'ja': {}, 'ko': {}, 'th': {}, 'id': {}, 'vi': {}, 'fil': {}, 'ms': {}, 'zh-TW': {}, tr: {}, 'es-419': {}, 'pt-BR': {} }
 
 export function register(locale: Locale, dict: Record<string, string>): void {
   Object.assign(DICTS[locale], dict)

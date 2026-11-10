@@ -1,1 +1,1 @@
-Simpan volume per lagu, tingkatkan hingga +12 dB, dan pantau clipping. Periksa pengaturan sebelum latihan, lalu kembali ke halaman latihan setelah selesai. Pustaka Drive diperbarui tanpa mengganggu tampilan. Sembilan bahasa antarmuka baru dan perbaikan kontrol yang terpotong.
+Pemuatan lagu lebih andal: unduhan menampilkan byte dan kecepatan, mencoba lagi saat terjadi gangguan sementara, dan pemuatan yang macet dapat dibatalkan. File cache yang sudah lengkap dapat dipakai saat mencoba lagi. Ikon Pengaturan dan Log lebih ringkas.

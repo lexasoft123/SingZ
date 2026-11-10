@@ -1,1 +1,1 @@
-Lưu âm lượng riêng cho từng bài, tăng tối đa +12 dB và theo dõi cắt ngọn. Kiểm tra cài đặt trước khi luyện tập và trở về trang luyện tập khi kết thúc. Thư viện Drive làm mới mà không đổi màn hình. Thêm chín ngôn ngữ giao diện và sửa các nút bị cắt.
+Tải bài hát ổn định hơn: hiển thị số byte và tốc độ, tự thử lại khi có lỗi tạm thời và cho phép hủy khi bị kẹt. Khi thử lại, các tệp đã tải xong trong bộ nhớ đệm có thể được dùng lại. Biểu tượng Cài đặt và Nhật ký gọn hơn, giúp phần đầu màn hình thoáng hơn.

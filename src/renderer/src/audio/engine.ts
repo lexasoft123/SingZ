@@ -1,4 +1,5 @@
 import { sanitizeSongVolume } from './song-volume'
+import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
 import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch'
 import {
@@ -16,7 +17,8 @@ import type {
   DesktopNativeRecoveryErrorCode
 } from './desktop-native-playback'
 import type { DesktopNativePlaybackEngineRequest } from './desktop-native-playback'
-import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './native-playback-preference'
+import type { AcceptedControlHost } from './accepted-controls'
+import { desktopNativePlaybackPreferred, detectedDesktopPlatform, type DesktopNativePlaybackPolicy } from './native-playback-preference'
 import type { DesktopPlaybackProvider, DesktopPlaybackStatus } from '../../../shared/types'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 import { t } from '../i18n'
@@ -100,13 +102,14 @@ const SEC_COUNT_PERIOD = 1
  * ramps so toggling mid-playback is click-free.
  */
 export class MultitrackEngine {
-  private ctx = new AudioContext({ latencyHint: 'interactive' })
+  private ctx: AudioContext
   private desiredOutputId = ''
   private trainingConfiguredOutputId: string | null = null
   private confirmedOutputId = ''
   private outputRouteVersion = 0
   private outputRouteApplyPending: Promise<void> | null = null
   private nativeMonitorLease = false
+  private headphoneMonitorLease = false
   private nativePlayback: DesktopNativePlaybackClient | null = null
   /** The prepare-ahead debounce: the loader and the settings that follow a
    * load (grid, metronome, transpose, tempo, training, region, faders) each
@@ -132,8 +135,9 @@ export class MultitrackEngine {
   /** Full verified JS document. Opaque state remains here; the native facade
    * creates the bounded projection immediately before each prepare/rebuild. */
   private graphDocument: ParsedGraphDocument | null = null
-  private master = this.ctx.createGain()
-  private outputBus = this.ctx.createGain()
+  private retainedProjectIdentity: { dir: string; songPath: string } | null = null
+  private master: GainNode
+  private outputBus: GainNode
   // Keep channels separate: a mono analyser would hide opposite-phase peaks.
   private outputMeterSplit: ChannelSplitterNode | null = null
   private outputMeters: AnalyserNode[] = []
@@ -175,9 +179,9 @@ export class MultitrackEngine {
   private trainTimer: ReturnType<typeof setInterval> | null = null
   private beatsInfo: BeatInfo | null = null
   private met: MetronomeConfig = { ...MET_DEFAULTS }
-  private clickGain = this.ctx.createGain()
+  private clickGain: GainNode
   /** Exercise cues bypass pitch/stretch processing but follow the user's master volume. */
-  private trainingGain = this.ctx.createGain()
+  private trainingGain: GainNode
   private trainingCues: DesktopTrainingCueController | null = null
   /** Output level for everything the singer hears, mix and click alike. */
   private masterVol = 1
@@ -198,7 +202,16 @@ export class MultitrackEngine {
 
   duration = 0
 
-  constructor() {
+  constructor(private readonly nativePlaybackPolicy: DesktopNativePlaybackPolicy = {}) {
+    // Boot inventory must precede Chromium claiming an exclusive endpoint.
+    // Each surface reconciles its native, browser, or default route afterward.
+    this.ctx = new AudioContext({
+      latencyHint: 'interactive', sinkId: { type: 'none' }
+    } as AudioContextOptions)
+    this.master = this.ctx.createGain()
+    this.outputBus = this.ctx.createGain()
+    this.clickGain = this.ctx.createGain()
+    this.trainingGain = this.ctx.createGain()
     this.master.connect(this.outputBus)
     this.outputBus.connect(this.ctx.destination)
     // Clicks bypass the master bus: transpose/tempo correction and stem
@@ -214,6 +227,27 @@ export class MultitrackEngine {
    * Playing, and the core refuses resume() from there: park the renderer at
    * the end and hand the core a Pause, so the next Play seeks and resumes. */
   private onNativeStatus(status: DesktopPlaybackStatus | null): void {
+    if (status && (status.state === 'terminal' || status.state === 'quarantined') &&
+        this._playing && this.nativePlayback?.active) {
+      const frame = Number(status.audibleProjectionQuality === 'current'
+        ? status.audibleProjectFrame : status.renderedProjectFrame)
+      if (Number.isFinite(frame)) this.startOffset = Math.max(0, Math.min(this.duration,
+        frame / (status.format.sampleRate || this.ctx.sampleRate)))
+      this._playing = false
+      this.cancelPendingClicks()
+      this.countInfo = null
+      this.nextClickIdx = null
+      this.startBeatIdx = null
+      this.syncBoundWatcher()
+      this.syncTrainWatcher()
+      this.syncClickWatcher()
+      const message = status.error || (Number(status.xruns) > 0
+        ? 'Audio playback stopped after a buffer underrun. Press Play to retry.'
+        : `Audio playback stopped (${status.terminalReason || status.hostState}). Press Play to retry.`)
+      this.requestedPlaybackError = { reason: 'toggle', code: 'provider-failure',
+        provider: this.nativePlayback.recoveryProviderId, message, cause: status }
+      console.error('Native playback stopped:', message)
+    }
     if (status?.transportState === 'completed' && this._playing && this.nativePlayback?.active) {
       this._playing = false
       this.startOffset = this.duration
@@ -226,13 +260,13 @@ export class MultitrackEngine {
     this.emit()
   }
 
-  /** Bumps on every load() and on retireForSongSwitch(). The renderer's
+  /** Bumps on every load(), retained attach and retireForSongSwitch(). The renderer's
    * rollbacks compare it, so a native mutation issued for the song being
    * left can never restore that song's grid, region or training into the
-   * next one — the cross-song contamination class CLAUDE.md records. */
+   * next one — the cross-song contamination class docs/PROJECT-RULES.md records. */
   private _songEpoch = 0
-  /** True from retireForSongSwitch() until the next load(): the tracks on
-   *  hand belong to the song being left. See both for why. */
+  /** True from retireForSongSwitch() until the next load() or retained attach:
+   *  the tracks on hand belong to the song being left. See both for why. */
   private betweenSongs = false
   get songEpoch(): number {
     return this._songEpoch
@@ -262,6 +296,81 @@ export class MultitrackEngine {
     if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead) this.beginNativePlaybackUnload()
   }
 
+  setRetainedProjectIdentity(identity: { dir: string; songPath: string } | null): void {
+    this.retainedProjectIdentity = identity ? { ...identity } : null
+  }
+
+  async attachRetained(
+    graphDocument: ParsedGraphDocument | null,
+    confirm: () => Promise<BoxRetainedPlaybackRecovery | null>,
+    commit: () => void
+  ): Promise<boolean> {
+    if (this.teardownStarted) return false
+    if (this.tracks.length > 0 || this._playing || this.pendingPlayRequests.size > 0 ||
+        this.nativePlaybackUnload || this.nativePlayback?.active ||
+        this.nativePlayback?.preparedAhead || this.nativePlayback?.recoveryPending) {
+      throw new Error('Retained playback needs a fresh audio engine.')
+    }
+    const generation = ++this.generation
+    this.playRequestEpoch++
+    this.aheadEpoch++
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    const module = await this.ensureNativePlayback()
+    if (this.teardownStarted || generation !== this.generation) return false
+    const recovery = await confirm()
+    if (!recovery) return false
+    if (this.teardownStarted || generation !== this.generation) return false
+    const request = module.client.attachRetained(recovery, graphDocument)
+    for (const track of this.tracks) track.gain.disconnect()
+    this.tracks = request.lanes.map(lane => {
+      const gain = this.ctx.createGain()
+      gain.connect(this.master)
+      return {
+        id: lane.id,
+        buffer: null,
+        duration: request.durationSeconds,
+        path: lane.path,
+        gain,
+        volume: lane.gain,
+        muted: lane.muted,
+        solo: lane.solo
+      }
+    })
+    this.duration = request.durationSeconds
+    this.startOffset = request.positionSeconds
+    this.graphDocument = graphDocument
+    this.retainedProjectIdentity = request.retainedProject ?? null
+    this.masterVol = request.masterGain
+    this.semitones = request.transpose
+    this.rate = request.playbackRate
+    this.beatsInfo = request.beat
+    this.met = { ...request.metronome }
+    this.training = request.training
+    this.region = request.loop ? { ...request.loop } : null
+    this.regionLoop = request.loop !== null
+    if (request.browserOutputId !== undefined) {
+      this.desiredOutputId = request.browserOutputId
+      this.confirmedOutputId = request.browserOutputId
+      this.outputRouteVersion++
+    }
+    this.master.gain.value = this.masterVol
+    this.clickGain.gain.value = this.met.volume * this.masterVol
+    this.trainingGain.gain.value = this.masterVol
+    this._playing = recovery.status.transportState === 'playing' || recovery.status.transportState === 'pre-roll'
+    this._songEpoch++
+    this.betweenSongs = false
+    this.ducked.clear()
+    this.clearRequestedPlaybackError()
+    this.applyGains(true)
+    commit()
+    this.syncBoundWatcher()
+    this.syncTrainWatcher()
+    this.trainTick()
+    this.emit()
+    return true
+  }
+
   /** The engine's request for the native graph, as Play builds it. The
    * position is the remembered start unless a caller names another — the
    * count-in restart names the spot the transport is parked at. */
@@ -284,7 +393,10 @@ export class MultitrackEngine {
       training: this.training,
       loop: this.regionLoop ? this.region : null,
       nativeAudioProvider: this.nativeAudioProvider,
-      graphDocument: this.graphDocument
+      graphDocument: this.graphDocument,
+      ...(this.retainedProjectIdentity ? { retainedProject: { ...this.retainedProjectIdentity } } : {}),
+      nativePlaybackEnabled: this.nativePlaybackPolicy.playback,
+      streamLanes: this.nativePlaybackPolicy.streamLanes
     }
   }
 
@@ -298,7 +410,7 @@ export class MultitrackEngine {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
-        !this.aheadAllowed || this.betweenSongs) return
+        !this.aheadAllowed || this.betweenSongs || this.headphoneMonitorLease) return
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null
       void this.prepareNativeAhead().catch((error) => {
@@ -309,14 +421,14 @@ export class MultitrackEngine {
 
   private async prepareNativeAhead(): Promise<void> {
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
-        this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs) return
-    if (!desktopNativePlaybackPreferred()) return
+        this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs || this.headphoneMonitorLease) return
+    if (!desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback)) return
     const epoch = this._songEpoch
     const ahead = this.aheadEpoch
     const stale = (): boolean =>
       epoch !== this._songEpoch || ahead !== this.aheadEpoch || this._playing ||
       this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.teardownStarted ||
-      this.betweenSongs
+      this.betweenSongs || this.headphoneMonitorLease
     const module = await this.ensureNativePlayback()
     if (stale() || module.client.active || module.client.recoveryPending) return
     if (module.client.preparedAhead) await module.client.discardAhead()
@@ -360,7 +472,11 @@ export class MultitrackEngine {
     this.nativePlayback ??= new module.DesktopNativePlaybackClient(
       {
         releaseLegacyOutput: () => this.releaseOutputForNativeMonitor(),
-        restoreLegacyOutput: () => this.restoreOutputAfterNativeMonitor()
+        restoreLegacyOutput: async () => {
+          // Monitoring takes over the silent renderer lease while the song
+          // graph retires. Only the monitor coordinator may restore it then.
+          if (!this.headphoneMonitorLease) await this.restoreOutputAfterNativeMonitor()
+        }
       },
       (status) => this.onNativeStatus(status)
     )
@@ -492,6 +608,35 @@ export class MultitrackEngine {
     return operation
   }
 
+  /** Closing the TV retires this UI, not its independently owned song.
+   * Already admitted plays/mutations settle before the native facade detaches;
+   * no public pause, unload or browser-output restoration is issued here. */
+  detachPersistentPlayback(): Promise<void> {
+    if (window.singz.boxAudioPersistent !== true) return Promise.reject(new Error('Persistent Box audio is not configured.'))
+    if (this.teardownPending) return this.teardownPending
+    this.teardownStarted = true
+    this.aheadAllowed = false
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    const operation = (async () => {
+      // Do not revoke generation before accepted native Play has drained: its
+      // supersession cleanup would unload the very song being preserved.
+      await Promise.allSettled([...this.pendingPlayRequests])
+      if (this.nativePlaybackUnload) await this.nativePlaybackUnload
+      await this.nativePlayback?.detachPersistentPlayback()
+      this.playRequestEpoch++
+      this.stopTransportForTeardown()
+      this.listeners.clear()
+    })()
+    this.teardownPending = operation
+    // As in teardown(): a failed detach must stay retryable rather than make
+    // every later detach or teardown replay the same rejection.
+    void operation.catch(() => {
+      if (this.teardownPending === operation) this.teardownPending = null
+    })
+    return operation
+  }
+
   subscribe(fn: () => void): () => void {
     this.listeners.add(fn)
     return () => {
@@ -521,7 +666,7 @@ export class MultitrackEngine {
         ? candidate.code as EnginePlaybackErrorCode
         : 'playback-failure'
       const provider = candidate?.provider === 'asio' || candidate?.provider === 'wasapi' ||
-        candidate?.provider === 'coreaudio'
+        candidate?.provider === 'coreaudio' || candidate?.provider === 'alsa'
         ? candidate.provider
         : null
       const message = cause instanceof Error ? cause.message : String(cause)
@@ -583,12 +728,15 @@ export class MultitrackEngine {
   }
 
   private async configureTrainingOutput(): Promise<void> {
-    const provider: DesktopPlaybackProvider = detectedDesktopPlatform() === 'win32' ? this.nativeAudioProvider : 'coreaudio'
+    const platform = detectedDesktopPlatform()
+    const provider: DesktopPlaybackProvider = platform === 'win32' ? this.nativeAudioProvider : platform === 'linux' ? 'alsa' : 'coreaudio'
     const routeKey = `${provider}:${this.desiredOutputId}`
     if (this.nativePlayback?.active || this.trainingConfiguredOutputId === routeKey) return
     const requested = this.desiredOutputId
     let uid = ''
-    if (requested && requested !== 'default') {
+    if (provider === 'alsa' && requested.startsWith('native:')) {
+      uid = requested.slice(7)
+    } else if (requested && requested !== 'default') {
       const inventory = await window.singz.audioHostDevices(provider)
       if (!inventory.ok) throw new Error(inventory.error)
       const outputs = await navigator.mediaDevices.enumerateDevices()
@@ -631,7 +779,7 @@ export class MultitrackEngine {
     // restoration, but never let Chromium reacquire a device underneath it.
     if (this.nativeMonitorLease) return
     await this.applyDesiredOutputRoute()
-    await this.configureTrainingOutput()
+    if (detectedDesktopPlatform() !== 'linux' || deviceId.startsWith('native:')) await this.configureTrainingOutput()
     if (this._playing && this.ctx.state !== 'running') await this.ctx.resume()
   }
 
@@ -644,14 +792,18 @@ export class MultitrackEngine {
         const version = this.outputRouteVersion
         const target = this.desiredOutputId
         try {
-          if (this.ctx.sinkId !== target) await this.ctx.setSinkId(target)
+          if (target.startsWith('native:')) {
+            await (this.ctx.setSinkId as unknown as (sink: { type: 'none' }) => Promise<void>)({ type: 'none' })
+          } else if (this.ctx.sinkId !== target) await this.ctx.setSinkId(target)
         } catch (error) {
           if (version !== this.outputRouteVersion) continue
           this.desiredOutputId = this.confirmedOutputId
           this.outputRouteVersion++
           const fallbackVersion = this.outputRouteVersion
           if (this.ctx.sinkId !== this.confirmedOutputId) {
-            await this.ctx.setSinkId(this.confirmedOutputId)
+            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(
+              this.confirmedOutputId.startsWith('native:') ? { type: 'none' } : this.confirmedOutputId
+            )
           }
           if (fallbackVersion !== this.outputRouteVersion) continue
           throw error
@@ -671,6 +823,36 @@ export class MultitrackEngine {
 
   /** Pause/suspend and detach Chromium's destination before the native host
    * opens it. The silent sink is an explicit device release, not a mute. */
+  async releaseOutputForHeadphoneMonitor(): Promise<void> {
+    this.headphoneMonitorLease = true
+    const position = this.position
+    if (this.nativePlayback?.active) {
+      // Unload serializes behind the coordinator's pause and stops the host;
+      // do not enqueue a second pause against an already parked transport.
+      this.generation++
+      this._playing = false
+    } else this.pause()
+    try {
+      await Promise.allSettled([...this.pendingPlayRequests])
+      await this.discardNativeAhead()
+      this.beginNativePlaybackUnload()
+      await this.settleNativePlaybackUnload()
+      this.startOffset = position
+      this._playing = false
+      await this.releaseOutputForNativeMonitor()
+    } catch (error) {
+      // A failed native cleanup retains its own existing recovery owner;
+      // do not claim a second, invisible headphone-monitor owner.
+      this.headphoneMonitorLease = false
+      throw error
+    }
+  }
+
+  async restoreOutputAfterHeadphoneMonitor(): Promise<void> {
+    await this.restoreOutputAfterNativeMonitor()
+    this.headphoneMonitorLease = false
+  }
+
   async releaseOutputForNativeMonitor(): Promise<void> {
     if (this.nativeMonitorLease) return
     this.nativeMonitorLease = true
@@ -870,8 +1052,10 @@ export class MultitrackEngine {
   setMasterVolume(v: number): void {
     this.scheduleNativePrepareAhead()
     const target = sanitizeSongVolume(v)
+    const epoch = this._songEpoch
     if (this.nativePlayback?.active) {
       void this.nativePlayback.setMasterGain(target).then(() => {
+        if (epoch !== this._songEpoch) return
         this.masterVol = target
         this.trainingCues?.setOutputGain(target)
         this.master.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
@@ -887,6 +1071,11 @@ export class MultitrackEngine {
     this.clickGain.gain.setTargetAtTime(this.met.volume * this.masterVol, this.ctx.currentTime, 0.02)
     this.trainingGain.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)
     this.emit()
+  }
+
+  async setMasterVolumeAccepted(v: number): Promise<void> {
+    const { setMasterVolumeAccepted } = await import('./accepted-controls')
+    return setMasterVolumeAccepted(this.acceptedControlHost(), sanitizeSongVolume(v))
   }
 
   async setMetronome(m: MetronomeConfig): Promise<void> {
@@ -1556,12 +1745,26 @@ export class MultitrackEngine {
     else this.scheduleNativePrepareAhead()
   }
 
+  get starting(): boolean { return this.pendingPlayRequests.size > 0 && !this._playing }
+
+  /** Confirm command acceptance without waiting for the native render snapshot. */
+  async playAccepted(): Promise<void> {
+    const operation = this.play()
+    const generation = this.generation
+    await operation
+    if (this.teardownStarted || generation !== this.generation || !this._playing) {
+      throw new Error('Playback was superseded.')
+    }
+  }
+
   play(opts: { countIn?: boolean } = {}): Promise<void> {
     if (this.teardownStarted) return Promise.resolve()
     const operation = this.performPlay(opts)
     this.pendingPlayRequests.add(operation)
+    this.emit()
     return operation.finally(() => {
       this.pendingPlayRequests.delete(operation)
+      if (!this.teardownStarted) this.emit()
     })
   }
 
@@ -1706,6 +1909,12 @@ export class MultitrackEngine {
         'The retained native provider cannot retry with the current runtime, toggle, or graph.'
       )
     }
+    if (this.nativePlaybackPolicy.requireNative) {
+      throw new Error(t('box.nativeRequired'))
+    }
+    if (this.desiredOutputId.startsWith('native:')) {
+      throw new Error('This ALSA output needs native playback. Enable it in Settings and use a supported audio format.')
+    }
 
     // Native declined, so Web Audio is about to do the playing — and it can
     // only do it from samples. A lane released to an earlier native
@@ -1718,7 +1927,8 @@ export class MultitrackEngine {
     }
     if (requestGeneration !== this.generation) return
 
-    const gen = ++this.generation
+    // The last await still belongs to this request; its source callbacks do too.
+    const gen = requestGeneration
     let when = this.ctx.currentTime + START_DELAY
     // Metronome pipeline. A count-in pushes the music start out and clicks
     // through the beats leading up to it — real preceding beats when they
@@ -1816,6 +2026,10 @@ export class MultitrackEngine {
   }
 
   pause(): void {
+    void this.pauseAccepted().catch(error => console.error('Native pause failed:', error))
+  }
+
+  pauseAccepted(): Promise<void> {
     // A play request can be awaiting AudioContext.resume() without having
     // created sources or set _playing yet. Pausing still revokes that request.
     this.generation++
@@ -1830,9 +2044,9 @@ export class MultitrackEngine {
         this.syncBoundWatcher()
         this.syncTrainWatcher()
         this.emit()
-        return
+        return Promise.resolve()
       }
-      void this.nativePlayback.pause().then(() => {
+      return this.nativePlayback.pause().then(() => {
         this._playing = false
         // Remember where it parked, as the Web Audio path does: the position
         // a Play after this counts in to, and what the song reopens at once
@@ -1842,10 +2056,9 @@ export class MultitrackEngine {
         this.syncBoundWatcher()
         this.syncTrainWatcher()
         this.emit()
-      }).catch((error) => console.error('Native pause failed:', error))
-      return
+      })
     }
-    if (!this._playing) return
+    if (!this._playing) return Promise.resolve()
     this.startOffset = this.position
     this._playing = false
     this.stopSources()
@@ -1857,6 +2070,7 @@ export class MultitrackEngine {
     this.syncTrainWatcher()
     this.syncClickWatcher()
     this.emit()
+    return Promise.resolve()
   }
 
   toggle(): void {
@@ -1933,10 +2147,12 @@ export class MultitrackEngine {
 
   setMuted(id: string, muted: boolean): void {
     this.scheduleNativePrepareAhead()
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find((track) => track.id === id)
     if (!t) return
+    const epoch = this._songEpoch
     if (this.nativePlayback?.active) {
       void this.nativePlayback.updateLane(t.id, { muted }).then((accepted) => {
+        if (epoch !== this._songEpoch) return
         t.volume = accepted.gain
         t.muted = accepted.muted
         t.solo = accepted.solo
@@ -1952,10 +2168,12 @@ export class MultitrackEngine {
 
   setSolo(id: string, solo: boolean): void {
     this.scheduleNativePrepareAhead()
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find((track) => track.id === id)
     if (!t) return
+    const epoch = this._songEpoch
     if (this.nativePlayback?.active) {
       void this.nativePlayback.updateLane(t.id, { solo }).then((accepted) => {
+        if (epoch !== this._songEpoch) return
         t.volume = accepted.gain
         t.muted = accepted.muted
         t.solo = accepted.solo
@@ -1971,11 +2189,13 @@ export class MultitrackEngine {
 
   setVolume(id: string, volume: number): void {
     this.scheduleNativePrepareAhead()
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find((track) => track.id === id)
     if (!t) return
     const target = Math.max(0, Math.min(1, volume))
+    const epoch = this._songEpoch
     if (this.nativePlayback?.active) {
       void this.nativePlayback.updateLane(t.id, { gain: target }).then((accepted) => {
+        if (epoch !== this._songEpoch) return
         t.volume = accepted.gain
         t.muted = accepted.muted
         t.solo = accepted.solo
@@ -1987,6 +2207,47 @@ export class MultitrackEngine {
     t.volume = target
     this.applyGains()
     this.emit()
+  }
+
+  setMutedAccepted(id: string, muted: boolean): Promise<void> {
+    return this.setLaneAccepted(id, { muted })
+  }
+
+  setSoloAccepted(id: string, solo: boolean): Promise<void> {
+    return this.setLaneAccepted(id, { solo })
+  }
+
+  setVolumeAccepted(id: string, volume: number): Promise<void> {
+    return this.setLaneAccepted(id, { gain: Math.max(0, Math.min(1, volume)) })
+  }
+
+  private async setLaneAccepted(id: string, patch: { gain?: number; muted?: boolean; solo?: boolean }): Promise<void> {
+    const { setLaneAccepted } = await import('./accepted-controls')
+    return setLaneAccepted(this.acceptedControlHost(), id, patch)
+  }
+
+  private acceptedControlHost(): AcceptedControlHost {
+    return {
+      schedule: () => this.scheduleNativePrepareAhead(),
+      epoch: () => this._songEpoch,
+      native: () => this.nativePlayback,
+      lane: id => this.tracks.find(track => track.id === id),
+      applyLane: (track, accepted) => {
+        track.volume = accepted.gain
+        track.muted = accepted.muted
+        track.solo = accepted.solo
+        this.applyGains()
+        this.emit()
+      },
+      applyMaster: target => {
+        this.masterVol = target
+        this.trainingCues?.setOutputGain(target)
+        this.master.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
+        this.clickGain.gain.setTargetAtTime(this.met.volume * target, this.ctx.currentTime, 0.02)
+        this.trainingGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
+        this.emit()
+      }
+    }
   }
 
   private applyGains(instant = false): void {

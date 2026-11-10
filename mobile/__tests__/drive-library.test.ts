@@ -223,6 +223,21 @@ describe('a song on the phone', () => {
     expect(native.read('Song One', 'stems/vocals.flac')).toEqual(vocals.bytes)
   })
 
+  it('keeps completed tracks after a final-track failure and only downloads the missing track on retry', async () => {
+    const g = boot()
+    const entries = await g.driveListProjects()
+    const song = entries.find(p => p.dir === 'Song Two')!
+    const backing = drive.projects.get('Song Two')!.stems.get('custom-harmony.mp3')!
+    store.faults.push({ match: new RegExp(`GET /drive/v3/files/${backing.id}$`), status: 503, times: Infinity })
+    const { loadProject } = require('../src/projects') as typeof import('../src/projects')
+    await expect(loadProject(song, 48000, () => {})).rejects.toThrow(/Downloaded tracks are kept/)
+    expect(native.downloads).toHaveLength(6)
+    native.downloads.length = 0
+    store.faults.length = 0
+    await loadProject(song, 48000, () => {})
+    expect(native.downloads).toEqual(['Song Two/stems/custom-harmony.mp3'])
+  })
+
   it('refuses bytes that are not what the doc asked for', async () => {
     const g = boot()
     const one = drive.projects.get('Song One')!

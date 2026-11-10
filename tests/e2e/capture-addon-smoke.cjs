@@ -2,8 +2,18 @@
 // exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
 require('../shared/watchdog.cjs').arm('capture-addon-smoke')
 
-const { app } = require('electron')
 const assert = require('node:assert/strict')
+const electronNodeMode = process.env.ELECTRON_RUN_AS_NODE === '1'
+assert.ok(process.versions.electron, 'smoke test must use the Electron runtime')
+const app = electronNodeMode ? null : require('electron').app
+function finish(code = 0) {
+  if (app) {
+    if (code) app.exit(code)
+    else app.quit()
+  } else {
+    process.exit(code)
+  }
+}
 const { unlinkSync, writeFileSync } = require('node:fs')
 const { tmpdir } = require('node:os')
 const { join, resolve } = require('node:path')
@@ -37,9 +47,10 @@ function writeSilentPcm16Wav(path, frames = 512) {
 }
 
 process.env.SINGZ_MUTE = '1'
-app.commandLine.appendSwitch('mute-audio')
+app?.commandLine.appendSwitch('mute-audio')
 
-app.whenReady().then(async () => {
+const ready = app ? app.whenReady() : Promise.resolve()
+ready.then(async () => {
   const target = `${process.platform}-${process.arch}`
   const requested = process.argv.slice(2).find((arg) => !arg.startsWith('--'))
   const expectsCurrentSource = process.argv.includes('--current-source')
@@ -85,9 +96,27 @@ app.whenReady().then(async () => {
   assert.equal(typeof stats.deliveredBlocks, 'string')
   assert.equal(typeof stats.droppedEvents, 'string')
   assert.equal(typeof stats.overwrittenWindows, 'string')
-  const hostDevices = addon.audioHostDevices()
+  const expectedProvider = process.platform === 'darwin' ? 'coreaudio' : process.platform === 'linux' ? 'alsa' : 'wasapi'
+  // Playback requires provider-scoped device identities (notably wasapi: on Windows).
+  // A UID absent from inventory tests admission without opening hardware.
+  const missingMic = 'smoke:never-opened:optional-enabled-channels'
+  assert.ok(!devices.devices.some(device => device.uid === missingMic))
+  for (const [config, generation] of [
+    [{ deviceUid: missingMic, inputChannel: 0 }, 101n],
+    [{ deviceUid: missingMic, inputChannel: 0, enabledChannels: undefined }, 102n]
+  ]) {
+    let result
+    assert.doesNotThrow(() => { result = addon.beginCapture(config, generation, () => {}) })
+    assert.equal(result.ok, false, 'unavailable UID must not fall back to hardware')
+    assert.equal(addon.cancelCapture(generation).cancelled, false, 'failed admission releases ownership')
+  }
+  for (const enabledChannels of [null, [], [0, 0], [0, 64]]) {
+    assert.throws(() => addon.beginCapture({ deviceUid: missingMic, inputChannel: 0, enabledChannels }, 103n, () => {}))
+    assert.equal(addon.cancelCapture(103n).cancelled, false)
+  }
+  console.log('PASS optional enabled-channel admission and ownership release without hardware')
+  const hostDevices = addon.audioHostDevices(expectedProvider)
   assert.equal(hostDevices.ok, true)
-  const expectedProvider = process.platform === 'darwin' ? 'coreaudio' : 'wasapi'
   assert.equal(hostDevices.provider, expectedProvider)
   assert.equal(typeof hostDevices.defaultInputUid, 'string')
   assert.equal(typeof hostDevices.defaultOutputUid, 'string')
@@ -102,7 +131,7 @@ app.whenReady().then(async () => {
     assert.ok(device.outputChannelLabels.every((label) => typeof label === 'string' && label.length > 0))
     assert.equal(typeof device.transport, 'string')
     assert.equal(typeof device.monitoringSuitability, 'string')
-    assert.equal(device.accessMode, 'shared')
+    assert.equal(device.accessMode, process.platform === 'linux' ? 'exclusive' : 'shared')
     assert.ok(Array.isArray(device.sampleRateRanges))
     assert.equal(typeof device.bufferFrames.maximumFrames, 'number')
   }
@@ -216,7 +245,7 @@ app.whenReady().then(async () => {
   const strictPlaybackConfig = {
     capability: PLAYBACK_CAPABILITY,
     provider: expectedProvider,
-    accessMode: 'shared',
+    accessMode: process.platform === 'linux' ? 'exclusive' : 'shared',
     outputDeviceUid: hostDevices.defaultOutputUid || 'smoke:never-opened',
     outputChannels: [0, 1],
     sampleRate: 48000,
@@ -288,15 +317,24 @@ app.whenReady().then(async () => {
       'prepared-graph accounting skipped: the host has no output device at all ' +
       `(provider ${hostDevices.provider}, ${hostDevices.devices.length} devices)`
     )
-    app.quit()
+    finish()
     return
   }
-  assert.ok(hostDevices.defaultOutputUid,
-    'a host with outputs must name a default output')
+  if (process.platform === 'linux') {
+    // Direct ALSA has no system-default routing service. Multiple hardware
+    // endpoints deliberately require an explicit selection in the product.
+    assert.equal(hostDevices.defaultOutputUid, outputs.length === 1 ? outputs[0].uid : '')
+  } else {
+    assert.ok(hostDevices.defaultOutputUid,
+      'a host with outputs must name a default output')
+  }
   const wav = join(tmpdir(), `singz-capture-smoke-${process.pid}.wav`)
   writeSilentPcm16Wav(wav)
   try {
-    const preparedConfig = { ...strictPlaybackConfig }
+    const preparedConfig = {
+      ...strictPlaybackConfig,
+      outputDeviceUid: hostDevices.defaultOutputUid || outputs[0].uid
+    }
     delete preparedConfig.graphDocument
     const preparedResult = await addon.preparePlayback(preparedConfig, [{
       id: 'smoke', path: wav, gain: 1, muted: false, solo: false
@@ -314,14 +352,61 @@ app.whenReady().then(async () => {
     assert.equal(unloaded.ok, true, unloaded.error)
     assert.equal(unloaded.cleanupComplete, true)
     assert.equal(addon.playbackStatus().graphArenaBytes, '0')
+
+    const streamingConfig = { ...preparedConfig, streamLanes: true }
+    const seededKey = `measure:${'a'.repeat(64)}`
+    const seededResult = await addon.preparePlayback(streamingConfig, [{
+      id: 'seeded', path: wav, gain: 1, muted: false, solo: false,
+      sourceKey: seededKey,
+      waveform: {
+        version: 1,
+        policy: 'singz.native.streaming-envelope.rms96-v1',
+        contentKey: seededKey,
+        peaks: Array(96).fill(0.75)
+      }
+    }], 5n)
+    assert.equal(seededResult.ok, true, seededResult.error)
+    const seeded = addon.playbackLanePeaks(5n)
+    assert.equal(seeded.ok, true, seeded.message)
+    assert.equal(seeded.bucketCount, 96)
+    assert.equal(seeded.lanes.length, 1)
+    assert.equal(seeded.lanes[0].peaksValid, true)
+    // Silent PCM measures zero everywhere. Only the consumed sentinel seed can
+    // produce this answer, so dropping the N-API handoff fails this smoke.
+    assert.deepEqual(seeded.lanes[0].peaks, Array(96).fill(0.75))
+    assert.equal(addon.unloadPlayback(5n).ok, true)
+
+    const mismatchedResult = await addon.preparePlayback(streamingConfig, [{
+      id: 'fallback', path: wav, gain: 1, muted: false, solo: false,
+      sourceKey: `measure:${'b'.repeat(64)}`,
+      waveform: {
+        version: 1,
+        policy: 'singz.native.streaming-envelope.rms96-v1',
+        contentKey: seededKey,
+        peaks: Array(96).fill(0.9)
+      }
+    }], 6n)
+    assert.equal(mismatchedResult.ok, true, mismatchedResult.error)
+    let measured
+    for (let attempt = 0; attempt < 600; ++attempt) {
+      measured = addon.playbackLanePeaks(6n)
+      if (measured.lanes[0]?.peaksValid) break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(measured.ok, true, measured.message)
+    assert.equal(measured.lanes[0].peaksValid, true)
+    assert.deepEqual(measured.lanes[0].peaks, Array(96).fill(0))
+    assert.equal(addon.unloadPlayback(6n).ok, true)
   } finally {
     // Exact-generation unload is idempotently rejected after success and
     // provides cleanup on an assertion failure after prepare.
     addon.unloadPlayback(4n)
+    addon.unloadPlayback(5n)
+    addon.unloadPlayback(6n)
     try { unlinkSync(wav) } catch {}
   }
-  app.quit()
+  finish()
 }).catch((error) => {
   console.error(error)
-  app.exit(1)
+  finish(1)
 })

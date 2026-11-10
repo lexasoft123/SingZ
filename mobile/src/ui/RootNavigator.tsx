@@ -1,4 +1,5 @@
 import { useQuickStart } from './QuickStart'
+import { tabModalListeners } from './tab-modal-dismissal'
 import { AudioDiagnosticsScreen } from './AudioDiagnosticsScreen'
 import { nativePlayback } from '../playback/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
@@ -286,6 +287,7 @@ export default function RootNavigator({
         }}
         screenListeners={{
           transitionEnd: event => {
+            tabModalListeners.transitionEnd(event)
             // The retained screen's appearance proves the Settings controller
             // has finished dismissing. A removed route can lose its closing
             // event listener before onDisappear is delivered.
@@ -424,6 +426,6 @@ export default function RootNavigator({
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: C.bg },
+  root: { flex: 1, backgroundColor: 'transparent' },
   sheet: { flex: 1, backgroundColor: C.sheet }
 })

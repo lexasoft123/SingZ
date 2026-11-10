@@ -7,6 +7,7 @@ import './styles.css'
 import { applyPlatformClasses } from '@singz/ui'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { DriveSignInProvider } from './components/DriveSignInProvider'
 import { loadLocale, setLocale, subscribeLocale, getLocale } from '../../shared/i18n'
 
 // Before the first render, deliberately: App reads these classes DURING
@@ -40,5 +41,5 @@ void window.singz
   .catch(() => {})
   .finally(() => {
     syncLang()
-    createRoot(document.getElementById('root') as HTMLElement).render(<App />)
+    createRoot(document.getElementById('root') as HTMLElement).render(<DriveSignInProvider><App /></DriveSignInProvider>)
   })

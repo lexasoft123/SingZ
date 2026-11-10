@@ -66,6 +66,15 @@ function copiedCaptureLayout(context) {
       expectedTargets: 'win32-x64'
     }
   }
+  if (platform === 'linux' && ['x64', 'arm64'].includes(arch)) {
+    return {
+      platform,
+      appPath: null,
+      universalIntermediate: false,
+      engines: path.join(context.appOutDir, 'resources', 'engines'),
+      expectedTargets: `linux-${arch}`
+    }
+  }
   throw new Error(`Unsupported capture package platform: ${platform}`)
 }
 

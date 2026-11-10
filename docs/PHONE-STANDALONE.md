@@ -577,7 +577,7 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       returned a melody where a grid was asked for. The emitter now runs
       the bundle through `@babel/plugin-transform-block-scoping` before
       inlining it; the detectors close over loop lets too, so without it
-      the wrong answers would not always be that loud (CLAUDE.md gotcha).
+      the wrong answers would not always be that loud (docs/PROJECT-RULES.md gotcha).
     - **Proof (iPhone 16 Pro sim, `__test.hostSpike(3)` vs the in-thread
       `analysisSpike(3)`)**: melody 66.0 s on the worklet runtime vs 60.2 s
       in-thread, beats 1.3 s, two 8 MB stems crossed in 26 ms; **f0 7 187
@@ -714,7 +714,7 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       only way past is an uninstall that takes the library and the Drive
       sign-in with it. Its test is the next Play build + the Log panel.
       The emulator (SingZ_API36) had a RELEASE 0.16.0 on it from the FGS
-      video — CLAUDE.md's "which emulator can be driven" trap, met again;
+      video — docs/PROJECT-RULES.md's "which emulator can be driven" trap, met again;
       reinstalled as debug for the parity run.
     - **The real-device number that decided what to port next (POCO's iOS
       sibling — the user's iPhone, 2026-08-16, a 5:02 song)**: the whole
@@ -752,7 +752,7 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       ways, native 778 ms vs TS 1429 ms**; Android emulator **C major both
       ways, 2641 ms vs 5373 ms**. The iOS rebuild first hit the recorded
       CocoaPods trap (a link failure on `facebook::react::Sealable`, the
-      RNGestureHandler family named in CLAUDE.md) — `rm -rf Pods && pod
+      RNGestureHandler family named in docs/PROJECT-RULES.md) — `rm -rf Pods && pod
       install` cleared it, exactly as written down; it was not the port.
     - Three review findings worth keeping, all mine to have avoided: the
       pipeline refactor took the key's stems OUT of the stems-changed guard
@@ -1263,7 +1263,7 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
       **(1) arity.** The method shipped taking two arguments while the hook
       and the JNI pass three; the bridge then never dispatches and the
       promise never settles — no work, no rejection, no red box. Hence the
-      suite's settle DEADLINE and its native-method probe, and the CLAUDE.md
+      suite's settle DEADLINE and its native-method probe, and the docs/PROJECT-RULES.md
       gotcha. **(2) `%.17g` must not reach Foundation.** `NSJSONSerialization`
       is not correctly rounded on seventeen significant digits, so parsing
       `mlGridJson` back cost 49 of 2041 beat probabilities and 7 downbeat
@@ -2074,7 +2074,7 @@ nobody has taken on the target:
   in 3-4 s where it matters, the playback tax is small, and the
   encode-after-first-analysis trigger stands. Debug-rig open times must
   never be quoted as product numbers — this section nearly did.
-  Two traps found on the way, both now in CLAUDE.md's territory:
+  Two traps found on the way, both now in docs/PROJECT-RULES.md's territory:
   **disconnecting the Hermes inspector while a decode is in flight kills
   the app** exactly like evaluating does (SIGSEGV at 0x0 on `mqt_v_js`,
   reproduced 2026-08-21 12:36) — the socket may sit attached idle through a

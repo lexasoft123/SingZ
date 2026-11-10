@@ -341,8 +341,10 @@ fn exact_lookup_preserves_query_order_album_rounding_and_versioned_native_header
         ]
     );
     let request = server.requests.lock().unwrap()[0].to_ascii_lowercase();
-    assert!(request.contains("lrclib-client: singz/0.26.5"));
-    assert!(request.contains("user-agent: singz/0.26.5"));
+    let package: Value = serde_json::from_str(include_str!("../../../package.json")).unwrap();
+    let version = package["version"].as_str().unwrap().to_ascii_lowercase();
+    assert!(request.contains(&format!("lrclib-client: singz/{version}")));
+    assert!(request.contains(&format!("user-agent: singz/{version}")));
     assert!(request.contains("accept: application/json"));
 }
 #[test]

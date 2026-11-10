@@ -192,11 +192,17 @@ export interface ProjectDoc {
    *  otherwise draw no bar until a background pass caught up, on every open.
    *  Cached here it is paid once per file instead of once per open.
    *
-   *  Each entry carries the md5 of the stem it was measured from, checked
-   *  against `stemHashes`, so a re-split or a re-import invalidates it without
-   *  anything having to remember to clear it. A stale entry is ignored, never
-   *  drawn: a waveform from the wrong audio is worse than none. */
-  waveforms?: Record<string, { md5: string; peaks: number[] }>
+   *  Each entry carries the md5 of the materialized bytes it was measured from.
+   *  A re-split or re-import therefore invalidates only that lane, even when
+   *  `stemHashes` itself is stale. Invalid entries measure again, never draw. */
+  waveforms?: Record<string, {
+    /** Absent together on the desktop's original RMS96 entries. New mobile
+     * writes stamp both so an algorithm change cannot reuse old statistics. */
+    version?: number
+    policy?: string
+    md5: string
+    peaks: number[]
+  }>
   /** Optional portable DSP graph. The member name is fixed as graph.json and
    * it remains small-text state, never part of the downloaded-audio byte sum. */
   graphHash?: { format: number; md5: string; size: number; mtimeMs: number }

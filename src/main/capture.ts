@@ -1,4 +1,5 @@
-import { app } from 'electron'
+import { withBoxAudioHostAuthority, type BoxAudioHostAuthority } from './box-audio/profile'
+import { audioApp as app, audioResourcesPath } from './audio-service-runtime'
 import { createHash, randomBytes } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
@@ -21,13 +22,16 @@ import { t } from '../shared/i18n'
 import type {
   DesktopAudioHostDevice,
   DesktopTrainingAudioStatus,
+  DesktopMicrophoneMixConfig,
+  DesktopMicrophoneMixResult,
+  DesktopMicrophoneMixStatus,
   DesktopAudioHostInventoryResult,
   DesktopMonitorConfig,
   DesktopMonitorFormat,
   DesktopMonitorLatency,
   DesktopMonitorResult,
   DesktopMonitorStatus,
-  DesktopPlaybackLaneConfig,
+  DesktopPlaybackTrustedLaneConfig,
   DesktopPlaybackLaneMeasureRequest,
   DesktopPlaybackLaneMeasureResult,
   DesktopPlaybackPrepareConfig,
@@ -39,6 +43,7 @@ import type {
   CaptureAnalysisWindow,
   CaptureInputDevice,
   CaptureStartResult,
+  CaptureStartConfig,
   CaptureStateName,
   CaptureStats
 } from '../shared/types'
@@ -65,6 +70,9 @@ export interface NativeCaptureBinding {
   setTrainingCueGain(generation: bigint, gain: number): { ok: boolean; error?: string }
   cancelTrainingCues(generation: bigint): { ok: boolean; error?: string }
   trainingCueStatus(): DesktopTrainingAudioStatus
+  configureMicrophoneMix?(config: DesktopMicrophoneMixConfig): DesktopMicrophoneMixResult
+  stopMicrophoneMix?(): DesktopMicrophoneMixResult
+  microphoneMixStatus?(): DesktopMicrophoneMixStatus
   captureRecording(action: 'record' | 'finish', path: string, generation: bigint): Record<string, unknown>
 
   exportAudio?(sourceFd: number | number[], destinationFd: number, format: 'wav' | 'flac' | 'mp3', job: string): Promise<{ ok: boolean; error?: string }>
@@ -73,7 +81,7 @@ export interface NativeCaptureBinding {
     | { ok: true; devices: CaptureInputDevice[] }
     | { ok: false; devices: []; error: string }
   beginCapture(
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number; crepeModelPath?: string },
+    config: CaptureStartConfig & { crepeModelPath?: string },
     generation: bigint,
     sink: (window: CaptureAnalysisWindow) => void
   ): CaptureStartResult
@@ -91,7 +99,7 @@ export interface NativeCaptureBinding {
    *  JS thread either side of it. */
   preparePlayback(
     config: DesktopPlaybackPrepareConfig,
-    lanes: DesktopPlaybackLaneConfig[],
+    lanes: DesktopPlaybackTrustedLaneConfig[],
     generation: bigint
   ): Promise<DesktopPlaybackResult>
   openPlaybackOutput(generation: bigint): DesktopPlaybackResult
@@ -161,24 +169,47 @@ export function resolveCaptureAddonPath(runtime: CaptureAddonRuntime): string {
 }
 
 /** Same native-input fingerprint as scripts/build-capture-addon.cjs. */
-export function captureSourceFingerprint(root: string, electronVersion: string): string {
+export function captureSourceFingerprint(
+  root: string,
+  electronVersion: string,
+  platform: NodeJS.Platform = process.platform
+): string {
+  // Source fingerprints run only for development checkouts. Packaged apps do
+  // not ship build scripts, so loading this helper must stay inside this path.
+  const { zcoreGitlinkRevision, loopzFingerprintInputs } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
+    zcoreGitlinkRevision(root: string): string
+    loopzFingerprintInputs(root: string, platform: string): { revision: string; files: string[] } | null
+  }
+  const zcoreRevision = zcoreGitlinkRevision(root)
+  // LoopZ is part of the addon only where Box routing is built (Linux).
+  const loopz = loopzFingerprintInputs(root, platform)
   const files: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === '.git') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
       else files.push(path)
     }
   }
   for (const dir of [
-    'native/electron', 'native/playback', 'zcore', 'zdsp', 'third_party/native', 'cmake'
+    'native/electron', 'native/playback', 'third_party/zcore',
+    'zcore', 'zdsp', 'third_party/native', 'cmake'
   ]) {
     walk(join(root, dir))
   }
-  files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts', 'build-capture-addon.cjs'))
+  files.push(join(root, 'CMakeLists.txt'), join(root, '.gitmodules'),
+    join(root, 'scripts', 'verify-zcore-submodule.py'),
+    join(root, 'scripts', 'zcore-gitlink.cjs'),
+    join(root, 'scripts', 'ccache-launcher.sh'),
+    join(root, 'scripts', 'ccache-launcher.ps1'),
+    join(root, 'scripts', 'build-capture-addon.cjs'))
+  if (loopz) files.push(...loopz.files)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
+  hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
+  if (loopz) hash.update(`third_party/loopz.gitlink ${loopz.revision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
@@ -912,12 +943,12 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
     addonPath = resolve(envOverride)
     manifest = parseCaptureManifest(captureAddonManifestPath(addonPath))
   } else if (app.isPackaged) {
-    const engines = join(process.resourcesPath, 'engines')
+    const engines = join(audioResourcesPath, 'engines')
     manifest = parseCaptureManifest(join(engines, 'singz-capture.manifest.json'))
     addonPath = resolveCaptureAddonPath({
       envOverride,
       packaged: true,
-      resourcesPath: process.resourcesPath,
+      resourcesPath: audioResourcesPath,
       cwd: root,
       platform: process.platform,
       arch: process.arch
@@ -927,7 +958,7 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
     manifest = parseCaptureManifest(manifestPath)
     addonPath = resolveCaptureAddonPath({
       packaged: false,
-      resourcesPath: process.resourcesPath,
+      resourcesPath: audioResourcesPath,
       cwd: root,
       platform: process.platform,
       arch: process.arch,
@@ -997,6 +1028,17 @@ export function sharedCaptureBindingLoader(loader: () => NativeCaptureBinding): 
 }
 const processCaptureBinding = sharedCaptureBindingLoader(() => loadCaptureBindingWith(captureBindingLoadRuntime()))
 export function loadCaptureBinding(): NativeCaptureBinding {
+  if (process.env.SINGZ_AUDIO_PROCESS !== '1' || !process.parentPort)
+    throw new Error('Native audio can only load inside the dedicated audio process')
+  return loadProcessCaptureBinding()
+}
+
+/** Separate browser-main service authority; Desktop keeps the utility-only gate. */
+export function loadBoxAudioHostBinding(authority: BoxAudioHostAuthority): NativeCaptureBinding {
+  return withBoxAudioHostAuthority(authority, loadProcessCaptureBinding)
+}
+
+function loadProcessCaptureBinding(): NativeCaptureBinding {
   try { return processCaptureBinding() }
   catch (error) {
     if (error instanceof CaptureAddonLoadError) throw error
@@ -1005,6 +1047,37 @@ export function loadCaptureBinding(): NativeCaptureBinding {
       true
     )
   }
+}
+
+export function validMicrophoneMixConfig(value: unknown): value is DesktopMicrophoneMixConfig {
+  if (typeof value !== 'object' || value === null) return false
+  const config = value as Partial<DesktopMicrophoneMixConfig>
+  if (typeof config.deviceUid !== 'string' || !config.deviceUid ||
+      Buffer.byteLength(config.deviceUid, 'utf8') > 4096 || config.deviceUid.includes('\0') ||
+      !Array.isArray(config.channels) || config.channels.length < 1 || config.channels.length > 8)
+    return false
+  if (config.outputDeviceUid !== undefined &&
+      (typeof config.outputDeviceUid !== 'string' || !config.outputDeviceUid ||
+       Buffer.byteLength(config.outputDeviceUid, 'utf8') > 4096 || config.outputDeviceUid.includes('\0')))
+    return false
+  const channels = new Set<number>()
+  for (const row of config.channels) {
+    if (typeof row !== 'object' || row === null || !Number.isInteger(row.channel) ||
+        row.channel < 0 || row.channel > 0xffffffff || channels.has(row.channel) ||
+        typeof row.gain !== 'number' || !Number.isFinite(row.gain) || row.gain < 0 || row.gain > 1 ||
+        typeof row.muted !== 'boolean' ||
+        (row.pan !== undefined && (typeof row.pan !== 'number' || !Number.isFinite(row.pan) || row.pan < -1 || row.pan > 1)))
+      return false
+    channels.add(row.channel)
+  }
+  if (!(config.delayFrames === undefined || (Number.isInteger(config.delayFrames) &&
+      config.delayFrames >= 256 && config.delayFrames <= 8192))) return false
+  if (config.requestedOutputPeriodFrames !== undefined &&
+      (typeof config.requestedOutputPeriodFrames !== 'number' ||
+       !Number.isInteger(config.requestedOutputPeriodFrames) ||
+       (config.requestedOutputPeriodFrames !== 256 && config.requestedOutputPeriodFrames !== 512 &&
+        config.requestedOutputPeriodFrames !== 1024))) return false
+  return config.measureRenderTiming === undefined || typeof config.measureRenderTiming === 'boolean'
 }
 
 function parseGeneration(raw: string): bigint | null {
@@ -1108,7 +1181,7 @@ const EMPTY_PLAYBACK_FORMAT: DesktopPlaybackResult['format'] = {
   outputChannels: 0
 }
 
-function failedPlayback(
+export function failedPlayback(
   error: string,
   errorCode: DesktopPlaybackResult['errorCode'] = 'host-failure',
   generation = '0',
@@ -1278,6 +1351,7 @@ export class CaptureOwner {
   private rendererId: number | null = null
   private monitorGeneration = ''
   private monitorRendererId: number | null = null
+  private microphoneMixRendererId: number | null = null
   private monitorHighWater = 0n
   private playbackGeneration = ''
   private playbackRendererId: number | null = null
@@ -1285,15 +1359,18 @@ export class CaptureOwner {
    *  who asked for it. See preparePlayback for why this is recorded before
    *  the await rather than after it. */
   private playbackPending: { generation: string; rendererId: number } | null = null
-  /** Set by a teardown that found a prepare in flight, so the graph is
-   *  unloaded when it lands instead of outliving the app. */
+  /** Set by a teardown that found a prepare in flight. Unload reaches the
+   *  native worker immediately; the receipt decides whether completion still
+   *  needs to repeat cleanup when the prepare promise settles. */
   private playbackAbandoned = false
+  private playbackAbandonCleanupComplete = false
   /** Re-anchor log throttling; see reanchorPlayback(). */
   private reanchorGeneration = ''
   private reanchorCount = 0
   private reanchorLoggedAt = 0
   /** The streamed-lane starvation watch; see judgeLaneStarvation(). */
   private starveWatch: LaneStarveWatch | null = null
+  private terminalLoggedKey = ''
   private starveLoggedGeneration = ''
   private starveLoggedAt = 0
   private playbackHighWater = 0n
@@ -1347,6 +1424,40 @@ export class CaptureOwner {
     return this.binding
   }
 
+  configureMicrophoneMix(rendererId: number, config: unknown): DesktopMicrophoneMixResult {
+    if (this.microphoneMixRendererId !== null && this.microphoneMixRendererId !== rendererId)
+      return { ok: false, error: 'Microphone mixing belongs to another window' }
+    if (!validMicrophoneMixConfig(config))
+      return { ok: false, error: 'Invalid microphone mixing input/output device, channels, gain, pan or delay' }
+    const binding = this.native()
+    if (!binding?.configureMicrophoneMix || !binding.stopMicrophoneMix || !binding.microphoneMixStatus)
+      return { ok: false, error: this.loadError ?? 'This native audio build does not support microphone mixing' }
+    try {
+      const result = binding.configureMicrophoneMix(config)
+      if (result.ok) this.microphoneMixRendererId = rendererId
+      return result
+    } catch (error) { return { ok: false, error: String(error) } }
+  }
+
+  stopMicrophoneMix(rendererId: number): DesktopMicrophoneMixResult {
+    if (this.microphoneMixRendererId !== null && this.microphoneMixRendererId !== rendererId)
+      return { ok: false, error: 'Microphone mixing belongs to another window' }
+    if (!this.binding?.stopMicrophoneMix) return { ok: true }
+    try {
+      const result = this.binding.stopMicrophoneMix()
+      if (result.ok) this.microphoneMixRendererId = null
+      return result
+    } catch (error) { return { ok: false, error: String(error) } }
+  }
+
+  microphoneMixStatus(): DesktopMicrophoneMixStatus {
+    const binding = this.native()
+    if (!binding?.microphoneMixStatus)
+      return { ok: false, error: this.loadError ?? 'This native audio build does not support microphone mixing' }
+    try { return binding.microphoneMixStatus() }
+    catch (error) { return { ok: false, error: String(error) } }
+  }
+
   devices(): { ok: true; devices: CaptureInputDevice[] } | { ok: false; devices: []; error: string } {
     const binding = this.native()
     if (!binding) return { ok: false, devices: [], error: this.loadError ?? t('main.error.nativeCaptureUnavailable') }
@@ -1360,10 +1471,11 @@ export class CaptureOwner {
     const exposedPlatform = platform === 'darwin' || platform === 'win32' || platform === 'linux'
       ? platform
       : 'other'
-    const exposedProvider = provider ?? (platform === 'darwin' ? 'coreaudio' : 'wasapi')
+    const exposedProvider = provider ?? (platform === 'darwin' ? 'coreaudio' : platform === 'linux' ? 'alsa' : 'wasapi')
     const providerMatchesPlatform = provider === undefined ||
       (platform === 'darwin' && provider === 'coreaudio') ||
-      (platform === 'win32' && (provider === 'wasapi' || provider === 'asio'))
+      (platform === 'win32' && (provider === 'wasapi' || provider === 'asio')) ||
+      (platform === 'linux' && provider === 'alsa')
     if (!providerMatchesPlatform) {
       return {
         ok: false,
@@ -1388,39 +1500,53 @@ export class CaptureOwner {
       }
     }
     try {
-      const raw = binding.audioHostDevices(provider) as {
-        ok?: unknown
-        provider?: unknown
-        defaultInputUid?: unknown
-        defaultOutputUid?: unknown
-        devices?: unknown
-        error?: unknown
-      }
-      if (
-        raw.ok !== true || raw.provider !== exposedProvider || typeof raw.defaultInputUid !== 'string' ||
-        typeof raw.defaultOutputUid !== 'string' || !Array.isArray(raw.devices) ||
-        !raw.devices.every(validHostDevice)
-      ) {
+      const readInventory = (): DesktopAudioHostInventoryResult => {
+        const raw = binding.audioHostDevices(provider) as {
+          ok?: unknown
+          provider?: unknown
+          defaultInputUid?: unknown
+          defaultOutputUid?: unknown
+          devices?: unknown
+          error?: unknown
+        }
+        if (
+          raw.ok !== true || raw.provider !== exposedProvider || typeof raw.defaultInputUid !== 'string' ||
+          typeof raw.defaultOutputUid !== 'string' || !Array.isArray(raw.devices) ||
+          !raw.devices.every(validHostDevice)
+        ) {
+          return {
+            ok: false,
+            platform: exposedPlatform,
+            provider: exposedProvider,
+            defaultInputUid: '',
+            defaultOutputUid: '',
+            devices: [],
+            error: typeof raw.error === 'string'
+              ? raw.error
+              : t('main.error.nativeAudioHostInvalidInventory')
+          }
+        }
         return {
-          ok: false,
+          ok: true,
           platform: exposedPlatform,
           provider: exposedProvider,
-          defaultInputUid: '',
-          defaultOutputUid: '',
-          devices: [],
-          error: typeof raw.error === 'string'
-            ? raw.error
-            : t('main.error.nativeAudioHostInvalidInventory')
+          defaultInputUid: raw.defaultInputUid,
+          defaultOutputUid: raw.defaultOutputUid,
+          devices: raw.devices
         }
       }
-      return {
-        ok: true,
-        platform: exposedPlatform,
-        provider: exposedProvider,
-        defaultInputUid: raw.defaultInputUid,
-        defaultOutputUid: raw.defaultOutputUid,
-        devices: raw.devices
+      const inventory = readInventory()
+      // An early ALSA probe can see EBUSY while Chromium releases an endpoint.
+      // A direction-known output with no capability bound must not stay hidden
+      // forever in the process cache. Retry once; healthy inventories stay cheap.
+      if (platform === 'linux' && exposedProvider === 'alsa' && inventory.ok &&
+          inventory.devices.some(device => device.outputChannels === 0 &&
+            (device.direction === 'duplex' || device.direction === 'output')) &&
+          typeof binding.refreshSharedAudioInventory === 'function') {
+        binding.refreshSharedAudioInventory()
+        return readInventory()
       }
+      return inventory
     } catch (error) {
       return {
         ok: false,
@@ -1579,6 +1705,13 @@ export class CaptureOwner {
   playbackProviders(platform: NodeJS.Platform = process.platform): DesktopPlaybackProviderInfo[] {
     const fallback: DesktopPlaybackProviderInfo[] = [
       {
+        id: 'alsa',
+        label: 'ALSA',
+        available: false,
+        errorCode: platform === 'linux' ? 'runtime-unavailable' : 'wrong-platform',
+        detail: platform === 'linux' ? 'Native Linux ALSA runtime is unavailable' : 'Available only on Linux'
+      },
+      {
         id: 'coreaudio',
         label: 'CoreAudio',
         available: platform === 'darwin',
@@ -1611,7 +1744,7 @@ export class CaptureOwner {
         'none', 'not-compiled', 'runtime-unavailable', 'platform-not-ready', 'wrong-platform'
       ])
       const valid = native.every((row) => row &&
-        (row.id === 'coreaudio' || row.id === 'wasapi' || row.id === 'asio') &&
+        (row.id === 'coreaudio' || row.id === 'wasapi' || row.id === 'asio' || row.id === 'alsa') &&
         typeof row.label === 'string' && typeof row.available === 'boolean' &&
         validCodes.has(row.errorCode) && typeof row.detail === 'string')
       if (!valid) return fallback
@@ -1694,7 +1827,7 @@ export class CaptureOwner {
   async preparePlayback(
     rendererId: number,
     config: DesktopPlaybackPrepareConfig,
-    lanes: DesktopPlaybackLaneConfig[],
+    lanes: DesktopPlaybackTrustedLaneConfig[],
     platform: NodeJS.Platform = process.platform
   ): Promise<DesktopPlaybackResult> {
     // Every refusal below is an answer to "why did this song end up on Web
@@ -1735,7 +1868,7 @@ export class CaptureOwner {
     if (
       config.capability !== DESKTOP_PLAYBACK_CAPABILITY ||
       config.playback?.version !== DESKTOP_PLAYBACK_CONTRACT_VERSION ||
-      config.accessMode !== (config.provider === 'asio' ? 'exclusive' : 'shared')
+      config.accessMode !== (config.provider === 'asio' || config.provider === 'alsa' ? 'exclusive' : 'shared')
     ) {
       return refused(
         'The desktop native playback contract is not the current strict version.',
@@ -1810,6 +1943,7 @@ export class CaptureOwner {
       this.playbackPending = { generation: rawGeneration, rendererId }
       let result: DesktopPlaybackResult
       let abandoned = false
+      let abandonCleanupComplete = false
       try {
         result = await binding.preparePlayback(nativeConfig, lanes, generation)
       } finally {
@@ -1818,7 +1952,9 @@ export class CaptureOwner {
         // rendererGone() would then tear down capture and monitoring too.
         this.playbackPending = null
         abandoned = this.playbackAbandoned
+        abandonCleanupComplete = this.playbackAbandonCleanupComplete
         this.playbackAbandoned = false
+        this.playbackAbandonCleanupComplete = false
       }
       if (result.ok)
         log(
@@ -1841,17 +1977,17 @@ export class CaptureOwner {
       // retire, and no unload for it will ever arrive from the renderer. A
       // seam the core refused leaves the running generation exactly as it
       // was (the candidate's claim is spent, nothing of it exists).
-      if (result.generation === rawGeneration && result.ownershipRetained === true) {
+      if (result.generation === rawGeneration && result.ownershipRetained === true &&
+          !(abandoned && abandonCleanupComplete)) {
         this.playbackGeneration = rawGeneration
         this.playbackRendererId = rendererId
-        // The renderer that asked for this graph is gone, or the app is on
-        // its way out, and the teardown that would have unloaded it ran while
-        // the decode was still going. Nothing else will ever unload it.
+        // A teardown already drained the worker through native unload. Repeat
+        // only when that unload did not prove global cleanup; a late prepare
+        // result must never recreate an owner after a successful receipt.
         if (abandoned) {
           log(
             'dsp',
-            `graph ready for a caller that left · generation ${rawGeneration} · unloading`,
-            'warn'
+            `graph ${result.ok ? 'ready' : 'refused'} after caller left · generation ${rawGeneration} · unloading`
           )
           this.unloadPlayback(rendererId, rawGeneration)
         }
@@ -2019,6 +2155,15 @@ export class CaptureOwner {
     }
     if (status?.capability !== DESKTOP_PLAYBACK_CAPABILITY) return null
     try {
+      if (status.state === 'terminal' || status.state === 'quarantined') {
+        const key = `${status.generation}:${status.terminalOrdinal}:${status.state}`
+        if (key !== this.terminalLoggedKey) {
+          log('dsp', `playback stopped · generation ${status.generation} · ${status.state} · ` +
+            `${status.hostState} · ${status.terminalReason || 'unknown cause'} · xruns ${status.xruns}` +
+            (status.error ? ` · ${status.error}` : ''), 'error')
+          this.terminalLoggedKey = key
+        }
+      }
       this.watchLaneStarvation(status)
     } catch {
       // A diagnostic never costs the renderer its status.
@@ -2101,13 +2246,30 @@ export class CaptureOwner {
   }
 
   unloadPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    const result = this.playbackCommand(
-      rendererId,
-      generation,
-      (binding, value) => binding.unloadPlayback(value),
-      'unload',
-      true
-    )
+    const pending = this.playbackPending?.generation === generation &&
+      this.playbackPending.rendererId === rendererId ? this.playbackPending : null
+    let result: DesktopPlaybackResult
+    if (pending) {
+      // Native unload requests cancellation before draining the worker. This
+      // branch is deliberately not behind playbackCommand's active-generation
+      // check: a pending prepare has claimed its generation but is not active.
+      this.playbackAbandoned = true
+      try {
+        result = this.binding!.unloadPlayback(parseGeneration(generation)!)
+        if (result.ok) log('dsp', `unload · generation ${generation} · ${result.state}`)
+      } catch (error) {
+        result = failedPlayback(`Native playback command failed: ${String(error)}`, 'host-failure', generation)
+      }
+      this.playbackAbandonCleanupComplete ||= result.ok && result.cleanupComplete === true
+    } else {
+      result = this.playbackCommand(
+        rendererId,
+        generation,
+        (binding, value) => binding.unloadPlayback(value),
+        'unload',
+        true
+      )
+    }
     // The one command whose PARTIAL success matters: an unload that returns ok
     // without a cleanup receipt has left the core holding audio, and on the
     // desktop that is hundreds of megabytes per song sitting there unnamed.
@@ -2127,13 +2289,19 @@ export class CaptureOwner {
 
   begin(
     rendererId: number,
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number; crepeModelPath?: string },
+    config: CaptureStartConfig & { crepeModelPath?: string },
     rawGeneration: string,
     emit: (window: CaptureAnalysisWindow) => void
   ): CaptureStartResult {
     const generation = parseGeneration(rawGeneration)
     if (!generation || !Number.isInteger(config.inputChannel) || config.inputChannel < 0) {
       return failedStart('Invalid microphone ownership generation or input channel.', 0)
+    }
+    const enabled = config.enabledChannels
+    if (enabled !== undefined && (!Array.isArray(enabled) || !enabled.length || enabled.length > 64 ||
+      Array.from(enabled).some((channel, index) => !Number.isInteger(channel) || channel < 0 || channel >= 64 ||
+        (index > 0 && channel <= enabled[index - 1])) || !enabled.includes(config.inputChannel))) {
+      return failedStart('Choose unique increasing enabled microphone channels including the analysis channel.', config.inputChannel, config.deviceUid)
     }
     const binding = this.native()
     if (!binding) {
@@ -2152,7 +2320,10 @@ export class CaptureOwner {
         timestampSource: ''
       }
     }
-    let exactConfig = config
+    // Snapshot the caller's list before crossing the native ownership boundary.
+    let exactConfig = { ...config }
+    if (enabled === undefined) delete exactConfig.enabledChannels
+    else exactConfig.enabledChannels = [...enabled]
     if (!config.deviceUid) {
       const inventory = binding.inputDevices()
       const defaultDevice = inventory.ok
@@ -2174,7 +2345,19 @@ export class CaptureOwner {
           timestampSource: ''
         }
       }
-      exactConfig = { ...config, deviceUid: defaultDevice.uid }
+      exactConfig = { ...exactConfig, deviceUid: defaultDevice.uid }
+    }
+    if (enabled !== undefined) {
+      try {
+        if (!binding.captureStats().microphoneLevels)
+          return failedStart('Enabled channel selection is unavailable on this audio service.', config.inputChannel, exactConfig.deviceUid)
+        const inventory = binding.inputDevices()
+        const device = inventory.ok ? inventory.devices.find(row => row.uid === exactConfig.deviceUid) : undefined
+        if (!device || enabled[enabled.length - 1] >= device.channels)
+          return failedStart('Choose enabled channels available on the selected microphone interface.', config.inputChannel, exactConfig.deviceUid)
+      } catch (error) {
+        return failedStart(`Could not validate enabled microphone channels: ${String(error)}`, config.inputChannel, exactConfig.deviceUid)
+      }
     }
     if (this.generation) binding.cancelCapture(BigInt(this.generation))
     this.generation = rawGeneration
@@ -2229,15 +2412,19 @@ export class CaptureOwner {
   }
 
   rendererGone(rendererId: number): void {
-    // A graph still decoding for this renderer has no generation on record
-    // yet, so stop() below cannot unload it. Mark it instead: prepare unloads
-    // it the moment it lands.
     const preparingForThisRenderer = this.playbackPending?.rendererId === rendererId
-    if (preparingForThisRenderer) this.playbackAbandoned = true
     if (
       rendererId === this.rendererId || rendererId === this.monitorRendererId ||
-      rendererId === this.playbackRendererId || preparingForThisRenderer
+      rendererId === this.playbackRendererId || rendererId === this.microphoneMixRendererId || preparingForThisRenderer
     ) this.stop()
+  }
+
+  /** A UI reload releases private microphone analysis/monitoring, while the
+   * app-owned song and configured relay continue in this process. */
+  rendererDetached(rendererId: number): void {
+    if (this.rendererId === rendererId && this.generation) this.cancel(rendererId, this.generation)
+    if (this.monitorRendererId === rendererId && this.monitorGeneration)
+      this.endMonitor(rendererId, this.monitorGeneration)
   }
 
   /** True once per webContents lifetime, so restarts/reloads add no listeners. */
@@ -2248,11 +2435,11 @@ export class CaptureOwner {
   }
 
   stop(): void {
-    // Same reason as in rendererGone: a prepare in flight owns audio the
-    // unload below cannot name. On the quit path the addon's env cleanup
-    // hook is the fail-closed owner — it cancels the decode and unloads —
-    // and this flag covers the teardowns the process survives.
-    if (this.playbackPending) this.playbackAbandoned = true
+    if (this.microphoneMixRendererId !== null) this.stopMicrophoneMix(this.microphoneMixRendererId)
+    // Unload is also the native prepare-cancellation boundary: it requests
+    // cancellation and drains the worker instead of waiting for its promise.
+    const pending = this.playbackPending
+    if (pending) this.unloadPlayback(pending.rendererId, pending.generation)
     if (this.playbackGeneration && this.binding) {
       try {
         const result = this.binding.unloadPlayback(BigInt(this.playbackGeneration))

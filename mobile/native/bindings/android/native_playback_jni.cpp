@@ -1102,11 +1102,11 @@ static_assert(
 
 static jdoubleArray nativePlaybackOutputMeter(JNIEnv *env, jobject) {
   const auto meter = owner().session.outputMeter();
-  const jdouble values[4] = {meter.available ? 1.0 : 0.0,
+  const jdouble values[5] = {meter.available ? 1.0 : 0.0,
       static_cast<jdouble>(meter.generation), meter.peak,
-      static_cast<jdouble>(meter.clippedBlocks)};
-  jdoubleArray out = env->NewDoubleArray(4);
-  if (out != nullptr) env->SetDoubleArrayRegion(out, 0, 4, values);
+      static_cast<jdouble>(meter.clippedBlocks), meter.rms};
+  jdoubleArray out = env->NewDoubleArray(5);
+  if (out != nullptr) env->SetDoubleArrayRegion(out, 0, 5, values);
   return out;
 }
 
@@ -1160,8 +1160,11 @@ static jstring nativePlaybackPrepare(
     jlong preparedStartProjectFrame, jboolean initialPaused,
     jboolean initialLoopPresent, jlong initialLoopStartProjectFrame,
     jlong initialLoopEndProjectFrame, jobjectArray laneIdsValue,
-    jobjectArray lanePathsValue,
-    jfloatArray laneGainsValue, jbooleanArray laneMutedValue,
+    jobjectArray lanePathsValue, jint waveformSeedVersion,
+    jstring waveformSeedPolicyValue, jobjectArray laneContentMd5Value,
+    jintArray laneWaveformBucketCountsValue,
+    jdoubleArray laneWaveformPeaksValue, jfloatArray laneGainsValue,
+    jbooleanArray laneMutedValue,
     jbooleanArray laneSoloValue, jboolean playbackPresent, jdouble entrySeconds,
     jdouble countInAnchorSeconds, jdouble playbackRate,
     jdouble transposeSemitones, jboolean click,
@@ -1181,12 +1184,26 @@ static jstring nativePlaybackPrepare(
         stringArray(env, laneIdsValue, singz::kNativePlaybackMaximumLanes);
     const std::vector<std::string> lanePaths =
         stringArray(env, lanePathsValue, singz::kNativePlaybackMaximumLanes);
+    const std::vector<std::string> laneContentMd5 =
+        stringArray(env, laneContentMd5Value, singz::kNativePlaybackMaximumLanes);
     const std::vector<std::string> roots = stringArray(env, authorizedRootsValue, 16);
+    const bool seedPolicyMatches =
+        waveformSeedVersion == static_cast<jint>(singz::kNativePlaybackWaveformSeedVersion) &&
+        waveformSeedPolicyValue != nullptr &&
+        env->GetStringUTFLength(waveformSeedPolicyValue) <= 128 &&
+        fromJava(env, waveformSeedPolicyValue) == singz::kNativePlaybackWaveformSeedPolicy;
     const std::vector<std::string> trainingLaneIds = stringArray(
         env, trainingLaneIdsValue, singz::kNativePlaybackMaximumLanes);
     const jsize laneCount = laneIdsValue == nullptr
                                 ? 0
                                 : env->GetArrayLength(laneIdsValue);
+    const jsize waveformBucketArrayCount =
+        laneWaveformBucketCountsValue == nullptr
+            ? -1
+            : env->GetArrayLength(laneWaveformBucketCountsValue);
+    const jsize waveformPeakCount = laneWaveformPeaksValue == nullptr
+                                        ? -1
+                                        : env->GetArrayLength(laneWaveformPeaksValue);
     const jsize outputCount = outputChannelsValue == nullptr
                                   ? 0
                                   : env->GetArrayLength(outputChannelsValue);
@@ -1227,6 +1244,10 @@ static jstring nativePlaybackPrepare(
         laneCount <= static_cast<jsize>(singz::kNativePlaybackMaximumLanes) &&
         static_cast<jsize>(laneIds.size()) == laneCount &&
         static_cast<jsize>(lanePaths.size()) == laneCount &&
+        static_cast<jsize>(laneContentMd5.size()) == laneCount &&
+        waveformBucketArrayCount == laneCount &&
+        waveformPeakCount == laneCount * static_cast<jsize>(
+            singz::kNativePlaybackLaneSummaryBuckets) &&
         laneGainsValue != nullptr && laneMutedValue != nullptr &&
         laneSoloValue != nullptr && env->GetArrayLength(laneGainsValue) == laneCount &&
         env->GetArrayLength(laneMutedValue) == laneCount &&
@@ -1279,6 +1300,12 @@ static jstring nativePlaybackPrepare(
     std::vector<jfloat> gains(static_cast<size_t>(laneCount));
     std::vector<jboolean> muted(static_cast<size_t>(laneCount));
     std::vector<jboolean> solo(static_cast<size_t>(laneCount));
+    std::vector<jint> waveformBucketCounts(static_cast<size_t>(laneCount));
+    std::vector<jdouble> waveformPeaks(static_cast<size_t>(waveformPeakCount));
+    env->GetIntArrayRegion(laneWaveformBucketCountsValue, 0, laneCount,
+                           waveformBucketCounts.data());
+    env->GetDoubleArrayRegion(laneWaveformPeaksValue, 0, waveformPeakCount,
+                              waveformPeaks.data());
     env->GetFloatArrayRegion(laneGainsValue, 0, laneCount, gains.data());
     env->GetBooleanArrayRegion(laneMutedValue, 0, laneCount, muted.data());
     env->GetBooleanArrayRegion(laneSoloValue, 0, laneCount, solo.data());
@@ -1397,15 +1424,38 @@ static jstring nativePlaybackPrepare(
                                  generation,
                                  singz::NativePlaybackError::DecodeFailure)));
       }
-      // The authorized path is this bridge's opaque identity for the bytes:
-      // the core never opens or resolves it, it only compares it when a
-      // retaining unload offers an already decoded lane to the next prepare.
-      lanes.push_back({laneIds[static_cast<size_t>(index)],
-                       std::move(descriptor),
-                       gains[static_cast<size_t>(index)],
-                       muted[static_cast<size_t>(index)] == JNI_TRUE,
-                       solo[static_cast<size_t>(index)] == JNI_TRUE,
-                       lanePaths[static_cast<size_t>(index)]});
+      const auto &md5 = laneContentMd5[static_cast<size_t>(index)];
+      const bool contentValid =
+          md5.size() == 32 &&
+          std::all_of(md5.begin(), md5.end(), [](const char value) {
+            return (value >= '0' && value <= '9') ||
+                   (value >= 'a' && value <= 'f');
+          });
+      const std::string sourceKey =
+          contentValid ? "md5:" + md5 : lanePaths[static_cast<size_t>(index)];
+      singz::NativePlaybackLaneSource source{
+          laneIds[static_cast<size_t>(index)], std::move(descriptor),
+          gains[static_cast<size_t>(index)],
+          muted[static_cast<size_t>(index)] == JNI_TRUE,
+          solo[static_cast<size_t>(index)] == JNI_TRUE, sourceKey};
+      if (contentValid && seedPolicyMatches &&
+          waveformBucketCounts[static_cast<size_t>(index)] ==
+              static_cast<jint>(singz::kNativePlaybackLaneSummaryBuckets)) {
+        singz::NativePlaybackLaneWaveformSeed seed;
+        seed.contentKey = sourceKey;
+        bool valid = true;
+        for (size_t bucket = 0; bucket < seed.peaks.size(); ++bucket) {
+          const double peak = waveformPeaks[
+              static_cast<size_t>(index) * seed.peaks.size() + bucket];
+          if (!std::isfinite(peak) || peak < 0.0 || peak > 1.0) {
+            valid = false;
+            break;
+          }
+          seed.peaks[bucket] = static_cast<float>(peak);
+        }
+        if (valid) source.waveform = std::move(seed);
+      }
+      lanes.push_back(std::move(source));
     }
     CancellationContext cancellation{&bridge, generation};
     const auto result = bridge.session.prepare(
@@ -1685,7 +1735,7 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
     {const_cast<char *>("nativePlaybackPrepare"),
      const_cast<char *>(
          "(JLjava/lang/String;[IIIIFJJJZZJZZJJ[Ljava/lang/String;[Ljava/lang/String;"
-         "[F[Z[ZZDDDDZIDZ[DII[IZIJ[J[J[Ljava/lang/String;Z"
+         "ILjava/lang/String;[Ljava/lang/String;[I[D[F[Z[ZZDDDDZIDZ[DII[IZIJ[J[J[Ljava/lang/String;Z"
          "Z[Lcom/singzplayer/playback/NativePlaybackGraphNodeJni;"
          "[Lcom/singzplayer/playback/NativePlaybackGraphConnectionJni;"
          "[Ljava/lang/String;)Ljava/lang/String;"),

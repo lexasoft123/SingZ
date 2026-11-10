@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'Memeriksa…',
+  'phone.library.openingConnect': 'Menghubungkan…',
+  'phone.library.openingDownload': 'Mengunduh…',
+  'phone.library.openingVerify': 'Memeriksa unduhan…',
+  'phone.library.openingRetry': 'Mencoba lagi…',
   "phone.library.pickFailed": "File itu tidak bisa dibuka ({msg})",
   "phone.library.folderInactive": "Folder yang dipilih tidak lagi aktif. Buka kembali dan coba lagi.",
   "phone.library.folderIdentityUnavailable": "Identitas folder yang dipilih tidak tersedia. Buka folder lagi dan coba lagi.",
@@ -18,6 +23,16 @@ export const library: Translation<typeof en> = {
   "phone.library.delete": "Hapus",
   "phone.library.opening": "Membuka...",
   "phone.library.decoding": "Pengkodean {id} · {i}/{n}",
+  'phone.library.downloadChecking': "Memeriksa {label} tersimpan · {index}/{count}",
+  'phone.library.downloadTrack': "Mengunduh {label} · {index}/{count}",
+  'phone.library.downloadVerifying': "Memverifikasi {label} · {index}/{count}",
+  'phone.library.downloadRetrying': "Mencoba lagi {label} · {attempt}/{attempts}",
+  'phone.library.downloadInterrupted': "Koneksi terputus. Trek yang sudah diunduh tetap disimpan. Ketuk Coba lagi untuk melanjutkan.",
+  'phone.library.downloadMissing': "Trek ini tidak ada di Drive. Sinkronkan ulang lagu dari komputer.",
+  'phone.library.downloadDenied': "Drive menolak akses ke trek ini. Periksa login dan coba lagi.",
+  'phone.library.downloadStorage': "Trek tidak dapat disimpan. Periksa ruang kosong di ponsel.",
+  'phone.library.downloadRetry': "Coba lagi",
+  'phone.library.downloadDamaged': "Trek tidak lengkap atau rusak. Trek lain yang sudah diunduh tetap disimpan. Coba lagi.",
   "phone.library.fetchingStep": "Pengiriman {id} · {i}/{n}",
   "phone.library.decodingStep": "Pengkodean {id} · {i}/{n}",
   "phone.library.lyricsStep": "Lirik…",

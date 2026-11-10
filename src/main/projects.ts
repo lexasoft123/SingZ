@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { driveProjectsRoot, isDriveProject } from './drive-storage'
 import { sanitizeSongVolume } from '../shared/song-volume'
 import { t } from '../shared/i18n'
 import { createHash } from 'node:crypto'
@@ -26,6 +27,15 @@ import {
   serializeGraphDocument
 } from '../shared/graph-document'
 import { customTrackPath } from '../shared/custom-track-path'
+import {
+  MAX_LANES as WAVEFORM_MAX_LANES,
+  POLICY as WAVEFORM_POLICY,
+  VERSION as WAVEFORM_VERSION,
+  isCurrentWaveformEnvelopeEntry,
+  parseWaveformEnvelopeEntry,
+  type CurrentWaveformEnvelopeEntry,
+  type StoredWaveformEnvelopeEntry
+} from '../shared/waveform-envelope-cache'
 import { wavToFlac } from './flac'
 import { log } from './log'
 import { describeProject } from './project-state'
@@ -35,16 +45,25 @@ import { hashFile } from './separation'
 import { isIssuedLead } from './vocal-separation'
 import { readSettings, writeSettings } from './settings'
 import { AUDIO_EXT } from './source'
+import { productProfileDir } from '../shared/product-identity'
+
+function defaultProjectsRoot(): string {
+  return join(app.getPath('documents'), productProfileDir(process.env.SINGZ_SURFACE))
+}
+
+function legacyProjectsRoot(): string {
+  return join(app.getPath('music'), productProfileDir(process.env.SINGZ_SURFACE))
+}
 
 /**
- * User-visible project library: ~/Documents/SingZ/<song name>/ by default,
- * relocatable (settings.json) into a cloud-synced folder — iCloud Drive /
- * Google Drive / OneDrive are plain folders to us; their apps do the syncing.
+ * User-visible project library: ~/Documents/SingZ (Desktop) or
+ * ~/Documents/SingZ Box (Box), relocatable in settings.json to a cloud-synced
+ * folder. Explicitly configured roots may be shared between products.
  */
 export function projectsRoot(): string {
   const custom = readSettings().projectsRoot
   if (custom && existsSync(custom)) return custom
-  return join(app.getPath('documents'), 'SingZ')
+  return defaultProjectsRoot()
 }
 
 /**
@@ -57,7 +76,7 @@ export function inLibrary(dir: string): boolean {
   return dir === root || dir.startsWith(root + sep)
 }
 
-/** Cloud-synced folders present on this machine (each proposes a SingZ subfolder). */
+/** Cloud-synced folders present on this machine, with product-local proposals. */
 export function listCloudRoots(): CloudRoot[] {
   const home = app.getPath('home')
   const candidates: { label: string; base: string }[] = [
@@ -83,7 +102,7 @@ export function listCloudRoots(): CloudRoot[] {
   for (const c of candidates) {
     if (!existsSync(c.base) || seen.has(c.label)) continue
     seen.add(c.label)
-    out.push({ label: c.label, path: join(c.base, 'SingZ') })
+    out.push({ label: c.label, path: join(c.base, productProfileDir(process.env.SINGZ_SURFACE)) })
   }
   return out
 }
@@ -92,13 +111,13 @@ export function getStorage(): { root: string; isDefault: boolean; cloud: CloudRo
   const root = projectsRoot()
   return {
     root,
-    isDefault: root === join(app.getPath('documents'), 'SingZ'),
+    isDefault: root === defaultProjectsRoot(),
     cloud: listCloudRoots()
   }
 }
 
 /**
- * Move the library to a new folder (null = back to Documents/SingZ).
+ * Move the library to a new folder (null = back to the product's Documents folder).
  * Existing projects are copied (never deleted) so a half-synced cloud folder
  * can't lose anything; collisions keep whatever the target already has.
  */
@@ -107,7 +126,7 @@ export async function setProjectsRoot(
 ): Promise<{ ok: true; root: string; copied: number } | { ok: false; error: string }> {
   try {
     const oldRoot = projectsRoot()
-    const newRoot = path ?? join(app.getPath('documents'), 'SingZ')
+    const newRoot = path ?? defaultProjectsRoot()
     if (newRoot === oldRoot) return { ok: true, root: newRoot, copied: 0 }
     await mkdir(newRoot, { recursive: true })
     let copied = 0
@@ -132,9 +151,9 @@ export async function setProjectsRoot(
   }
 }
 
-/** Projects lived in ~/Music/SingZ before 0.2.4 — move them over once. */
+/** Migrate only the active product's pre-0.2.4 library, never Desktop's into Box. */
 export async function migrateProjects(): Promise<void> {
-  const legacy = join(app.getPath('music'), 'SingZ')
+  const legacy = legacyProjectsRoot()
   if (!(await exists(legacy))) return
   try {
     if (!(await exists(projectsRoot()))) {
@@ -238,9 +257,9 @@ export interface ProjectFile {
   /** Fixed member graph.json. Its version is independent of project.version. */
   graphHash?: ProjectGraphHash
   /** The seek bar's envelope per lane, 96 buckets of RMS over every channel,
-   *  each carrying the md5 of the stem it was measured from. Written here so a
-   *  phone draws the bar without decoding the song; see saveProjectWaveforms. */
-  waveforms?: Record<string, { md5: string; peaks: number[] }>
+   *  each carrying the md5 of the stem it was measured from. Current entries
+   *  carry an explicit algorithm stamp; readers still accept legacy records. */
+  waveforms?: Record<string, StoredWaveformEnvelopeEntry>
 }
 
 export interface StemHash {
@@ -406,7 +425,11 @@ async function storeCustomTracks(
       log('app', `custom track "${t.label ?? t.id}": ${src} is gone — not saved`, 'warn')
       continue
     }
-    let name = `${customBase(t.id, i)}${extname(src).toLowerCase()}`
+    // An existing project lane may have a filename unrelated to its mixer ID.
+    // Keep it stable: a save can overlap a native prepare still using this path.
+    const existingName = dirname(src) === resolve(stemsDir) && basename(src).startsWith(CUSTOM_PREFIX)
+      ? basename(src) : undefined
+    let name = existingName ?? `${customBase(t.id, i)}${extname(src).toLowerCase()}`
     for (let n = 2; used.has(name); n++) {
       name = `${customBase(t.id, i)}-${n}${extname(src).toLowerCase()}`
     }
@@ -592,43 +615,84 @@ export async function saveProjectSongVolume(songPath: string, value: number): Pr
  *
  * The numbers are `laneEnvelope` in the renderer — 96 buckets of RMS over
  * every channel, unnormalized — which is the port of `summarizeLanePeaks` in
- * the core. Nothing here interprets them; this pairs them with a hash and
- * writes them down.
+ * the core. Only finite values in [0, 1] are accepted, then paired with a hash
+ * and written down.
  */
 export async function saveProjectWaveforms(
   dir: string,
   envelopes: Record<string, number[]>
 ): Promise<{ ok: boolean; stored: number }> {
   const ids = Object.keys(envelopes)
-  if (ids.length === 0) return { ok: true, stored: 0 }
   return withProjectDocumentTransaction(dir, async (meta, replace) => {
     const hashes = meta.stemHashes ?? {}
+    const hashFor = (file: string): string | undefined => {
+      const hash = hashes[file]
+      return hash && typeof hash.md5 === 'string' && MD5.test(hash.md5) ? hash.md5 : undefined
+    }
     // stemHashes is keyed by FILE name (`vocals.flac`); the phone keys lanes by
-    // id (`vocals`). This is where the two meet, and the extension is whatever
-    // the project actually holds rather than an assumption about it.
+    // id (`vocals`). Custom IDs need not match their filenames, so their stored
+    // id → file entries are authoritative. Ordinary stems retain FLAC priority.
     const byLane = new Map<string, string>()
-    for (const [file, hash] of Object.entries(hashes)) {
+    const stemIds = new Set<string>(STEMS_6)
+    for (const file of Object.keys(hashes)) {
       const dot = file.lastIndexOf('.')
       const id = dot > 0 ? file.slice(0, dot) : file
-      if (hash && typeof hash.md5 === 'string' && MD5.test(hash.md5)) byLane.set(id, hash.md5)
+      const md5 = hashFor(file)
+      if (md5) byLane.set(id, md5)
     }
-    const waveforms: Record<string, { md5: string; peaks: number[] }> = {}
+    for (const id of STEMS_6) {
+      const md5 = hashFor(`${id}.flac`) ?? hashFor(`${id}.wav`)
+      if (md5) byLane.set(id, md5)
+    }
+    const custom = meta.settings?.custom
+    if (Array.isArray(custom)) {
+      for (const track of custom) {
+        if (!track || typeof track.id !== 'string' || stemIds.has(track.id)) continue
+        const file = customTrackPath(track.file)
+        if (!file) continue
+        const md5 = hashFor(file.slice('stems/'.length))
+        if (md5) byLane.set(track.id, md5)
+      }
+    }
+    const currentEntry = (value: unknown, md5: string): CurrentWaveformEnvelopeEntry | null => {
+      const parsed = parseWaveformEnvelopeEntry(value, md5)
+      return isCurrentWaveformEnvelopeEntry(parsed) ? parsed : null
+    }
+    const incoming = new Map<string, CurrentWaveformEnvelopeEntry>()
     for (const id of ids) {
+      if (incoming.size >= WAVEFORM_MAX_LANES) break
       const md5 = byLane.get(id)
-      const peaks = envelopes[id]
-      if (!md5 || !Array.isArray(peaks) || peaks.length === 0) continue
-      if (!peaks.every((v) => Number.isFinite(v) && v >= 0)) continue
-      waveforms[id] = { md5, peaks }
+      if (!md5) continue
+      const entry = currentEntry({
+        version: WAVEFORM_VERSION,
+        policy: WAVEFORM_POLICY,
+        md5,
+        peaks: envelopes[id]
+      }, md5)
+      if (entry) incoming.set(id, entry)
     }
-    const stored = Object.keys(waveforms).length
-    if (stored === 0) return { ok: true, stored: 0 }
-    // Merged, not replaced: a project can gain a lane (a custom track) without
-    // the others being re-measured, and a stale entry is refused on the phone
-    // by its hash rather than by being absent.
+    const retained = new Map<string, CurrentWaveformEnvelopeEntry>()
+    for (const [id, value] of Object.entries(meta.waveforms ?? {})) {
+      if (incoming.has(id)) continue
+      const md5 = byLane.get(id)
+      if (!md5) continue
+      const entry = currentEntry(value, md5)
+      if (entry) retained.set(id, entry)
+    }
+    const waveforms: Record<string, CurrentWaveformEnvelopeEntry> = {}
+    for (const [id, entry] of incoming) waveforms[id] = entry
+    let count = incoming.size
+    for (const [id, entry] of retained) {
+      if (count >= WAVEFORM_MAX_LANES) break
+      waveforms[id] = entry
+      ++count
+    }
+    const stored = incoming.size
+    if (stored === 0 && meta.waveforms === undefined) return { ok: true, stored: 0 }
     const next: ProjectFile = {
       ...meta,
       savedAt: new Date().toISOString(),
-      waveforms: { ...(meta.waveforms ?? {}), ...waveforms }
+      waveforms
     }
     await replace(next)
     return { ok: true, stored }
@@ -783,38 +847,40 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
   const root = projectsRoot()
   const projects: ProjectListItem[] = []
   try {
-    for (const entry of await readdir(root, { withFileTypes: true })) {
-      // A sync can retain a complete staging document when its final rename
-      // is refused (for example a scanner holds the destination on Windows).
-      // Only the published destination belongs in the playable library.
-      if (!entry.isDirectory() || entry.name.startsWith('.singz-adopting-')) continue
-      const dir = join(root, entry.name)
-      const meta = await readMeta(dir)
-      if (!meta) continue
-      const songPath = join(dir, meta.songFile)
-      if (!(await exists(songPath))) continue
-      const present = await stemsPresent(dir)
-      const facts = describeProject(meta, present)
-      if (facts.damaged.length || facts.missing.length) {
-        log(
-          'app',
-          `${entry.name}: ${[...facts.missing.map((f) => `${f} missing`), ...facts.damaged.map((f) => `${f} the wrong size`)].join(', ')}`,
-          'warn'
-        )
+    for (const library of [root, driveProjectsRoot()]) {
+      for (const entry of await readdir(library, { withFileTypes: true }).catch(() => [])) {
+        // A sync can retain a complete staging document when its final rename
+        // is refused (for example a scanner holds the destination on Windows).
+        // Only the published destination belongs in the playable library.
+        if (!entry.isDirectory() || entry.name.startsWith('.singz-adopting-')) continue
+        const dir = join(library, entry.name)
+        const meta = await readMeta(dir)
+        if (!meta) continue
+        const songPath = join(dir, meta.songFile)
+        const present = await stemsPresent(dir)
+        const facts = describeProject(meta, present)
+        if (!(await exists(songPath)) && !facts.playable) continue
+        if (facts.damaged.length || facts.missing.length) {
+          log(
+            'app',
+            `${entry.name}: ${[...facts.missing.map((f) => `${f} missing`), ...facts.damaged.map((f) => `${f} the wrong size`)].join(', ')}`,
+            'warn'
+          )
+        }
+        projects.push({
+          dir,
+          name: meta.name ?? entry.name,
+          songPath,
+          savedAt: meta.savedAt ?? '',
+          // playable = the core four exist; guitar/piano may be silent-hidden
+          hasStems: facts.playable,
+          stemCount: Object.keys(facts.stems).length,
+          hasLyrics: await exists(join(dir, 'lyrics.json')),
+          // what deleting it would free — stats only, so an evicted iCloud stem
+          // is measured, never downloaded
+          bytes: Object.values(present).reduce((a, b) => a + b, 0) + (await topBytes(dir))
+        })
       }
-      projects.push({
-        dir,
-        name: meta.name ?? entry.name,
-        songPath,
-        savedAt: meta.savedAt ?? '',
-        // playable = the core four exist; guitar/piano may be silent-hidden
-        hasStems: facts.playable,
-        stemCount: Object.keys(facts.stems).length,
-        hasLyrics: await exists(join(dir, 'lyrics.json')),
-        // what deleting it would free — stats only, so an evicted iCloud stem
-        // is measured, never downloaded
-        bytes: Object.values(present).reduce((a, b) => a + b, 0) + (await topBytes(dir))
-      })
     }
   } catch {
     // no library yet
@@ -830,6 +896,7 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
   if (!(await exists(metaPath))) return null
   try {
     const meta = JSON.parse(await readFile(metaPath, 'utf8')) as ProjectFile
+    if (basename(songPath) !== meta.songFile && !(await exists(songPath))) return null
     const facts = describeProject(meta, await stemsPresent(dir))
     const stems: Partial<Record<StemName6, string>> = {}
     for (const s of STEMS_6) {
@@ -841,6 +908,7 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
     return {
       dir,
       name: meta.name ?? basename(dir),
+      sourceMissing: !(await exists(songPath)),
       formatVersion: meta.version ?? 1,
       settings: { ...settings, custom: await resolveCustom(dir, settings.custom) },
       graphHash: validGraphHash(meta.graphHash) ? { ...meta.graphHash } : undefined,
@@ -917,7 +985,8 @@ export async function saveProject(
       // vanished while it waited (its project renamed, the file deleted) would
       // otherwise read as "loose song" below and fork a second copy of the
       // project into the library, built out of the splitter cache.
-      if (!(await exists(songPath))) {
+      const sourceExists = await exists(songPath)
+      if (!sourceExists && !(await detectProject(songPath))?.stems) {
         return {
           ok: false as const,
           error: t('main.error.songMoved')
@@ -940,11 +1009,12 @@ export async function saveProject(
 
         // processed stems from the hash cache (if the song has been split);
         // the six-stem split wins when both exist — it is a superset
-        const hashDir = join(stemsRoot(), await hashFile(songPath))
-        const sixDir = join(hashDir, 'htdemucs_6s')
+        const hashDir = sourceExists ? join(stemsRoot(), await hashFile(songPath)) : null
+        const sixDir = hashDir ? join(hashDir, 'htdemucs_6s') : ''
         const useSix = await exists(join(sixDir, 'vocals.wav'))
-        const cacheDir = useSix ? sixDir : join(hashDir, 'htdemucs')
+        const cacheDir = hashDir ? (useSix ? sixDir : join(hashDir, 'htdemucs')) : null
         for (const s of useSix ? STEMS_6 : STEMS) {
+          if (!cacheDir) continue
           const src = join(cacheDir, `${s}.wav`)
           const dst = join(dir, 'stems', `${s}.wav`)
           // an existing FLAC already carries this stem — don't resurrect the WAV
@@ -971,7 +1041,7 @@ export async function saveProject(
         const stored = await storeCustomTracks(dir, settings.custom)
 
         // lyrics from the hash cache (project-local lyrics stay as they are)
-        const cachedLyrics = join(stemsRoot(), await hashFile(songPath), 'lyrics.json')
+        const cachedLyrics = hashDir ? join(hashDir, 'lyrics.json') : ''
         const projLyrics = join(dir, 'lyrics.json')
         if ((await exists(cachedLyrics)) && !(await exists(projLyrics))) {
           await copyFile(cachedLyrics, projLyrics)
@@ -1016,7 +1086,7 @@ export async function saveProject(
           // portable; the renderer gets absolute paths back below.
           settings: storedSettings,
           stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
-          songHash: await refreshFileHash(join(dir, songFile), prevMeta?.songHash),
+          songHash: sourceExists ? await refreshFileHash(join(dir, songFile), prevMeta?.songHash) : prevMeta?.songHash,
           lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
         }
         await writeMetaAtomic(dir, meta)
@@ -1123,7 +1193,7 @@ export async function deleteProject(
 ): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
   try {
     const target = resolve(dir)
-    if (!inLibrary(target) || target === projectsRoot()) {
+    if ((!inLibrary(target) && !isDriveProject(target)) || target === projectsRoot()) {
       return { ok: false, error: t('main.error.folderNotInLibrary') }
     }
     return await withProjectLock(target, async () => {

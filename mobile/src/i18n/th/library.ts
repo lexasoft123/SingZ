@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'กำลังตรวจสอบ…',
+  'phone.library.openingConnect': 'กำลังเชื่อมต่อ…',
+  'phone.library.openingDownload': 'กำลังดาวน์โหลด…',
+  'phone.library.openingVerify': 'กำลังตรวจสอบไฟล์…',
+  'phone.library.openingRetry': 'กำลังลองอีกครั้ง…',
   "phone.library.pickFailed": "ไฟล์นั้นไม่สามารถเปิดได้ ({msg})",
   "phone.library.folderInactive": "โฟลเดอร์ที่เลือกไม่ได้ทํางานแล้ว เปิดมันอีกครั้งและลองอีกครั้ง",
   "phone.library.folderIdentityUnavailable": "ตัวประกันโฟลเดอร์ที่เลือกไม่ได้ เปิดโฟลเดอร์อีกครั้งและลองอีกครั้ง",
@@ -18,6 +23,16 @@ export const library: Translation<typeof en> = {
   "phone.library.delete": "ลบ",
   "phone.library.opening": "เปิด...",
   "phone.library.decoding": "การออกหมาย {id} · {i}/{n}",
+  'phone.library.downloadChecking': "ตรวจสอบ {label} ที่บันทึกไว้ · {index}/{count}",
+  'phone.library.downloadTrack': "กำลังดาวน์โหลด {label} · {index}/{count}",
+  'phone.library.downloadVerifying': "ตรวจสอบความถูกต้องของ {label} · {index}/{count}",
+  'phone.library.downloadRetrying': "ลอง {label} อีกครั้ง · {attempt}/{attempts}",
+  'phone.library.downloadInterrupted': "การเชื่อมต่อขาดหาย แทร็กที่ดาวน์โหลดแล้วจะยังอยู่ แตะลองอีกครั้งเพื่อดำเนินการต่อ",
+  'phone.library.downloadMissing': "ไม่พบแทร็กนี้ใน Drive โปรดซิงค์เพลงจากคอมพิวเตอร์อีกครั้ง",
+  'phone.library.downloadDenied': "Drive ปฏิเสธการเข้าถึงแทร็ก โปรดตรวจสอบการลงชื่อเข้าใช้แล้วลองอีกครั้ง",
+  'phone.library.downloadStorage': "บันทึกแทร็กไม่ได้ โปรดตรวจสอบพื้นที่ว่างในโทรศัพท์",
+  'phone.library.downloadRetry': "ลองอีกครั้ง",
+  'phone.library.downloadDamaged': "แทร็กไม่ครบหรือเสียหาย แทร็กอื่นที่ดาวน์โหลดแล้วยังอยู่ โปรดลองอีกครั้ง",
   "phone.library.fetchingStep": "รับส่ง {id} · {i}/{n}",
   "phone.library.decodingStep": "การออกหมาย {id} · {i}/{n}",
   "phone.library.lyricsStep": "เนื้อเพลง…",

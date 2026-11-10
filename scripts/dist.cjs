@@ -35,8 +35,44 @@ function hasExplicitPublishArg(args) {
   )
 }
 
-function electronBuilderArgs(args) {
-  return hasExplicitPublishArg(args) ? [...args] : [...args, '--publish', 'never']
+function electronBuilderArgs(args, box = false) {
+  const builderArgs = box ? [...args, '--config', 'electron-builder.box.yml'] : [...args]
+  return hasExplicitPublishArg(args) ? builderArgs : [...builderArgs, '--publish', 'never']
+}
+
+function parseDistRequest(args, hostPlatform = process.platform, hostArch = process.arch) {
+  let box = false
+  const builderArgs = []
+  for (const arg of args) {
+    if (arg === '--box') {
+      if (box) throw new Error('The internal --box selector may be specified only once')
+      box = true
+      continue
+    }
+    if (/^--(?:no-)?box(?:[.=]|$)/.test(arg)) {
+      throw new Error(`Unsupported SingZ dist selector: ${arg}`)
+    }
+    builderArgs.push(arg)
+  }
+  return {
+    args: builderArgs,
+    box,
+    targets: requestedCaptureTargets(builderArgs, hostPlatform, hostArch)
+  }
+}
+
+/**
+ * The Linux CI build stage assembles the package inside a container that
+ * cannot open a desktop, so the host dlopen smoke cannot run there. Both
+ * Linux architectures defer it to the installed-test stage; every other
+ * host/target combination smokes immediately when the target matches the
+ * host (the caller still gates on `targets.includes(hostTarget)`).
+ */
+function shouldDeferRuntimeSmoke(env, targets, hostTarget) {
+  return env.SINGZ_CI_STAGE === 'build' &&
+    hostTarget.startsWith('linux-') &&
+    targets.length === 1 &&
+    (targets[0] === 'linux-x64' || targets[0] === 'linux-arm64')
 }
 
 function finalVerifyCaptureSnapshots({
@@ -61,9 +97,18 @@ function finalVerifyCaptureSnapshots({
   )
 }
 
-function main(builderArgs = process.argv.slice(2)) {
-  const targets = requestedCaptureTargets(builderArgs)
+function main(args = process.argv.slice(2)) {
+  const { args: builderArgs, box, targets } = parseDistRequest(args)
   for (const target of targets) {
+    if (target.startsWith('linux-')) {
+      for (const script of ['vendor-analyze.sh', 'vendor-llama.sh', 'vendor-crispasr.sh']) {
+        run('bash', [join(root, 'scripts', script), target])
+      }
+      for (const helper of ['singz-analyze', 'llama-server', 'crispasr']) {
+        run('bash', [join(root, 'scripts/assert-portable-binary.sh'), target, join(root, 'vendor', target, helper)])
+      }
+      run('bash', [join(root, 'scripts/build-onnx-pack.sh'), target])
+    }
     run(process.execPath, [join(root, 'scripts/build-capture-addon.cjs'), target])
   }
   if (builderArgs.includes('--universal')) {
@@ -76,9 +121,13 @@ function main(builderArgs = process.argv.slice(2)) {
 
   // Only the host architecture can be dlopen-smoked here; cross-architecture
   // artifacts are still checksum/manifest verified above and are load-smoked by
-  // their native CI runner.
+  // their native CI runner. The Linux CI build stage runs inside a container
+  // that cannot open a desktop, so EITHER Linux arch defers its runtime smoke
+  // to the installed-test stage (same rule as the x64 gate it replaces).
   const hostTarget = `${process.platform}-${process.arch}`
-  if (targets.includes(hostTarget)) {
+  const runtimeSmokeDeferred = shouldDeferRuntimeSmoke(process.env, targets, hostTarget)
+  if (runtimeSmokeDeferred) console.log('Linux runtime smoke deferred to the required installed-test CI stage')
+  if (targets.includes(hostTarget) && !runtimeSmokeDeferred) {
     const electron = require('electron')
     run(electron, [
       join(root, 'tests/e2e/capture-addon-smoke.cjs'),
@@ -95,7 +144,7 @@ function main(builderArgs = process.argv.slice(2)) {
   })
   run(process.execPath, [
     require.resolve('electron-builder/cli.js'),
-    ...electronBuilderArgs(builderArgs)
+    ...electronBuilderArgs(builderArgs, box)
   ])
 }
 
@@ -105,5 +154,7 @@ module.exports = {
   electronBuilderArgs,
   finalVerifyCaptureSnapshots,
   hasExplicitPublishArg,
+  parseDistRequest,
+  shouldDeferRuntimeSmoke,
   spawnOptions
 }

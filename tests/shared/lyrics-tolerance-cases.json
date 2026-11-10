@@ -1,0 +1,427 @@
+[
+  {
+    "name": "backward word",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello world",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 2.5
+            },
+            {
+              "w": "world",
+              "s": 1.5,
+              "e": 2
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello world",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 2.5
+            },
+            {
+              "w": "world",
+              "s": 2,
+              "e": 2
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "zero-length word",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 2
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 2
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "end before start",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 3,
+              "e": 2
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 3,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "empty-text line",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 0,
+          "end": 1,
+          "text": "  ",
+          "words": []
+        },
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "line without words",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": []
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "out-of-order lines",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 3,
+          "end": 4,
+          "text": "next",
+          "words": []
+        },
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        },
+        {
+          "start": 3,
+          "end": 4,
+          "text": "next",
+          "words": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "word outside line",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 0,
+              "e": 9
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 1,
+              "e": 4
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "invalid line end",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 1,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 1.2,
+              "e": 2
+            }
+          ]
+        },
+        {
+          "start": 3,
+          "end": 4,
+          "text": "next",
+          "words": []
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 3,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 1.2,
+              "e": 2
+            }
+          ]
+        },
+        {
+          "start": 3,
+          "end": 4,
+          "text": "next",
+          "words": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown source",
+    "input": {
+      "source": "future",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "non-JSON-shaped input",
+    "input": [
+      {
+        "start": 1,
+        "end": 4,
+        "text": "hello",
+        "words": [
+          {
+            "w": "hello",
+            "s": 2,
+            "e": 3
+          }
+        ]
+      }
+    ],
+    "expected": null
+  },
+  {
+    "name": "all lines unusable",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 0,
+          "end": 1,
+          "text": "  ",
+          "words": []
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "invalid words",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": " ",
+              "s": 2,
+              "e": 3
+            },
+            {
+              "w": "bad",
+              "s": -1,
+              "e": 2
+            },
+            {
+              "w": "ok",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "ok",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': '확인 중…',
+  'phone.library.openingConnect': '연결 중…',
+  'phone.library.openingDownload': '다운로드 중…',
+  'phone.library.openingVerify': '다운로드 확인 중…',
+  'phone.library.openingRetry': '다시 시도 중…',
   "phone.library.pickFailed": "이 파일은 열 수 없었습니다 ({msg})",
   "phone.library.folderInactive": "선택된 폴더가 더 이상 활성화되지 않습니다. 다시 열고 다시 시도하십시오.",
   "phone.library.folderIdentityUnavailable": "선택한 폴더 아이덴티티는 사용할 수 없습니다. 폴더를 다시 열고 다시 시도하십시오.",
@@ -18,6 +23,16 @@ export const library: Translation<typeof en> = {
   "phone.library.delete": "삭제",
   "phone.library.opening": "개막...",
   "phone.library.decoding": "{id} · {i}/{n}",
+  'phone.library.downloadChecking': "저장된 {label} 확인 · {index}/{count}",
+  'phone.library.downloadTrack': "{label} 다운로드 · {index}/{count}",
+  'phone.library.downloadVerifying': "{label} 검증 · {index}/{count}",
+  'phone.library.downloadRetrying': "{label} 재시도 · {attempt}/{attempts}회",
+  'phone.library.downloadInterrupted': "연결이 끊겼습니다. 다운로드한 트랙은 보관됩니다. 재시도를 눌러 계속하세요.",
+  'phone.library.downloadMissing': "Drive에 이 트랙이 없습니다. 컴퓨터에서 곡을 다시 동기화하세요.",
+  'phone.library.downloadDenied': "Drive가 트랙 접근을 거부했습니다. 로그인 상태를 확인하고 다시 시도하세요.",
+  'phone.library.downloadStorage': "트랙을 저장할 수 없습니다. 휴대폰의 여유 공간을 확인하세요.",
+  'phone.library.downloadRetry': "재시도",
+  'phone.library.downloadDamaged': "트랙이 불완전하거나 손상되었습니다. 다른 다운로드한 트랙은 보관됩니다. 다시 시도하세요.",
   "phone.library.fetchingStep": "{id} · {i}/{n}",
   "phone.library.decodingStep": "{id} · {i}/{n}",
   "phone.library.lyricsStep": "가사…",

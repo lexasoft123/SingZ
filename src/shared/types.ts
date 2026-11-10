@@ -1,4 +1,6 @@
 import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from './training-progress'
+import type { BoxAPI } from './box-contract'
+import { POLICY as WAVEFORM_POLICY, VERSION as WAVEFORM_VERSION } from './waveform-envelope-cache'
 import type { NativeGraphDocumentProjection } from './graph-document'
 
 import type { ReleaseNotes } from './release-highlights'
@@ -269,6 +271,7 @@ export type ProjectGraphWriteResult =
   | { ok: false; code: 'not-project' | 'unsupported' | 'invalid' | 'write-failed'; error: string }
 
 export interface ProjectInfo {
+  sourceMissing?: boolean
   dir: string
   name: string
   /** 1 = WAV stems (pre-0.7), 2 = FLAC stems. Missing on old metas = 1. */
@@ -427,6 +430,19 @@ export type LyricsResult =
       error: string
     }
 
+export type CachedLyricsResult =
+  | {
+      ok: true
+      cached: true
+      lines: LyricLine[]
+      source: LyricsSource
+      credit?: string
+      aligned?: boolean
+      check?: AlignCheck
+    }
+  | { ok: true; cached: false }
+  | { ok: false; error: string }
+
 /**
  * ML beat analysis from the splitter pack's Beat This! runner: peak-picked
  * beat/downbeat times (downbeats snapped onto beats) plus the framewise
@@ -552,6 +568,14 @@ export interface CaptureAnalysisWindow {
   dbfs: number
 }
 
+export interface CaptureStartConfig {
+  deviceUid?: string
+  inputChannel: number
+  ringBlocks?: number
+  /** Box private reader: unique increasing physical channels, including inputChannel. */
+  enabledChannels?: number[]
+}
+
 export interface CaptureStartResult {
   ok: boolean
   state: CaptureStateName
@@ -568,6 +592,8 @@ export interface CaptureStartResult {
 }
 
 export interface CaptureStats {
+  /** Native scalar levels from a private LoopZ history reader, never PCM. */
+  microphoneLevels?: { valid: boolean; channels: number; ownershipGeneration: string; channelIndices?: number[]; peak: number[]; rms: number[] }
   deliveredBlocks: string
   deliveredFrames: string
   overruns: string
@@ -755,7 +781,7 @@ export interface DesktopMonitorStatus {
   rejectedBlocks: number
 }
 
-export type DesktopPlaybackProvider = 'coreaudio' | 'wasapi' | 'asio'
+export type DesktopPlaybackProvider = 'coreaudio' | 'wasapi' | 'asio' | 'alsa'
 
 export interface DesktopPlaybackProviderInfo {
   id: DesktopPlaybackProvider
@@ -899,6 +925,8 @@ export interface DesktopPlaybackPrepareConfig {
    * prepared ahead. The core resamples into the device rate as it fills and
    * falls back to decoding any lane it cannot stream. Absent = decode. */
   streamLanes?: boolean
+  /** Box-only project hint, stripped before the native owner sees the config. */
+  retainedProject?: { dir: string; songPath: string }
 }
 
 export interface DesktopPlaybackLaneConfig {
@@ -907,6 +935,20 @@ export interface DesktopPlaybackLaneConfig {
   gain: number
   muted: boolean
   solo: boolean
+}
+
+export interface DesktopPlaybackLaneWaveformSeed {
+  version: typeof WAVEFORM_VERSION
+  policy: typeof WAVEFORM_POLICY
+  contentKey: string
+  peaks: number[]
+}
+
+/** Main-only prepare fields, attached after its allowlist and source checks.
+ * Renderer input remains DesktopPlaybackLaneConfig and cannot supply these. */
+export interface DesktopPlaybackTrustedLaneConfig extends DesktopPlaybackLaneConfig {
+  sourceKey?: string
+  waveform?: DesktopPlaybackLaneWaveformSeed
 }
 
 /**
@@ -1005,9 +1047,13 @@ export interface DesktopPlaybackLaneStatus {
   /** The lane plays out of a window the streaming feeder keeps ahead. */
   streamed: boolean
   /** Render blocks this generation that wanted a frame the window did not
-   *  hold and played silence. A couple per seek is the design; one per block
-   *  is a lane that has stopped being fed (main logs `lanes starving`). */
+   *  hold and played silence. Zero is the design at seeks, loop wraps and
+   *  starts (the core stages each jump before the transport moves); one per
+   *  block is a lane that has stopped being fed (main logs `lanes starving`). */
   starvedBlocks: string
+  /** Jumps this generation (seeks, loop wraps) that landed on a region the
+   *  feeder had staged for them. Optional: an addon built before it omits it. */
+  stagedJumps?: string
 }
 
 export const DESKTOP_PLAYBACK_GRAPH_MAX_NODES = 128
@@ -1191,6 +1237,78 @@ export interface DesktopPlaybackStatus {
   mediaCodecTag: string
 }
 
+/** Native ALSA input routing. Channels are zero-based; an explicit target relays capture only. */
+export interface DesktopMicrophoneMixConfig {
+  deviceUid: string
+  /** Omit to add inputs to song output. Set to relay captured hardware mix only to this output. */
+  outputDeviceUid?: string
+  channels: { channel: number; gain: number; muted: boolean; pan?: number }[]
+  delayFrames?: number
+  /** Requested relay period; negotiated outputPeriodFrames remains authoritative. */
+  requestedOutputPeriodFrames?: 256 | 512 | 1024
+  /** Opt-in relay render wall/thread-CPU measurements; additive mixing is not instrumented. */
+  measureRenderTiming?: boolean
+}
+export type DesktopMicrophoneMixResult = { ok: true } | { ok: false; error: string }
+export type DesktopMicrophoneMixStatus = {
+  ok: true
+  active: boolean
+  callbacks: string
+  missingFrames: string
+  failures: string
+  sampleRate: number
+  /** Last capture/output failure is retained after the route stops. */
+  error: string
+  /** Optional configured relay software timing, not acoustic latency measurements. */
+  captureSafetyFrames?: number
+  outputPeriodFrames?: number
+  outputBufferFrames?: number
+  presentationDelayFrames?: number
+  /** Optional relay recovery counters, preserved as decimal strings. */
+  outputXruns?: string
+  /** Callback blocks silenced for missing presentation time; not selected-mono missingFrames. */
+  outputTimestampUnavailableBlocks?: string
+  /** Optional relay render/mix timing; uint64 durations and counts are decimal strings. */
+  relayRenderCalls?: string
+  relayRenderTotalWallNs?: string
+  relayRenderMaxWallNs?: string
+  relayRenderTotalCpuNs?: string
+  relayRenderMaxCpuNs?: string
+  relayRenderBudgetOverruns?: string
+  relayRenderCpuTimingAvailable?: boolean
+  relayRenderTimingEnabled?: boolean
+  /** Optional for older bindings. One row per mono capture channel; live fields
+   * are independent atomic observations, not a coherent cross-source snapshot.
+   * History misses exclude non-read pre-delay silence, while missingFrames sums
+   * all input-channel misses including that silence. Counters are decimal strings. */
+  diagnostics?: {
+    channel: number
+    historyOnline: boolean
+    historyCallbacks: string
+    historyDiscontinuities: string
+    /** Valid received PCM discarded for Unknown timestamp quality, not measured hardware loss. */
+    unanchoredBlocks?: string
+    unanchoredFrames?: string
+    measuredRate: number
+    lastHostNs: string
+    publishedEndHostNs: string
+    missingFramesByReason: {
+      invalidRequest: string
+      offline: string
+      anchorUnavailable: string
+      clockMapping: string
+      resamplingSupport: string
+      generationChanged: string
+    }
+    unpublishedSampleReads: string
+    expiredSampleReads: string
+    racingSampleReads: string
+    absentSampleReads: string
+    verifiedClockSteps: string
+    maximumVerifiedClockStepNs: string
+  }[]
+} | { ok: false; error: string }
+
 export interface DesktopTrainingAudioStatus {
   hostTimeNs: string
   outputLatencyMs: number
@@ -1246,6 +1364,9 @@ export interface LocaleState {
 }
 
 export interface SingzApi {
+  /** Main-selected Box socket service owns playback beyond this renderer. */
+  readonly boxAudioPersistent: boolean
+  box: BoxAPI
   /** True only when main was launched with SINGZ_E2E_HOOKS=1: the renderer
    * then publishes `window.__test` (engine, transport, metronome, training,
    * open/back) for the desktop player-session driver. Never set in a
@@ -1262,6 +1383,9 @@ export interface SingzApi {
   winClose: () => void
   winIsMaximized: () => Promise<boolean>
   onWinMaximized: (cb: (maximized: boolean) => void) => () => void
+  /** Box-only normal-close request; other surfaces never receive it. */
+  onBoxCloseRequest(cb: () => void): () => void
+  boxCloseReady(): void
   /** Resolve the on-disk path of a dropped/picked File (empty string if none). */
   pathForFile(file: File): string
   /** Read a registered audio file's bytes (source song or produced stem). */
@@ -1299,6 +1423,9 @@ export interface SingzApi {
   }): Promise<DesktopAudioInputStartResult>
   configureDesktopTrainingOutput(outputDeviceUid: string, provider: DesktopPlaybackProvider): Promise<{ ok: boolean; error?: string }>
   desktopTrainingAudioStatus(): Promise<DesktopTrainingAudioStatus | null>
+  configureMicrophoneMix(config: DesktopMicrophoneMixConfig): Promise<DesktopMicrophoneMixResult>
+  stopMicrophoneMix(): Promise<DesktopMicrophoneMixResult>
+  microphoneMixStatus(): Promise<DesktopMicrophoneMixStatus>
   scheduleDesktopTrainingCue(config: DesktopTrainingPcmCue): Promise<DesktopTrainingPcmResult>
   setDesktopTrainingCueGain(generation: string, gain: number): Promise<{ ok: boolean; error?: string }>
   cancelDesktopTrainingCues(generation: string): Promise<{ ok: boolean; error?: string }>
@@ -1384,6 +1511,9 @@ export interface SingzApi {
     allowDownload?: boolean,
     prefer?: 'auto' | 'transcribe' | 'align' | 'precise'
   ): Promise<LyricsResult>
+  /** Read only an existing validated lyrics cache. Never searches, downloads,
+   * transcribes, aligns, or writes the cache. */
+  getCachedLyrics(songPath: string): Promise<CachedLyricsResult>
   /** Whether the precise (CTC forced-alignment) aligner can run on this machine. */
   alignCaps(): Promise<{ precise: boolean }>
   /** Manual LRCLIB search for the variant picker. */
@@ -1416,7 +1546,7 @@ export interface SingzApi {
     { ok: true; devices: CaptureInputDevice[] } | { ok: false; devices: []; error: string }
   >
   beginCapture(
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number },
+    config: CaptureStartConfig,
     ownershipGeneration: string
   ): Promise<CaptureStartResult>
   cancelCapture(
@@ -1594,7 +1724,13 @@ export interface SingzApi {
   >
 
   /** Google Drive sync (drive.file scope — no Drive client needed anywhere). */
+  gdriveProjects(): Promise<{ ok: boolean; projects: { id: string; name: string; songPath?: string }[]; error?: string }>
+  gdriveDownload(id: string): Promise<{ ok: boolean; songPath?: string; error?: string; cancelled?: boolean }>
+  gdriveCancelDownload(): Promise<{ ok: boolean }>
   gdriveStatus(): Promise<{
+    signInMode: 'device' | 'browser'
+    deviceSignInConfigured: boolean
+    browserSignInConfigured: boolean
     configured: boolean
     signedIn: boolean
     lastSync?: number | null
@@ -1602,6 +1738,9 @@ export interface SingzApi {
     /** Absolute dirs waiting to reach Drive — what the per-song badges read. */
     dirtyDirs: string[]
   }>
+  gdriveDeviceStart(): Promise<import('./drive-device').DriveDeviceStart>
+  gdriveDeviceStatus(id: string): Promise<import('./drive-device').DriveDeviceStatus>
+  gdriveDeviceCancel(id?: string): Promise<{ ok: boolean; complete?: boolean }>
   gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }>
   gdriveSignOut(): Promise<{ ok: boolean }>
   gdriveCancelSync(): Promise<{ ok: boolean }>

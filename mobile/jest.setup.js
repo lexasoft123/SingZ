@@ -87,6 +87,7 @@ jest.mock('react-native-reanimated', () => {
     __esModule: true,
     default: { View },
     useSharedValue: (v) => ({ value: v }),
+    useReducedMotion: () => false,
     useAnimatedRef: () => require('react').useRef(null),
     useAnimatedStyle: (fn) => fn(),
     useDerivedValue: (fn) => ({ value: fn() }),
@@ -119,8 +120,13 @@ jest.mock('@shopify/react-native-skia', () => {
   const node = () => null;
   return {
     __esModule: true,
-    Canvas: View,
+    Canvas: require('react').forwardRef((props, ref) => {
+      require('react').useImperativeHandle(ref, () => ({ redraw: jest.fn() }));
+      return require('react').createElement(View, props);
+    }),
+    useCanvasRef: () => require('react').useRef(null),
     Rect: View,
+    RoundedRect: View,
     Group: node,
     Text: node,
     LinearGradient: node,

@@ -1,3 +1,5 @@
+import type { OpeningActivity, OpeningTrack } from '../loading-progress'
+import { describeFileProgress, fileProgressFraction, openingTrack } from '../drive-progress';
 import { sanitizeSongVolume } from '../../../src/shared/song-volume';
 import { NativeModules, Platform } from 'react-native';
 import { barLengthAt, beatIndexAtOrAfter, beatTime } from '../beat';
@@ -20,6 +22,7 @@ import {
 import {
   loadProject,
   loadProjectGraph,
+  localFileIdentity,
   localProjectFile,
   MAX_DECODED_BYTES,
   metronomeRefForEntry,
@@ -48,6 +51,16 @@ import {
 } from './preferences';
 import { FlacStreamingPreferenceStore } from './preferences';
 import { mobileMetronomePersistence } from './metronome-persistence';
+import { mobileWaveformStore, type WaveformStore } from '../waveform-store';
+import {
+  MAX_WAVEFORM_LANES,
+  WAVEFORM_BUCKET_COUNT,
+  validWaveformMd5,
+  waveformSeedFor,
+  waveformCacheFor,
+  type PersistedWaveform,
+  type NativeWaveformSeed,
+} from '../waveform-cache';
 
 export interface NativePlaybackResult {
   readonly ok: boolean;
@@ -560,7 +573,7 @@ interface NativePlaybackBridgeApi {
    *  back to projecting the polled position. Same name and arity (none) on
    *  both bridges. */
   positionNow?(): unknown;
-  /** Four scalars; never waits for the control mutex or enumerates devices. */
+  /** Five scalars; never waits for the control mutex or enumerates devices. */
   outputMeter?(): unknown;
   /** Hold a parked generation's output stream without closing it, and let it
    *  go again (Android's background park; iOS answers InvalidState and keeps
@@ -679,6 +692,10 @@ interface NativePlaybackPrepareRequest {
     gain: number;
     muted: boolean;
     solo: boolean;
+    /** Actual materialized bytes and, when valid, their previously measured
+     * policy-bound envelope. Both optional for older FolderAccess builds. */
+    contentMd5?: string;
+    waveform?: NativeWaveformSeed;
   }>;
   outputDeviceUid: string;
   outputChannels: number[];
@@ -776,6 +793,8 @@ interface MaterializedLane {
   readonly label: string;
   readonly color: string;
   readonly custom: boolean;
+  readonly contentMd5?: string;
+  readonly waveform?: NativeWaveformSeed;
 }
 
 interface MaterializedProject {
@@ -799,9 +818,10 @@ export interface PlaybackLoadOptions {
   readonly entry: ProjectEntry;
   readonly engine: MultitrackEngine;
   readonly sampleRate: number;
-  readonly onStep: (message: string, fraction: number) => void;
+  readonly onStep: (message: string, fraction: number, activity?: OpeningActivity, track?: OpeningTrack) => void;
   readonly crumb?: (message: string) => Promise<void>;
   readonly isCurrent: () => boolean;
+  readonly signal?: AbortSignal;
 }
 
 export interface NativePlaybackEligibility {
@@ -813,6 +833,7 @@ export interface NativePlaybackCoordinatorDeps {
   readonly platform: string;
   readonly native: NativePlaybackApi | undefined;
   readonly preferences: IosNativePlaybackPreferenceStore;
+  readonly waveforms?: Pick<WaveformStore, 'seed' | 'remember'>;
   readonly legacyLoad: typeof loadProject;
   readonly now: () => number;
 }
@@ -982,34 +1003,50 @@ export const nativePlaybackBridge = (
   };
 };
 
-/** Read a lane envelope the core published, or null if this build cannot
- *  produce one. Every value is clamped: the seek bar must never be handed a
- *  NaN, and a malformed payload is a plain bar rather than a crash. */
+/** Read the fixed RMS96 contract. A malformed native response is refused as a
+ * whole: clamping NaN/out-of-range data would turn corrupt evidence into a
+ * plausible waveform that could then be persisted. */
 export function parseNativePlaybackLanePeaks(
   raw: unknown,
 ): NativePlaybackLanePeaksResult | null {
   const root = objectValue(raw);
-  if (!root || root.ok !== true || !Array.isArray(root.lanes)) return null;
-  const bucketCount = safeUnsigned(root.bucketCount) ?? 0;
-  if (bucketCount <= 0 || bucketCount > MAX_LANE_PEAK_BUCKETS) return null;
+  const rootKeys = new Set([
+    'ok', 'error', 'generation', 'bucketCount', 'lanes',
+    'waveformDiagnostics', 'message',
+  ]);
+  if (!root || root.ok !== true || !Array.isArray(root.lanes) ||
+      Object.keys(root).some(key => !rootKeys.has(key)) ||
+      root.bucketCount !== WAVEFORM_BUCKET_COUNT ||
+      root.lanes.length < 1 || root.lanes.length > MAX_WAVEFORM_LANES)
+    return null;
   const lanes: NativePlaybackLanePeaks[] = [];
+  const seen = new Set<string>();
   for (const entry of root.lanes) {
     const lane = objectValue(entry);
-    if (!lane || typeof lane.id !== 'string' || !Array.isArray(lane.peaks))
+    if (!lane || Object.keys(lane).some(key =>
+          key !== 'id' && key !== 'peaksValid' && key !== 'peaks'
+        ) ||
+        typeof lane.id !== 'string' || lane.id.length < 1 ||
+        lane.id.length > 96 || lane.id.includes('\0') || seen.has(lane.id) ||
+        typeof lane.peaksValid !== 'boolean' || !Array.isArray(lane.peaks) ||
+        lane.peaks.length !== WAVEFORM_BUCKET_COUNT)
       return null;
-    if (lane.peaks.length !== bucketCount) return null;
+    seen.add(lane.id);
     const peaks: number[] = [];
     for (const value of lane.peaks) {
       const level = finiteNumber(value);
-      peaks.push(level === null ? 0 : Math.max(0, Math.min(1, level)));
+      if (level === null || level < 0 || level > 1) return null;
+      peaks.push(level);
     }
-    lanes.push({ id: lane.id, peaksValid: lane.peaksValid === true, peaks });
+    lanes.push({ id: lane.id, peaksValid: lane.peaksValid, peaks });
   }
   const diagnostics =
-    typeof root.waveformDiagnostics === 'string' && root.waveformDiagnostics.length > 0
+    typeof root.waveformDiagnostics === 'string' &&
+      root.waveformDiagnostics.length > 0 &&
+      root.waveformDiagnostics.length <= 16384
       ? root.waveformDiagnostics
       : undefined;
-  return { bucketCount, lanes, waveformDiagnostics: diagnostics };
+  return { bucketCount: WAVEFORM_BUCKET_COUNT, lanes, waveformDiagnostics: diagnostics };
 }
 
 const emptyNativeSession = (): NativePlaybackSessionStatus => ({
@@ -1163,10 +1200,6 @@ const SWAP_LANDING_DEADLINE_MS = 1_000;
 /** A pause is applied at the next block boundary too, and pause() waits for
  *  it on the synchronous clock for the same reason and the same bound. */
 const PAUSE_RECEIPT_DEADLINE_MS = SEEK_RECEIPT_DEADLINE_MS;
-
-/** The core pins 96. This only has to be small enough that spreading a
- *  lane's buckets cannot overflow the stack if a bridge ever lies. */
-const MAX_LANE_PEAK_BUCKETS = 4096;
 
 /** What the core says about a seam, for the log: enough to tell "the render
  *  thread never landed it" from "it landed and nobody serviced it" from "the
@@ -1924,6 +1957,7 @@ export class IosNativePlaybackCoordinator {
       platform: Platform.OS,
       native: nativeModule(),
       preferences: iosNativePlaybackPreference,
+      waveforms: mobileWaveformStore,
       legacyLoad: loadProject,
       now: Date.now,
     },
@@ -1983,7 +2017,7 @@ export class IosNativePlaybackCoordinator {
   }
 
   async load(options: PlaybackLoadOptions): Promise<LoadedProject> {
-    const doc = await readActualProjectDoc(options.entry, options.crumb);
+    const doc = await readActualProjectDoc(options.entry, options.crumb, options.signal);
     if (!options.isCurrent()) throw new Error('Song load was superseded.');
     const preference = await this.deps.preferences.load();
     if (!options.isCurrent()) throw new Error('Song load was superseded.');
@@ -2031,6 +2065,7 @@ export class IosNativePlaybackCoordinator {
           options.sampleRate,
           options.onStep,
           options.crumb,
+          options.signal,
         );
         if (!options.isCurrent()) {
           releaseProject(loaded);
@@ -2040,14 +2075,14 @@ export class IosNativePlaybackCoordinator {
       });
     }
 
-    const materialized = await materializeNativeProject(options, doc);
+    const materialized = await materializeNativeProject(options, doc, this.deps.waveforms);
     if (!options.isCurrent()) throw new Error('Song load was superseded.');
     return this.withOwnershipLock(async () => {
       if (!options.isCurrent()) throw new Error('Song load was superseded.');
       // Everything from here is where the seconds actually go, and none of it
       // said so. Retiring the last song's graph can take a moment of its own;
       // the core's build takes most of it.
-      options.onStep(t('phone.app.native.progress.releasingLastSong'), MATERIALIZE_SHARE + 0.02);
+      options.onStep(t('phone.app.native.progress.releasingLastSong'), MATERIALIZE_SHARE + 0.02, 'preparing');
       const retired = await this.retireActiveLocked(
         'new native project selected',
       );
@@ -2064,7 +2099,7 @@ export class IosNativePlaybackCoordinator {
       // longest part of the open. The bar eases toward 0.95 and stops there
       // until the song is really open — see `creepingProgress`.
       const building = creepingProgress(
-        options.onStep,
+        (msg, frac) => options.onStep(msg, frac, 'preparing'),
         t('phone.app.native.progress.buildingGraph'),
         MATERIALIZE_SHARE + 0.05,
         0.97,
@@ -2179,6 +2214,10 @@ export class IosNativePlaybackCoordinator {
   readLanePeaks(generation: number): Promise<unknown> {
     const native = this.deps.native;
     return native ? native.lanePeaks(generation) : Promise.resolve(null);
+  }
+
+  rememberWaveforms(entries: readonly PersistedWaveform[], isCurrent: () => boolean): Promise<void> {
+    return this.deps.waveforms?.remember(entries, isCurrent) ?? Promise.resolve();
   }
 
   /**
@@ -4375,6 +4414,7 @@ export class IosNativePlaybackCoordinator {
         );
       }
     }
+    const alreadyClean = handle.hasCleanupFor(generation);
     const safe = await this.cleanupGeneration(handle, generation);
     if (!safe) {
       handle.fail(t('phone.app.native.unloadUncertainNotStarted'));
@@ -4388,7 +4428,7 @@ export class IosNativePlaybackCoordinator {
       countInStatus: null,
       regionState: handle.pendingRegionState(),
     });
-    log(
+    if (!alreadyClean) log(
       'native-playback',
       `unloaded generation ${generation} · ${reason} · ${since(unloadStartedAt)}`,
     );
@@ -4731,6 +4771,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   generation = 0;
   output: NativePlaybackOutput | null = null;
   lanes: NativePlaybackLaneView[] = [];
+  readonly laneContentMd5: Readonly<Record<string, string>>;
   polling = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private pollIntervalArmedMs = NATIVE_TELEMETRY_POLL_MS;
@@ -4764,6 +4805,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private displayTrimSec = 0;
   private lanePeaksGeneration = 0;
   private lanePeaksCache: NativePlaybackLanePeaksResult | null = null;
+  private readonly rememberedWaveforms = new Set<string>();
   private retryProjectSeconds: number | null = null;
   /** The frame the current generation's count-in lands on (a Play from
    *  mid-song with the count-in on), 0 when its pre-roll precedes the entry:
@@ -4875,6 +4917,13 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.acceptedMasterGain = sanitizeSongVolume(materialized.doc.settings?.masterVolume);
     this.kind = coordinator.handleKind();
     this.preparedAt = Date.now();
+    this.laneContentMd5 = Object.fromEntries(
+      materialized.lanes.flatMap(lane =>
+        lane.contentMd5 && validWaveformMd5(lane.contentMd5)
+          ? [[lane.id, lane.contentMd5] as const]
+          : []
+      ),
+    );
     this.beatInfo = sanitizeBeatInfo(materialized.doc.settings?.beat);
     this.metronomeConfig = materialized.doc.settings?.metronome
       ? sanitizeMetronome(materialized.doc.settings.metronome)
@@ -5335,7 +5384,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    */
   async lanePeaks(): Promise<NativePlaybackLanePeaksResult | null> {
     const generation = this.generation;
-    if (generation <= 0) return null;
+    if (generation <= 0 || !this.routeValid) return null;
     if (this.lanePeaksGeneration === generation) return this.lanePeaksCache;
     let parsed: NativePlaybackLanePeaksResult | null = null;
     try {
@@ -5345,11 +5394,28 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     } catch {
       parsed = null;
     }
-    if (this.generation !== generation) return null;
+    if (!this.routeValid || this.generation !== generation) return null;
+    if (parsed) {
+      const entries = Object.values(waveformCacheFor(parsed, this.laneContentMd5))
+        .filter(entry => !this.rememberedWaveforms.has(entry.md5));
+      if (entries.length > 0) {
+        for (const entry of entries) this.rememberedWaveforms.add(entry.md5);
+        // The app-owned cache also covers read-only picked folders.
+        // Never delay a waveform response on preference I/O.
+        // A cue rebuild changes generation, but these MD5-bound source bytes
+        // remain the same. Cancel only when this song/route loses ownership.
+        void this.coordinator.rememberWaveforms(entries,
+          () => this.routeValid && this.isCurrent())
+          .catch(() => {
+            for (const entry of entries) this.rememberedWaveforms.delete(entry.md5);
+          });
+      }
+    }
+    const expectedIds = new Set(this.materialized.lanes.map(lane => lane.id));
     const complete =
       parsed != null &&
-      parsed.lanes.length > 0 &&
-      parsed.lanes.every(lane => lane.peaksValid);
+      parsed.lanes.length === expectedIds.size &&
+      parsed.lanes.every(lane => lane.peaksValid && expectedIds.has(lane.id));
     if (complete) {
       this.lanePeaksGeneration = generation;
       this.lanePeaksCache = parsed;
@@ -5832,9 +5898,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
 
   graphDescription(): string {
     const shape = `${this.graphNodeCount} nodes/${this.graphConnectionCount} connections`;
-    return this.graphTopology.length > 0
-      ? `${shape} · ${this.graphTopology}`
-      : `${shape} · native topology unavailable`;
+    return shape;
   }
 
   publishTelemetry(session: NativePlaybackSessionStatus): void {
@@ -5929,8 +5993,10 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       this.firstAudibleLogged = true;
       log(
         'dsp',
-        `first audible callback · generation ${this.generation} · ` +
-          `zcore AudioHost → zdsp graph → native output · ${session.audibleFrames} frames · ` +
+        `presentation counter first observed · generation ${this.generation} · ` +
+          `estimated presented ${session.audibleFrames} frames · rendered ${session.renderedFrames} frames · ` +
+          `presentation latency ${session.presentationLatencyFrames} frames (graph ${session.graphLatencyFrames}, route ${session.devicePresentationLatencyFrames}) · ${sampleRate} Hz · ` +
+          `status polling ${this.pollIntervalMs()} ms nominal · ` +
           `${since(this.startRequestedAt)} after Play · ` +
           `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
           `discontinuities ${session.discontinuities}`,
@@ -5942,7 +6008,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         'dsp',
         `render health · generation ${this.generation} · ${(
           session.renderedFrames / sampleRate
-        ).toFixed(1)} s processed · ${session.audibleFrames} audible frames · ` +
+        ).toFixed(1)} s processed · estimated presented ${session.audibleFrames} frames · ` +
           `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
           `discontinuities ${session.discontinuities}`,
       );
@@ -7120,7 +7186,7 @@ function logDspGraphPrepared(
     'dsp',
     `graph ready · generation ${session.generation} · ${session.graphNodeCount} nodes/${
       session.graphConnectionCount
-    } connections · ${session.topology || 'native topology unavailable'} · ` +
+    } connections · ` +
       `transport pre-roll ${session.preRollFrames} frames · ${session.cueEventCount} cues · ` +
       `reference gain ${session.referenceGain.toFixed(3)} · ` +
       `${formatSampleRate(session.sampleRate || result.sampleRate)} · ` +
@@ -7322,6 +7388,8 @@ function prepareRequest(
         gain: lane.gain,
         muted: lane.muted,
         solo: lane.solo,
+        ...(lane.contentMd5 ? { contentMd5: lane.contentMd5 } : {}),
+        ...(lane.waveform ? { waveform: lane.waveform } : {}),
       };
       return control
         ? {
@@ -7364,13 +7432,14 @@ function prepareRequest(
 async function readActualProjectDoc(
   entry: ProjectEntry,
   crumb?: (message: string) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<ProjectDoc> {
   let doc = entry.doc;
   if (entry.source === 'gdrive') {
     await crumb?.('fetching project.json');
     try {
       doc = JSON.parse(
-        await driveReadText(entry.dir, 'project.json'),
+        await driveReadText(entry.dir, 'project.json', undefined, undefined, signal),
       ) as ProjectDoc;
     } catch {
       doc = entry.doc;
@@ -7384,10 +7453,11 @@ async function readActualProjectDoc(
 async function materializeNativeProject(
   options: PlaybackLoadOptions,
   doc: ProjectDoc,
+  waveforms?: Pick<WaveformStore, 'seed' | 'remember'>,
 ): Promise<MaterializedProject> {
   const { entry, onStep, crumb, isCurrent } = options;
   await crumb?.('graph');
-  const graph = await loadProjectGraph(entry, doc);
+  const graph = await loadProjectGraph(entry, doc, options.signal);
   if (!isCurrent()) throw new Error('Song load was superseded.');
   const ids = STEM_ORDER_ALL.filter(id => entry.stems[id] != null);
   const added = customTracks(doc.settings);
@@ -7409,8 +7479,15 @@ async function materializeNativeProject(
       custom: true,
     })),
   ];
+  const weights = sources.map(source =>
+    doc.stemHashes?.[source.hashName]?.size ?? entry.expect?.[source.relative] ?? 0);
+  const byteWeighted = weights.every(bytes => bytes > 0);
+  const totalWeight = byteWeighted ? weights.reduce((sum, bytes) => sum + bytes, 0) : sources.length;
+  let completedWeight = 0;
   const lanes: MaterializedLane[] = [];
   const materializeStartedAt = Date.now();
+  let projectSeeds = 0;
+  let privateSeeds = 0;
   log(
     'native-playback',
     `materializing ${doc.name ?? entry.dir} · ${
@@ -7421,13 +7498,15 @@ async function materializeNativeProject(
     if (!isCurrent()) throw new Error('Song load was superseded.');
     const source = sources[index];
     const wanted = doc.stemHashes?.[source.hashName];
+    const detail = openingTrack(source.id, index + 1, sources.length, source.custom ? source.label : undefined);
     onStep(
       t('phone.app.native.progress.fetchingTrack', {
         label: source.label,
         index: index + 1,
         count: sources.length,
       }),
-      MATERIALIZE_SHARE * (index / sources.length),
+      MATERIALIZE_SHARE * completedWeight / Math.max(1, totalWeight),
+      undefined, detail,
     );
     await crumb?.(`fetching ${source.id}`);
     const path =
@@ -7437,9 +7516,30 @@ async function materializeNativeProject(
             source.relative,
             wanted?.md5,
             wanted?.size,
+            {
+              signal: options.signal,
+              onProgress: progress => {
+                if (!isCurrent()) return;
+                const weight = byteWeighted ? weights[index] : 1;
+                onStep(describeFileProgress(progress, source.label, index + 1, sources.length),
+                  MATERIALIZE_SHARE * (completedWeight + weight * fileProgressFraction(progress)) / Math.max(1, totalWeight),
+                  progress.phase, detail);
+              },
+            },
           )
         : await localProjectFile(entry.dir, source.relative);
+    if (!isCurrent()) throw new Error('Song load was superseded.');
+    const identity = await localFileIdentity(path);
+    if (!isCurrent()) throw new Error('Song load was superseded.');
+    completedWeight += byteWeighted ? weights[index] : 1;
     const track = doc.settings?.tracks?.[source.id];
+    const projectSeed = identity ? waveformSeedFor(doc, source.id, identity.md5) : undefined;
+    const privateSeed = identity && !projectSeed ? await waveforms?.seed(identity.md5) : undefined;
+    const waveform = projectSeed ?? privateSeed;
+    onStep(t('phone.library.opening'), MATERIALIZE_SHARE * completedWeight / Math.max(1, totalWeight), 'checking', detail);
+    if (projectSeed) projectSeeds += 1;
+    if (privateSeed) privateSeeds += 1;
+    if (!isCurrent()) throw new Error('Song load was superseded.');
     lanes.push({
       id: source.id,
       path,
@@ -7449,15 +7549,17 @@ async function materializeNativeProject(
       label: source.label,
       color: source.color,
       custom: source.custom,
+      ...(identity ? { contentMd5: identity.md5 } : {}),
+      ...(waveform ? { waveform } : {}),
     });
   }
   let lyrics: LyricsDoc | null = null;
   if (entry.hasLyrics && isCurrent()) {
-    onStep(t('phone.app.native.progress.fetchingLyrics'), MATERIALIZE_SHARE * 0.9);
+    onStep(t('phone.app.native.progress.fetchingLyrics'), MATERIALIZE_SHARE);
     try {
       const text =
         entry.source === 'gdrive'
-          ? await driveReadText(entry.dir, 'lyrics.json', doc.lyricsHash?.md5)
+          ? await driveReadText(entry.dir, 'lyrics.json', doc.lyricsHash?.md5, undefined, options.signal)
           : await readProjectText(entry.dir, 'lyrics.json');
       lyrics = JSON.parse(text) as LyricsDoc;
     } catch {
@@ -7467,37 +7569,26 @@ async function materializeNativeProject(
   log(
     'native-playback',
     `materialized ${doc.name ?? entry.dir} · ${lanes.length} lanes · ` +
-      `${lyrics ? 'lyrics ready' : 'no lyrics'} · ${since(materializeStartedAt)}`,
+      `${lyrics ? 'lyrics ready' : 'no lyrics'} · file preparation ${since(materializeStartedAt)} total (resolve/download/cache/copy/hash/lyrics)`,
+  );
+  log(
+    'waveform',
+    `seed candidates · ${doc.name ?? entry.dir} · ${lanes.length} lanes · project ${projectSeeds} · private ${privateSeeds} · unseeded ${lanes.length - projectSeeds - privateSeeds} · native acceptance not reported`,
   );
   return { entry, doc, graph, lyrics, lanes };
 }
 
-/**
- * How much of the opening bar `materializeNativeProject` is worth.
- *
- * MEASURED, not reasoned about, and the reasoning was wrong. "Zero JS decode"
- * in materialize's own log says nothing about its cost: resolving each stem's
- * authorized path takes ~400 ms on the field phone, six of them in sequence,
- * and with the lyrics that is ~3.0 s of a 4.5 s open — about 65%. The graph
- * build after it is ~1.5 s.
- *
- * So the original 0-to-0.98 was nearly right about materialize and wrong about
- * what follows: the core's build reported NOTHING, and the bar sat at 98%
- * under a message still saying "Fetching lyrics…" for the last third of the
- * wait. That is the "freezes at 100%" this fixes — by reporting the build, not
- * by shrinking the fetch.
- *
- * (The first attempt at this file put materialize at 0.3, on the assumption
- * that path resolution was free. `mobile/tests/open-steps-android.cjs` printed
- * the steps and said otherwise.)
+/** Estimated opening-stage allocation, not a measured download percentage.
+ * File resolution/hash/lyrics occupies the first part; native preparation has
+ * no intermediate completion events. Only a returned load may publish 100%.
  */
 const MATERIALIZE_SHARE = 0.65;
 
 /**
  * A bar that keeps moving through a step that cannot report its own progress.
  *
- * `native.prepare` is one awaited call into the core — six stems decoded, no
- * events — so there is nothing true to report between its start and its end.
+ * `native.prepare` is one awaited call into the core — streaming graph prepared, no
+ * intermediate events — so there is nothing true to report between its start and its end.
  * This eases from `from` toward `to` and NEVER reaches it: an asymptote is the
  * honest shape for "still working, cannot say how much longer", where a bar
  * pinned at 100% is a claim that it is finished.
@@ -7561,6 +7652,8 @@ export interface SongOutputMeter {
   readonly generation: number;
   readonly peak: number;
   readonly clippedBlocks: number;
+  /** Short-block pre-limiter signal energy; absent on older native builds. */
+  readonly rms?: number;
 }
 export function readNativeSongOutputMeter(): SongOutputMeter {
   const unavailable = { available: false, generation: 0, peak: 0, clippedBlocks: 0 };
@@ -7569,6 +7662,7 @@ export function readNativeSongOutputMeter(): SongOutputMeter {
     const raw = bridge?.outputMeter?.() as SongOutputMeter | undefined;
     if (!raw || raw.available !== true || !Number.isSafeInteger(raw.generation) || raw.generation <= 0 ||
         !Number.isFinite(raw.peak) || raw.peak < 0 || !Number.isSafeInteger(raw.clippedBlocks) || raw.clippedBlocks < 0) return unavailable;
+    if (raw.rms !== undefined && (!Number.isFinite(raw.rms) || raw.rms < 0)) return unavailable;
     return raw;
   } catch { return unavailable; }
 }

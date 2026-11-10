@@ -1,9 +1,16 @@
 # Developing SingZ
 
+[AGENTS.md](../AGENTS.md) is the canonical policy for agents, worktrees,
+bootstrap, native build serialization, cache reuse, and commits. Both agents
+consult applicable sections of [PROJECT-RULES.md](PROJECT-RULES.md) for
+product/platform invariants. Load the runbooks below when the task needs them.
+`CLAUDE.md` is only an `@AGENTS.md` entry point; the instructions below explain
+the tooling.
+
 ## Setup
 
 ```bash
-npm install
+scripts/worktree-setup.sh --desktop-only  # installs deps + review hook, builds/verifies analyzer
 scripts/vendor-llama.sh        # llama-server, the lyrics recogniser — once per machine (needs cmake)
 scripts/vendor-crispasr.sh     # crispasr, its word aligner — once per machine (needs cmake)
 scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
@@ -11,17 +18,35 @@ npm run dev
 ```
 
 The desktop capture *addon* is a stable Node-API module built explicitly for
-the Electron version installed in `node_modules`. It is the in-process
-transport for the shared `AudioInput` core. Karaoke mic matching still captures
-via `getUserMedia` (echo cancellation intact), and vocal training talks to the
-same core through the spawned `singz-analyze` session (`src/main/audio-input.ts`).
-The experimental headphone monitor is app-shell owned: Settings configures its
-device, channels, gain and native DSP graph, while the persistent top bar keeps
-its status and Stop control available after Settings closes. It transfers
-exclusive output ownership from Web Audio before opening the native graph, and
-restores Web Audio readiness without resuming the song when monitoring ends.
-Swapping karaoke or vocal training capture onto the addon remains a deliberate
-future step, not a side effect of building it:
+the installed Electron version. The production app loads it only in the
+**SingZ Audio** utility process. Main keeps the file allowlist and renderer IPC;
+`audio-process.ts` forwards asynchronous controls to `audio-service.ts`, which
+owns the existing playback/capture/relay service. Both helper entry and shared
+main chunks are bundled under `out/main` and ship inside the app asar. Do not
+copy only `out/main/index.js` when testing an overlay.
+
+Build before driving the app. Automated runs set `SINGZ_MUTE=1` and
+`SINGZ_NO_SYNC=1`; native cues and playback must remain muted too. The log's
+`audio process ready` receipt names the helper PID and Electron main PID.
+Confirm different PIDs and inspect the actual helper's addon mapping before
+claiming isolation. Exercise repeated Chromium camera/helper launches during
+playback, renderer reload, stop/unload, pending-prepare cancellation, and helper
+crash. A successful mocked RPC test does not qualify hardware buffer sizes.
+
+Renderer reload retains song/relay audio but releases private microphone
+analysis and monitoring. The replacement screen exposes top-bar Stop controls
+for audio that remains active without a loaded song. Destroying the owning
+webContents releases its native ownership; app quit tears down the helper. A helper crash or
+control timeout fails closed and needs an app restart; status polls must not
+spawn a replacement and replay stale commands. This implementation does not
+keep audio alive across an Electron main restart; a separately supervised
+system service would need a different lifecycle contract.
+
+The helper performs the same artifact fingerprint, checksum, ABI and codec
+validation as the former main-process loader. Do not point a worktree at a
+neighbour's addon to bypass a source mismatch. The low-level `capture:verify`
+probe below deliberately loads the addon directly as an ABI/native-contract
+test; production process-isolation verification also needs the real app.
 
 ```bash
 npm run capture:addon                    # current platform/architecture
@@ -46,8 +71,9 @@ normalized, and meaningful thin/fat slices are hashed by CPU identity;
 never overwritten (especially important for a loaded Windows DLL): rebuilding
 publishes a fresh path, validates its Mach-O/PE architecture, then moves the
 selector. The builder fingerprints the source tree again after CMake and before
-selector publication, aborting if an edit raced the build. Capture never publishes into `vendor/`: that
-directory is shared by all worktrees, while `build/` is deliberately local.
+selector publication, aborting if an edit raced the build. Capture never
+publishes into `vendor/`: that directory contains a local analyzer and validated
+third-party artifacts, while `build/` holds this checkout's capture products.
 The app independently fingerprints this checkout's native inputs and only
 resolves the matching immutable path, so another worktree cannot redirect it.
 
@@ -117,60 +143,240 @@ Electron's `node.lib` still names `node.exe`, so the CMake target must retain it
 delay-load hook and `/DELAYLOAD:node.exe`; a hard `node.exe` PE dependency loads
 in Node but fails before module initialization in `electron.exe`.
 
-The zcore host scripts key their temporary CMake directories on a hash of the
-complete checkout path, not its basename; two unrelated `foo` checkouts cannot
-reuse one CMake cache.
+### Waveform measurements
 
-Local clang builds pick up **ccache** automatically when it is installed
-(`brew install ccache`): `vendor-llama.sh`, `vendor-crispasr.sh` and `npm run android` export
-CMake's compiler-launcher env (the mechanism the Android CI uses), and the
-iOS Podfile turns on React Native's `ccache_enabled` wrappers at pod install.
-No setup step — the settings ride with the build, never with the machine.
+Desktop native waveform measurements are cached locally under `userData`. The
+cache stores full-resolution, unnormalized peaks, the seek-bar envelope, RMS
+and source duration/format metadata. It is advisory data, separate from
+`project.json` and Drive sync; cache failures must preserve the normal native
+measurement and legacy decode fallback paths.
 
-**Sharing the cache across worktrees takes more than one cache dir.** The dir
-already is shared (`cache_dir` is per-user, nothing to pass), but CMake and
-Xcode compile with absolute paths, and `-g` hashes the working directory too,
-so a second checkout hits *nothing* in it — measured 0% of a real CMake Debug
-build, and 5.6% overall on this machine before the fix. Two settings fix it,
-and both are needed for Debug builds (`base_dir` alone was still 0%):
+A hit requires the current source-file identity, measurement algorithm/schema
+version and every peak-policy parameter to match. Source identity includes
+canonical path and high-resolution size, inode/device, mtime and ctime data;
+replacing a stem or restoring its mtime must not reuse stale statistics. The
+entry is checksummed, shape-validated and bounded before use. Bump the cache
+version when measurement semantics change. Recheck source identity after
+asynchronous work and discard superseded requests before publication.
 
-| Setting | Why |
+Cache lookup stays after the IPC file allowlist and codec checks. Never let a
+cache hit grant access to an unregistered path. Persist through atomic writes,
+keep the disk budget bounded and prune only owned cache files. Reopening after
+an app restart must use the persisted data, not merely a process-local memo.
+This cache avoids repeated waveform scans; it does not cache the native
+playback graph or change the streaming preference.
+
+The small per-lane RMS96 envelope also lives in `project.json` for phone reuse.
+`src/shared/waveform-envelope-cache.ts` owns its version, policy, 96-bucket shape
+and 16-lane bound. Change the policy/version when envelope semantics change;
+legacy unstamped records mean only the original v1 algorithm. Both writers prune
+removed, stale and malformed lanes and resolve custom IDs through
+`settings.custom[].file`, rather than deriving filenames from labels or IDs.
+
+Mobile also keeps up to 64 validated RMS96 envelopes in the durable app-private
+`singz.waveforms.rms96.v1` preference, bounded to 256 KiB and keyed by the actual
+audio MD5. This survives process restarts for read-only picked folders and Drive
+projects. Only a project explicitly owned by the phone may receive a
+`project.json` waveform update; never write a same-named Documents shadow for an
+external source. App-private writes are serialized and discard superseded loads.
+
+A streamed prepare passes validated envelopes into the native session before
+analysis starts, so a cache hit avoids opening a background analysis reader.
+Desktop seeds come only from main's verified measurement cache, after path/codec
+authorization; renderer-supplied seeds are refused. Mobile seeds require the
+fresh MD5 of the materialized file, not merely the hash in the document. Folder
+copies compare source and destination contents even when size and mtime match.
+Mobile download currency and waveform identity share a bounded 128-entry process
+memo. Its key includes canonical path, device/inode, size, and nanosecond mtime
+and ctime; a restored mtime alone cannot preserve an entry. Hashes come from one
+opened descriptor with stamps checked before/after the read and against the live
+path. Authorization is rechecked after canonicalization and on the opened target.
+Read errors, short reads and concurrent replacement fail closed. Old persisted
+size/mtime-only MD5 records are not identity evidence. Opaque folder-provider
+sources still receive a fresh content comparison; validated destinations reuse
+the same identity instead of being hashed again for waveform seeding.
+
+Catalog loading coalesces visual progress at 100 ms. Every diagnostic step and
+awaited durable breadcrumb is still recorded; fast file callbacks must not pay
+for a complete catalog render per step. Completion, cancellation and a newer
+load discard pending visual updates before they can restore a stale spinner.
+
+The playback log's presentation counter is a sampled, latency-adjusted frame
+estimate. It does not detect PCM energy or establish the instant sound began;
+status polling and bridge scheduling delay its observation. Report its sampling
+scope and graph/route latency rather than calling it a first audible callback.
+
+The native in-memory envelope map is bounded to 64 content-bound identities;
+path-only identities never reuse measurements. Missing or rejected lanes still
+measure progressively. Short custom lanes are padded with silence in the mixed
+seek-bar timeline, while their stored envelope remains relative to their source.
+
+Focused checks: desktop `lane-measure-cache`, `desktop-waveform-seed` and
+`project-waveforms` Vitest suites; mobile `waveform-cache`, `waveform-store`, `waveform-writer`,
+`waveform-mix` and `native-playback-b2` Jest suites; the Swift folder runner at
+`mobile/__tests__/test-swift-folder-materialization.sh`; Android folder/schema
+unit tests; and native playback/streaming feeder tests in all sanitizer presets.
+The real addon smoke includes valid and mismatched seed controls. Rebuild and
+install mobile binaries after bridge/core changes before claiming runtime reuse.
+
+### Native compiler caches
+
+`ccache` is optional and shared per user; build outputs remain worktree-local.
+The root CMake build, including direct presets, finds it automatically through
+`cmake/SingZCompilerCache.cmake`. An explicitly configured different launcher
+is preserved. Use `-DSINGZ_COMPILER_CACHE=OFF` to disable this integration.
+
+Host producers now keep CMake state under `build/native/analyze-host`,
+`build/native/host-tests`, and `build/native/analyze-vendor-<target>`. Matching
+relative source/build layouts are necessary for cross-worktree hits: an external
+`SINGZ_CORE_BUILD_DIR` is still supported but warns that reuse may be lost.
+Temporary build directories outside the checkout did not reliably share objects,
+even with `base_dir` and `hash_dir=false`. Fastlane and `npm run ios` likewise
+use local `build/native/ios-derived`, and iOS canary products/intermediates stay
+under the checkout. For direct Xcode GUI builds, select a DerivedData location
+inside this checkout to get the same path normalization; the GUI's global
+path-specific default can reduce cross-worktree compiler hits.
+
+The common `scripts/ccache-launcher.sh` / `.ps1` carry these settings with every
+host/Android compile rather than changing machine configuration:
+
+| Setting | Purpose |
 |---|---|
-| `base_dir` = this checkout's root | hashes paths under it relative, so worktrees agree |
-| `hash_dir = false` | drops the CWD from `-g` compilations |
-| `compiler_check = content` | survives an Xcode/CLT update re-stamping clang (unrelated to worktrees, cheap) |
+| `CCACHE_BASEDIR=<checkout root>` | Normalize absolute inputs under this checkout |
+| `CCACHE_NOHASHDIR=1` | Permit identical debug compilations in sibling checkouts |
+| `CCACHE_COMPILERCHECK=content` | Survive compiler re-extraction/restamping |
+| `CCACHE_SLOPPINESS=pch_defines,time_macros` plus caller options | Cache the PCH generators/consumers used by native dependencies |
 
-They are passed **per build, never written to the machine's ccache config**:
-`vendor-llama.sh` and `vendor-crispasr.sh` export them, Android's all-project CMake prelude installs
-one env-carrying compiler launcher (`run-with-ccache.js` also puts the settings
-in the child env), and `mobile/scripts/ccache-xcode-conf.js` appends them to
-react-native's
-`scripts/xcode/ccache.conf` at postinstall — that last one because RN's
-`ccache-clang.sh` sets `CCACHE_CONFIGPATH` to that file, which *replaces* the
-machine's config (so `ccache --set-config` never reaches a pod build), and a
-build started from Xcode.app inherits no shell env either. It lives in
-`node_modules`, so it is disposable and re-applied by every `npm ci`.
+PCH support also requires Clang's `-fno-pch-timestamp`; the React Native native
+dependencies already provide it. The PCH opt-in relaxes time-macro/define
+checking, so avoid build-time macros in cached native code. Reused debug objects
+can refer to the first checkout's source paths; disable reuse when debugging
+source-diverged trees. Compiler/ABI/SDK/flags/input differences still select
+different cache entries.
 
-The cost of `hash_dir = false`: a reused object carries the debug info of
-whichever worktree compiled it first, so lldb may open a sibling's copy of a
-source file — invisible while they agree, confusing when they differ. Drop
-`CCACHE_NOHASHDIR` (or the conf line) if you are stepping through native code
-in two diverged worktrees at once.
+Xcode's React Native wrappers read their own `ccache.conf`. Mobile postinstall
+adds the same root/hash/compiler settings while preserving RN's PCH/module
+options. It embeds the discovered ccache executable in the generated compiler
+wrappers because Xcode may omit `CCACHE_BINARY` from compiler environments.
+Objective-C and prefix/PCH invocations keep their module-cache path absolute and
+hashed, preventing Clang from mixing absolute and relative references to one PCM.
+That module/PCH identity remains local; ordinary C++ retains cross-worktree
+normalization. Explicit `CCACHE_DIR` and `CCACHE_MAXSIZE` are baked into that generated
+configuration so GUI builds use the requested store/cap too. Missing expected
+RN configuration or malformed overrides fail rather than silently disabling reuse.
+Ccache covers Clang compilation, not Swift or linking. Current prebuilt React
+Native disables Swift explicit modules, so we do not force the incompatible
+Swift compilation-cache mode; Xcode incremental state remains local and whole
+native-archive reuse covers unchanged Swift builds.
 
-Running `mobile/android/gradlew` directly instead of `npm run android` is also
-cached: `mobile/scripts/android-cmake-init.cmake` is injected into the app and
-every native React Native dependency and applies the same checkout root,
-`hash_dir = false` and compiler-content identity without changing machine
-configuration. `org.gradle.workers.max=1` serializes AGP worker actions so
-native dependency modules cannot overlap. The one active Ninja graph gives
-compile and link edges one shared eight-process ceiling: four edges when
-ccache is present on POSIX because both ccache and the compiler match
-`ps ... | grep clang`, two on Windows where the PowerShell launcher remains
-resident too, otherwise eight. The POSIX launcher `exec`s ccache so it adds no
-third process line. ABIs and dependency modules therefore cannot multiply into
-dozens of simultaneous clang lines. We still run only one native build at a
-time across worktrees because separate Gradle processes cannot share a
-project-level worker limit.
+### Android task, configuration, and bundle caches
+
+`org.gradle.caching=true` enables shared eligible task outputs under Gradle User
+Home, in addition to existing dependency/transformation caches.
+`org.gradle.configuration-cache=true` enables checkout-local graph reuse with
+strict incompatibility checking. Postinstall's `patch-gradle-cache.cjs` replaces
+the pinned Skia/audio-api configuration-time external commands with tracked
+`providers.exec` calls; unknown upstream shapes fail before partial patching.
+Runtime selection depends on the cached native-library restore task, so a fresh
+`npm ci` cannot run verification before its compatibility libraries exist.
+The ORT SDK extraction task has explicit cacheable inputs/outputs and avoids
+execution-time Project capture. Repeat the same task graph to observe
+`Configuration cache entry reused`; removing only generated ORT output should
+restore `:app:extractOrtSdk FROM-CACHE`.
+
+Every Android CMake dependency uses one common env-carrying compiler launcher,
+including direct Gradle builds. One Gradle worker serializes native tasks, while
+Ninja's compile/link pool respects the existing process ceiling. Worktree-local
+`.gradle`, `.cxx`, Java/Kotlin incremental files and APK/AAB outputs are never
+shared by symlink. Both shipping ABIs retain distinct correct compiler objects.
+
+Android release bundling now uses `bundle-android-incremental.cjs`, which
+preserves Metro transforms instead of resetting them each time a bundle task
+runs. `SINGZ_METRO_RESET_CACHE=1` requests the original reset explicitly. Arguments,
+environment and failures still pass through to React Native's official CLI.
+Metro uses its stable async-runtime module identifier rather than React Native's
+checkout-absolute default, so identical transforms also share keys across worktrees;
+dynamic imports still resolve the runtime from the consuming checkout.
+iOS native-archive refresh likewise rebundles fresh JS/Hermes output without a
+forced Metro reset.
+
+### Dependency downloads and hosted caches
+
+`node scripts/restore-audio-api-prebuilts.cjs ios|android` caches upstream ZIPs
+across fresh worktrees and `npm ci`. The key binds URL/release tag, npm version,
+and upstream download-script content; receipts verify the ZIP checksum on reuse.
+Only complete, tested archives with safe paths/symlinks are installed, through
+local staging. Upstream `__MACOSX` metadata is discarded. Extracted libraries
+remain local, and an existing product-selected real directory is preserved.
+Bootstrap and mobile CI call the same helper before pod/native integration.
+Postinstall patches the pinned Android download task and iOS pod prepare command
+to call it too; direct Gradle/CocoaPods builds cannot bypass the shared store.
+Both patches reject unknown upstream shapes rather than silently falling back.
+Use `SINGZ_AUDIO_API_CACHE` to override its per-user download store.
+
+The shared `.github/actions/mobile-build-cache` action installs ccache and
+restores compiler objects, audio-library downloads, Android Gradle dependencies
+and task outputs, CocoaPods/React Native tarballs, and Metro transforms. Metro
+uses `SINGZ_METRO_CACHE_DIR` so runner temporary-directory changes do not discard
+its store. Full DerivedData and serialized configuration graphs stay job-local.
+
+Mutable stores use immutable run/attempt keys, with compatible restore prefixes
+separated by runner architecture, toolchain, dependencies, and source/recipe
+generation. This lets reruns accumulate compiler and task outputs rather than
+freeze an early partial snapshot. Pinned download stores retain exact keys and
+are saved only after dependency setup and cache preflight succeed. The separate
+`save-mobile-build-cache` action runs even after a later build/upload failure.
+Signed archives are saved only when completed entries pass receipt, executable
+checksum, and deep signature validation; leases and staging state are excluded.
+Compiler objects are capped at 1200 MB; CI archives retain two entries / 1 GiB /
+14 days.
+
+GitHub caches are ref-scoped: a fresh tag can read default-branch caches, but
+cannot read the preceding tag's cache. Main pushes therefore run iOS
+`cache_warm`: readonly signing plus an App Store archive, with no upload or
+submission. The iOS native canary also runs on main and pull requests; PR caches
+remain isolated from trusted release jobs. Android's existing main canary and
+scheduled release build seed its stores.
+
+`scripts/ci-build-cache.cjs begin/report` checks active compiler configuration
+without changing it, records counter deltas without resets, and uploads JSON
+and Markdown evidence. Successful native builds must show cacheable compiler
+hits/misses, verified iOS archive reuse, or cached/up-to-date Android native
+tasks. Cold misses are valid; silent cache bypass fails the job. Android also
+runs `scripts/ci-android-cache-smoke.cjs`: it deletes only checkout-local ORT
+extraction output, then requires `FROM-CACHE` restoration and reuse of the exact
+configuration graph. One additional graph run is allowed for React Native's
+generated checksum to settle. All native producers retain the shared build lock.
+
+Before archive fingerprinting, Fastlane runs React Native's installed dependency
+selector phases in Release mode. This prevents Debug-to-Release framework
+replacement during the archive from changing the key and suppressing publication.
+The same preparation runs before a cache lookup in another worktree.
+
+The iOS archive fingerprint excludes generated Android dependency build state
+and Android/macOS-only audio downloads. iOS headers, frameworks, static libraries,
+and shared native sources remain inputs, so Android work in a sibling checkout
+does not prevent reuse of an otherwise identical iOS archive. Unused local Podspec
+metadata left by an interrupted install is ignored only when the installed
+Pods manifest proves that the Pod is absent; unknown manifests retain all inputs.
+
+Local native archives default to eight entries / 4 GiB / 30 days. Override with
+`SINGZ_IOS_NATIVE_CACHE_MAX_ENTRIES`, `SINGZ_IOS_NATIVE_CACHE_MAX_BYTES`, and
+`SINGZ_IOS_NATIVE_CACHE_MAX_AGE_DAYS`; comma-separated 64-hex fingerprints in
+`SINGZ_IOS_NATIVE_CACHE_PINNED` are protected. Pruning only recognizes owned
+fingerprint directories with matching receipts. Reader leases protect a cache
+hit while copying it locally; current/pinned/active entries can temporarily
+exceed the limits. Existing caches are pruned only after a successful publication.
+
+To test real cross-checkout compiler hits without touching shared cache counters:
+
+```bash
+SINGZ_TEST_COMPILER_CACHE=1 node scripts/with-native-build-lock.mjs --owner cache-probe -- node --test tests/tooling/compiler-cache.test.cjs
+```
+
+The probe builds tiny Debug and Release fixtures under an isolated cache, checks
+second-checkout hits, and verifies a source edit misses. CI runs it explicitly;
+ordinary tooling tests skip the native probes unless requested.
 
 ### Target-executed mobile codec proof
 
@@ -292,8 +498,8 @@ later run that selects nothing restores them and drops the receipt, so
 switching a machine between proven and base builds needs no network. A
 dependency that was replaced before that copy existed (a proof-staging install
 from before this rule) cannot be restored offline; the selector says so and
-points at `scripts/worktree-setup.sh`, which re-downloads the prebuilt
-binaries. The Gradle `-PsingzCodecTargetProof=true` harness and
+points at `scripts/worktree-setup.sh`, which restores verified prebuilts from
+the shared download cache (fetching only on a cold/corrupt entry). The Gradle `-PsingzCodecTargetProof=true` harness and
 `SINGZ_CODEC_TARGET_PROOF=1 pod install` are `required`-strict regardless of
 the variable: the proof has to execute the staged pack it is proving.
 
@@ -306,62 +512,114 @@ version the app requires).
 
 ## Worktrees
 
-Every parallel feature gets its own worktree (`git worktree add
-.claude/worktrees/<feature> -b worktree-<feature> main`). A fresh worktree
-has none of the machine-local, gitignored artifacts — bootstrap it with:
+Use one worktree per independent feature/session. Bounded agents implementing
+one feature can share its checkout with disjoint file ownership; only the
+coordinator stages and commits. Give each worker its own scratch/build paths.
+Reuse an existing task worktree when suitable. For a new Codex feature:
 
 ```bash
-scripts/worktree-setup.sh                 # desktop + mobile (pods on a Mac)
-scripts/worktree-setup.sh --desktop-only  # skip mobile deps + pods
+git worktree add ../SingZ-feature -b codex/feature main
 ```
 
-It provisions what must be shared from the main checkout
-(`mobile/gdrive.config.json` so the baked gdrive-config modules come out
-filled instead of EMPTY, `mobile/android/local.properties`, and `vendor/` —
-see below), runs `npm ci` in both roots (postinstall bakes configs, patches audio-api,
-synthesizes the sample song), restores the electron binary when npm's cache
-skipped its postinstall (the "Electron failed to install correctly" launch
-error), and pod-installs iOS with a UTF-8 `LANG` — CocoaPods crashes in
-non-interactive shells without one.
+Run bootstrap inside the new checkout:
 
-Three of its steps exist for RE-RUNS rather than fresh worktrees, which is
-the case that matters: re-running is how a worktree catches up after a
-rebase, and each of these is a way its build state can lag its source.
+```bash
+scripts/worktree-setup.sh                 # desktop + mobile; iOS Pods on macOS
+scripts/worktree-setup.sh --desktop-only  # skip mobile deps and Pods
+```
 
-- It **re-downloads react-native-audio-api's prebuilt binaries**, which
-  `npm ci` deletes and nothing else restores — they are not in the npm
-  tarball, and the podspec's `prepare_command` fetches them only when
-  CocoaPods integrates the pod for the FIRST time. This runs BEFORE
-  `pod install`, because CocoaPods records only the vendored frameworks
-  present at install time and the other order dies in `ld` with undefined
-  `_av_*` symbols. It **asserts the files arrived**: the vendor's downloader
-  `continue`s past a failed curl and still exits 0, so its status proves
-  nothing.
-- It **fails if `mobile/ios/SingzCore/core` does not match
-  `mobile/native/core`** byte for byte. That mirror is a gitignored copy
-  (CocoaPods drops globs reaching above the podspec and skips directory
-  symlinks), synced by mobile's postinstall; a worktree that skipped one
-  keeps building the stale copy and the failure names a missing header.
-- It **fails if the Pods sandbox still disagrees with `Podfile.lock`** after
-  installing — the "sandbox is not in sync" archive error, seen from here
-  instead of from xcodebuild ten minutes later.
+Bootstrap validates its mode and required tools before changing dependencies.
+On macOS, full mobile setup requires CocoaPods; it fails with an actionable
+message if `pod` is missing. Other hosts skip iOS downloads and integration.
+It holds the shared native build lock throughout provisioning, installs the
+Git review hook, links machine-local OAuth/Android configuration when available,
+and runs `npm ci` in the selected roots. Dependency directories, generated
+sources, Pods, Gradle state and native build products remain checkout-local.
+An app-local workspace setup command can invoke this same script; there is no
+second bootstrap implementation and no assumption that creating a worktree
+provisions it automatically.
 
-It touches no ccache config: the
-cross-worktree settings ride with each build (see above). Build products
-(`out/`, `Pods/`, `.gradle/`) stay per-worktree; the global npm / CocoaPods /
-ccache caches are what make the second worktree fast (pods ~30 s warm).
+Re-runs restore Electron's binary if npm skipped its installer; macOS mobile
+setup restores **all three** audio-api prebuilt directories before pod install,
+compares `mobile/ios/SingzCore/core` against top-level `zcore`, and checks the
+Pods manifest against `Podfile.lock`. It builds the host analyzer and verifies
+the executable's embedded fingerprint before reporting readiness. Output names
+what was actually provisioned; optional lyrics engines, splitter packs, and the
+capture addon need their own producers when used.
 
-`vendor/` is **mirrored, not linked**, and the distinction is the whole
-point. Third-party engine builds (llama-server, crispasr, the splitter
-packs) come from `.engines-src/` and downloads, cost minutes, and no branch
-of ours changes them — those stay symlinks to main's copies. Our own engine
-builds (`singz-analyze` and `singz-capture.node`) come from the shared
-`zcore`/`zdsp` tree, which is exactly what a feature branch edits — so the
-worktree gets an empty slot instead of a link. `worktree-setup.sh` builds
-`singz-analyze` (~10 s with a warm ccache); the capture addon stays empty until
-`npm run capture:addon` builds it for the current Electron/platform. An empty
-slot is the right answer because the app can fall back or report the missing
-transport, while a link would silently run another branch's engine.
+After completing native tests, the capture producer can reuse that checkout's
+configured CMake build with `SINGZ_CAPTURE_BUILD_DIR=build/native/<name>`.
+The directory must be a real local directory under `build/`, with a regular cache
+naming this exact checkout; escapes and shared links are rejected. The producer
+still holds the native build lock, applies its own configuration and verifies
+immutable output identity. Finish CTest first because addon configuration changes
+the enabled targets in the reused build. This avoids recompiling the same core
+under ARM64 emulation without sharing build state across checkouts.
+
+
+`vendor/` is a real local directory, never a whole-directory shared symlink.
+The analyzer is always local. Bootstrap copies only llama/CrispASR artifacts
+whose receipt matches the current producer scripts, requested revision, target,
+and binary checksum; missing or stale receipts remove old shared links.
+Validated binaries and receipts are copied locally so a later main-checkout
+rebuild cannot change this worktree's engine revision. Unknown artifacts and
+splitter packs are not shared without a validator.
+Engine producers detach shared destinations before publishing local output.
+Receipts bind raw binary bytes. Old receiptless caches rebuild once; signed
+published engines may differ from their pre-signing receipts. Release recovery
+with `reuse_lyrics_from` requires a matching receipt and fails explicitly when
+it cannot validate one, rather than silently rebuilding or blessing new bytes.
+Clear that input to build from the pinned sources in that case.
+Capture publishes immutable generations to local `build/capture-runtime/` and
+packaging snapshots to `build/capture-package/`; build it with
+`npm run capture:addon` when needed.
+
+### Shared native build lock
+
+The lock is `<git-common-dir>/singz-native-build.lock` for every worktree of a
+repository, independent of `TMPDIR`, `TEMP`, and task scratch directories.
+Exported trees without Git use `<root>/.singz-native-build.lock`. Producers
+validate inherited lock tokens rather than acquiring a second lock. Direct
+native commands (including Gradle and Xcode) must use the same wrapper:
+
+```bash
+node scripts/with-native-build-lock.mjs --owner android-feature -- bash -c 'cd mobile/android && ./gradlew :app:assembleDebug'
+```
+
+Ordinary core/engine producers accept at most four compile edges; capture and
+codec producers retain their stricter limits. Compiler-cache settings stay
+per build as described above. A busy or interrupted lock fails with owner
+information; confirm that owner and its children have stopped before removing
+it. On Windows, interrupted builds retain the lock even after `taskkill /T`
+so the recorded owner/tree can be inspected. Normal direct commands must await
+all descendants before returning. On POSIX, the wrapper forwards signals to
+the complete child process group and retains the lock while that group exists.
+Stop all builds using the old temporary-directory lock scheme before switching
+versions. Never remove a live lock to make a second build start.
+
+### Review in Claude Code and Codex
+
+Bootstrap runs `node scripts/install-git-hooks.cjs`, which installs
+`core.hooksPath=.githooks` and refuses to overwrite an unrelated configuration
+or existing active Git hooks. Installation can also be run separately without
+installing application dependencies. The relative hook path resolves inside
+the active worktree; every participating checkout must contain the hooks.
+
+Before committing, stage the intended files and delegate an independent staged
+diff review using `.claude/agents/code-reviewer.md` in that same checkout. On a
+safe verdict the reviewer writes the staged tree hash to the worktree's
+`singz-reviewed` marker under its Git directory. The Git pre-commit and
+prepare-commit-msg hooks compare that marker against the actual commit index, including alternate indexes used by
+partial commits. Changed staging requires another review. Continuations are
+checked too; `--no-verify` does not skip the prepare-commit-msg guard. Claude's tool hook
+adds earlier feedback, but Git provides the common gate for both clients.
+These are workflow guards, not a security boundary; bypassing them requires
+explicit user authorization under AGENTS.md.
+
+Dependency-free tooling regressions run with `npm run test:tooling`; `npm test`
+also runs them before Vitest, so the checks do not depend on remembering a
+separate command. Fixtures exercise sibling worktrees, different temp roots,
+review markers, corrupt/stale engine receipts, and bootstrap failure modes.
 
 It used to link the whole directory, and that is how a sibling worktree's
 core reached the main checkout during the v0.19.0 cut: `vendor-analyze.sh`
@@ -377,9 +635,9 @@ The safety net for what the mirror cannot reach — a packaged app, an
 `$SINGZ_ANALYZE` override, a hand-copied file — is
 [Which core am I running?](#which-core-am-i-running) below.
 
-What the mirror leaves behind — the per-artifact links inside `vendor/`, and
-the two config links — are still files (symlinks), and a committed `vendor`
-symlink once merged into main and clobbered the real `vendor/` on checkout —
+The two configuration links remain symlinks, while engine snapshots are real
+files. A historical committed `vendor` symlink once merged into main and
+clobbered the real `vendor/` on checkout —
 `.gitignore`'s old `vendor/` pattern only matched the directory form, and
 worktrees branched before that fix still carry the old pattern. (A mirrored
 `vendor/` is matched by both spellings, so it is if anything safer than the
@@ -452,6 +710,27 @@ on whether the vendored binary supports native capture — so which binary is
 present decides which half of that driver runs, and provenance is a testing
 question, not only a correctness one.
 
+## Diagnostic log wording
+
+Log confirmed outcomes, not inferred work. A native envelope read can return a
+seed, an in-memory result or newly scanned data: call it “envelopes ready” unless
+the producer actually reports a scan. A seed offered by JS is a cache candidate,
+not proof that native accepted it. Cache summaries name the layer and count hits,
+misses or pending lanes independently. Never invent a zero-duration lookup.
+
+Every duration names its scope: a full waveform request can include disk lookup,
+native measurement, cache writes and pruning; mobile file preparation can include
+download/cache validation, copying and content hashing. Cancellation is a normal
+outcome, failures retain their operation and reason, and an already completed
+cleanup must not announce another successful release. Routine graph logs retain
+counts and resource totals without repeating the entire topology.
+
+Use the existing persistent Log pipeline. Desktop renderer warnings/errors and
+renderer crashes/load failures are captured there as well; a closing log viewer
+cannot fail the operation being logged. Copy/Share exports use full ISO UTC
+timestamps so archived launches and midnight remain distinguishable, while the
+on-screen clock remains compact.
+
 ## Test suites
 
 | command | covers |
@@ -465,6 +744,18 @@ question, not only a correctness one.
 | `mobile/scripts/test-swift-project-paths.sh` | Swift's half of `tests/shared/project-name-cases.json` — how a phone-added song's folder is named (no leading dot: iOS lists the library without hidden folders) and which project paths are refused; Kotlin runs it in `ProjectPathsTest`, vitest against the reference writer and the desktop's own `safeName` |
 | `bash mobile/scripts/test-native-playback-bridge-schema.sh` | the iOS bridge's request/result validators — one `clang++` call over the real `.mm` sources, no Xcode, no Pods, no simulator; run by the iOS native canary |
 | `bash zdsp/run-sanitizer-gates.sh` | the native gate, three presets (strict, asan/ubsan, tsan): the playback session and its two injected-failure runs, the bridge-contract test against `tests/shared/`, the graph and analysis suites, the realtime-source policies. What each preset runs is the `filter.include.name` regex in `CMakePresets.json` — a new `add_test` is NOT picked up until it is added there and to the build preset's `targets`, which is why `playback_cue_plan_tests` still runs only under the unfiltered Windows job |
+
+After a desktop-only bootstrap, generate the mobile shared modules imported by
+the desktop tests before running the full suite, using the same steps as CI:
+
+```sh
+node mobile/scripts/sync-graph-document.js
+node mobile/scripts/build-training.mjs
+npm test
+```
+
+These generators use the root build dependencies and write ignored outputs in
+this worktree; installing the mobile app dependencies is not required.
 
 The three-language agreement fixtures under `tests/shared/` are read by more
 than one of these at once — `native-playback-bridge-manifest.json` by jest,
@@ -714,7 +1005,7 @@ against a voice that is no longer in it.
 **Stored lyrics still say `source: 'whisper'`** for anything transcribed on
 the device — the label means "transcribed here", lyrics.json, Drive and the
 phones all read it, and renaming it would strand installed phones (see
-`CLAUDE.md`). `engine: 'qwen3-asr-1.7b'` beside it says which recogniser it
+`docs/PROJECT-RULES.md`). `engine: 'qwen3-asr-1.7b'` beside it says which recogniser it
 was, and `AlignMethod` keeps `'whisper'` only so older lyrics.json files read.
 
 **The release build must ship both engines, and says so without taking the
@@ -781,7 +1072,7 @@ a push that was stopped.
    `gh release create "$TAG" "${PRE[@]}" --title "$TAG" --notes ""` — still a
    prerelease if the tag is hyphenated, but public, untitled and unnoted, to be
    repaired by hand with `gh release edit`.
-   Notes are user-facing — see CLAUDE.md § Releasing for what belongs in them.
+   Notes are user-facing — see docs/PROJECT-RULES.md § Releasing for what belongs in them.
 3. Regenerate the store text and commit it:
 
    ```bash
@@ -828,7 +1119,9 @@ public: the in-app pack URLs are
 There is no bundled splitter — every platform downloads its pack on first
 run. `scripts/build-gpu-pack.sh` builds the Apple Silicon torch/MPS pack;
 `scripts/build-onnx-pack.sh <target>` builds the demucs-onnx packs
-(win32-x64 with onnxruntime-directml, darwin-x64 with CPU onnxruntime).
+(win32-x64 with onnxruntime-directml, darwin-x64 with CPU onnxruntime,
+linux-x64 and linux-arm64 with the same CPU pipeline — each on a matching
+host; see docs/LINUX-ARM64.md).
 Pack tarballs must contain no symlinks in the model cache (Windows tar
 can't extract them without admin rights) — the script materializes and
 asserts this, then re-verifies the cache resolves fully offline.
@@ -882,12 +1175,14 @@ Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
 
 ## Localization
 
-The desktop speaks English, Russian, Simplified and Traditional Chinese, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay and Turkish. The title bar's
+The desktop speaks English, Russian, Simplified and Traditional Chinese, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay, Turkish, Latin American Spanish and Brazilian Portuguese. The title bar's
 flag (the kit's `LanguageSwitcher`, `compact`) picks one, or `System`, which
 follows the machine's preferred languages (`app.getPreferredSystemLanguages()`;
 Traditional Chinese is deliberately not handed Simplified). The choice lives in
 `settings.json` as `language`; switching is live — nothing remounts, a playing
 song keeps playing.
+
+Latin American Spanish (`es-419`) includes Peruvian `es-PE` system tags. Brazilian Portuguese uses `pt-BR`. Store metadata maps `es-419` to Apple's `es-MX` (the Spanish storefront locale used in Peru); both stores use `pt-BR` for Brazil. These regional variants share one dictionary per language.
 
 - **Every user-visible string goes through `t('ns.key')`** (or `tn` for a
   count, `<T k=…/>` for `**bold**`) from `src/renderer/src/i18n.tsx` /
@@ -966,6 +1261,10 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
 - Every rAF loop must be **change-gated** (write DOM/canvas only when the
   value actually changed) and **skip work under `body.modal-open`** — any
   pixel change behind a modal re-rasters the whole blurred backdrop.
+- A compositor-only animation can cost more than a change-gated mask. For Box
+  lyrics, keep word updates on the current row and measure CPU and presented
+  frames on the TV before promoting glyphs or multiplying moving clip layers.
+  Zero Paint events alone is not a performance acceptance check.
 - No infinite CSS animation without a `body.modal-open … animation-play-state:
   paused` rule (see the shimmer/pulse block in styles.css).
 - Windows gets solid surfaces — modal scrim, drop overlay, transport, the
@@ -996,3 +1295,33 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
   one — it would mean attaching our own to a pinned release, the way
   `mms-fa.onnx` is (Q4_K_M is not a candidate: it collapses when the
   language is not known).
+
+## Shared audio engine (zCore)
+
+The reusable C++ audio foundation is maintained in the independent **zCore**
+project. SingZ pins it as a Git submodule at `third_party/zcore`. The parent
+repository records the exact zCore commit as a mode-160000 gitlink; the build
+verifier checks the index pin, the initialized child repository, matching
+`HEAD`, and a clean child worktree. Builds use only the checked-out submodule
+and never fetch a floating branch.
+
+Make shared DSP/device/media changes in zCore, run its standalone tests, and
+publish the reviewed commit. Then update the SingZ gitlink explicitly to the
+full zCore commit SHA:
+
+```sh
+git -C third_party/zcore fetch origin
+git -C third_party/zcore checkout --detach <full-commit-sha>
+git add third_party/zcore
+python3 scripts/verify-zcore-submodule.py --root . --path third_party/zcore
+node mobile/scripts/sync-singzcore.js
+node mobile/scripts/sync-singz-dsp-runtime.js
+```
+
+If a fresh checkout has no child repository yet, initialize it with
+`git submodule update --init -- third_party/zcore`. The parent-side verifier is
+offline and read-only; it reports that command when the child is unavailable.
+Treat the submodule as a dependency: do not patch its files directly. Product
+playback/session composition, detector/ML adapters and UI remain in SingZ.
+LoopZ consumes the same zCore project with media/analysis components disabled.
+Its dependency pin can advance independently after integration checks.

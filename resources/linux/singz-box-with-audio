@@ -1,0 +1,23 @@
+#!/bin/sh
+# Opt-in launcher. The ordinary desktop/Box launcher remains unchanged.
+set -eu
+: "${XDG_RUNTIME_DIR:?A user runtime directory is required}"
+systemctl --user start singz-box-audio.service
+export SINGZ_SURFACE=box
+export SINGZ_BOX_AUDIO_SOCKET="$XDG_RUNTIME_DIR/singz-box-audio/control.sock"
+attempt=0
+while [ ! -S "$SINGZ_BOX_AUDIO_SOCKET" ]; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 100 ]; then
+    echo 'SingZ Box audio service did not create its socket within 10 seconds' >&2
+    exit 1
+  fi
+  if ! systemctl --user is-active --quiet singz-box-audio.service; then
+    echo 'SingZ Box audio service failed to start; inspect journalctl --user -u singz-box-audio' >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+# Resolve the packaged resources/linux location without shell evaluation.
+launcher_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+exec "$launcher_dir/../../singz-box" "$@"

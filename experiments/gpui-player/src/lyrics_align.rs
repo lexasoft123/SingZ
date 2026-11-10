@@ -1741,16 +1741,11 @@ struct Placed {
     end: f64,
 }
 fn source_script(onnx: bool) -> Result<&'static str> {
-    let source = include_str!("../../../src/main/align-mms.ts");
-    let prefix = if onnx {
-        "const ALIGN_ONNX_PY = String.raw`"
+    Ok(if onnx {
+        include_str!("../../../scripts/mms_align_onnx.py")
     } else {
-        "const ALIGN_PY = String.raw`"
-    };
-    source
-        .split_once(prefix)
-        .and_then(|(_, s)| s.split_once("\n`\n").map(|(script, _)| script))
-        .context("Embedded source MMS script is missing")
+        include_str!("../../../scripts/mms_align.py")
+    })
 }
 fn precise_ctc(
     input: &Inputs,

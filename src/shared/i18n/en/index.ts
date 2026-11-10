@@ -6,5 +6,10 @@ import { lyrics } from './lyrics'
 import { player } from './player'
 import { library } from './library'
 import { main } from './main'
+import type { box } from './box'
 
-export const en = { ...common, ...app, ...settings, ...training, ...lyrics, ...player, ...library, ...main }
+const base = { ...common, ...app, ...settings, ...training, ...lyrics, ...player, ...library, ...main }
+
+// Box keys are typed here but registered by the Box/main consumers, keeping
+// Desktop's eager English dictionary unchanged.
+export const en = base as typeof base & typeof box

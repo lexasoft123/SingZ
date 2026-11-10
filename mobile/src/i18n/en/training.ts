@@ -1,5 +1,22 @@
 /* English phone strings for the `phone.training` namespace — see ../index.ts. */
 export const training = {
+  "phone.training.melodyLevel": "Melody level",
+  "phone.training.melodyLevel.first-phrases": "First phrases",
+  "phone.training.melodyLevel.five-notes": "Five notes",
+  "phone.training.melodyLevel.motifs": "Motifs",
+  "phone.training.melodyLevel.wide": "Wider phrases",
+  "phone.training.melodyLevel.chromatic": "Chromatic notes",
+  "phone.training.melodyLevel.first-phrases.help": "Three scale notes in a narrow range.",
+  "phone.training.melodyLevel.five-notes.help": "Five scale notes, with steps and thirds.",
+  "phone.training.melodyLevel.motifs.help": "Short motifs and their variations.",
+  "phone.training.melodyLevel.wide.help": "Up to an octave, with controlled leaps.",
+  "phone.training.melodyLevel.chromatic.help": "Non-key passing and neighbor notes resolve by semitone.",
+
+  "phone.training.exerciseMelodyTitle": "Melody",
+  "phone.training.melodyHelp": "Listen to the whole melody, then sing each note in order. Take your time — rhythm is not scored.",
+  "phone.training.melodyLength": "Notes in each melody",
+  "phone.training.melodyGridCaption": "1 row = 1 semitone · numbers show the interval",
+
   'phone.training.soundSettingsSaved': 'Your sound and volume apply to every training exercise.',
   'phone.training.soundLabBack': 'Back',
   'phone.training.soundLabTitle': 'Instrument sound lab',

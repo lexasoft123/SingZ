@@ -16,4 +16,6 @@
     <locale android:name="ms" />
     <locale android:name="zh-TW" />
     <locale android:name="tr" />
+    <locale android:name="es-419" />
+    <locale android:name="pt-BR" />
 </locale-config>

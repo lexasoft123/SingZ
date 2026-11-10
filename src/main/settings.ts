@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 
 /** Small app-wide settings file (userData/settings.json), window-state style.
@@ -11,7 +11,7 @@ export interface AppSettings {
   /** Overridden project-library location (e.g. an iCloud Drive folder). */
   projectsRoot?: string
   /** Google Drive OAuth, refreshed in place. */
-  gdrive?: { access: string; refresh: string; expiresAt: number }
+  gdrive?: import('../shared/drive-device').DriveOAuthTokens
   /** When the last successful push finished. */
   gdriveLastSync?: number
   /** What has changed since Drive last saw it — see sync-dirty.ts. */
@@ -57,7 +57,8 @@ export function writeSettings(patch: Partial<AppSettings>): void {
     if (next[k] === undefined) delete next[k]
   }
   try {
-    writeFileSync(settingsFile(), JSON.stringify(next, null, 2))
+    writeFileSync(settingsFile(), JSON.stringify(next, null, 2), { mode: 0o600 })
+    if (process.platform !== 'win32') chmodSync(settingsFile(), 0o600)
   } catch {
     /* a failed settings save must never break the app */
   }

@@ -1,3 +1,6 @@
+import { tabModalListeners } from './tab-modal-dismissal'
+import { MelodyLevelSelector } from './MelodyLevelSelector'
+import { melodyReferenceTargetIndices } from '../gen/training-lib'
 import SettingsScreen from './SettingsScreen'
 import WhatsNewScreen from './WhatsNewScreen'
 import { HeaderIconButton } from './HeaderIconButton'
@@ -17,7 +20,6 @@ import React, { createContext, useContext, useSyncExternalStore, useCallback, us
 import {
   AccessibilityInfo,
   AppState,
-  Image,
   PanResponder,
   Platform,
   Pressable,
@@ -30,7 +32,6 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { AudioManager } from 'react-native-audio-api'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
-import { Canvas, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
 import type { MultitrackEngine } from '../engine'
 import {
   createTrainingCompletionReceipt,
@@ -79,6 +80,7 @@ import {
   DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS,
   EMPTY_SINGLE_NOTE_LOCK,
   SINGLE_NOTE_HOLD_MS,
+  trainingTargetHoldMs,
   SINGLE_NOTE_MIN_CONFIDENCE,
   SINGLE_NOTE_PITCH_WINDOW_OPTIONS,
   SingleNoteLockTracker,
@@ -99,6 +101,7 @@ import {
   ChoiceChip,
   FeatureCard,
   GlassHeader,
+  HeaderAction,
   GlassSurface,
   Hairline,
   ListEntry,
@@ -138,8 +141,6 @@ interface ActiveVocalRun {
 }
 
 const persistence = new MobileTrainingPersistence()
-const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
-const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 const TrainingLogContext = createContext<(() => void) | null>(null)
 function TrainingLogButton(): React.JSX.Element | null {
   const openLog = useContext(TrainingLogContext)
@@ -226,7 +227,6 @@ export default function TrainingScreen({
   const routeRecoveryAttempt = useRef<string | null>(null)
   const pendingRouteRecovery = useRef<{ promptKey: string; generation: number } | null>(null)
   const sampleControls = useTrainingSampleRecording(active && !state.error && state.route === 'session' && state.session?.status !== 'completed')
-  const window = useWindowDimensions()
 
   const stopRuntime = useCallback(() => {
     runGeneration.current++
@@ -378,6 +378,8 @@ export default function TrainingScreen({
   const saveSetupPreferences = useCallback((setup: MobileTrainingSetup) => {
     persistence.savePreferences({
       ...progress.profile,
+      ...(setup.melodyLevel === undefined ? {} : { melodyLevel: setup.melodyLevel }),
+      ...(setup.melodyLength === undefined ? {} : { melodyLength: setup.melodyLength }),
       ...(setup.scalePresentation === undefined ? {} : { scalePresentation: setup.scalePresentation }),
       tonicPc: setup.tonicPc,
       keyMode: setup.keyMode,
@@ -531,7 +533,7 @@ export default function TrainingScreen({
       observations: fake ? fakeObservations(run.prompt, run.targetWindows) : captured,
       range: stateRef.current.session!.config.range,
       options: { minimumConfidence: fake ? SINGLE_NOTE_MIN_CONFIDENCE : (mic.live.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE) }
-    }, SINGLE_NOTE_HOLD_MS))
+    }, trainingTargetHoldMs(run.prompt.kind)))
     if (run.activeTarget >= run.prompt.targets.length - 1) {
       finishVocalPrompt(run, 'locked')
       return
@@ -541,7 +543,7 @@ export default function TrainingScreen({
     run.activeTarget++
     run.reachedSoundPlayed = false
     // Keep the transition out of the next target window.
-    run.targetStartEngineMs = endMs + 350 + engine.outputDisplayLatency * 1000
+    run.targetStartEngineMs = endMs + (run.prompt.kind === 'melody' ? 80 : 350) + engine.outputDisplayLatency * 1000
     if (run.prompt.taskMode === 'imitate' && (run.prompt.kind === 'interval' || run.prompt.kind === 'scale' && stateRef.current.session?.config.scalePresentation !== 'phrase')) {
       run.targetStartEngineMs = Infinity
       const cue = mobileTrainingTargetCue(run.prompt.kind, run.prompt.targets[run.activeTarget].midi)
@@ -634,7 +636,7 @@ export default function TrainingScreen({
     }
     setActiveTarget(0)
     const mobileCues = mobileTrainingCues(prompt, session?.config.scalePresentation)
-    const countdownSeconds = mobileTrainingCountdownSeconds(mobileCues)
+    const countdownSeconds = mobileTrainingCountdownSeconds(mobileCues, prompt.kind)
     setSingleNoteCountdown(countdownSeconds)
     const cueResult = await engine.playTrainingCues(mobileCues)
     if (generation !== runGeneration.current || !activeRef.current) {
@@ -648,20 +650,24 @@ export default function TrainingScreen({
     // Highlight each target on its audible onset, including the final target
     // during a whole-scale demonstration. Context chords remain unselected.
     const planned = planTrainingCues(mobileCues, cueResult.startsAt)
-    for (const voice of planned.voices) {
-      const targetIndex = prompt.targets.findIndex(target => target.midi === voice.midi)
+    const melodyIndices = prompt.kind === 'melody'
+      ? melodyReferenceTargetIndices(prompt) : []
+    for (const [voiceIndex, voice] of planned.voices.entries()) {
+      const targetIndex = prompt.kind === 'melody' ? melodyIndices[voiceIndex] ?? -1 : prompt.targets.findIndex(target => target.midi === voice.midi)
       if (targetIndex < 0) continue
       timers.current.push(setTimeout(() => {
         if (generation === runGeneration.current && activeRef.current) setActiveTarget(targetIndex)
       }, Math.max(0, (voice.start + engine.outputDisplayLatency - engine.trainingCurrentTime) * 1000)))
     }
-    const audioDelay = Math.max(0, (cueResult.endsAt - engine.trainingCurrentTime) * 1000)
+    const audioDelay = Math.max(0, (cueResult.endsAt + (prompt.kind === 'melody' ? engine.outputDisplayLatency : 0) - engine.trainingCurrentTime) * 1000)
     const cueDelay = Math.max(audioDelay, countdownSeconds * 1_000)
-    for (let remaining = countdownSeconds - 1; remaining >= 1; remaining--) {
-      const elapsed = countdownSeconds - remaining
+    const visibleSeconds = Math.max(1, Math.ceil(cueDelay / 1000))
+    setSingleNoteCountdown(visibleSeconds)
+    for (let remaining = visibleSeconds - 1; remaining >= 1; remaining--) {
+      const elapsed = visibleSeconds - remaining
       timers.current.push(setTimeout(
         () => setSingleNoteCountdown(remaining),
-        cueDelay * elapsed / countdownSeconds
+        cueDelay * elapsed / visibleSeconds
       ))
     }
     timers.current.push(setTimeout(() => {
@@ -768,11 +774,12 @@ export default function TrainingScreen({
         reading.midi,
         reading.confidence,
         run.prompt.targets[run.activeTarget].midi,
-        reading.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE
+        reading.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE,
+        trainingTargetHoldMs(run.prompt.kind)
       )
       if (Date.now() - lastLockLogMs >= 1000 || next.locked) {
         lastLockLogMs = Date.now()
-        log('training', `prompt ${run.prompt.id} · target ${run.activeTarget + 1} MIDI ${run.prompt.targets[run.activeTarget].midi} · heard MIDI ${reading.midi?.toFixed(2) ?? 'none'} · confidence ${reading.confidence.toFixed(3)} · ${next.status} · median ${next.medianCents?.toFixed(1) ?? 'none'} cents · hold ${next.progressMs.toFixed(0)}/${SINGLE_NOTE_HOLD_MS} ms`)
+        log('training', `prompt ${run.prompt.id} · target ${run.activeTarget + 1} MIDI ${run.prompt.targets[run.activeTarget].midi} · heard MIDI ${reading.midi?.toFixed(2) ?? 'none'} · confidence ${reading.confidence.toFixed(3)} · ${next.status} · median ${next.medianCents?.toFixed(1) ?? 'none'} cents · hold ${next.progressMs.toFixed(0)}/${trainingTargetHoldMs(run.prompt.kind)} ms`)
       }
       const reached = !run.reachedSoundPlayed && reading.midi !== null && next.displayMidi !== null &&
           reading.confidence >= (reading.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE) &&
@@ -870,11 +877,11 @@ export default function TrainingScreen({
       accessibilityElementsHidden={!active}
       importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
     >
-      <TrainingBackdrop width={window.width} height={window.height} />
       <View pointerEvents="none" style={styles.staff}>
         {[0, 1, 2, 3, 4].map((line) => <View key={line} style={[styles.staffLine, { top: 88 + line * 18 }]} />)}
       </View>
       <TrainingStack.Navigator
+        screenListeners={tabModalListeners}
         initialRouteName="Home"
         screenLayout={({ children, navigation }) => <TrainingLogContext.Provider value={() => {
           stopRuntime()
@@ -1021,48 +1028,6 @@ export default function TrainingScreen({
   )
 }
 
-const TrainingBackdrop = React.memo(function TrainingBackdrop({ width, height }: { width: number; height: number }): React.JSX.Element {
-  return (
-    <>
-      <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
-        <Rect x={0} y={0} width={width} height={height}>
-          <SkLinearGradient
-            start={vec(width * 0.15, 0)}
-            end={vec(width * 0.85, height)}
-            colors={['#3a2517', '#2a1c12', '#1c130d', '#120c09']}
-            positions={[0, 0.3, 0.58, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.25, height * 0.16)}
-            r={width * 0.62}
-            colors={['rgba(236,164,84,0.46)', 'rgba(210,130,60,0.18)', 'rgba(210,130,60,0)']}
-            positions={[0, 0.55, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.86, height * 0.34)}
-            r={width * 0.5}
-            colors={['rgba(190,120,60,0.24)', 'rgba(190,120,60,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.5, height * 0.46)}
-            r={width * 1.1}
-            colors={['rgba(10,7,5,0)', 'rgba(10,7,5,0)', 'rgba(10,7,5,0.52)']}
-            positions={[0, 0.42, 1]}
-          />
-        </Rect>
-      </Canvas>
-      <View pointerEvents="none" style={styles.topScrim}><Image source={SCRIM_TOP} resizeMode="stretch" style={styles.scrimImage} /></View>
-      <View pointerEvents="none" style={styles.bottomScrim}><Image source={SCRIM_BOTTOM} resizeMode="stretch" style={styles.scrimImage} /></View>
-    </>
-  )
-})
-
 function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose, onPrepare, onProgress, onSoundSettings, onSettings }: {
   progress: TrainingProgress
   onProgramLesson: (lesson: ProgramLesson, day: number) => void
@@ -1076,18 +1041,20 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
 }): React.JSX.Element {
   const layout = useMobileLayout()
   const snapshot = summarizeTrainingProgress(progress)
+  const tendency = snapshot.tendency === 'not-enough-pitch' ? '—'
+    : snapshot.tendency === 'centered' ? t('phone.training.centered')
+    : snapshot.tendency === 'flat' ? t('phone.training.kit.flat') : t('phone.training.kit.sharp')
   const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
   return (
-    <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
-      {song && (
+    <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1120, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
+      <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} beforeRoutine={song && (
         <GlassSurface radius={26} style={styles.songCardContent}>
           <Text style={styles.eyebrow}>{t('phone.training.loadedSongEyebrow')}</Text>
           <Text style={styles.cardTitle}>{t('phone.training.prepareFor', { song: song.songName })}</Text>
           <Text style={styles.cardCopy}>{effectiveKey ? t('phone.training.keyWithTranspose', { key: keyLabel(keyName(effectiveKey)) }) : t('phone.training.noCurrentKey')}</Text>
           <View style={styles.wrap}>{(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => <Chip key={choice} label={songPreparationChoiceLabel(choice)} onPress={() => onPrepare(choice)} />)}</View>
         </GlassSurface>
-      )}
-      <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} headerActions={<>
+      )} headerActions={<>
         <HeaderIconButton label={t('phone.library.openSettings')} onPress={onSettings}><Icon name="settings" size={20} color={C.amber} /></HeaderIconButton>
         <TrainingLogButton />
       </>} />
@@ -1209,7 +1176,7 @@ export function SingleNoteSetup({
           </View>
         )}
         <Hairline />
-        {setup.exercise !== 'note' && setup.exercise !== 'scale' && (
+        {setup.exercise !== 'note' && setup.exercise !== 'scale' && setup.exercise !== 'melody' && (
           <>
             <CompactSetupRow
               label={t('phone.training.setupPractice')}
@@ -1243,6 +1210,7 @@ export function SingleNoteSetup({
             <Hairline />
           </>
         )}
+        {setup.exercise === 'melody' && <View style={styles.compactEditor}><MelodyLevelSelector value={setup.melodyLevel ?? 'first-phrases'} onChange={melodyLevel => onChange({ melodyLevel })} /><Text style={styles.sectionLabel}>{t('phone.training.melodyLength')}</Text><View style={styles.wrap}>{([3,5,7] as const).map(n => <Chip key={n} label={String(n)} selected={(setup.melodyLength ?? 5) === n} onPress={() => onChange({ melodyLength: n })} />)}</View><Text style={styles.cardCopy}>{t('phone.training.melodyHelp')}</Text></View>}
         {setup.exercise === 'scale' && <View style={styles.compactEditor}><Text style={styles.sectionLabel}>{t('phone.training.setupPractice')}</Text><View style={styles.wrap}><Chip label={t('phone.training.scaleGuided')} selected={setup.scalePresentation !== 'phrase'} onPress={() => onChange({ scalePresentation: 'guided' })} /><Chip label={t('phone.training.scalePhrase')} selected={setup.scalePresentation === 'phrase'} onPress={() => onChange({ scalePresentation: 'phrase' })} /></View></View>}
         {setup.exercise === 'interval' && (
           <View style={styles.intervalPlan}>
@@ -1396,7 +1364,8 @@ export function TrainingSessionView({ paused = false, onPause = () => undefined,
         title={trainingExerciseTitle(prompt.kind)}
         backLabel={t('phone.training.endSession')}
         onBack={onExit}
-        trailing={<View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}><Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.recordingTools')} onPress={() => setShowSampleTools(value => !value)}><Text style={styles.counter}>{displayIndex} / {displayTotal}</Text></Pressable><TrainingLogButton /></View>}
+        testID="training-session-header"
+        trailing={<><HeaderAction label={t('phone.training.recordingTools')} onPress={() => setShowSampleTools(value => !value)}><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7} maxFontSizeMultiplier={1.2} style={styles.counter}>{displayIndex} / {displayTotal}</Text></HeaderAction><TrainingLogButton /></>}
       />
       {showSampleTools && sampleControls}
       {guidedVocal ? (
@@ -1467,22 +1436,28 @@ function SingleNoteSessionBody({ paused, onPause, repetition, phrase, phase, pro
   const target = prompt.targets[targetIndex]
   const swipeLeft = phase === 'respond' && countdown === null ? onSkip : undefined
   const swipeRight = phase === 'respond' && countdown === null ? onBegin : undefined
+  const scrollWholeMelody = prompt.kind === 'melody' && compact && !layout.wide
+  const lesson = <TrainingLessonOverview matchedCount={phase === 'cue' || phase === 'ready' ? 0 : activeTarget + (lock.locked ? 1 : 0)} prompt={prompt} activeTarget={targetIndex} phrase={phrase} repetition={repetition} compact={compact} topAligned={layout.wide || scrollWholeMelody} intrinsic={scrollWholeMelody} />
+  const detector = <View style={[styles.practiceDetector, compact && styles.practiceDetectorCompact, scrollWholeMelody && { flex: 0, flexShrink: 0 }]}>
+    <Text accessibilityLiveRegion="polite" style={[styles.practicePhase, compact && styles.practicePhaseCompact]}>{phase === 'cue' || countdown !== null ? prompt.kind === 'melody' ? t('phone.training.listen') : t('phone.training.hearNamedNote', { note: target.noteName }) : phase === 'respond' ? t('phone.training.yourTurn') : paused ? t('phone.training.paused') : error ? t('phone.training.tapStartWhenReady') : t('phone.training.preparing')}</Text>
+    <SingleNotePitchMeter compact={compact} prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} listening={phase !== 'respond' || countdown !== null} />
+    {phase === 'feedback' && result && <Text style={styles.feedback}>{trainingFeedback(result)}</Text>}
+  </View>
+  const transport = <SingleNoteTransport paused={paused} onPause={onPause} phase={phase === 'respond' && countdown !== null ? 'cue' : phase} error={error} onBegin={onBegin} onSkip={onSkip} />
   return (
     <PracticeSwipeSurface onSwipeLeft={swipeLeft} onSwipeRight={swipeRight}>
       <View testID="training-practice-body" onLayout={event => setBodyHeight(event.nativeEvent.layout.height)} style={[styles.practiceColumns, layout.wide && styles.practiceColumnsWide]}>
-      <ScrollView style={styles.lessonColumn} contentContainerStyle={styles.singleStage} showsVerticalScrollIndicator={false}>
-        <TrainingLessonOverview prompt={prompt} activeTarget={targetIndex} phrase={phrase} repetition={repetition} compact={compact} topAligned={layout.wide} />
-      </ScrollView>
-      <View style={[styles.performanceColumn, !layout.wide && styles.performanceColumnNarrow]}>
-      <ScrollView style={layout.wide ? { flex: 1 } : { flexGrow: 0, flexShrink: 0 }} contentContainerStyle={styles.detectorScroll} showsVerticalScrollIndicator={false}>
-        <View style={[styles.practiceDetector, compact && styles.practiceDetectorCompact]}>
-          <Text accessibilityLiveRegion="polite" style={[styles.practicePhase, compact && styles.practicePhaseCompact]}>{phase === 'cue' || countdown !== null ? t('phone.training.hearNamedNote', { note: target.noteName }) : phase === 'respond' ? t('phone.training.yourTurn') : paused ? t('phone.training.paused') : error ? t('phone.training.tapStartWhenReady') : t('phone.training.preparing')}</Text>
-          <SingleNotePitchMeter compact={compact} prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} listening={phase !== 'respond' || countdown !== null} />
-          {phase === 'feedback' && result && <Text style={styles.feedback}>{trainingFeedback(result)}</Text>}
-        </View>
-      </ScrollView>
-        <SingleNoteTransport paused={paused} onPause={onPause} phase={phase === 'respond' && countdown !== null ? 'cue' : phase} error={error} onBegin={onBegin} onSkip={onSkip} />
-      </View>
+        {scrollWholeMelody ? <ScrollView testID="training-melody-body-scroll" style={{ flex: 1 }} contentContainerStyle={{ gap: 12, paddingBottom: 8 }} directionalLockEnabled>
+          {lesson}
+          {detector}
+          {transport}
+        </ScrollView> : <>
+          <ScrollView style={styles.lessonColumn} contentContainerStyle={styles.singleStage} showsVerticalScrollIndicator={false}>{lesson}</ScrollView>
+          <View style={[styles.performanceColumn, !layout.wide && styles.performanceColumnNarrow]}>
+            <ScrollView style={layout.wide ? { flex: 1 } : { flexGrow: 0, flexShrink: 0 }} contentContainerStyle={styles.detectorScroll} showsVerticalScrollIndicator={false}>{detector}</ScrollView>
+            {transport}
+          </View>
+        </>}
       </View>
     </PracticeSwipeSurface>
   )
@@ -1648,10 +1623,10 @@ function SingleNotePitchMeter({ compact = false, prompt, activeTarget, liveMidi,
     detectedNote={detected}
     progress={lock.progress}
     centered={lock.centered}
-    instruction={listening ? t('phone.training.hearNamedNote', { note: target.noteName }) : instruction}
+    instruction={listening ? prompt.kind === 'melody' ? t('phone.training.listen') : t('phone.training.hearNamedNote', { note: target.noteName }) : instruction}
     reading={listening ? t('phone.training.listen') : centsReading}
     accessibilityReading={reading}
-    hint={listening ? t('phone.training.listenNowHint') : liveMidi === null && micHearing !== 'starting' && micHearing !== 'hearing' ? instruction : t('phone.training.centerWithinHint', { cents: pitchWindowCents })}
+    hint={listening ? t('phone.training.listenNowHint') : liveMidi === null && micHearing !== 'starting' && micHearing !== 'hearing' ? instruction : prompt.kind === 'melody' ? t('phone.training.steadyTheNote') : t('phone.training.centerWithinHint', { cents: pitchWindowCents })}
   />
 }
 
@@ -1727,7 +1702,10 @@ function IntervalWeekProgress(): React.JSX.Element | null {
 
 function TrainingProgressView({ progress, onBack }: { progress: TrainingProgress; onBack: () => void }): React.JSX.Element {
   const snapshot = summarizeTrainingProgress(progress)
-  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={snapshot.tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.dailyActivityTitle')}><DailyTrainingActivity days={persistence.practiceDays} /></Section><TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
+  const tendency = snapshot.tendency === 'not-enough-pitch' ? '—'
+    : snapshot.tendency === 'centered' ? t('phone.training.centered')
+    : snapshot.tendency === 'flat' ? t('phone.training.kit.flat') : t('phone.training.kit.sharp')
+  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.dailyActivityTitle')}><DailyTrainingActivity days={persistence.practiceDays} /></Section><TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
 }
 
 export function TrainingHeader({ title, onBack }: { title: string; onBack: () => void }): React.JSX.Element { return <GlassHeader title={title} onBack={onBack} backLabel={t('phone.training.kit.back')} trailing={<TrainingLogButton />} /> }
@@ -1750,7 +1728,7 @@ function identifyChoices(prompt: TrainingPrompt): { label: string; answer: Train
   if (prompt.kind === 'scale-degree') return [1,2,3,4,5,6,7].map((scaleDegree) => ({ label: String(scaleDegree), answer: { kind: 'scale-degree', scaleDegree } }))
   if (prompt.kind === 'interval') return [2,3,4,5,6,7,8].map((intervalNumber) => ({ label: String(intervalNumber), answer: { kind: 'interval', intervalNumber, direction: prompt.direction } }))
   if (prompt.kind === 'chord-tone') return (['root','third','fifth'] as const).map((role) => ({ label: chordToneRoleLabel(role), answer: { kind: 'chord-tone', role } }))
-  if (prompt.kind === 'scale') return []
+  if (prompt.kind === 'scale' || prompt.kind === 'melody') return []
   return [1,2,3,4,5,6,7].map((scaleDegree) => ({ label: t('phone.training.degreeN', { n: scaleDegree }), answer: { kind: 'arpeggio', scaleDegree, quality: prompt.chord.quality } }))
 }
 
@@ -1785,6 +1763,7 @@ function readableResult(value: string): string {
 function readableExercise(value: string): string {
   switch (value) {
     case 'scale': return t('phone.training.exerciseScaleTitle')
+    case 'melody': return t('phone.training.exerciseMelodyTitle')
     case 'arpeggio': return t('phone.training.exerciseArpeggioTitle')
     case 'note': return t('phone.training.kindNote')
     case 'interval': return t('phone.training.kindInterval')
@@ -1799,12 +1778,13 @@ function trainingExerciseTitle(value: MobileTrainingSetup['exercise']): string {
   if (value === 'note') return t('phone.training.exerciseNoteTitle')
   if (value === 'interval') return t('phone.training.exerciseIntervalTitle')
   if (value === 'chord-tone') return t('phone.training.exerciseChordToneTitle')
+  if (value === 'melody') return t('phone.training.exerciseMelodyTitle')
   if (value === 'arpeggio') return t('phone.training.exerciseArpeggioTitle')
   if (value === 'scale-degree') return t('phone.training.exerciseScaleDegreeTitle')
   return t('phone.training.exerciseMixedTitle')
 }
 function promptPracticeLabel(prompt: TrainingPrompt): string {
-  if (prompt.kind === 'scale') return keyLabel(keyName(prompt.key))
+  if (prompt.kind === 'scale' || prompt.kind === 'melody') return keyLabel(keyName(prompt.key))
   if (prompt.kind === 'note') return t('phone.training.singleNotePracticeLabel')
   if (prompt.kind === 'scale-degree') return t('phone.training.degreeN', { n: prompt.scaleDegree })
   if (prompt.kind === 'interval') return `${intervalLabel(prompt.intervalName)} ${directionWord(prompt.direction)}`
@@ -1816,11 +1796,8 @@ const glassSurface = nativeGlassStyle(nightStudioNativeTheme, 'surface')
 const flatGlassSurface = nativeGlassStyle(nightStudioNativeTheme, 'none')
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: C.bg },
+  screen: { flex: 1, backgroundColor: 'transparent' },
   trainingRoute: { backgroundColor: 'transparent' },
-  topScrim: { position: 'absolute', top: 0, left: 0, right: 0, width: '100%', height: 150, opacity: 0.68 },
-  bottomScrim: { position: 'absolute', bottom: 0, left: 0, right: 0, width: '100%', height: 290, opacity: 0.82 },
-  scrimImage: { width: '100%', height: '100%' },
   staff: { position: 'absolute', inset: 0, opacity: 0.22 },
   staffLine: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,240,220,0.12)' },
   scroll: { paddingHorizontal: 20, paddingTop: Platform.OS === 'ios' ? 58 : 34, paddingBottom: 36, gap: 18 },
@@ -1874,7 +1851,7 @@ const styles = StyleSheet.create({
   stepperActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   stepperValue: { color: C.text, fontSize: 16, fontWeight: '900', minWidth: 36, textAlign: 'center' },
   session: { flex: 1, paddingHorizontal: 12, paddingTop: Platform.OS === 'ios' ? 58 : 34, paddingBottom: 10 },
-  counter: { color: C.dim, fontSize: 12, fontWeight: '800', letterSpacing: 1 },
+  counter: { color: C.dim, fontSize: 11, fontWeight: '800' },
   swipeSurface: { flex: 1 },
   singleStage: { flexGrow: 1, alignItems: 'center', gap: 8 },
   practiceDetector: { minHeight: 240, flex: 1, width: '100%', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.hairline, paddingTop: 10 },

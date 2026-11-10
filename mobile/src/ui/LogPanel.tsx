@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { GlassHeader, HeaderAction } from '@singz/ui/native'
 import { clearLog, fmtTime, formatLog, logEntries, logSessions, logSessionEntries, onLogLine, LOG_MAX_ENTRIES, type LogEntry, type LogSession } from '../log'
 import { t, tn, getLocale, useLocale } from '../i18n'
-import { C } from './bits'
+import { C, CloseGlyph, ShareGlyph, TrashGlyph } from './bits'
 
 /**
  * The desktop's Log dialog, on the phone: the same columns (time, source,
@@ -69,26 +70,25 @@ export default function LogPanel({
 
   return (
     <View style={[s.sheet, { paddingTop: insets.top + 14, paddingBottom: insets.bottom + 10 }]}>
-      <View style={s.head}>
-        <Text style={s.title}>{t('phone.app.log.title')}</Text>
-        <Text style={s.count}>{tn('phone.app.log.lines', entries.length)}</Text>
-        <View style={s.actions}>
-          <Pressable hitSlop={8} onPress={share} accessibilityRole="button" accessibilityLabel={t('phone.app.log.shareA11y')}>
-            <Text style={s.link}>{t('phone.app.log.share')}</Text>
-          </Pressable>
-          {shown === null && <Pressable
-            hitSlop={8}
+      <GlassHeader
+        title={t('phone.app.log.title')}
+        subtitle={tn('phone.app.log.lines', entries.length)}
+        align="start"
+        trailing={<>
+          <HeaderAction onPress={share} label={t('phone.app.log.shareA11y')}>
+            <ShareGlyph color={C.amber} />
+          </HeaderAction>
+          {shown === null && <HeaderAction
             onPress={confirmClear}
-            accessibilityRole="button"
-            accessibilityLabel={t('phone.app.log.clearA11y')}
+            label={t('phone.app.log.clearA11y')}
           >
-            <Text style={s.link}>{t('phone.app.log.clear')}</Text>
-          </Pressable>}
-          <Pressable hitSlop={8} onPress={onClose} accessibilityRole="button" accessibilityLabel={t('phone.app.log.closeA11y')}>
-            <Text style={s.link}>{t('phone.app.log.close')}</Text>
-          </Pressable>
-        </View>
-      </View>
+            <TrashGlyph color={C.amber} />
+          </HeaderAction>}
+          <HeaderAction onPress={onClose} label={t('phone.app.log.closeA11y')}>
+            <CloseGlyph color={C.amber} />
+          </HeaderAction>
+        </>}
+      />
       <Pressable
         style={s.selector}
         accessibilityRole="button"
@@ -143,10 +143,7 @@ export default function LogPanel({
 
 const s = StyleSheet.create({
   sheet: { flex: 1, backgroundColor: C.bg, paddingHorizontal: 16 },
-  head: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
-  title: { color: C.text, fontSize: 20, fontWeight: '700' },
   count: { color: C.dim, fontSize: 12 },
-  actions: { flexDirection: 'row', gap: 16, marginLeft: 'auto' },
   link: { color: C.amber, fontSize: 14, fontWeight: '600' },
   selector: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, marginBottom: 8, borderBottomWidth: 1, borderColor: C.dim },
   sessionList: { maxHeight: 240, marginBottom: 10 },

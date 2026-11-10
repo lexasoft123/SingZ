@@ -52,6 +52,92 @@ class FakeAudioContext {
   async setSinkId(): Promise<void> {}
 }
 
+class StartupAudioContext extends FakeAudioContext {
+  static last: StartupAudioContext | null = null
+  sinkId: string | { type: 'none' }
+  readonly physicalRoutes: string[]
+
+  constructor(options: { sinkId?: string | { type: 'none' } } = {}) {
+    super()
+    this.sinkId = options.sinkId ?? ''
+    this.physicalRoutes = [this.route(this.sinkId)]
+    StartupAudioContext.last = this
+  }
+
+  private route(sink: string | { type: 'none' }): string {
+    return typeof sink === 'string' ? sink || 'default' : 'none'
+  }
+
+  async setSinkId(sink: string | { type: 'none' } = ''): Promise<void> {
+    this.sinkId = sink
+    this.physicalRoutes.push(this.route(sink))
+  }
+}
+
+async function reconcileStartupOutput(
+  savedOutputId: string | undefined,
+  nativeAvailable: boolean
+): Promise<{
+  result: import('../../src/renderer/src/audio/output-routing').PlaybackOutputReconcileResult
+  context: StartupAudioContext
+  enumerateOutputs: ReturnType<typeof vi.fn>
+}> {
+  vi.stubGlobal('AudioContext', StartupAudioContext)
+  vi.stubGlobal('navigator', { platform: 'Linux' })
+  vi.stubGlobal('window', {
+    singz: { configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })) }
+  })
+  const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+  const { PlaybackOutputArbiter } = await import('../../src/renderer/src/audio/output-routing')
+  const engine = new MultitrackEngine()
+  const context = StartupAudioContext.last!
+  const enumerateOutputs = vi.fn(async () =>
+    savedOutputId && nativeAvailable && context.physicalRoutes.at(-1) === 'none'
+      ? [{ kind: 'audiooutput' as const, deviceId: savedOutputId }]
+      : []
+  )
+  const arbiter = new PlaybackOutputArbiter(savedOutputId, {
+    setOutput: (sinkId) => engine.setOutput(sinkId),
+    enumerateOutputs,
+    commit: vi.fn()
+  })
+  const result = await arbiter.reconcile()
+  return { result, context, enumerateOutputs }
+}
+
+describe('startup output ownership', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.resetModules()
+  })
+
+  it('does not make the initial default sink hide a saved native endpoint from inventory', async () => {
+    const outputId = 'native:alsa:sysfs:/sys/devices/platform/usb/5-1:pcm:0'
+
+    const { result, context } = await reconcileStartupOutput(outputId, true)
+
+    expect(result).toEqual({ kind: 'applied', outputId })
+    expect(context.physicalRoutes).toEqual(['none', 'none'])
+  })
+
+  it('negative control: restores the ordinary browser default after starting detached', async () => {
+    const { result, context, enumerateOutputs } = await reconcileStartupOutput(undefined, false)
+
+    expect(result).toEqual({ kind: 'applied', outputId: undefined })
+    expect(context.physicalRoutes).toEqual(['none', 'default'])
+    expect(enumerateOutputs).not.toHaveBeenCalled()
+  })
+
+  it('still falls back to the browser default when the saved native endpoint is really missing', async () => {
+    const outputId = 'native:alsa:disconnected'
+
+    const { result, context } = await reconcileStartupOutput(outputId, false)
+
+    expect(result).toEqual({ kind: 'missing', outputId })
+    expect(context.physicalRoutes).toEqual(['none', 'default'])
+  })
+})
+
 interface FakeClient {
   pauses: number
   [key: string]: unknown
@@ -200,4 +286,65 @@ describe('native seeks never pause a playing selection', () => {
       })
     }
   }
+})
+
+/** Desktop-visible: a native receipt for the song being LEFT must not land in
+ *  the next one (the epoch guards in setMasterVolume / setVolume and the
+ *  accepted-control twins). */
+describe('late native control receipts across a song switch', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.resetModules()
+  })
+
+  function later<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(done => { resolve = done })
+    return { promise, resolve }
+  }
+
+  async function nativeSong(): Promise<{ engine: any; gain: ReturnType<typeof later<void>>; lane: ReturnType<typeof later<{ gain: number; muted: boolean; solo: boolean }>> }> {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine: any = new MultitrackEngine()
+    engine.aheadAllowed = false
+    engine.load([{ id: 'vocals', buffer: { duration: 120 }, duration: 120, path: '/vocals.flac' }])
+    const gain = later<void>()
+    const lane = later<{ gain: number; muted: boolean; solo: boolean }>()
+    engine.nativePlayback = {
+      active: true, preparedAhead: false, recoveryPending: false, transportActive: false,
+      setMasterGain: vi.fn(() => gain.promise),
+      updateLane: vi.fn(() => lane.promise),
+      unload: vi.fn(async () => {})
+    }
+    return { engine, gain, lane }
+  }
+
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+
+  it('drops a master gain and lane receipt that settle after the song switched', async () => {
+    const { engine, gain, lane } = await nativeSong()
+    engine.setMasterVolume(0.3)
+    engine.setVolume('vocals', 0.2)
+    const accepted = engine.setMasterVolumeAccepted(0.4)
+    await vi.waitFor(() => expect(engine.nativePlayback.setMasterGain).toHaveBeenCalledTimes(2))
+    engine.retireForSongSwitch()
+    gain.resolve()
+    lane.resolve({ gain: 0.2, muted: false, solo: false })
+    await expect(accepted).rejects.toThrow('song changed')
+    await flush()
+    expect(engine.masterVolume).toBe(1)
+    expect(engine.getTrackStates().find((track: { id: string }) => track.id === 'vocals')?.volume).toBe(1)
+  })
+
+  it('negative control: the same receipts apply when the song did not change', async () => {
+    const { engine, gain, lane } = await nativeSong()
+    engine.setMasterVolume(0.3)
+    engine.setVolume('vocals', 0.2)
+    gain.resolve()
+    lane.resolve({ gain: 0.2, muted: false, solo: false })
+    await flush()
+    expect(engine.masterVolume).toBe(0.3)
+    expect(engine.getTrackStates().find((track: { id: string }) => track.id === 'vocals')?.volume).toBe(0.2)
+  })
 })
