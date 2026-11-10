@@ -185,6 +185,8 @@ mod ui_grain;
 #[cfg(feature = "ui-tests")]
 mod ui_integration;
 #[cfg(feature = "ui-tests")]
+mod ui_perf_scenario;
+#[cfg(feature = "ui-tests")]
 mod ui_library_review;
 #[cfg(feature = "ui-tests")]
 mod ui_log_review;
@@ -6470,6 +6472,11 @@ fn main() {
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_INTEGRATION_TEST") {
             assert!(background, "Native integration requires background mode");
             ui_integration::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_PERF_SCENARIO") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
+            ui_perf_scenario::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_UI_SMOKE") {
