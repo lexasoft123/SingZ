@@ -112,23 +112,34 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .player-header-actions { margin-left: auto; }
 .player-header-actions .pill { min-height: var(--box-compact-height); font-size: var(--box-label-size); padding: 8px 16px; }
 .box-player[data-controls="hidden"] .player-chrome { visibility: hidden; pointer-events: none; }
-.player-lyrics { position: absolute; left: 100px; right: 80px; top: 130px; height: 550px; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; gap: 28px; overflow: hidden; }
-.player-lyric-slot { position: relative; padding-top: 40px; flex-shrink: 0; min-width: 0; }
-.player-lyric-slot:first-child { padding-top: 0; }
-.player-lyric { padding: 0; margin: 0; font-size: 52px; line-height: 1.2; font-weight: 650; font-variation-settings: 'wdth' 92; letter-spacing: -.02em; min-height: 62px; overflow-wrap: anywhere; color: var(--sz-faint); flex-shrink: 0; }
-.player-lyric.past { color: var(--sz-dim); }
+.player-lyrics { position: absolute; left: 100px; right: 80px; top: 130px; height: 550px; overflow: hidden; }
+.player-lyrics-track { position: absolute; left: 20px; right: 20px; top: 0; will-change: transform; }
+.player-lyric-slot { position: absolute; left: 0; right: 0; padding-top: 40px; min-width: 0; transition: opacity 260ms ease-out; }
+.player-lyric-slot[data-context="outside"] { opacity: 0; }
+/* Fixed layout size: only transform and opacity animate between contextual roles. */
+.player-lyric { padding: 0; margin: 0; width: calc(100% / 1.03); font-size: 68px; line-height: 1.2; font-weight: 650; font-variation-settings: 'wdth' 92; letter-spacing: -.02em; min-height: 82px; overflow-wrap: anywhere; color: var(--sz-faint); transform-origin: left center; transform: scale(calc(52 / 68)); opacity: .72; transition: transform 260ms ease-out, opacity 260ms ease-out; }
+.player-lyric.past { color: var(--sz-dim); opacity: .6; }
 .player-lyric.up-next { color: color-mix(in srgb, var(--sz-text) 76%, var(--sz-faint)); }
-.player-lyric.current { font-size: 68px; min-height: 82px; color: var(--sz-text); }
-.player-shaped-word { display: inline-block; position: relative; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; --lyric-edge: -7px; --lyric-pen: 0px; }
-.player-shaped-word > .lyric-ink-base { color: var(--sz-text); }
+.player-lyric.current { transform: scale(1); color: var(--sz-text); opacity: 1; }
+.player-lyric.current[data-started="true"] { transform: scale(1.03); }
+.player-shaped-word { display: inline-block; position: relative; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; --lyric-edge: var(--lyric-feather-start); --lyric-pen: 0px; }
+.player-shaped-word > .lyric-ink-base { color: inherit; }
+.player-shaped-word > .lyric-ink-halo,
 .player-shaped-word > .lyric-ink-glow,
 .player-shaped-word > .lyric-ink-amber,
-.player-shaped-word > .lyric-ink-core { position: absolute; inset: 0; pointer-events: none; }
-.player-shaped-word > .lyric-ink-glow { color: transparent; opacity: 0; text-shadow: 0 0 5px #ffb743, 0 0 14px #ef8b25; }
-.player-shaped-word > .lyric-ink-amber { color: var(--sz-accent); mask-image: linear-gradient(90deg, #000 calc(var(--lyric-edge) - 7px), transparent calc(var(--lyric-edge) + 7px)); }
-.player-shaped-word > .lyric-ink-core { color: #fff4dc; opacity: 0; mask-image: linear-gradient(90deg, transparent calc(var(--lyric-pen) - 9px), #000 var(--lyric-pen), transparent calc(var(--lyric-pen) + 9px)); }
-.player-shaped-word[data-singing="true"] > .lyric-ink-glow,
-.player-shaped-word[data-singing="true"] > .lyric-ink-core { opacity: 1; }
+.player-shaped-word > .lyric-ink-core { position: absolute; inset: 0; pointer-events: none; opacity: 0; }
+/* Static blurred glyphs; the advancing glow is clipped by the approved 8-level band. */
+.player-shaped-word > .lyric-ink-halo,
+.player-shaped-word > .lyric-ink-glow { inset: calc(-1 * var(--lyric-glow-pad)); padding: var(--lyric-glow-pad); color: transparent; text-shadow: 0 0 var(--lyric-glow-blur) rgb(255 160 40 / .75); }
+.player-shaped-word > .lyric-ink-glow { mask-image: var(--lyric-glow-mask); }
+.player-shaped-word > .lyric-ink-amber { color: var(--sz-accent); mask-image: var(--lyric-amber-mask); }
+/* The moving core brightens partial leading and final glyphs without splitting shaping. */
+.player-shaped-word > .lyric-ink-core { color: #ffdf9c; mask-image: var(--lyric-core-mask); }
+.current .player-shaped-word > .lyric-ink-amber { opacity: 1; }
+.current .player-shaped-word[data-singing="true"] > .lyric-ink-halo { opacity: .35; }
+.current .player-shaped-word[data-singing="true"] > .lyric-ink-glow,
+.current .player-shaped-word[data-singing="true"] > .lyric-ink-core { opacity: var(--lyric-band-opacity, 0); }
+.player-shaped-word[data-multiline="true"] > .lyric-ink-halo,
 .player-shaped-word[data-multiline="true"] > .lyric-ink-glow,
 .player-shaped-word[data-multiline="true"] > .lyric-ink-amber,
 .player-shaped-word[data-multiline="true"] > .lyric-ink-core { display: none; }

@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { LyricLine } from '../../src/shared/types'
 import { PlayerLyrics } from '../../src/renderer/src/box/PlayerLyrics'
-import { lyricInkGeometry, lyricPaintPosition, shapedWordWidth, setLyricSinging, singingCountdown } from '../../src/renderer/src/box/player-lyrics-model'
+import { LYRIC_DESKTOP_SCALE, LYRIC_FEATHER, LYRIC_LIGHT_WIDTH, lyricBandSlices, lyricHighlightMasks, lyricScrollStep, lyricScrollShouldSnap, lyricWindow, lyricInkGeometry, lyricPaintPosition, shapedWordWidth, setLyricSinging, singingCountdown } from '../../src/renderer/src/box/player-lyrics-model'
 const lines: LyricLine[] = [
   { start: 10, end: 13, text: 'Wide iii', words: [{ w: 'Wide', s: 10, e: 11 }, { w: 'iii', s: 11, e: 13 }] },
   { start: 25, end: 29, text: '你好 é', words: [{ w: '你好', s: 25, e: 27 }, { w: 'é', s: 27, e: 29 }] }
@@ -37,12 +37,12 @@ describe('Box singing guide, independent of audio pre-roll/metronome', () => {
     const render = (position: number): string => renderToStaticMarkup(createElement(PlayerLyrics, { lines, position, playing: true, rate: 1 }))
     const intro = render(0)
     expect(slot(intro, 0)).toContain('data-countdown-target="0"')
-    expect(slot(intro, 0).indexOf('player-singing-countdown')).toBeLessThan(slot(intro, 0).indexOf('<p class="player-lyric'))
+    expect(slot(intro, 0).indexOf('player-singing-countdown')).toBeLessThan(slot(intro, 0).indexOf('class="player-lyric '))
     expect(slot(intro, 1)).not.toContain('player-singing-countdown')
     for (const position of [14, 23]) {
       const gap = render(position)
       expect(slot(gap, 1)).toContain('data-countdown-target="1"')
-      expect(slot(gap, 1).indexOf('player-singing-countdown')).toBeLessThan(slot(gap, 1).indexOf('<p class="player-lyric'))
+      expect(slot(gap, 1).indexOf('player-singing-countdown')).toBeLessThan(slot(gap, 1).indexOf('class="player-lyric '))
       expect(slot(gap, 0)).not.toContain('player-singing-countdown')
     }
   })
@@ -89,7 +89,7 @@ describe('continuous browser-shaped lyric paint', () => {
   it('moves the bright edge continuously within shaped glyphs and clamps endpoints', () => {
     expect(lyricInkGeometry(137.4, .25).pen).toBeCloseTo(34.35)
     expect(lyricInkGeometry(137.4, .255).pen).toBeGreaterThan(34.35)
-    expect(lyricInkGeometry(137.4, -1)).toEqual({ edge: -7, pen: 0 })
+    expect(lyricInkGeometry(137.4, -1)).toEqual({ edge: -LYRIC_FEATHER, pen: 0 })
     expect(lyricInkGeometry(137.4, 2).pen).toBeCloseTo(137.4)
   })
   it('projects rate only within two status intervals and resets immediately on pause or seek', () => {
@@ -106,5 +106,92 @@ describe('continuous browser-shaped lyric paint', () => {
     expect(html).toContain('class="lyric-ink-glow" aria-hidden="true">é</span>')
     expect(html).toContain('class="lyric-ink-core" aria-hidden="true">é</span>')
     expect(html).not.toContain('player-singing-countdown')
+  })
+})
+
+describe('approved GPUI band and Box geometry', () => {
+  it('places the feather around shaped advances at the approved Box pixel scale', () => {
+    expect(lyricInkGeometry(100, .25).edge).toBeCloseTo(11.4)
+    expect(lyricInkGeometry(100, .75).edge).toBeCloseTo(88.6)
+  })
+  it('scales the 18px band and 7px feather by 68/17.5 and quantizes progress to 1/200', () => {
+    expect(LYRIC_DESKTOP_SCALE).toBeCloseTo(3.8857142857)
+    expect(LYRIC_LIGHT_WIDTH).toBeCloseTo(69.9428571429)
+    expect(LYRIC_FEATHER).toBeCloseTo(27.2)
+    expect(lyricInkGeometry(100, .2524)).toEqual(lyricInkGeometry(100, .25))
+    expect(lyricInkGeometry(100, .2526)).toEqual(lyricInkGeometry(100, .255))
+    expect(lyricInkGeometry(100, 0).edge).toBe(-LYRIC_FEATHER)
+    expect(lyricInkGeometry(100, 1).edge).toBe(100 + LYRIC_FEATHER)
+  })
+  it('uses twelve midpoint samples of the approved power curve and eight glow opacity levels', () => {
+    const slices = lyricBandSlices()
+    expect(slices).toHaveLength(12)
+    expect(slices[0].left).toBeCloseTo(-34.9714285714)
+    expect(slices[11].right).toBeCloseTo(34.9714285714)
+    expect(slices[0].core).toBeCloseTo(.0240562612)
+    expect(slices[5].core).toBeCloseTo(.8776415154)
+    expect(slices[0].glow).toBe(.125)
+    expect(slices[5].glow).toBe(1)
+    slices.forEach((slice, index) => {
+      const u = (index + .5) / 12
+      expect(slice.core).toBeCloseTo((1 - Math.abs(2 * u - 1)) ** 1.5)
+      expect(slice.glow).toBe(Math.ceil(slice.core * 8) / 8)
+      expect(slice.core).toBeCloseTo(slices[11 - index].core)
+      if (index) expect(slice.left).toBeCloseTo(slices[index - 1].right)
+    })
+    // Rejected old CSS: a linear ±9px core and a full-opacity static word glow.
+    expect(slices[0].core).not.toBeCloseTo(1 - Math.abs(2 * (.5 / 12) - 1))
+    expect(slices[0].glow).not.toBe(1)
+  })
+  it('builds static slice masks for amber, bright core and the padded advancing glow', () => {
+    const masks = lyricHighlightMasks()
+    for (const mask of Object.values(masks)) expect((mask.match(/rgb\(/g) ?? [])).toHaveLength(26)
+    expect(masks.amber).toContain('--lyric-edge')
+    expect(masks.core).toContain('--lyric-pen')
+    expect(masks.glow).toContain('--lyric-pen')
+    expect(masks.glow).not.toBe(masks.core)
+  })
+})
+
+describe('Box lyric track motion', () => {
+  it('matches the 120Hz native response at 30, 60 and 120Hz', () => {
+    const offsets = [30, 60, 120].map(hz => {
+      let offset = 0
+      for (let frame = 0; frame < hz / 5; frame++) offset = lyricScrollStep(offset, 100, 1 / hz)
+      return offset
+    })
+    offsets.forEach(offset => expect(offset).toBeCloseTo(100 * (1 - .84 ** 24), 10))
+    expect(lyricScrollStep(0, 100, 1 / 120)).toBeCloseTo(16)
+    // Negative control: a fixed 16% step at 30Hz would still be only 64.87px.
+    expect(offsets[0]).toBeGreaterThan(100 * (1 - .84 ** 6) + 30)
+  })
+  it('converges exactly, snaps within 0.2px and ignores negative elapsed time', () => {
+    let offset = -150
+    for (let frame = 0; frame < 30; frame++) offset = lyricScrollStep(offset, 250, 1 / 30)
+    expect(offset).toBe(250)
+    expect(lyricScrollStep(249.81, 250, 0)).toBe(250)
+    expect(lyricScrollStep(0, 100, -1)).toBe(0)
+    expect(lyricScrollStep(0, 100, 0, true)).toBe(100)
+  })
+  it('snaps seeks and jumps over two lines, preserving easing for adjacent and two-line changes', () => {
+    expect(lyricScrollShouldSnap(3, 4, false)).toBe(false)
+    expect(lyricScrollShouldSnap(3, 5, false)).toBe(false)
+    expect(lyricScrollShouldSnap(3, 6, false)).toBe(true)
+    expect(lyricScrollShouldSnap(6, 3, false)).toBe(true)
+    expect(lyricScrollShouldSnap(3, 4, true)).toBe(true)
+    expect(lyricScrollShouldSnap(3, 3, true)).toBe(true)
+  })
+  it('keeps overlapping line identities in a bounded seven-line window', () => {
+    expect(lyricWindow(5, 20)).toEqual([2, 3, 4, 5, 6, 7, 8])
+    expect(lyricWindow(6, 20)).toEqual([3, 4, 5, 6, 7, 8, 9])
+    expect(lyricWindow(0, 2)).toEqual([0, 1])
+    expect(lyricWindow(-1, 0)).toEqual([])
+  })
+  it('pre-mounts shaped words in upcoming rows so becoming current does not replace plain text', () => {
+    const html = renderToStaticMarkup(createElement(PlayerLyrics, { lines, position: 10, playing: true, rate: 1 }))
+    const upcoming = html.split('data-lyric-line="1"')[1]
+    expect(upcoming).toContain('data-lyric-word="0"')
+    expect(upcoming).toContain('class="lyric-ink-base">你好</span>')
+    expect(html).toContain('player-lyrics-track')
   })
 })

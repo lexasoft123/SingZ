@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { lyricScrollStep } from '../../src/renderer/src/box/player-lyrics-model'
 import { lyricPaintAllowed, watchLyricPaint, watchLyricTransform } from '../../src/renderer/src/box/player-lyrics-loop'
 function fixture() {
   let modal = false, hidden = false, observe!: () => void, id = 0
@@ -49,6 +50,24 @@ describe('lyric paint under UIKit modal occlusion', () => {
     f.setModal(true); expect(lyricPaintAllowed()).toBe(false)
     f.setModal(false); expect(f.refresh).toHaveBeenCalledTimes(2); expect(f.frames.size).toBe(0)
     stop(); f.observe(); expect(f.refresh).toHaveBeenCalledTimes(2)
+  })
+  it('applies the track transform while paused and stops requesting frames once settled', () => {
+    const f = fixture()
+    let offset = 0
+    const track = { style: { transform: '' } }
+    const paint = (): void => {
+      offset = lyricScrollStep(offset, 100, 1 / 30)
+      track.style.transform = `translateY(${-offset}px)`
+    }
+    const stop = watchLyricPaint(null, false, paint, () => {}, () => offset !== 100)
+    expect(f.frames.size).toBe(1)
+    f.tick(0)
+    expect(offset).toBeCloseTo(100 * (1 - .84 ** 4))
+    expect(track.style.transform).toBe(`translateY(${-offset}px)`)
+    for (let frame = 1; frame < 30; frame++) f.tick(frame * 1000 / 30)
+    expect(track.style.transform).toBe('translateY(-100px)')
+    expect(f.frames.size).toBe(0)
+    stop()
   })
   it('does not paint an already queued callback after modal opens or after disposal', () => {
     const f = fixture(), stop = watchLyricPaint(null, true, f.paint, f.refresh)

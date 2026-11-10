@@ -3,20 +3,20 @@ export function lyricPaintAllowed(): boolean {
   return !document.hidden && !document.body.classList.contains('modal-open')
 }
 
-export function watchLyricPaint(root: HTMLElement | null, playing: boolean, paint: (time: number) => void, refresh: () => void): () => void {
+export function watchLyricPaint(root: HTMLElement | null, playing: boolean, paint: (time: number) => void, refresh: () => void, moving: () => boolean = () => false): () => void {
   let frame = 0, visible = true, disposed = false
   const stop = (): void => { cancelAnimationFrame(frame); frame = 0 }
   const tick = (time: number): void => {
     frame = 0
     if (disposed || !visible || !lyricPaintAllowed()) return
     paint(time)
-    frame = requestAnimationFrame(tick)
+    if (playing || moving()) frame = requestAnimationFrame(tick)
   }
   const resume = (): void => {
     stop()
     if (disposed || !visible || !lyricPaintAllowed()) return
     refresh()
-    if (playing) frame = requestAnimationFrame(tick)
+    if (playing || moving()) frame = requestAnimationFrame(tick)
   }
   const intersection = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver(entries => {
     visible = entries.some(entry => entry.isIntersecting); resume()
