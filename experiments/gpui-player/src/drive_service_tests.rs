@@ -1061,3 +1061,88 @@ fn wake_keeps_native_worker_suspended_or_signed_out() {
     assert!(service.snapshot().scheduler.run_at.is_none());
     assert_eq!(f.state()["requests"].as_array().unwrap().len(), requests);
 }
+
+#[test]
+fn c11_two_sync_cycles_preserve_document_ledger_and_service_receipt() {
+    let f = Fixture::new();
+    let service = f.service();
+    f.login(&service);
+    drop(service);
+    let root = f.root.canonicalize().unwrap();
+    let project = root.join("Song/project.json");
+    let before = fs::read(&project).unwrap();
+    assert!(
+        serde_json::from_slice::<Value>(&before)
+            .unwrap()
+            .get("stemHashes")
+            .is_none()
+    );
+    let ledger = crate::sync_dirty::Store::new(f.config.clone());
+    let before_ledger = ledger.snapshot().unwrap();
+    let receipt_path = f.config.join("gdrive/sync-state.json");
+    let before_receipt = fs::read(&receipt_path).unwrap();
+    let _ = fs::remove_dir_all(f.config.join("gdrive/hash-cache"));
+    let mut receipt = read_receipt(&f.config);
+    let before_projects = receipt.projects.clone();
+    let config = Config::from_json(
+        &json!({"clientId":"fixture-client", "clientSecret":"fixture-secret",
+        "authBase":f.url,"apiBase":f.url,"uploadBase":f.url})
+        .to_string(),
+    )
+    .unwrap();
+    let remote = crate::drive_remote::Remote::new(AuthClient::new(
+        config,
+        TokenStore::new(&f.config).unwrap(),
+    ));
+    // Run the same core the service dispatches, then revalidate its saved receipt.
+    // Keeping the service stopped avoids its intentional last_sync timestamp
+    // update obscuring whether capture itself mutated any service state.
+    let mut scheduler = crate::sync_scheduler::Scheduler::new();
+    scheduler.start(now(), true, receipt.last_sync);
+    for _ in 0..2 {
+        let run = scheduler.request_now(now()).unwrap();
+        let report = crate::drive_sync::run(
+            &remote,
+            &root,
+            &f.config.join("gdrive/spool"),
+            &|| false,
+            &|_, _| {},
+            &|_| {},
+        )
+        .unwrap();
+        assert!(!report.follow_up);
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.synced, before_projects);
+        verify_receipt(&mut receipt, &root, &ledger).unwrap();
+        assert_eq!(receipt.projects, before_projects);
+        let after_ledger = ledger.snapshot().unwrap();
+        assert_eq!(after_ledger, before_ledger);
+        scheduler.observe_dirty(now(), after_ledger.seq, count(&after_ledger));
+        assert!(scheduler.finish(
+            run.id,
+            crate::sync_scheduler::Outcome::Success {
+                warnings: report.warnings,
+                last_sync: receipt.last_sync,
+            },
+            now(),
+            0.,
+            false,
+            after_ledger.seq,
+            count(&after_ledger)
+        ));
+        assert_eq!(scheduler.status().phase, crate::sync_scheduler::Phase::Idle);
+        assert_eq!(scheduler.status().dirty, 0);
+        assert!(
+            scheduler.status().run_at.is_none(),
+            "hash maintenance queued a follow-up"
+        );
+        assert_eq!(fs::read(&project).unwrap(), before);
+        assert_eq!(fs::read(&receipt_path).unwrap(), before_receipt);
+    }
+    assert_eq!(
+        fs::read_dir(f.config.join("gdrive/hash-cache"))
+            .unwrap()
+            .count(),
+        1
+    );
+}

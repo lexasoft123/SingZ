@@ -29,7 +29,9 @@ impl Fixture {
         Self { base, root, spool }
     }
     fn capture(&self) -> Result<Capture> {
-        capture(&self.root, "Song", &self.spool, &|| false)
+        capture_with_config(
+            &self.root, "Song", &self.spool, &self.base.join("preferences"), &|| false,
+        )
     }
 }
 impl Drop for Fixture {
@@ -338,5 +340,398 @@ fn surrogate_named_portable_graph_is_hash_bound_and_spooled_without_rewriting() 
             .unwrap()
             .to_string()
             .contains("graph bytes do not match")
+    );
+}
+
+fn fixed_mtime(path: &Path, millis: f64) {
+    let time = UNIX_EPOCH + std::time::Duration::from_secs_f64(millis / 1000.);
+    File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(time))
+        .unwrap();
+}
+fn transport(capture: &Capture) -> Vec<u8> {
+    fs::read(
+        &capture
+            .snapshot
+            .top
+            .iter()
+            .find(|e| e.name == "project.json")
+            .unwrap()
+            .path,
+    )
+    .unwrap()
+}
+#[test]
+fn c11_transport_md5_matches_base_commit_golden() {
+    let f = Fixture::new();
+    fixed_mtime(&f.root.join("Song/stems/vocals.wav"), 1_700_000_000_000.);
+    let cold = f.capture().unwrap();
+    let bytes = transport(&cold);
+    // Captured from b644c20a's unchanged snapshot logic with this fixed mtime.
+    const BASE_MD5: &str = "365518dc1621234b1a0c45e42445943c";
+    assert_eq!(format!("{:x}", Md5::digest(&bytes)), BASE_MD5);
+    drop(cold);
+    let warm = f.capture().unwrap();
+    assert_eq!(transport(&warm), bytes);
+    assert_eq!(format!("{:x}", Md5::digest(transport(&warm))), BASE_MD5);
+}
+
+fn cache_path(f: &Fixture) -> PathBuf {
+    fs::read_dir(f.base.join("preferences/gdrive/hash-cache"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .expect("persistent hash cache")
+}
+fn reset_digest_bytes() {
+    DIGEST_BYTES.with(|bytes| bytes.set(0));
+}
+fn digest_bytes() -> u64 {
+    DIGEST_BYTES.with(std::cell::Cell::get)
+}
+fn assert_second_capture_reads_zero(f: &Fixture) {
+    reset_digest_bytes();
+    drop(f.capture().unwrap());
+    assert!(digest_bytes() > 0, "cold capture must digest audio");
+    reset_digest_bytes();
+    drop(f.capture().unwrap());
+    assert_eq!(
+        digest_bytes(),
+        0,
+        "second capture must digest zero audio bytes"
+    );
+}
+#[test]
+fn c11_second_capture_reloads_hashes_for_native_split_without_document_entries() {
+    let f = Fixture::new();
+    let doc = fs::read(f.root.join("Song/project.json")).unwrap();
+    assert!(
+        serde_json::from_slice::<Value>(&doc)
+            .unwrap()
+            .get("stemHashes")
+            .is_none()
+    );
+    // Exercise the source hash too, even though stems suppress source upload.
+    let mut document: Value = serde_json::from_slice(&doc).unwrap();
+    document["songFile"] = json!("original.wav");
+    fs::write(
+        f.root.join("Song/project.json"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .unwrap();
+    fs::write(f.root.join("Song/original.wav"), b"original source bytes").unwrap();
+    assert_second_capture_reads_zero(&f);
+    let cache = cache_path(&f);
+    let before = fs::metadata(&cache).unwrap().modified().unwrap();
+    drop(f.capture().unwrap());
+    assert_eq!(
+        fs::metadata(cache).unwrap().modified().unwrap(),
+        before,
+        "unchanged cache must not be rewritten"
+    );
+}
+#[test]
+#[should_panic(expected = "second capture must digest zero audio bytes")]
+fn c11_negative_control_without_cache_save_rejects_zero_read_claim() {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DISABLE_CACHE_SAVE.with(|value| value.set(false));
+        }
+    }
+    let _restore = Restore;
+    DISABLE_CACHE_SAVE.with(|value| value.set(true));
+    assert_second_capture_reads_zero(&Fixture::new());
+}
+#[test]
+fn c11_mtime_boundary_reuses_at_1_5ms_and_digests_at_2_5ms() {
+    let f = Fixture::new();
+    let path = f.root.join("Song/stems/vocals.wav");
+    let original = fs::read(&path).unwrap();
+    let stamp = 1_700_000_000_000.;
+    fixed_mtime(&path, stamp);
+    let cold = f.capture().unwrap();
+    let old_md5 = cold.snapshot.stems[0].md5.clone();
+    drop(cold);
+    fs::write(&path, vec![b'x'; original.len()]).unwrap();
+    fixed_mtime(&path, stamp + 1.5);
+    reset_digest_bytes();
+    let within = f.capture().unwrap();
+    assert_eq!(digest_bytes(), 0, "1.5 ms must reuse sidecar hash");
+    assert_eq!(within.snapshot.stems[0].md5, old_md5);
+    drop(within);
+    fixed_mtime(&path, stamp + 2.5);
+    reset_digest_bytes();
+    let outside = f.capture().unwrap();
+    assert_eq!(digest_bytes(), original.len() as u64);
+    assert_ne!(outside.snapshot.stems[0].md5, old_md5);
+}
+#[test]
+fn c11_recreated_directory_does_not_inherit_old_hash() {
+    let f = Fixture::new();
+    let project = f.root.join("Song");
+    let bytes = fs::read(project.join("project.json")).unwrap();
+    let stamp = 1_700_000_000_000.;
+    fixed_mtime(&project.join("stems/vocals.wav"), stamp);
+    let old = f.capture().unwrap();
+    let old_md5 = old.snapshot.stems[0].md5.clone();
+    let identity = old.local_identity.clone();
+    drop(old);
+    let old_cache = cache_path(&f);
+    let old_record = fs::read(&old_cache).unwrap();
+    fs::remove_dir_all(&project).unwrap();
+    fs::create_dir_all(project.join("stems")).unwrap();
+    fs::write(project.join("project.json"), bytes).unwrap();
+    fs::write(
+        project.join("stems/vocals.wav"),
+        vec![b'x'; b"immutable source audio".len()],
+    )
+    .unwrap();
+    fixed_mtime(&project.join("stems/vocals.wav"), stamp);
+    assert_ne!(crate::directory_identity::read(&project).unwrap(), identity);
+    reset_digest_bytes();
+    let recreated = f.capture().unwrap();
+    assert!(digest_bytes() > 0);
+    assert_ne!(recreated.snapshot.stems[0].md5, old_md5);
+    drop(recreated);
+    // Put the old identity's record at the new key, to exercise load validation
+    // independently of the identity-key separation above (and path fallback).
+    let new_cache = fs::read_dir(old_cache.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|path| path != &old_cache)
+        .unwrap_or(old_cache.clone());
+    fs::write(&new_cache, old_record).unwrap();
+    reset_digest_bytes();
+    let checked = f.capture().unwrap();
+    assert!(digest_bytes() > 0);
+    assert_ne!(checked.snapshot.stems[0].md5, old_md5);
+    assert!(crate::drive_hash_cache::WARNINGS.with(std::cell::Cell::get) > 0);
+    drop(checked);
+    fs::remove_dir_all(&project).unwrap();
+    crate::drive_hash_cache::prune(&f.base.join("preferences"), &f.root.canonicalize().unwrap());
+    assert!(!new_cache.exists());
+}
+#[test]
+fn c11_disagreeing_fresh_electron_and_sidecar_entries_force_digest() {
+    let f = Fixture::new();
+    let cold = f.capture().unwrap();
+    let mut document: Value = serde_json::from_slice(&transport(&cold)).unwrap();
+    let actual = cold.snapshot.stems[0].md5.clone();
+    drop(cold);
+    document["stemHashes"]["vocals.wav"]["md5"] = json!("00000000000000000000000000000000");
+    fs::write(
+        f.root.join("Song/project.json"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .unwrap();
+    reset_digest_bytes();
+    let conflict = f.capture().unwrap();
+    assert_eq!(digest_bytes(), b"immutable source audio".len() as u64);
+    assert_eq!(conflict.snapshot.stems[0].md5, actual);
+    drop(conflict);
+    // Fresh Electron entries still take precedence when the sidecar is absent.
+    fs::remove_file(cache_path(&f)).unwrap();
+    reset_digest_bytes();
+    let electron = f.capture().unwrap();
+    assert_eq!(digest_bytes(), 0);
+    assert_eq!(
+        electron.snapshot.stems[0].md5,
+        "00000000000000000000000000000000"
+    );
+}
+#[test]
+fn c11_corrupt_oversized_or_linked_cache_is_only_a_warning() {
+    let f = Fixture::new();
+    drop(f.capture().unwrap());
+    let path = cache_path(&f);
+    for bytes in [
+        b"invalid JSON".to_vec(),
+        vec![b' '; crate::drive_hash_cache::LIMIT as usize + 1],
+    ] {
+        fs::write(&path, bytes).unwrap();
+        reset_digest_bytes();
+        crate::drive_hash_cache::WARNINGS.with(|warnings| warnings.set(0));
+        let capture = f.capture().unwrap();
+        assert_eq!(
+            capture.snapshot.stems[0].md5,
+            format!("{:x}", Md5::digest(b"immutable source audio"))
+        );
+        assert!(crate::drive_hash_cache::WARNINGS.with(std::cell::Cell::get) > 0);
+        assert!(digest_bytes() > 0);
+        drop(capture);
+    }
+    #[cfg(unix)]
+    {
+        fs::remove_file(&path).unwrap();
+        let target = f.base.join("keep.json");
+        fs::write(&target, b"untouched target").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        reset_digest_bytes();
+        crate::drive_hash_cache::WARNINGS.with(|warnings| warnings.set(0));
+        let capture = f.capture().unwrap();
+        assert!(crate::drive_hash_cache::WARNINGS.with(std::cell::Cell::get) > 0);
+        assert!(digest_bytes() > 0);
+        assert_eq!(fs::read(&target).unwrap(), b"untouched target");
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        drop(capture);
+        fs::remove_file(&path).unwrap();
+        let drive = f.base.join("preferences/gdrive");
+        let outside = f.base.join("outside-drive");
+        fs::rename(&drive, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &drive).unwrap();
+        reset_digest_bytes();
+        crate::drive_hash_cache::WARNINGS.with(|warnings| warnings.set(0));
+        let capture = f.capture().unwrap();
+        assert!(digest_bytes() > 0);
+        assert!(crate::drive_hash_cache::WARNINGS.with(std::cell::Cell::get) > 0);
+        assert_eq!(fs::read_dir(outside.join("hash-cache")).unwrap().count(), 0,
+            "unsafe storage must not receive a cache write after load was refused");
+        drop(capture);
+    }
+}
+
+#[test]
+fn c11_review_sidecar_extra_fields_never_reach_transport_hashes() {
+    let f = Fixture::new();
+    let project = f.root.join("Song");
+    fs::write(
+        project.join("project.json"),
+        br#"{"name":"Song","songFile":"original.wav","settings":{}}"#,
+    )
+    .unwrap();
+    fs::write(project.join("original.wav"), b"original source bytes").unwrap();
+    drop(f.capture().unwrap());
+    let path = cache_path(&f);
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for key in ["stems/vocals.wav", "source/original.wav"] {
+        record["entries"][key]["privateSidecarField"] = json!({"mustNotUpload": true});
+    }
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    reset_digest_bytes();
+    let warm = f.capture().unwrap();
+    assert_eq!(
+        digest_bytes(),
+        0,
+        "valid cached hash facts still avoid audio IO"
+    );
+    let transported: Value = serde_json::from_slice(&transport(&warm)).unwrap();
+    for entry in [
+        &transported["stemHashes"]["vocals.wav"],
+        &transported["songHash"],
+    ] {
+        let fields = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            fields,
+            std::collections::BTreeSet::from(["md5", "size", "mtimeMs"])
+        );
+    }
+}
+
+#[test]
+fn c11_review_birthless_recreated_directory_with_reused_inode_is_digested() {
+    let f = Fixture::new();
+    let project = f.root.canonicalize().unwrap().join("Song");
+    let stem = project.join("stems/vocals.wav");
+    fixed_mtime(&stem, 1_700_000_000_000.);
+    // Model a birthless filesystem reusing the same dev+ino at the same path.
+    let mut identity =
+        serde_json::to_value(crate::directory_identity::read(&project).unwrap()).unwrap();
+    identity["created"] = Value::Null;
+    let identity: crate::directory_identity::DirectoryIdentity =
+        serde_json::from_value(identity).unwrap();
+    assert!(!identity.persistent_eligible());
+    let config = f.base.join("preferences");
+    let hash = hash_value(&stem, &Value::Null, &Value::Null, &|| false).unwrap();
+    let mut cache = crate::drive_hash_cache::Cache::load(&config, &project, identity.clone());
+    cache.remember("stems/vocals.wav".into(), hash.clone());
+    cache.save();
+    let directory = config.join("gdrive/hash-cache");
+    let path = directory.join(format!(
+        "{}.json",
+        crate::project_store::fingerprint(project.as_os_str().as_encoded_bytes())
+    ));
+    let persisted = path.exists();
+    // Seed a pre-fix path-keyed record too: upgrading must not trust old entries.
+    fs::create_dir_all(&directory).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [&config, &config.join("gdrive"), &directory] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let legacy = serde_json::to_vec(&json!({"version":1,"project":project,"identity":identity,"entries":{"stems/vocals.wav":hash}})).unwrap();
+    if path.exists() {
+        fs::remove_file(&path).unwrap();
+    }
+    let mut file = crate::drive_http::private_file(&path).unwrap();
+    file.write_all(&legacy).unwrap();
+    drop(file);
+    fs::remove_dir_all(&project).unwrap();
+    fs::create_dir_all(project.join("stems")).unwrap();
+    let changed = vec![b'x'; b"immutable source audio".len()];
+    fs::write(&stem, &changed).unwrap();
+    fixed_mtime(&stem, 1_700_000_000_000.);
+    let cache = crate::drive_hash_cache::Cache::load(&config, &project, identity);
+    reset_digest_bytes();
+    let current = hash_value(&stem, &Value::Null, cache.get("stems/vocals.wav"), &|| {
+        false
+    })
+    .unwrap();
+    assert_eq!(
+        digest_bytes(),
+        changed.len() as u64,
+        "a recycled birthless inode must not reuse a persisted hash"
+    );
+    assert_eq!(current["md5"], format!("{:x}", Md5::digest(&changed)));
+    assert!(!persisted, "birthless identities must not persist sidecars");
+    assert_eq!(
+        fs::read(path).unwrap(),
+        legacy,
+        "legacy hints must remain unused"
+    );
+}
+
+#[test]
+fn c11_review_prune_sweeps_only_old_owned_temporary_files() {
+    let f = Fixture::new();
+    drop(f.capture().unwrap());
+    let directory = cache_path(&f).parent().unwrap().to_owned();
+    let old = directory.join(format!(".hash-{}.part", "a".repeat(48)));
+    let recent = directory.join(format!(".hash-{}.part", "b".repeat(48)));
+    let unrelated = directory.join(".hash-unrelated.part");
+    for path in [&old, &recent, &unrelated] {
+        let mut file = crate::drive_http::private_file(path).unwrap();
+        file.write_all(b"interrupted cache write").unwrap();
+    }
+    let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    for path in [&old, &unrelated] {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+    }
+    crate::drive_hash_cache::prune(&f.base.join("preferences"), &f.root.canonicalize().unwrap());
+    assert!(!old.exists(), "orphaned cache temporary must be swept");
+    assert!(recent.exists(), "a recent writer's temporary must remain");
+    assert!(
+        unrelated.exists(),
+        "unrecognized temporary names must remain"
     );
 }

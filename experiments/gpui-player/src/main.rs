@@ -56,6 +56,7 @@ mod drive_auth;
 mod drive_http;
 mod drive_plan;
 mod drive_remote;
+mod drive_hash_cache;
 mod drive_snapshot;
 mod drive_empty;
 mod directory_identity;

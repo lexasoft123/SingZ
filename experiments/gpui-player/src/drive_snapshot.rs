@@ -52,6 +52,11 @@ fn ordinary(path: &Path) -> Result<fs::Metadata> {
     );
     Ok(meta)
 }
+#[cfg(test)]
+thread_local! {
+    static DIGEST_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static DISABLE_CACHE_SAVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 pub fn digest(path: &Path, cancel: &impl Fn() -> bool) -> Result<Fingerprint> {
     let before = ordinary(path)?;
     let mut source = File::open(path)?;
@@ -64,6 +69,8 @@ pub fn digest(path: &Path, cancel: &impl Fn() -> bool) -> Result<Fingerprint> {
         if n == 0 {
             break;
         }
+        #[cfg(test)]
+        DIGEST_BYTES.with(|bytes| bytes.set(bytes.get() + n as u64));
         hash.update(&buffer[..n]);
         size = size.checked_add(n as u64).context("Sync file too large")?;
     }
@@ -82,16 +89,20 @@ pub fn digest(path: &Path, cancel: &impl Fn() -> bool) -> Result<Fingerprint> {
 fn mtime(meta: &fs::Metadata) -> Result<f64> {
     Ok(meta.modified()?.duration_since(UNIX_EPOCH)?.as_secs_f64() * 1000.)
 }
-fn hash_value(path: &Path, previous: &Value, cancel: &impl Fn() -> bool) -> Result<Value> {
+fn hash_value(path: &Path, previous: &Value, cached: &Value, cancel: &impl Fn() -> bool) -> Result<Value> {
     let meta = ordinary(path)?;
     let modified = mtime(&meta)?;
-    if previous["md5"].as_str().is_some_and(valid_md5)
-        && previous["size"].as_u64() == Some(meta.len())
-        && previous["mtimeMs"]
-            .as_f64()
-            .is_some_and(|old| old.is_finite() && (old - modified).abs() < 2.)
-    {
-        return Ok(previous.clone());
+    let fresh = |entry: &Value| entry["md5"].as_str().is_some_and(valid_md5)
+        && entry["size"].as_u64() == Some(meta.len())
+        && entry["mtimeMs"].as_f64().is_some_and(|old|
+            old.is_finite() && (old - modified).abs() < crate::drive_plan::MTIME_TOLERANCE_MS);
+    match (fresh(previous), fresh(cached)) {
+        (true, true) if previous["md5"] != cached["md5"] => {},
+        (true, _) => return Ok(previous.clone()),
+        (_, true) => return Ok(json!({
+            "md5": cached["md5"], "size": cached["size"], "mtimeMs": cached["mtimeMs"],
+        })),
+        _ => {},
     }
     let value = digest(path, cancel)?;
     Ok(json!({"md5":value.md5,"size":value.size,"mtimeMs":modified}))
@@ -191,13 +202,16 @@ pub fn capture(
     name: &str,
     spool_root: &Path,
     cancel: &impl Fn() -> bool,
-) -> Result<Capture> {capture_inner(root,name,spool_root,cancel,false)}
+) -> Result<Capture> {capture_inner(root,name,spool_root,None,cancel,false)}
+pub fn capture_with_config(root: &Path, name: &str, spool_root: &Path, config: &Path, cancel: &impl Fn() -> bool) -> Result<Capture> {
+    capture_inner(root, name, spool_root, Some(config), cancel, false)
+}
 /// A coherent metadata-only export for the dedicated journaled transaction.
 /// Generic writer capture remains guarded until its coordinator is integrated.
 pub fn capture_empty(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool)->Result<Capture> {
-    capture_inner(root,name,spool_root,cancel,true)
+    capture_inner(root,name,spool_root,None,cancel,true)
 }
-fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,allow_empty:bool)->Result<Capture> {
+fn capture_inner(root:&Path,name:&str,spool_root:&Path,config:Option<&Path>,cancel:&impl Fn()->bool,allow_empty:bool)->Result<Capture> {
     check(cancel)?;
     ensure!(
         crate::drive_plan::plain_name(name),
@@ -247,6 +261,8 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,a
         lease: Some(lease),
         promoted: false,
     };
+    let mut cache = config.map(|config| crate::drive_hash_cache::Cache::load(
+        config, &source, capture.local_identity.clone()));
     let mut doc = parsed.unwrap_or(Value::Null);
     if explicit_empty {
         let object=doc.as_object_mut().context("Invalid empty project document")?;
@@ -275,7 +291,10 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,a
                     continue;
                 }
                 ensure!(crate::drive_plan::plain_name(&name), "Unsafe stem name");
-                let hash = hash_value(&item.path(), &doc["stemHashes"][&name], cancel)?;
+                let key = format!("stems/{name}");
+                let cached = cache.as_ref().map_or(&Value::Null, |cache| cache.get(&key));
+                let hash = hash_value(&item.path(), &doc["stemHashes"][&name], cached, cancel)?;
+                if let Some(cache) = &mut cache { cache.remember(key, hash.clone()); }
                 capture
                     .snapshot
                     .stems
@@ -339,8 +358,11 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,a
                 crate::drive_plan::plain_name(&song),
                 "Source audio leaves project folder"
             );
-            match hash_value(&source.join(&song), &doc["songHash"], cancel) {
+            let key = format!("source/{song}");
+            let cached = cache.as_ref().map_or(&Value::Null, |cache| cache.get(&key));
+            match hash_value(&source.join(&song), &doc["songHash"], cached, cancel) {
                 Ok(hash) => {
+                    if let Some(cache) = &mut cache { cache.remember(key, hash.clone()); }
                     doc["songHash"] = hash.clone();
                     if hashes.is_empty() {
                         capture.snapshot.top.push(entry(
@@ -393,6 +415,9 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,a
     } else {
         capture.write_top("project.json", &bytes, "application/json")?;
     }
+    #[cfg(test)]
+    if DISABLE_CACHE_SAVE.with(std::cell::Cell::get) { cache = None; }
+    if let Some(cache) = cache { cache.save(); }
     // External writers do not use our lease. Refuse a mixed document snapshot.
     ensure!(
         crate::project_store::fingerprint(&read_bounded(&source.join("project.json"), JSON_LIMIT)?)

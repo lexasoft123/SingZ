@@ -93,6 +93,7 @@ pub fn run(
         "Local project operation recovery is unresolved: {:?}; active: {:?}",
         recovery.blocked, recovery.busy);
     let initial = drive_snapshot::scan(&root, cancel)?;
+    crate::drive_hash_cache::prune(config_dir, &root);
     let singz = remote.folder("SingZ", None, cancel)?;
     let mut remote_top = remote.children(&singz, cancel)?;
     let journal_root = temporary_root
@@ -248,7 +249,7 @@ pub fn run(
             index as f32 / dirs.len().max(1) as f32,
         );
         capturing(Some(root.join(name)));
-        let mut capture = match drive_snapshot::capture(&root, name, &spool.0, cancel) {
+        let mut capture = match drive_snapshot::capture_with_config(&root, name, &spool.0, config_dir, cancel) {
             Ok(capture) => capture,
             Err(error) => {
                 capturing(None);
