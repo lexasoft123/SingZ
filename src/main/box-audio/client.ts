@@ -8,6 +8,10 @@ export class BoxAudioUncertainError extends Error {
   constructor(message: string) { super(message); this.name = 'BoxAudioUncertainError' }
 }
 export interface BoxAudioClientOptions { timeoutMs?: number }
+/** Private microphone capture owns no state that survives its host process. After
+ *  a host restart these commands first read the new host's canonical state
+ *  (service.reconcile); they never replay anything sent to the old host. */
+const CAPTURE_RESYNC = new Set(['begin', 'cancel'])
 export interface BoxAudioClient {
   call<T>(target: BoxAudioTarget, method: string, args: unknown[]): Promise<T>
   callStamped<T>(target: BoxAudioTarget, method: string, args: unknown[]): Promise<{ epoch: string; value: T }>
@@ -26,17 +30,20 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
   let nextId = 0n
   let captureId = 0n
   let uncertain = false
+  /** Epoch on which a mutation's outcome is unknown. A new epoch alone is not. */
+  let unknownEpoch = ''
+  let resyncing: Promise<unknown> | undefined
   let closed = false
   let connection = 0
   const sinks = new Map<string, { renderer: unknown; generation: string; requestId: bigint; acknowledged: boolean; connection: number; emit(value: unknown): void }>()
-  const pending = new Map<string, { resolve(value: unknown, epoch: string): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; mutation: boolean; connection: number }>()
+  const pending = new Map<string, { resolve(value: unknown, epoch: string): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; mutation: boolean; connection: number; epoch: string }>()
   /** Fails one connection's work, or everything when `only` is omitted. A late
    *  close of a replaced socket must not clear a newer connection's state. */
   const fail = (error: Error, only?: number): void => {
     for (const [id, item] of pending) {
       if (only !== undefined && item.connection !== only) continue
       pending.delete(id); clearTimeout(item.timer)
-      if (item.mutation) uncertain = true
+      if (item.mutation) { uncertain = true; unknownEpoch = item.epoch }
       item.reject(item.mutation ? new BoxAudioUncertainError(error.message) : error)
     }
     for (const [key, sink] of sinks) if (only === undefined || sink.connection === only) sinks.delete(key)
@@ -61,6 +68,7 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
         if (!value || value.version !== BOX_AUDIO_VERSION || typeof value.epoch !== 'string' || value.epoch.length > 128) throw new Error('Invalid Box audio reply')
         if (value.type === 'ready') {
           if (epoch) throw new Error('Duplicate Box audio handshake')
+          // A different host process: fence mutations until its state is read.
           if (lastEpoch && lastEpoch !== value.epoch) uncertain = true
           epoch = lastEpoch = value.epoch
           clearTimeout(timer); resolve(); return
@@ -84,6 +92,12 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
   const callStamped = async <T>(target: BoxAudioTarget, method: string, original: unknown[]): Promise<{ epoch: string; value: T }> => {
     await ensure()
     const readOnly = boxAudioReadOnly(target, method)
+    // Uncertainty caused only by a host restart (no unknown outcome on this epoch)
+    // is resolved for capture by reading the new host first; nothing is replayed.
+    if (uncertain && !readOnly && target === 'owner' && CAPTURE_RESYNC.has(method) && unknownEpoch !== epoch) {
+      await (resyncing ??= call('service', 'reconcile', []).finally(() => { resyncing = undefined }))
+      await ensure()
+    }
     if (uncertain && !readOnly) throw new BoxAudioUncertainError('Audio state is uncertain; reconcile authoritative service state before another mutation')
     if (pending.size >= BOX_AUDIO_PENDING) throw new Error('Box audio control queue full')
     let args = [...original]
@@ -99,6 +113,7 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
     // JSON turns array omissions into null; leave trailing optional arguments absent.
     while (args.length && args[args.length - 1] === undefined) args.pop()
     const id = (++nextId).toString()
+    const sentEpoch = epoch
     let frame: string
     try { frame = boxAudioEncode({ version: 1, type: 'request', epoch, id, target, method, args }, BOX_AUDIO_REQUEST_BYTES) }
     catch (error) { if (key) sinks.delete(key); throw error }
@@ -107,17 +122,17 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
         const timer = setTimeout(() => {
           pending.delete(id)
           if (key) sinks.delete(key)
-          if (!readOnly) uncertain = true
+          if (!readOnly) { uncertain = true; unknownEpoch = sentEpoch }
           reject(readOnly ? new Error('Box audio query timed out') : new BoxAudioUncertainError('Box audio mutation timed out; outcome unknown'))
         }, options.timeoutMs ?? 120_000)
         pending.set(id, { resolve: (value, replyEpoch) => {
           try {
             const decoded = boxAudioMeasurementMethod(target, method)
               ? boxAudioMeasurementFromWire(value, original[0]) : value
-            if (target === 'service' && method === 'reconcile') uncertain = false
+            if (target === 'service' && method === 'reconcile') { uncertain = false; unknownEpoch = '' }
             resolve({ epoch: replyEpoch, value: decoded as T })
           } catch (error) { reject(error instanceof Error ? error : new Error(String(error))) }
-        }, reject, timer, mutation: !readOnly, connection })
+        }, reject, timer, mutation: !readOnly, connection, epoch: sentEpoch })
         socket!.write(frame, error => { if (error) socket?.destroy(error) })
       })
       const result = receipt.value

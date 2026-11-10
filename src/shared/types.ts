@@ -1047,9 +1047,13 @@ export interface DesktopPlaybackLaneStatus {
   /** The lane plays out of a window the streaming feeder keeps ahead. */
   streamed: boolean
   /** Render blocks this generation that wanted a frame the window did not
-   *  hold and played silence. A couple per seek is the design; one per block
-   *  is a lane that has stopped being fed (main logs `lanes starving`). */
+   *  hold and played silence. Zero is the design at seeks, loop wraps and
+   *  starts (the core stages each jump before the transport moves); one per
+   *  block is a lane that has stopped being fed (main logs `lanes starving`). */
   starvedBlocks: string
+  /** Jumps this generation (seeks, loop wraps) that landed on a region the
+   *  feeder had staged for them. Optional: an addon built before it omits it. */
+  stagedJumps?: string
 }
 
 export const DESKTOP_PLAYBACK_GRAPH_MAX_NODES = 128

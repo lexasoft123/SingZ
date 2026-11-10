@@ -18,6 +18,7 @@ import {
 import { RoutingSettings } from './RoutingSettings'
 import { physicalInputDevices, physicalChannels, physicalInputLevel, physicalInventoryIssue, selectPhysicalChannel, usePhysicalRoutingPreview, type PhysicalSelection, type RoutingPreview } from './physical-inputs-model'
 import { microphoneChannelLevel, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
+import { disabledFocusReplacement } from './focus'
 import './settings.css'
 
 export interface BoxSettingsProps {
@@ -358,7 +359,8 @@ export function PhysicalInputsPanel({ preview, selection, onSelect, microphones,
       <p>{tMicrophone('box.microphones.interfaceHelp')}</p>
     </div></div>
     {issue && <p className="settings-input-status" role="status">{issue}</p>}
-    <div className="settings-input-list" aria-label={tMicrophone('box.microphones.physicalChannels')}>
+    <div className="settings-input-list" aria-label={tMicrophone('box.microphones.physicalChannels')}
+      data-remote-down={microphones && microphoneSnapshot ? ANALYSIS_ACTIONS : undefined}>
       {devices.map(device => <section key={device.uid} data-settings-physical-device={device.uid}>
         <div className="settings-input-name"><strong>{device.name}</strong>
           <span>{tSettings('box.settings.inputChannels', { count: device.inputChannels })}{device.rate ? ` · ${formatSampleRate(device.rate)}` : ''}</span>
@@ -387,7 +389,7 @@ export function PhysicalInputsPanel({ preview, selection, onSelect, microphones,
       </section>)}
       {!issue && devices.length === 0 && <p className="settings-input-status">{tMicrophone('box.microphones.noPhysical')}</p>}
     </div>
-    {microphones && microphoneSnapshot ? <div className="settings-analysis-controls">
+    {microphones && microphoneSnapshot ? <div className="settings-analysis-controls" data-remote-up="[data-input-channel]">
       <p>{microphoneSnapshot.phase === 'running' && active
         ? tMicrophone('box.microphones.running', { device: active.label, channel: active.channel + 1 })
         : microphoneSnapshot.phase === 'starting' ? tMicrophone('box.microphones.starting')
@@ -396,14 +398,38 @@ export function PhysicalInputsPanel({ preview, selection, onSelect, microphones,
         : microphoneSnapshot.capability === 'unknown' ? tMicrophone('box.microphones.checking')
         : tMicrophone('box.microphones.select')}</p>
       {(microphoneSnapshot.error || microphoneSnapshot.inventoryError) && <p role="alert">{microphoneSnapshot.error || microphoneSnapshot.inventoryError}</p>}
-      <div className="routing-actions">
-        <Button data-microphone-start disabled={!selection || !!issue || !!microphoneSnapshot.inventoryError || microphonePending || (microphoneSnapshot.phase === 'running' && active?.uid === selection?.uid && active?.channel === selection?.channel) || microphoneSnapshot.capability !== 'available' || microphoneSnapshot.phase === 'uncertain'}
+      <AnalysisActions>
+        <Button data-microphone-start data-remote-id="analysis-start" data-remote-counterpart="analysis-stop" disabled={!selection || !!issue || !!microphoneSnapshot.inventoryError || microphonePending || (microphoneSnapshot.phase === 'running' && active?.uid === selection?.uid && active?.channel === selection?.channel) || microphoneSnapshot.capability !== 'available' || microphoneSnapshot.phase === 'uncertain'}
           onClick={() => { void microphones.start() }}>{tMicrophone(active ? 'box.microphones.switch' : 'box.microphones.start')}</Button>
-        <Button data-microphone-stop disabled={microphoneSnapshot.phase === 'stopping' || (!active && microphoneSnapshot.phase !== 'uncertain' && microphoneSnapshot.phase !== 'starting')}
+        <Button data-microphone-stop data-remote-id="analysis-stop" data-remote-counterpart="analysis-start" disabled={microphoneSnapshot.phase === 'stopping' || (!active && microphoneSnapshot.phase !== 'uncertain' && microphoneSnapshot.phase !== 'starting')}
           onClick={() => { void microphones.stop() }}>{tMicrophone('box.microphones.stop')}</Button>
-        <Button disabled={microphonePending} onClick={microphones.resetSelection}>{tMicrophone('box.microphones.cancel')}</Button>
-      </div>
+        <Button data-microphone-cancel disabled={microphonePending} onClick={microphones.resetSelection}>{tMicrophone('box.microphones.cancel')}</Button>
+      </AnalysisActions>
       <p className="settings-mic-setup">{tMicrophone('box.microphones.note')}</p>
     </div> : <p className="settings-mic-setup">{tMicrophone('box.microphones.routeNote')}</p>}
   </aside>
+}
+
+const ANALYSIS_ACTIONS = '[data-microphone-start], [data-microphone-stop], [data-microphone-cancel]'
+
+/** Start/Stop disable themselves when pressed. Keep remote focus in this row
+ * (on the counterpart, else the nearest enabled button) instead of <body>. */
+function AnalysisActions({ children }: { children: React.ReactNode }): React.JSX.Element {
+  const row = useRef<HTMLDivElement>(null)
+  const last = useRef<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    if (!row.current) return
+    const active = document.activeElement
+    if (active && active !== document.body && !row.current.contains(active)) last.current = null
+    const replacement = disabledFocusReplacement(row.current, last.current)
+    if (!replacement) return
+    replacement.focus({ preventScroll: true })
+    last.current = replacement
+  })
+  return <div ref={row} className="routing-actions"
+    onFocus={event => { last.current = event.target }}
+    // Disabling blurs with no successor; any real move elsewhere ends the claim.
+    onBlur={event => { if (event.relatedTarget) last.current = null }}>
+    {children}
+  </div>
 }

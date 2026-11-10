@@ -610,8 +610,18 @@ runs several times a second. `lanePeaks` publishes it once instead.
 The desktop's lanes carry two more, which the phones' do not emit yet:
 `streamed` (the lane plays out of the streaming feeder's window rather than a
 whole decode) and `starvedBlocks` (u64 string: render blocks this generation
-that wanted a frame the window did not hold, and played silence). One or two
-per seek is the design; one per block is a lane the feeder has stopped
+that wanted a frame the window did not hold, and played silence). ZERO is the
+design at a seek, a seek while paused, a loop wrap and a mid-song start: the
+session stages the target in each lane's standby ring before it queues the
+seek, the feeder keeps a loop's head staged, the prepare primes where the first
+block reads, and the transport swaps the window at the slice the position
+jumps (`StreamingLaneGroup::stageJump`/`transportJumped`). A jump nobody
+staged (a loop set while already past its end) still costs the old one or two
+blocks while the feeder chases it. `stagedJumps` (u64 string) is the positive
+half: jumps this generation that landed on a region the feeder had staged and
+the transport swapped in — it moves when a jump was ANSWERED, which is how a
+muted driver proves the lanes were fed rather than merely that nothing was
+counted. One starved block per block is a lane the feeder has stopped
 feeding — the song plays its metronome and none of its stems, and nothing else
 in status can tell that from a healthy song. Main watches the counter and logs
 `lanes starving` once a lane has starved for 3 s without a break
@@ -1052,10 +1062,10 @@ unnoticed, and each is a candidate for its own change — none should be
    `lanePeaks` after the song is already playing and hides nothing, so there
    is nothing for it to measure up front. Deliberate, and pinned as a
    desktop-only export rather than a method the phones forgot.
-14. **Only the desktop's lanes say whether they are starving.** `streamed`
-   and `starvedBlocks` (§5) are emitted by the desktop bridge alone and pinned
+14. **Only the desktop's lanes say whether they are starving.** `streamed`,
+   `starvedBlocks` and `stagedJumps` (§5) are emitted by the desktop bridge alone and pinned
    under `session.desktop.nested.lanes`; the phones' lane objects keep the six
-   common keys. The core fills both fields for every platform — the gap is the
+   common keys. The core fills all three for every platform — the gap is the
    two phone bridges, which would need a native rebuild to carry them — so a
    phone lane the feeder stops feeding is still invisible to every phone
    driver and to the phone's log. Deliberate for now: the desktop is where the

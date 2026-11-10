@@ -376,12 +376,19 @@ struct NativePlaybackLaneStatus {
   // Whether the lane plays out of a window the streaming feeder keeps ahead
   // (a decoded lane holds the whole song and never misses), and how many
   // render blocks this generation wanted a frame outside that window and
-  // played silence instead. One or two per seek is the design. One per block
-  // is a lane nobody is feeding any more — a song that plays its metronome
-  // and none of its stems, which is how a singer met it: nothing else in
-  // status or in the log could tell that apart from a healthy song.
+  // played silence instead. ZERO is the design at seeks, loop wraps and
+  // starts: jumps are staged before the transport moves (see
+  // StreamingLaneGroup). One per block is a lane nobody is feeding any more —
+  // a song that plays its metronome and none of its stems, which is how a
+  // singer met it: nothing else in status or in the log could tell that
+  // apart from a healthy song.
   bool streamed{false};
   uint64_t starvedBlocks{0};
+  // Jumps this generation (seeks, loop wraps) that landed on a region the
+  // feeder had staged for them and the transport swapped in. The positive
+  // half of the starvation signal: it moves when the feeder ANSWERED a jump,
+  // so a driver can tell "fed after the jump" from "nothing counted".
+  uint64_t stagedJumps{0};
 };
 
 // One lane's prepared level envelope: the RMS of every sample of every

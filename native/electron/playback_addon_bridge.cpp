@@ -2340,6 +2340,7 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
     // fed, and says so in the log.
     setValue(env, lane, "streamed", makeBool(env, source.lanes[index].streamed));
     setCounter(env, lane, "starvedBlocks", source.lanes[index].starvedBlocks);
+    setCounter(env, lane, "stagedJumps", source.lanes[index].stagedJumps);
     // No envelope here: it never changes for a generation. playbackLanePeaks
     // publishes it once instead.
     napi_set_element(env, lanes, index, lane);

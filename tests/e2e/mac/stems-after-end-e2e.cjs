@@ -23,10 +23,14 @@
  * Nothing a muted run can hear tells a starving lane from a playing one — the
  * transport, the button, the lyrics and the bar all move exactly as they
  * should — so it reads each lane's `starvedBlocks`: render blocks that wanted
- * a frame the window did not hold. One or two per jump is the design; the bug
- * was every block. Each leg judges 3 s of playing that starts a second after
- * its jump, and main's `lanes starving` warning says the same in the log (the
- * run fails on ANY dsp warning or error).
+ * a frame the window did not hold. Zero per jump is the design now (the core
+ * stages each seek's target before the transport moves and swaps it in at
+ * the jump); the bug was every block. Each leg judges 3 s of playing that
+ * starts a second after its jump, and main's `lanes starving` warning says
+ * the same in the log (the run fails on ANY dsp warning or error). Each jump
+ * must also move every lane's `stagedJumps` — the feeder ANSWERED it with a
+ * staged region — so a lane that is fed after the jump is told apart from a
+ * counter that simply never counts.
  *
  *   1. PLAY AFTER THE SONG RAN OUT: from 6 s before the end, play out, let the
  *      app park at the end, press Play: the song starts again from the top,
@@ -37,9 +41,16 @@
  *      there.
  *
  * Refuses to pass vacuously: no native graph, a lane that is not streamed, an
- * addon without the lane counters, or a counter that did not count the first
- * block of a Play from the tail (which starves on every lane by design) is an
- * error. An output at the stems' own rate (nothing resampled, so the state
+ * addon without the lane counters (`starvedBlocks` AND `stagedJumps`), or a
+ * jump that did not move `stagedJumps` on every lane long enough to land in
+ * is an error. (It used to prove the starvation counter live from the first
+ * block of a Play from the tail, which starved on every lane while the lanes
+ * were primed at frame 0; the prepare primes where the first block reads now,
+ * so that proof is gone. `stagedJumps` rides the same per-lane stats snapshot
+ * and the same bridge counter path as `starvedBlocks`, and the native suites
+ * — streaming_lane_feeder_tests, native_playback_session_tests
+ * streamedJumpsNeverStarve — pin that `starvedBlocks` counts real misses,
+ * red against the unstaged feeder.) An output at the stems' own rate (nothing resampled, so the state
  * leg 1 is about is never reached), a Play that built a fresh graph instead
  * of resuming, or an output so fast (88.2 kHz and up) that the feeder's lead
  * leaves leg 2 no room to land exits 2, INCONCLUSIVE.
@@ -126,7 +137,7 @@ const snapshot = (win) =>
     '(async function(){ const s = await window.singz.desktopPlaybackStatus(); const e = __test.engine;' +
       ' return { t: Date.now(), pos: e.position, button: __test.playing, engine: e.playing,' +
       ' core: s ? s.transportState : "none", generation: s ? s.generation : "", rate: s ? s.format.sampleRate : 0,' +
-      ' lanes: s ? s.lanes.map(function(l){ return { id: l.id, streamed: l.streamed, starved: l.starvedBlocks, frames: Number(l.totalFrames) } }) : [] } })()'
+      ' lanes: s ? s.lanes.map(function(l){ return { id: l.id, streamed: l.streamed, starved: l.starvedBlocks, staged: l.stagedJumps, frames: Number(l.totalFrames) } }) : [] } })()'
   )
 
 /** The sample rate a stem file states, for the resampling question. FLAC's
@@ -203,6 +214,20 @@ async function judgeFed(win, label, from, generation, fail, inconclusive) {
   return `bar ${a.pos.toFixed(2)} → ${b.pos.toFixed(2)} s; starved blocks over ${JUDGED_MS} ms: ${rows.join(', ')}`
 }
 
+/** The jump to `from` seconds was ANSWERED: every lane long enough to land
+ * there moved `stagedJumps` between `before` (taken before the jump) and
+ * `after`. Judged only on one generation — a rebuilt graph restarts its
+ * counters and is reported INCONCLUSIVE by judgeFed already. */
+function answeredJump(label, before, after, from, rate, fail) {
+  if (before.generation !== after.generation) return
+  const unanswered = after.lanes.filter((lane) => {
+    const was = before.lanes.find((l) => l.id === lane.id)
+    return lane.frames > from * rate && !(was && Number(lane.staged) > Number(was.staged))
+  })
+  if (unanswered.length > 0)
+    fail.push(`${label}: the jump moved no lane's stagedJumps on ${unanswered.map((l) => l.id).join(', ')} — the feeder did not answer it, so "nothing starved" proves nothing here`)
+}
+
 /** Leg 2, on a graph of its own so a red here cannot be leg 1's left over: a
  * Play with the count-in on always builds a fresh one (it stops, unloads and
  * prepares anchored at the spot), and the count-in is long over by the jump.
@@ -227,6 +252,7 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
   await val(win, `__test.engine.seek(${back})`)
   console.log(`2. scrub back from ${late.pos.toFixed(2)} s to ${back.toFixed(1)} s: ` +
     (await judgeFed(win, '2. scrub back from the end', back, fresh.generation, fail, inconclusive)))
+  answeredJump('2. scrub back from the end', late, await snapshot(win), back, late.rate, fail)
   await press(win)
   await waitFor(win, '__test.playing === false', 8000)
 }
@@ -299,8 +325,8 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
       throw new Error('native playback never took the song — build the capture addon for this tree')
     const first = await snapshot(win)
     if (!first.lanes.length) throw new Error('the core reported no lanes')
-    if (first.lanes.some((l) => typeof l.streamed !== 'boolean' || typeof l.starved !== 'string'))
-      throw new Error('the addon has no lane starvation counters — build the capture addon for this tree')
+    if (first.lanes.some((l) => typeof l.streamed !== 'boolean' || typeof l.starved !== 'string' || typeof l.staged !== 'string'))
+      throw new Error('the addon has no lane starvation counters (starvedBlocks, stagedJumps) — build the capture addon for this tree')
     if (first.lanes.some((l) => !l.streamed))
       throw new Error(`lanes not streamed (${first.lanes.filter((l) => !l.streamed).map((l) => l.id).join(', ')}) — the feeder is not playing them`)
     const paths = await val(win, '__test.engine.tracks.map(function(t){ return { id: t.id, path: t.path } })')
@@ -313,22 +339,11 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
     if (resampled.length === 0)
       inconclusive.push(`no lane is resampled into the ${first.rate} Hz output, so none reaches the state leg 1 is about`)
 
-    // The tail plays cleanly — so whatever follows belongs to the end. (Half a
-    // second in: the first blocks of a Play are the feeder's own jump from
-    // where it primed, one or two starved by design.)
+    // The tail plays cleanly — so whatever follows belongs to the end. The
+    // prepare ahead primed every lane at the tail, so the Play itself starves
+    // nothing either (half a second in, as a margin for the first callbacks).
     await sleep(500)
-    const tailRead = await fedBeforeJump(win, '1. playing out the tail', fail)
-    // The counter must COUNT, or both legs would pass over lanes that play
-    // nothing. The lanes are primed at frame 0 and the render thread publishes
-    // demand only once the song plays, so the first block of a Play from the
-    // tail misses on every lane that REACHES the tail: at least one starved
-    // block each by now. A lane that ends before it (a custom track shorter
-    // than the song) renders nothing there and never counts, rightly.
-    const uncounted = tailRead.lanes.filter(
-      (l) => l.frames > tail * first.rate && !(Number(l.starved) >= 1)
-    )
-    if (uncounted.length > 0)
-      fail.push(`1. the Play from the tail starved no block on ${uncounted.map((l) => l.id).join(', ')} — the starvation counter is not counting (or the feeder now primes at the start position), so this driver cannot see a silent lane`)
+    await fedBeforeJump(win, '1. playing out the tail', fail)
     if (!(await waitFor(win, '__test.playing === false', 15000)))
       throw new Error('the song never ran out: the button still says Pause 15 s after a Play 6 s from the end')
     const parked = await snapshot(win)
@@ -339,6 +354,7 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
       fail.push('1. Play after the song ran out never started it again')
     console.log(`1. play after the song ran out (parked at ${parked.pos.toFixed(2)} s): ` +
       (await judgeFed(win, '1. play after the song ran out', 0, first.generation, fail, inconclusive)))
+    answeredJump('1. play after the song ran out', parked, await snapshot(win), 0, first.rate, fail)
     await press(win)
     if (!(await waitFor(win, '__test.playing === false', 8000))) throw new Error('Pause never reached the button within 8 s')
 

@@ -55,6 +55,7 @@ class FakeRemoteElement {
       return this.tagName === 'button' && this.parent?.className === 'mode-seg' && this.attributes['aria-pressed'] === 'true'
     }
     if (selector === '[data-mix-play]') return this.dataset.mixPlay !== undefined
+    if (selector === '[data-remote-down]' || selector === '[data-remote-up]') return this.attributes[selector.slice(1, -1)] !== undefined
     throw new Error(`Unsupported selector: ${selector}`)
   }
 

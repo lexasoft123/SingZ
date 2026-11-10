@@ -693,6 +693,121 @@ graphConnection(const singz::NativePlaybackGraphSnapshot &graph,
 // through the same graph — once decoded, once streamed — and the two captured
 // outputs must agree sample for sample. Anything less and the two paths are
 // not interchangeable, whatever the benchmarks say.
+// Seeks, loop wraps, a seek while paused and a mid-song start never play a
+// streamed lane's silence. Measured on the RK3588 Box before this: ~20-27
+// starved blocks per lane per seek, ~10-14 per lane per wrap of a 4 s loop and
+// 2-8 per lane on a Play, every one of them a render block of silence the
+// singer hears as a dropout while the transport, the bar and every hard
+// counter say all is well. The feeder used to learn of a jump only from the
+// first block that played silence at the target; now the session stages the
+// target before it queues a seek, the feeder keeps a loop's head ready, and
+// the transport swaps each lane's window at the slice the position jumps.
+// 44.1 kHz stems into a 48 kHz device and 256-frame callbacks, as the Box
+// plays them; the feeder runs on its own thread at ~10x realtime.
+void streamedJumpsNeverStarve() {
+  const size_t sourceFrames = 1500000;  // 34 s at 44.1 kHz
+  std::vector<float> tone(sourceFrames, 0.0F);
+  for (size_t i = 0; i < tone.size(); i++)
+    tone[i] = 0.4F * std::sin(static_cast<double>(i) * 0.011) +
+              0.1F * std::sin(static_cast<double>(i) * 0.0007);
+  const std::string toneWav = writeWav("jumps-44k.wav", 1, tone, 44100);
+  const std::string toneFlac = scratch("jumps-44k.flac");
+  std::remove(toneFlac.c_str());
+  CHECK(singz::compactStem(toneWav, toneFlac).ok);
+
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  constexpr uint32_t kCallback = 256;
+  bool first = true;
+  auto play = [&](uint64_t callbacks) {
+    for (uint64_t i = 0; i < callbacks; ++i) {
+      CHECK(fake->drive(kCallback, first ? singz::AudioHostDiscontinuityStart
+                                         : singz::AudioHostDiscontinuityNone));
+      first = false;
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+  };
+  auto starved = [&](const char *what) {
+    const singz::NativePlaybackStatus status = session.status();
+    CHECK(status.lanes.size() == 2);
+    uint64_t sum = 0;
+    for (const auto &laneStatus : status.lanes) {
+      CHECK(laneStatus.streamed);
+      sum += laneStatus.starvedBlocks;
+    }
+    if (sum != 0)
+      std::fprintf(stderr, "streamed jumps: %s starved %llu blocks\n", what,
+                   static_cast<unsigned long long>(sum));
+    CHECK(sum == 0);
+    return status;
+  };
+  auto open = [&](uint64_t generation, std::optional<int64_t> start) {
+    singz::NativePlaybackPrepareConfig request = config();
+    request.streamLanes = true;
+    request.preparedStartProjectFrame = start;
+    std::vector<singz::NativePlaybackLaneSource> lanes;
+    lanes.push_back(lane("lead", toneFlac));
+    lanes.push_back(lane("band", toneFlac));
+    const auto prepared = session.prepare(std::move(request), std::move(lanes),
+                                          generation);
+    CHECK(prepared.ok);
+    CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+    first = true;
+  };
+
+  open(1, std::nullopt);
+  const uint64_t total = session.status().durationFrames;
+  CHECK(total > 1600000);
+  play(200);
+  starved("playing from the top");
+
+  CHECK(session.seek(1, 1000000).ok);
+  play(200);
+  starved("a far seek while playing");
+
+  // A 4 s loop, entered the way the Box enters one: set it, seek to its
+  // start. The ring holds it whole, so after the first lap its head stays.
+  const int64_t shortStart = 400000;
+  const int64_t shortEnd = shortStart + 192000;
+  CHECK(session.setLoop(1, shortStart, shortEnd).ok);
+  CHECK(session.seek(1, shortStart).ok);
+  play(3 * 192000 / kCallback + 20);
+  const auto shortLoop = starved("three wraps of a 4 s loop");
+  CHECK(shortLoop.loopCount >= 3);
+
+  // A 10 s loop, longer than the ring: every wrap lands on a staged head.
+  const int64_t longStart = 600000;
+  const int64_t longEnd = longStart + 480000;
+  CHECK(session.setLoop(1, longStart, longEnd).ok);
+  CHECK(session.seek(1, longStart).ok);
+  play(2 * 480000 / kCallback + 20);
+  const auto longLoop = starved("two wraps of a 10 s loop");
+  CHECK(longLoop.loopCount >= shortLoop.loopCount + 2);
+
+  // A seek while paused: no block plays to tell the feeder where to go.
+  CHECK(session.clearLoop(1).ok);
+  CHECK(session.pause(1).ok);
+  play(8);
+  CHECK(session.seek(1, 1300000).ok);
+  play(8);
+  CHECK(session.resume(1).ok);
+  play(200);
+  starved("Play after a seek while paused");
+  CHECK(session.unload(1).ok);
+
+  // A graph prepared to start mid-song — a Play from a paused spot, a
+  // rebuild for a metronome or pitch change — plays its first block there.
+  open(2, int64_t{900000});
+  play(200);
+  const auto midStart = starved("a mid-song start");
+  CHECK(midStart.renderedProjectFrame >= 900000);
+  CHECK(session.unload(2).ok);
+
+  std::remove(toneWav.c_str());
+  std::remove(toneFlac.c_str());
+}
+
 void streamedLanesPlayTheSameAudioAsDecodedOnes() {
   // Long enough to cross several refills and force the ring to wrap at the
   // small window this configures, which is where an append/retire mistake
@@ -7732,6 +7847,7 @@ int main() {
   mixerEditsWithoutCallbacksKeepTheLatestValues();
   compositionAndLifetime();
   streamedLanesPlayTheSameAudioAsDecodedOnes();
+  streamedJumpsNeverStarve();
   waveformEvictionPreservesPreparedCacheHits();
   laneWaveformSummaryAndCountInMeter();
   parallelLaneDecodeMatchesSequential();

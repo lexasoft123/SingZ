@@ -99,6 +99,63 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       expect(secondRuntime.calls).toEqual([['start', 1, '2']])
     } finally { await client.shutdown(); await second.close(); await rm(dir, { recursive: true, force: true }) }
   })
+  it('reads the restarted host before private capture begin/cancel, without replaying the old host or unfencing playback', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-audio-'))
+    const path = join(dir, 'audio.sock')
+    const withCapture = () => {
+      const value = fake()
+      value.runtime.owner.begin = (...args: unknown[]) => { value.calls.push(['begin', args[0], args[2]]); return { ok: true, state: 'running' } }
+      value.runtime.owner.cancel = (...args: unknown[]) => { value.calls.push(['cancel', ...args]); return { ok: true, cancelled: false } }
+      return value
+    }
+    const firstRuntime = withCapture()
+    const first = await startBoxAudioHost(path, firstRuntime.runtime)
+    const client = createBoxAudioClient(path)
+    const emit = () => undefined
+    await client.call('owner', 'begin', [7, { deviceUid: 'flow8', inputChannel: 0 }, '11', emit])
+    await first.close()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const secondRuntime = withCapture()
+    const second = await startBoxAudioHost(path, secondRuntime.runtime)
+    try {
+      // Nothing else (routing preview, retained snapshot) reconciles first.
+      expect(await client.call('owner', 'cancel', [7, '11'])).toEqual({ ok: true, cancelled: false })
+      expect(await client.call('owner', 'begin', [7, { deviceUid: 'flow8', inputChannel: 0 }, '12', emit])).toMatchObject({ ok: true })
+      const capture = secondRuntime.calls.filter(row => row[0] === 'begin' || row[0] === 'cancel').map(row => [row[0], row.at(-1)])
+      expect(capture).toEqual([['cancel', '11'], ['begin', '12']])
+    } finally { await client.shutdown(); await second.close() }
+    // A playback mutation is still fenced after a restart until someone reconciles.
+    const thirdRuntime = withCapture()
+    const third = await startBoxAudioHost(path, thirdRuntime.runtime)
+    const fresh = createBoxAudioClient(path)
+    try {
+      await fresh.call('owner', 'playbackStatus', [])
+      await third.close()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      const fourthRuntime = withCapture()
+      const fourth = await startBoxAudioHost(path, fourthRuntime.runtime)
+      try {
+        await expect(fresh.call('owner', 'startPlayback', [9, '1'])).rejects.toThrow('uncertain')
+        expect(fourthRuntime.calls).toHaveLength(0)
+      } finally { await fresh.shutdown(); await fourth.close() }
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+  it('keeps capture fenced when a capture mutation outcome is unknown on the same host', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-audio-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime, calls } = fake()
+    let release!: () => void
+    runtime.owner.begin = () => new Promise(resolve => { calls.push(['slow-begin']); release = () => resolve({ ok: true, state: 'running' }) })
+    const host = await startBoxAudioHost(path, runtime)
+    const client = createBoxAudioClient(path, { timeoutMs: 80 })
+    const emit = () => undefined
+    try {
+      await expect(client.call('owner', 'begin', [7, { deviceUid: 'flow8', inputChannel: 0 }, '11', emit])).rejects.toThrow('outcome unknown')
+      await expect(client.call('owner', 'begin', [7, { deviceUid: 'flow8', inputChannel: 0 }, '12', emit])).rejects.toThrow('uncertain')
+      expect(calls.filter(row => row[0] === 'slow-begin')).toHaveLength(1)
+      release()
+    } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
   it('treats shared initialization as host readiness and rejects raw physical reconfiguration or PCM', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-audio-'))
     const path = join(dir, 'audio.sock')

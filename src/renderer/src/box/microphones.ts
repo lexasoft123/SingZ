@@ -20,6 +20,16 @@ const MAX = (1n << 64n) - 1n
 /** Owned sessions poll levels at 5 Hz; without a session only capability is read, slowly. */
 export const MICROPHONE_LEVEL_POLL_MS = 200
 export const MICROPHONE_IDLE_POLL_MS = 2000
+/** After the persistent audio host restarts, a running analysis is restarted a
+ * bounded number of times, with exponential backoff between failed attempts. */
+export const MICROPHONE_RESUME_ATTEMPTS = 4
+export const MICROPHONE_RESUME_BACKOFF_MS = 1000
+type CaptureHostState = Awaited<ReturnType<SingzApi['captureState']>>
+/** Main reports a lost Box audio socket as `error` without an owner. A reachable
+ * host always names its UInt64 owner generation (0 before any capture). */
+function hostUnreachable(state: CaptureHostState): boolean {
+  return state.state === 'error' && !/^(0|[1-9][0-9]{0,19})$/.test(state.ownershipGeneration)
+}
 let lastGeneration = 0n
 export function microphoneGeneration(): string {
   const candidate = BigInt(Date.now()) * 1000n
@@ -91,6 +101,13 @@ export class BoxMicrophones {
   private requested: MicrophoneSelection | null = null
   private initializedSelection = false
   private lastPollStartedAt = Number.NEGATIVE_INFINITY
+  /** The owned session's host is unreachable (socket gone during a restart). */
+  private hostLost = false
+  /** Analysis the user left running when the host restarted underneath it. */
+  private resume: MicrophoneSelection | null = null
+  private resumeAttempts = 0
+  private resumeTimer?: ReturnType<typeof setTimeout>
+  private reconciling = false
   constructor(private readonly api: Api, private readonly now: () => number = Date.now,
     private readonly generation: () => string = microphoneGeneration,
     private readonly storage: MicrophoneChannelStorage | undefined = defaultStorage()) {
@@ -148,7 +165,11 @@ export class BoxMicrophones {
     })
     this.timer = setInterval(() => {
       this.expire()
-      if (this.owned || this.now() - this.lastPollStartedAt >= MICROPHONE_IDLE_POLL_MS) void this.poll()
+      const due = this.now() - this.lastPollStartedAt >= MICROPHONE_IDLE_POLL_MS
+      // An unconfirmed stop is retried at the slow cadence until the host answers;
+      // an unreachable host is likewise probed slowly instead of at 5 Hz.
+      if (this.uncertain) { if (due) this.reconcile() }
+      else if ((this.owned && !this.hostLost) || due) void this.poll()
     }, MICROPHONE_LEVEL_POLL_MS)
     void this.refreshDevices(); void this.poll()
   }
@@ -206,9 +227,18 @@ export class BoxMicrophones {
     try {
       const [state, stats] = await Promise.all([this.api.captureState(), this.api.captureStats()])
       if (!current()) return
+      if (owned && this.value.active && hostUnreachable(state)) {
+        // A transient socket absence (systemd restart) is not a failed session:
+        // keep ownership and wait for the host to answer again.
+        this.hostLost = true
+        this.publish({ levels: null, pitch: null, error: tMicrophone('box.microphones.hostReconnecting') }); return
+      }
       const capability = scalarCapability(stats.microphoneLevels) ? 'available' : 'unavailable'
       if (!owned || !this.value.active) { this.publish({ capability }); return }
+      this.hostLost = false
       if (state.ownershipGeneration !== owned.generation) {
+        // A restarted host owns nothing: the old session died with its process.
+        if (this.requested && (state.state === 'idle' || state.state === 'stopped')) { this.sessionLost(owned, capability); return }
         this.failSession(owned, tMicrophone('box.microphones.sessionChanged')); return
       }
       if (state.state === 'starting') {
@@ -240,6 +270,66 @@ export class BoxMicrophones {
     } finally { this.polling = false }
   }
   private clearRecovery(): void { clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined }
+  /** The host restarted with no owner: release the dead session and, because the
+   * user's intent was still "running", restart analysis on the new host. */
+  private sessionLost(owned: NonNullable<BoxMicrophones['owned']>, capability: MicrophoneSnapshot['capability']): void {
+    this.cancelResume()
+    this.resume = this.requested ? { ...this.requested } : null
+    this.clearRecovery(); this.readGeneration++
+    const intent = this.intent
+    this.publish({ capability, phase: 'starting', levels: null, pitch: null, error: null })
+    void this.enqueue(async () => {
+      if (this.owned !== owned || this.intent !== intent) return
+      // A failure here leaves uncertainty; reconcile() retries and resumes later.
+      try { await this.cancelOwned() } catch { return }
+      if (this.intent === intent) this.scheduleResume()
+    })
+  }
+  private cancelResume(): void {
+    clearTimeout(this.resumeTimer); this.resumeTimer = undefined
+    this.resume = null; this.resumeAttempts = 0
+  }
+  private scheduleResume(): void {
+    const selection = this.resume
+    if (!selection || this.disposed || this.resumeTimer) return
+    if (this.resumeAttempts >= MICROPHONE_RESUME_ATTEMPTS) {
+      this.cancelResume(); this.requested = null
+      this.publish({ phase: 'error', levels: null, pitch: null, error: tMicrophone('box.microphones.resumeFailed') }); return
+    }
+    const delay = this.resumeAttempts ? MICROPHONE_RESUME_BACKOFF_MS * 2 ** (this.resumeAttempts - 1) : 0
+    this.resumeTimer = setTimeout(async () => {
+      this.resumeTimer = undefined
+      if (this.resume !== selection || this.disposed) return
+      this.resumeAttempts++
+      // A freshly restarted host may not have published its capability yet.
+      if (this.value.capability !== 'available') await this.poll()
+      if (this.resume !== selection || this.disposed) return
+      void this.startSelection(selection).then(started => {
+        if (this.resume !== selection) return
+        if (started) { this.resume = null; this.resumeAttempts = 0 } else this.scheduleResume()
+      })
+    }, delay)
+  }
+  /** Retry an unconfirmed stop once per idle interval. It clears as soon as the
+   * (possibly restarted) host proves the generation is no longer running. */
+  private reconcile(): void {
+    if (this.reconciling || this.disposed || this.transitions > 0) return
+    this.reconciling = true
+    this.lastPollStartedAt = this.now()
+    const intent = this.intent
+    void this.enqueue(async () => {
+      if (!this.uncertain || this.disposed || this.intent !== intent) return
+      if (!this.owned) { this.uncertain = false } else {
+        try { await this.cancelOwned() } catch { return }
+      }
+      if (this.disposed || this.intent !== intent) return
+      this.publish({ phase: 'idle', levels: null, pitch: null, error: null })
+      this.scheduleResume()
+    }).finally(() => { this.reconciling = false })
+  }
+  private async hostState(): Promise<CaptureHostState | null> {
+    try { return await deadline(this.api.captureState(), 2000, () => tMicrophone('box.microphones.stopUnconfirmed')) } catch { return null }
+  }
   private failSession(owned: NonNullable<BoxMicrophones['owned']>, detail: string): void {
     this.requested = null
     this.clearRecovery(); this.readGeneration++
@@ -281,20 +371,31 @@ export class BoxMicrophones {
           if (state.ownershipGeneration === owned.generation && !['idle', 'stopped', 'unsupported'].includes(state.state)) throw new Error(tMicrophone('box.microphones.stopUnconfirmed'))
         }
       })(), 5000, () => tMicrophone('box.microphones.stopUnconfirmed'))
-      if (this.owned === owned) this.owned = null
-      this.latestWindow = null; this.uncertain = false
-      this.publish({ active: null, levels: null, pitch: null })
+      this.released(owned)
     } catch (error) {
+      // A failed cancel is not proof the session lives on: after a host restart
+      // the old process (and its capture) is gone, and the new host says so.
+      const state = await this.hostState()
+      if (state && !hostUnreachable(state) && (state.ownershipGeneration !== owned.generation || ['idle', 'stopped', 'unsupported'].includes(state.state))) {
+        this.released(owned); return
+      }
       this.uncertain = true
-      this.publish({ phase: 'uncertain', levels: null, pitch: null, error: tMicrophone('box.microphones.stopFailed', { detail: String(error) }) })
+      this.publish({ phase: 'uncertain', levels: null, pitch: null, error: state && hostUnreachable(state)
+        ? tMicrophone('box.microphones.hostReconnecting')
+        : tMicrophone('box.microphones.stopFailed', { detail: String(error) }) })
       throw error
     }
+  }
+  private released(owned: NonNullable<BoxMicrophones['owned']>): void {
+    if (this.owned === owned) this.owned = null
+    this.latestWindow = null; this.uncertain = false; this.hostLost = false
+    this.publish({ active: null, levels: null, pitch: null })
   }
   resetSelection = (): void => {
     const active = this.value.active
     this.publish({ selection: active ? { uid: active.uid, channel: active.channel } : this.value.selection })
   }
-  start = (): Promise<boolean> => this.startSelection(this.value.selection)
+  start = (): Promise<boolean> => { this.cancelResume(); return this.startSelection(this.value.selection) }
   private startSelection(selection: MicrophoneSelection | null): Promise<boolean> {
     const enabledChannels = selection ? this.enabledChannels(selection.uid) : []
     if (this.disposed || !selection || !enabledChannels.includes(selection.channel) || this.value.capability !== 'available' || this.uncertain) return Promise.resolve(false)
@@ -346,6 +447,7 @@ export class BoxMicrophones {
   }
   stop = (): Promise<boolean> => {
     this.requested = null
+    this.cancelResume()
     if (this.disposed) return this.disposal?.then(() => true, () => false) ?? Promise.resolve(false)
     const intent = ++this.intent
     this.clearRecovery(); this.transitions++
@@ -358,6 +460,7 @@ export class BoxMicrophones {
   dispose = (): Promise<void> => {
     if (this.disposal) return this.disposal
     this.requested = null
+    this.cancelResume()
     this.disposed = true; ++this.intent; this.clearRecovery()
     clearInterval(this.timer); this.unsubscribe?.(); this.unsubscribe = undefined
     this.publish({ levels: null, pitch: null })

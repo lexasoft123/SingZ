@@ -62,7 +62,9 @@ const microphoneEnglish = {
   "box.microphones.routingChanged": "Routing changed. Review the current route before applying.",
   "box.microphones.refreshRouting": "Refresh routing before applying changes.",
   "box.microphones.routingReadFailed": "Could not read audio routing. {detail}",
-  "box.microphones.routingApplyFailed": "Could not apply audio routing. {detail}"
+  "box.microphones.routingApplyFailed": "Could not apply audio routing. {detail}",
+  "box.microphones.hostReconnecting": "Audio service is reconnecting. Microphone analysis resumes when it is back.",
+  "box.microphones.resumeFailed": "Microphone analysis could not resume after the audio service restarted. Press Start analysis to try again."
 } as const
 register('en', microphoneEnglish)
 
@@ -114,7 +116,9 @@ register('ru', {
   "box.microphones.routingChanged": "Маршрут изменился. Проверьте текущий маршрут перед применением.",
   "box.microphones.refreshRouting": "Обновите маршруты перед применением изменений.",
   "box.microphones.routingReadFailed": "Не удалось прочитать звуковые маршруты. {detail}",
-  "box.microphones.routingApplyFailed": "Не удалось применить звуковые маршруты. {detail}"
+  "box.microphones.routingApplyFailed": "Не удалось применить звуковые маршруты. {detail}",
+  "box.microphones.hostReconnecting": "Аудиослужба переподключается. Анализ микрофона возобновится, когда она вернётся.",
+  "box.microphones.resumeFailed": "Не удалось возобновить анализ микрофона после перезапуска аудиослужбы. Нажмите «Начать анализ», чтобы попробовать снова."
 } satisfies Record<keyof typeof microphoneEnglish, string>)
 
 register('zh-CN', {
@@ -165,6 +169,8 @@ register('zh-CN', {
   "box.microphones.routingChanged": "路由已更改。请检查当前路由后再应用。",
   "box.microphones.refreshRouting": "应用更改前请刷新路由。",
   "box.microphones.routingReadFailed": "无法读取音频路由。{detail}",
-  "box.microphones.routingApplyFailed": "无法应用音频路由。{detail}"
+  "box.microphones.routingApplyFailed": "无法应用音频路由。{detail}",
+  "box.microphones.hostReconnecting": "音频服务正在重新连接。恢复后将继续麦克风分析。",
+  "box.microphones.resumeFailed": "音频服务重启后无法恢复麦克风分析。请按“开始分析”重试。"
 } satisfies Record<keyof typeof microphoneEnglish, string>)
 export function tMicrophone(key: keyof typeof microphoneEnglish, vars?: Vars): string { return lookup(key, vars) }
