@@ -34,6 +34,10 @@ files:
   # Output of the iOS pipeline (fastlane's export dir): .ipa plus a ~38 MB
   # dSYM zip, for the same reason.
   - '!build-ios/*'
+  # Package output never belongs in an asar. electron-builder excludes only the
+  # current config's own output dir, so the Box build (dist/box) would
+  # otherwise embed the Desktop .deb and linux-unpacked tree CI builds first.
+  - '!dist{,/**/*}'
   # Tests and agent/development configuration are not runtime assets.
   - '!tests/*'
   - '!.claude/*'
@@ -168,6 +172,8 @@ linux:
       filter: ['singz-analyze*', 'llama-server*', 'crispasr*']
     - from: third_party/notices/lyrics-engines
       to: open-source-notices/lyrics-engines
+    - from: third_party/loopz/vendor/nlohmann/LICENSE.MIT
+      to: open-source-notices/nlohmann-json-LICENSE.MIT
     - from: vendor/packs/gpu-splitter-linux-${arch}.tar.gz
       to: engines/gpu-splitter-linux-${arch}.tar.gz
     - from: build/capture-package/linux-${arch}

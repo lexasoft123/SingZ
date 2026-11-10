@@ -1,3 +1,4 @@
+import { withBoxAudioHostAuthority, type BoxAudioHostAuthority } from './box-audio/profile'
 import { audioApp as app, audioResourcesPath } from './audio-service-runtime'
 import { createHash, randomBytes } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -42,6 +43,7 @@ import type {
   CaptureAnalysisWindow,
   CaptureInputDevice,
   CaptureStartResult,
+  CaptureStartConfig,
   CaptureStateName,
   CaptureStats
 } from '../shared/types'
@@ -79,7 +81,7 @@ export interface NativeCaptureBinding {
     | { ok: true; devices: CaptureInputDevice[] }
     | { ok: false; devices: []; error: string }
   beginCapture(
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number; crepeModelPath?: string },
+    config: CaptureStartConfig & { crepeModelPath?: string },
     generation: bigint,
     sink: (window: CaptureAnalysisWindow) => void
   ): CaptureStartResult
@@ -167,13 +169,20 @@ export function resolveCaptureAddonPath(runtime: CaptureAddonRuntime): string {
 }
 
 /** Same native-input fingerprint as scripts/build-capture-addon.cjs. */
-export function captureSourceFingerprint(root: string, electronVersion: string): string {
+export function captureSourceFingerprint(
+  root: string,
+  electronVersion: string,
+  platform: NodeJS.Platform = process.platform
+): string {
   // Source fingerprints run only for development checkouts. Packaged apps do
   // not ship build scripts, so loading this helper must stay inside this path.
-  const { zcoreGitlinkRevision } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
+  const { zcoreGitlinkRevision, loopzFingerprintInputs } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
     zcoreGitlinkRevision(root: string): string
+    loopzFingerprintInputs(root: string, platform: string): { revision: string; files: string[] } | null
   }
   const zcoreRevision = zcoreGitlinkRevision(root)
+  // LoopZ is part of the addon only where Box routing is built (Linux).
+  const loopz = loopzFingerprintInputs(root, platform)
   const files: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -195,10 +204,12 @@ export function captureSourceFingerprint(root: string, electronVersion: string):
     join(root, 'scripts', 'ccache-launcher.sh'),
     join(root, 'scripts', 'ccache-launcher.ps1'),
     join(root, 'scripts', 'build-capture-addon.cjs'))
+  if (loopz) files.push(...loopz.files)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
   hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
+  if (loopz) hash.update(`third_party/loopz.gitlink ${loopz.revision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
@@ -1019,6 +1030,15 @@ const processCaptureBinding = sharedCaptureBindingLoader(() => loadCaptureBindin
 export function loadCaptureBinding(): NativeCaptureBinding {
   if (process.env.SINGZ_AUDIO_PROCESS !== '1' || !process.parentPort)
     throw new Error('Native audio can only load inside the dedicated audio process')
+  return loadProcessCaptureBinding()
+}
+
+/** Separate browser-main service authority; Desktop keeps the utility-only gate. */
+export function loadBoxAudioHostBinding(authority: BoxAudioHostAuthority): NativeCaptureBinding {
+  return withBoxAudioHostAuthority(authority, loadProcessCaptureBinding)
+}
+
+function loadProcessCaptureBinding(): NativeCaptureBinding {
   try { return processCaptureBinding() }
   catch (error) {
     if (error instanceof CaptureAddonLoadError) throw error
@@ -2269,13 +2289,19 @@ export class CaptureOwner {
 
   begin(
     rendererId: number,
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number; crepeModelPath?: string },
+    config: CaptureStartConfig & { crepeModelPath?: string },
     rawGeneration: string,
     emit: (window: CaptureAnalysisWindow) => void
   ): CaptureStartResult {
     const generation = parseGeneration(rawGeneration)
     if (!generation || !Number.isInteger(config.inputChannel) || config.inputChannel < 0) {
       return failedStart('Invalid microphone ownership generation or input channel.', 0)
+    }
+    const enabled = config.enabledChannels
+    if (enabled !== undefined && (!Array.isArray(enabled) || !enabled.length || enabled.length > 64 ||
+      Array.from(enabled).some((channel, index) => !Number.isInteger(channel) || channel < 0 || channel >= 64 ||
+        (index > 0 && channel <= enabled[index - 1])) || !enabled.includes(config.inputChannel))) {
+      return failedStart('Choose unique increasing enabled microphone channels including the analysis channel.', config.inputChannel, config.deviceUid)
     }
     const binding = this.native()
     if (!binding) {
@@ -2294,7 +2320,10 @@ export class CaptureOwner {
         timestampSource: ''
       }
     }
-    let exactConfig = config
+    // Snapshot the caller's list before crossing the native ownership boundary.
+    let exactConfig = { ...config }
+    if (enabled === undefined) delete exactConfig.enabledChannels
+    else exactConfig.enabledChannels = [...enabled]
     if (!config.deviceUid) {
       const inventory = binding.inputDevices()
       const defaultDevice = inventory.ok
@@ -2316,7 +2345,19 @@ export class CaptureOwner {
           timestampSource: ''
         }
       }
-      exactConfig = { ...config, deviceUid: defaultDevice.uid }
+      exactConfig = { ...exactConfig, deviceUid: defaultDevice.uid }
+    }
+    if (enabled !== undefined) {
+      try {
+        if (!binding.captureStats().microphoneLevels)
+          return failedStart('Enabled channel selection is unavailable on this audio service.', config.inputChannel, exactConfig.deviceUid)
+        const inventory = binding.inputDevices()
+        const device = inventory.ok ? inventory.devices.find(row => row.uid === exactConfig.deviceUid) : undefined
+        if (!device || enabled[enabled.length - 1] >= device.channels)
+          return failedStart('Choose enabled channels available on the selected microphone interface.', config.inputChannel, exactConfig.deviceUid)
+      } catch (error) {
+        return failedStart(`Could not validate enabled microphone channels: ${String(error)}`, config.inputChannel, exactConfig.deviceUid)
+      }
     }
     if (this.generation) binding.cancelCapture(BigInt(this.generation))
     this.generation = rawGeneration

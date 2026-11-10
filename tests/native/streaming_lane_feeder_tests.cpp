@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <chrono>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
@@ -181,9 +182,379 @@ void renderBlock(const zdsp::ProcessorHandle& handle, Output* output,
                             1);
 }
 
+// Seeking must select the identical global polyphase as decoding from zero.
+// A fitted single-tone delay would hide this defect; compare the actual samples
+// bit for bit, including the first block after both prime and a real node demand.
+void checkSeekPhase(uint32_t sourceRate, uint32_t outputRate) {
+  const std::string path = encodeFlac(kFrames, sourceRate, 2);
+  check(!path.empty(), "the seek-phase fixture encodes");
+  if (path.empty()) return;
+  singz::DecodedAudioPrepareOptions options;
+  options.requiredSampleRate = outputRate;
+  const auto decoded = singz::prepareDecodedAudio(openRead(path), options);
+  check(decoded.ok(), "the seek-phase reference decodes");
+  if (!decoded.ok()) { std::remove(path.c_str()); return; }
+  const uint64_t up = outputRate / std::gcd(sourceRate, outputRate);
+  const uint64_t total = decoded.audio->frameCount();
+  const std::vector<uint64_t> targets{
+      0, 1, 32, up - 1, up, up + 1, 256, 257,
+      300 * up, 300 * up + 1, 300 * up + 32, 301 * up - 1,
+      301 * up, 301 * up + 1, 300 * up + 256, total - kBlock};
+  singz::StreamingLaneGroup group;
+  singz::StreamingLaneOptions feeding;
+  feeding.windowFrames = 65536;
+  feeding.targetAheadFrames = 16384;
+  feeding.primeFrames = 8192;
+  group.setOptions(feeding);
+  const bool opened = group.addLane(openRead(path), {}, outputRate) ==
+      singz::DecodedAudioStatus::Ok;
+  check(opened, "the seek-phase lane opens");
+  if (!opened) { std::remove(path.c_str()); return; }
+  std::vector<uint8_t> storage(zdsp::streamingWindowSourceStateBytes() + 64);
+  uint8_t* aligned = storage.data() +
+      ((64 - (reinterpret_cast<uintptr_t>(storage.data()) & 63u)) & 63u);
+  const auto node = zdsp::createPositionedStreamingSource(
+      {{1}, group.window(0), 0, 0},
+      {aligned, static_cast<uint32_t>(zdsp::streamingWindowSourceStateBytes())});
+  const bool prepared = node.state != nullptr && prepareSource(node, 2, outputRate);
+  check(prepared, "the seek-phase node prepares");
+  if (prepared) {
+    Output output(2);
+    for (const uint64_t target : targets) {
+      for (const bool demandSeek : {false, true}) {
+        // Start at the opposite end to force the node's published demand out
+        // of residency; merely re-reading a primed ring would miss seekLane.
+        const uint64_t initial = demandSeek
+            ? (target < total / 2 ? total - 20000 : 0) : target;
+        const bool primed = group.prime(initial) == singz::DecodedAudioStatus::Ok;
+        check(primed, "the seek-phase lane primes");
+        if (!primed) continue;
+        const uint64_t seeksBefore = group.stats(0).seeks;
+        if (demandSeek) {
+          renderBlock(node, &output, static_cast<int64_t>(target), outputRate);
+          for (int round = 0; round < 64; ++round) group.serviceOnceForTesting();
+          check(group.stats(0).seeks > seeksBefore,
+                "the seek-phase demand really seeks the decoder");
+        }
+        renderBlock(node, &output, static_cast<int64_t>(target), outputRate);
+        bool equal = true;
+        for (uint32_t channel = 0; channel < 2; ++channel)
+          for (uint32_t frame = 0; frame < kBlock; ++frame)
+            equal &= output.planes[channel][frame] ==
+                decoded.audio->channelData(channel)[target + frame];
+        if (!equal)
+          std::fprintf(stderr, "seek phase %u -> %u target %llu via %s\n",
+              sourceRate, outputRate, static_cast<unsigned long long>(target),
+              demandSeek ? "demand" : "prime");
+        check(equal, "every post-seek sample matches the continuous decoded lattice");
+      }
+    }
+    (void)node.functions->deactivate(node.state);
+  }
+  if (node.state != nullptr) (void)node.functions->destroy(node.state);
+  std::remove(path.c_str());
+}
+
+// Jumps never starve: a seek while playing, a seek while paused, loop wraps
+// for a loop longer than the ring, one shorter than it, one set after the
+// window had moved past its head, a whole-song loop wrapping at the file's
+// end, and a staged seek that never lands.
+//
+// The session is modelled the way it drives the feeder: 256-frame callbacks
+// (the Box's LoopZ producer), sliced at a loop's end exactly as the
+// transport's nextSlice() slices them, `stageJump()` before a seek is queued
+// and `transportJumped()` at the slice the position moves — and the feeder
+// gets ONE wake per callback, which is what its 4 ms timed wait gives it
+// against 5.3 ms callbacks. Before staging, the block that first wanted the
+// target played silence — that is how the feeder learned of the jump — so
+// every jump starved at least one callback per lane here even with a decoder
+// that costs nothing; on the Box, where six lanes each pay a decoder seek
+// before any of them refills, it was ~20 per lane per seek. A seek applied
+// while paused was worse: no block plays to publish the new position, so the
+// feeder never chased it, and Play then starved like a seek. Every callback's audio is
+// compared with the continuous decode, so a swap to the wrong ring, or a
+// stage decoded at the wrong lattice phase, cannot pass as "not starved".
+void checkJumpsNeverStarve(uint32_t sourceRate, uint32_t outputRate) {
+  const std::string path = encodeFlac(kFrames, sourceRate, 2);
+  check(!path.empty(), "the jump fixture encodes");
+  if (path.empty()) return;
+  singz::DecodedAudioPrepareOptions decodeOptions;
+  decodeOptions.requiredSampleRate = outputRate;
+  const auto decoded = singz::prepareDecodedAudio(openRead(path), decodeOptions);
+  check(decoded.ok(), "the jump reference decodes");
+  if (!decoded.ok()) { std::remove(path.c_str()); return; }
+
+  constexpr size_t kLanes = 2;
+  constexpr uint32_t kCallback = 256;
+  singz::StreamingLaneGroup group;
+  singz::StreamingLaneOptions feeding;
+  feeding.windowFrames = 65536;
+  feeding.targetAheadFrames = 32768;
+  feeding.safetyFrames = 8192;
+  feeding.primeFrames = 16384;
+  feeding.stageFrames = 16384;
+  group.setOptions(feeding);
+  for (size_t lane = 0; lane < kLanes; ++lane)
+    check(group.addLane(openRead(path), {}, outputRate) ==
+              singz::DecodedAudioStatus::Ok,
+          "a jump lane opens");
+  if (group.laneCount() != kLanes) { std::remove(path.c_str()); return; }
+  const uint64_t total = group.outputFrames(0);
+  check(total == decoded.audio->frameCount(), "and is as long as the decode");
+
+  std::vector<std::vector<uint8_t>> storage(kLanes);
+  std::vector<zdsp::ProcessorHandle> nodes(kLanes);
+  bool prepared = true;
+  for (size_t lane = 0; lane < kLanes; ++lane) {
+    storage[lane].resize(zdsp::streamingWindowSourceStateBytes() + 64);
+    uint8_t* aligned = storage[lane].data() +
+        ((64 - (reinterpret_cast<uintptr_t>(storage[lane].data()) & 63u)) & 63u);
+    nodes[lane] = zdsp::createPositionedStreamingSource(
+        {{static_cast<uint64_t>(lane + 1)}, group.window(lane), 0, 0},
+        {aligned, static_cast<uint32_t>(zdsp::streamingWindowSourceStateBytes())});
+    prepared = prepared && nodes[lane].state != nullptr &&
+               prepareSource(nodes[lane], 2, outputRate);
+  }
+  check(prepared, "the jump nodes prepare");
+  check(group.prime(0) == singz::DecodedAudioStatus::Ok, "and the lanes prime");
+
+  // The transport, as the session's nextSlice() runs it.
+  uint64_t position = 0;
+  bool playing = true;
+  bool looping = false;
+  uint64_t loopStart = 0;
+  uint64_t loopEnd = 0;
+  bool pendingSeek = false;
+  uint64_t seekTarget = 0;
+  uint64_t seekToken = 0;
+  bool matched = true;
+  uint64_t silentFrames = 0;
+  std::vector<std::vector<float>> slice(2, std::vector<float>(kCallback, 0.0F));
+  std::vector<float*> slicePointers{slice[0].data(), slice[1].data()};
+  auto renderSlice = [&](uint64_t at, uint32_t frames) {
+    zdsp::MutableAudioBusView view{};
+    view.channels = slicePointers.data();
+    view.channelCount = 2;
+    view.frames = {frames};
+    zdsp::TransportContext transport{};
+    transport.validFields = zdsp::TransportValidProjectSamples;
+    transport.stateFlags = zdsp::TransportStatePlaying;
+    transport.projectTimeSamples = static_cast<int64_t>(at);
+    transport.projectRateQ32 = zdsp::kProjectRateOneQ32;
+    zdsp::ProcessContext context{};
+    context.interfaceVersion = zdsp::kProcessorInterfaceVersion;
+    context.structSize = zdsp::kProcessContextV1RequiredSize;
+    context.transport = &transport;
+    context.sampleRate = {static_cast<double>(outputRate)};
+    context.frames = {frames};
+    for (size_t lane = 0; lane < kLanes; ++lane) {
+      nodes[lane].functions->process(nodes[lane].state, &context, nullptr, 0,
+                                     &view, 1);
+      for (uint32_t c = 0; c < 2; ++c)
+        for (uint32_t f = 0; f < frames; ++f) {
+          const float want = decoded.audio->channelData(c)[at + f];
+          if (slice[c][f] != want) {
+            matched = false;
+            if (slice[c][f] == 0.0F) ++silentFrames;
+          }
+        }
+    }
+  };
+  auto callback = [&]() {
+    if (pendingSeek && (seekToken == 0 || group.commitJump(seekToken, seekTarget))) {
+      pendingSeek = false;
+      position = seekTarget;
+    }
+    if (playing) {
+      uint32_t remaining = kCallback;
+      while (remaining != 0) {
+        // Match the session's pending SetLoop+Seek batch: the new loop is
+        // installed only when its landing has been staged across all lanes.
+        if (looping && !pendingSeek && position >= loopEnd) {
+          position = loopStart + (position - loopStart) % (loopEnd - loopStart);
+          group.transportJumped(position);
+        }
+        if (position >= total) break;
+        uint64_t boundary = total;
+        if (looping && !pendingSeek && position < loopEnd)
+          boundary = std::min(boundary, loopEnd);
+        const uint32_t frames = static_cast<uint32_t>(
+            std::min<uint64_t>(remaining, boundary - position));
+        renderSlice(position, frames);
+        position += frames;
+        remaining -= frames;
+      }
+    }
+    // The feeder's one wake per callback: its loop goes round again
+    // without sleeping while a round makes progress, and the 4 ms wait
+    // after an idle round lets roughly one wake fall in each callback.
+    for (int round = 0; round < 4; ++round)
+      if (!group.serviceOnceForTesting()) break;
+  };
+  auto play = [&](uint64_t callbacks) {
+    for (uint64_t i = 0; i < callbacks; ++i) callback();
+  };
+  auto seek = [&](uint64_t target) {
+    // The caller only publishes; the feeder stages on subsequent rounds.
+    seekToken = group.requestJump(target);
+    pendingSeek = true;
+    seekTarget = target;
+  };
+  auto starved = [&]() {
+    uint64_t sum = 0;
+    for (size_t lane = 0; lane < kLanes; ++lane)
+      sum += group.stats(lane).starvedBlocks;
+    return sum;
+  };
+  auto expectClean = [&](const char* what) {
+    const uint64_t count = starved();
+    if (count != 0 || !matched)
+      std::fprintf(stderr, "jumps %u -> %u, %s: %llu starved blocks, %s, %llu silent frames\n",
+                   sourceRate, outputRate, what,
+                   static_cast<unsigned long long>(count),
+                   matched ? "audio matched" : "AUDIO DIFFERED",
+                   static_cast<unsigned long long>(silentFrames));
+    check(count == 0, what);
+    check(matched, "and every frame of it is the continuous decode");
+  };
+
+  if (prepared) {
+    play(48);
+    expectClean("linear play from the top never starves");
+
+    seek(300000);
+    play(64);
+    expectClean("a far seek while playing lands on resident audio");
+
+    const auto stagesBeforeDrag = group.stats(0).stages;
+    seek(100000);
+    const auto superseded = seekToken;
+    seek(180000);
+    seek(20000);
+    check(group.stats(0).stages == stagesBeforeDrag,
+          "rapid requests do no decoder work on the caller");
+    check(!group.commitJump(superseded, 100000), "a superseded request cannot commit");
+    play(64);
+    check(group.stats(0).stages == stagesBeforeDrag + 1,
+          "only the final scrub target is staged");
+    expectClean("a seek back while playing lands on resident audio");
+
+    playing = false;
+    seek(200000);
+    play(20);  // paused: the seek applies, the feeder keeps working
+    playing = true;
+    play(64);
+    expectClean("a seek while paused then Play starts on resident audio");
+
+    // A loop longer than the ring: every wrap needs the head staged.
+    looping = true;
+    loopStart = 100000;
+    loopEnd = 190000;
+    group.setLoop(loopStart, loopEnd);
+    seek(loopStart);
+    play(3 * (loopEnd - loopStart) / kCallback + 8);
+    expectClean("three wraps of a loop longer than the ring never starve");
+
+    // A loop the ring holds whole: after its first lap the head stays.
+    loopStart = 250000;
+    loopEnd = 290000;
+    group.setLoop(loopStart, loopEnd);
+    seek(loopStart);
+    play(4 * (loopEnd - loopStart) / kCallback + 8);
+    expectClean("four wraps of a loop shorter than the ring never starve");
+
+    // A loop set from inside, after the window has already moved past where
+    // it starts: the head is staged before the first wrap.
+    looping = false;
+    group.clearLoop();
+    seek(330000);
+    play(100);
+    loopStart = 320000;
+    loopEnd = 380000;
+    looping = true;
+    group.setLoop(loopStart, loopEnd);
+    play(3 * (loopEnd - loopStart) / kCallback + 8);
+    expectClean("a loop set mid-lap past its head wraps without starving");
+
+    // The whole song, wrapping at the end of the file.
+    loopStart = 0;
+    loopEnd = total;
+    group.setLoop(loopStart, loopEnd);
+    seek(total - 40000);
+    play(40000 / kCallback + 200);
+    expectClean("a whole-song loop wraps at the file's end without starving");
+    check(position < 200 * kCallback, "and really did wrap to the top");
+
+    // A seek staged and never queued (refused, superseded): the feeder takes
+    // its decoder back before the live ring runs low and keeps playing.
+    looping = false;
+    group.clearLoop();
+    group.stageJump(150000);
+    play(400);
+    expectClean("an abandoned stage never starves the playing region");
+
+    uint64_t swaps = 0;
+    uint64_t abandoned = 0;
+    for (size_t lane = 0; lane < kLanes; ++lane) {
+      swaps += group.stats(lane).swaps;
+      abandoned += group.stats(lane).stagesAbandoned;
+    }
+    check(swaps >= kLanes * 8, "the jumps really were taken through swapped stages");
+    check(abandoned >= kLanes, "and the abandoned stage was really taken back");
+  }
+  for (size_t lane = 0; lane < kLanes; ++lane)
+    if (nodes[lane].state != nullptr) {
+      (void)nodes[lane].functions->deactivate(nodes[lane].state);
+      (void)nodes[lane].functions->destroy(nodes[lane].state);
+    }
+  std::remove(path.c_str());
+}
+
+void checkResidentRequestSupersedesPendingStage() {
+  const auto path = encodeFlac(40000, kRate, 2);
+  singz::StreamingLaneGroup group;
+  singz::StreamingLaneOptions options;
+  options.windowFrames = 65536;
+  group.setOptions(options);
+  check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+        "the short coalescing lane opens");
+  check(group.prime(0) == singz::DecodedAudioStatus::Ok,
+        "the short coalescing lane primes partially");
+  const auto old = group.requestJump(1000);
+  group.serviceOnceForTesting();
+  // No callbacks: model a held output. Once the abandoned stage is reclaimed,
+  // the old live ring finishes this short song and becomes wholly resident.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1050));
+  group.serviceOnceForTesting();
+  uint64_t start = 0, end = 0;
+  check(zdsp::streamingWindowResident(group.window(0), &start, &end) &&
+        start == 0 && end == 40000, "the short live lane is now wholly resident");
+  const auto latest = group.requestJump(39000);
+  check(latest != 0 && latest != old,
+        "a resident request must still supersede an older pending stage");
+  group.serviceOnceForTesting();
+  check(!group.commitJump(old, 1000), "a superseded stage cannot replace the full live ring");
+  check(group.commitJump(latest, 39000), "the final short-lane target commits its own stage");
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  checkResidentRequestSupersedesPendingStage();
+  if (std::getenv("SINGZ_STAGING_RESIDENT_ONLY") != nullptr) return failures ? 1 : 0;
+  {
+    const auto path = encodeFlac(kFrames, kRate, 2);
+    singz::StreamingLaneGroup group;
+    check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+          "the default-memory lane opens");
+    std::fprintf(stderr, "default stereo lane retained ring bytes: %zu\n", group.retainedBytes(0));
+    check(group.retainedBytes(0) == 2097152,
+          "two default stereo rings together retain exactly 2097152 bytes");
+    std::remove(path.c_str());
+    if (std::getenv("SINGZ_STAGING_MEMORY_ONLY") != nullptr) return failures ? 1 : 0;
+  }
+
   // How long does the waveform pass ACTUALLY take, with nothing competing?
   //
   //   SINGZ_WAVEFORM_BENCH=1 streaming_lane_feeder_tests lane.flac [lane.flac...]
@@ -299,6 +670,12 @@ int main(int argc, char** argv) {
     group.stop();
     return 0;
   }
+
+  checkSeekPhase(44100, 48000);
+  checkSeekPhase(48000, 44100);
+  checkSeekPhase(44100, 44100);
+  checkJumpsNeverStarve(44100, 44100);
+  checkJumpsNeverStarve(44100, 48000);
 
   const std::string wav = tempPath(".wav");
   const std::string flac = encodeFlac(kFrames, kRate, 2);
@@ -460,8 +837,9 @@ int main(int argc, char** argv) {
     const int64_t spots[] = {300000, 12000, 250000, 4096, 380000};
     bool matched = true;
     for (const int64_t spot : spots) {
-      // The block at the new spot may starve — that is the design. What must
-      // be true is that the feeder catches up and the audio is then correct.
+      // An UNSTAGED jump (nobody called stageJump) may starve its first
+      // block — the demand path is the fallback. What must be true is that
+      // the feeder catches up and the audio is then correct.
       renderBlock(streamed, &out, spot);
       for (int round = 0; round < 64; round++)
         group.serviceOnceForTesting();

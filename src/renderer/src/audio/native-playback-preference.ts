@@ -33,12 +33,23 @@
  */
 export const DESKTOP_NATIVE_PLAYBACK_KEY = 'singz.desktop.native-playback'
 
+export interface DesktopNativePlaybackPolicy {
+  playback?: boolean
+  streamLanes?: boolean
+  /** Refuse Web Audio when this surface requires the native backend. */
+  requireNative?: boolean
+}
+
 export function detectedDesktopPlatform(): 'darwin' | 'win32' | 'linux' | 'other' {
   const p = typeof navigator === 'undefined' ? '' : navigator.platform
   return /Mac/i.test(p) ? 'darwin' : /Win/i.test(p) ? 'win32' : /Linux/i.test(p) ? 'linux' : 'other'
 }
 
-export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatform()): boolean {
+export function desktopNativePlaybackPreferred(
+  platform = detectedDesktopPlatform(),
+  override?: boolean
+): boolean {
+  if (override !== undefined) return override
   const stored = typeof localStorage === 'undefined' ? null : localStorage.getItem(DESKTOP_NATIVE_PLAYBACK_KEY)
   if (stored === '1') return true
   if (stored === '0') return false
@@ -66,7 +77,11 @@ export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatfor
  *  is the deliberate way to measure it there. */
 export const DESKTOP_STREAM_LANES_KEY = 'singz.desktop.stream-lanes'
 
-export function desktopStreamLanesPreferred(platform = detectedDesktopPlatform()): boolean {
+export function desktopStreamLanesPreferred(
+  platform = detectedDesktopPlatform(),
+  override?: boolean
+): boolean {
+  if (override !== undefined) return override
   const stored = typeof localStorage === 'undefined' ? null : localStorage.getItem(DESKTOP_STREAM_LANES_KEY)
   if (stored === '1') return true
   if (stored === '0') return false

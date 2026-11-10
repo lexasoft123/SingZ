@@ -1,5 +1,12 @@
 #include "audio_export_bridge.h"
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+#include "box_routing_bridge.h"
+#include "../playback/box_routing_owner.h"
+#include "../playback/box_input_capture.h"
+#endif
 #include <node_api.h>
+#include <span>
+#include <algorithm>
 
 #include "audio_monitor_session.h"
 #include "native_audio_ownership.h"
@@ -55,9 +62,64 @@ struct EventBridge {
   std::atomic<uint64_t> overwritten{0};
 };
 
+// Both paths share analysis/recording/ownership semantics. The Box branch
+// borrows LoopZ input history; ordinary Desktop retains its platform capture.
+class CaptureInput {
+ public:
+  singz::AudioInputResult start(const singz::AudioInputConfig& config,
+      singz::AudioInputSink sink, const std::vector<singz::AudioInputDevice>* inventory,
+      std::span<const uint32_t> enabledChannels = {}) {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (singz::boxRoutingOwnsCapture()) {
+      if (!box_) box_ = std::make_unique<singz::BoxInputCapture>();
+      return box_->start(config, std::move(sink), inventory, enabledChannels);
+    }
+#endif
+    if (!normal_) normal_ = std::make_unique<singz::AudioInput>();
+    return normal_->start(config, std::move(sink), inventory);
+  }
+  void stop(bool retain = false) {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (box_) box_->stop(retain);
+#endif
+    if (normal_) normal_->stop(retain);
+  }
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  singz::BoxInputMeter meter() const { return box_ ? box_->meter() : singz::BoxInputMeter{}; }
+#endif
+  singz::AudioInputStats stats() const {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (box_) return box_->stats();
+#endif
+    return normal_ ? normal_->stats() : singz::AudioInputStats{};
+  }
+  singz::AudioInputState state() const {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (box_) return box_->state();
+#endif
+    return normal_ ? normal_->state() : singz::AudioInputState::Idle;
+  }
+  std::string lastError() const {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (box_) return box_->lastError();
+#endif
+    return normal_ ? normal_->lastError() : std::string{};
+  }
+ private:
+  std::unique_ptr<singz::AudioInput> normal_;
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  std::unique_ptr<singz::BoxInputCapture> box_;
+#endif
+};
+std::vector<singz::AudioInputDevice> captureInputDevices() {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  if (singz::boxRoutingOwnsCapture()) return singz::boxRoutingInputDevices();
+#endif
+  return singz::sharedAudioService().inputDevices();
+}
 struct CaptureOwner {
   std::mutex mutex;
-  std::unique_ptr<singz::AudioInput> input;
+  std::unique_ptr<CaptureInput> input;
   std::unique_ptr<zdsp::analysis::PitchAnalysisModule> analyzer;
   EventBridge* bridge = nullptr;
   std::shared_ptr<singz::CaptureRecording> recording;
@@ -444,7 +506,9 @@ napi_value captureBusyResult(napi_env env, uint64_t generation) {
 
 napi_value devices(napi_env env, napi_callback_info) {
   std::string error;
-  const auto rows = singz::sharedAudioService().inputDevices();
+  std::vector<singz::AudioInputDevice> rows;
+  try { rows = captureInputDevices(); }
+  catch (const std::exception& e) { error = e.what(); }
   napi_value result;
   napi_create_object(env, &result);
   set(env, result, "ok", boolValue(env, error.empty()));
@@ -498,6 +562,36 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
                           "capture channels and ring blocks must be exact bounded integers");
     return undefined(env);
   }
+  std::vector<uint32_t> enabledChannels;
+  bool explicitChannels = false;
+  napi_has_named_property(env, argv[0], "enabledChannels", &explicitChannels);
+  if (explicitChannels) {
+    napi_value value;
+    napi_valuetype type;
+    if (napi_get_named_property(env, argv[0], "enabledChannels", &value) == napi_ok &&
+        napi_typeof(env, value, &type) == napi_ok && type == napi_undefined)
+      explicitChannels = false;
+  }
+  if (explicitChannels) {
+    bool supported = false;
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    supported = singz::boxRoutingOwnsCapture();
+#endif
+    if (!supported || !getExactU32Array(env, argv[0], "enabledChannels", &enabledChannels) ||
+        !std::is_sorted(enabledChannels.begin(), enabledChannels.end()) ||
+        std::adjacent_find(enabledChannels.begin(), enabledChannels.end()) != enabledChannels.end() ||
+        !std::binary_search(enabledChannels.begin(), enabledChannels.end(), config.channel)) {
+      napi_throw_type_error(env, nullptr, "enabledChannels requires Box and sorted unique physical channels including inputChannel");
+      return undefined(env);
+    }
+    const auto inventory = captureInputDevices();
+    const auto device = std::find_if(inventory.begin(), inventory.end(),
+        [&](const auto& row) { return row.uid == config.deviceUid; });
+    if (device == inventory.end() || enabledChannels.back() >= device->channels) {
+      napi_throw_type_error(env, nullptr, "enabledChannels contains an unavailable physical channel");
+      return undefined(env);
+    }
+  }
   const singz::NativeAudioAcquireResult acquired =
       nativeAudioOwnership.acquire(singz::NativeAudioOwnerKind::Capture,
                                    generation);
@@ -539,8 +633,8 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
     set(env, failed, "error", stringValue(env, message));
     return failed;
   }
-  if (!owner.input) owner.input = std::make_unique<singz::AudioInput>();
-  const auto inventory = singz::sharedAudioService().inputDevices();
+  if (!owner.input) owner.input = std::make_unique<CaptureInput>();
+  const auto inventory = captureInputDevices();
   const singz::AudioInputDevice* selectedDevice = nullptr;
   for (const auto& device : inventory) {
     if (device.uid == config.deviceUid) {
@@ -555,7 +649,7 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
     analyzer->push(block, [analyzer](const AnalysisWindow& window) {
       if (owner.bridge) publishLatest(owner.bridge, window, *analyzer);
     });
-  }, &inventory);
+  }, &inventory, enabledChannels);
   owner.lastState = result.state;
   owner.lastError = result.error;
   if (!result.ok) stopLocked(generation, true);
@@ -655,6 +749,31 @@ napi_value stats(napi_env env, napi_callback_info) {
   setU64(env, result, "overwrittenWindows", owner.bridge
       ? owner.bridge->overwritten.load(std::memory_order_relaxed)
       : owner.lastOverwrittenWindows);
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  if (singz::boxRoutingOwnsCapture()) {
+    const auto levels = owner.input ? owner.input->meter() : singz::BoxInputMeter{};
+    napi_value meter, peak, rms;
+    napi_create_object(env, &meter);
+    set(env, meter, "valid", boolValue(env, levels.valid));
+    set(env, meter, "channels", uintValue(env, levels.channels));
+    setU64(env, meter, "ownershipGeneration", owner.generation);
+    napi_create_array_with_length(env, levels.channels, &peak);
+    napi_create_array_with_length(env, levels.channels, &rms);
+    for (uint32_t channel = 0; channel < levels.channels; ++channel) {
+      napi_set_element(env, peak, channel, numberValue(env, levels.peak[channel]));
+      napi_set_element(env, rms, channel, numberValue(env, levels.rms[channel]));
+    }
+    if (levels.channels) {
+      napi_value indices;
+      napi_create_array_with_length(env, levels.channels, &indices);
+      for (uint32_t channel = 0; channel < levels.channels; ++channel)
+        napi_set_element(env, indices, channel, uintValue(env, levels.channelIndices[channel]));
+      set(env, meter, "channelIndices", indices);
+    }
+    set(env, meter, "peak", peak); set(env, meter, "rms", rms);
+    set(env, result, "microphoneLevels", meter);
+  }
+#endif
   return result;
 }
 
@@ -768,6 +887,9 @@ napi_value monitorResultValue(napi_env env,
 std::unique_ptr<singz::AudioHostBackend> playbackBackend(
     const std::string& provider, std::string* unavailableReason) {
   if (unavailableReason) unavailableReason->clear();
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  if (singz::boxRoutingInitialized()) return singz::boxRoutingPlaybackBackend();
+#endif
 #if defined(_WIN32)
   singz::WindowsAudioHostProvider selected;
   if (provider == "wasapi") {
@@ -984,6 +1106,12 @@ napi_value audioHostDevices(napi_env env, napi_callback_info info) {
 }
 
 napi_value beginMonitor(napi_env env, napi_callback_info info) {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  if (singz::boxRoutingOwnsCapture()) {
+    napi_throw_error(env, nullptr, "Direct monitoring is unavailable while Box routing owns audio inputs");
+    return undefined(env);
+  }
+#endif
   size_t argc = 2;
   napi_value argv[2];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
@@ -1233,10 +1361,16 @@ void cleanup(void*) {
         &nativeAudioOwnership, status.ownershipGeneration, ended.ok);
   }
   singz::sharedAudioService().shutdown();
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  singz::shutdownBoxRouting();
+#endif
 }
 
 napi_value init(napi_env env, napi_value exports) {
   singz::defineAudioExport(env, exports);
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  singz::defineBoxRoutingExports(env, exports);
+#endif
   singz::defineMicrophoneMixExports(env, exports, &nativeAudioOwnership);
   singz::defineTrainingAudioExports(env, exports, &nativeAudioOwnership, playbackBackend);
   napi_add_env_cleanup_hook(env, cleanup, nullptr);

@@ -77,6 +77,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "वहाँ कोई लाइनों को बचाने के लिए नहीं हैं.",
   "main.error.couldNotSaveLyrics": "बोलों को सहेज नहीं सका: {message}",
   "main.error.lyricsJobAlreadyRunning": "एक बोल काम पहले से ही चल रहा है.",
+  "main.error.existingLyricsUnreadable": "सहेजे गए बोल पढ़े नहीं जा सके, इसलिए उन्हें बदला नहीं गया। उन्हें बोल संपादक में खोलें या फिर से ट्रांसक्राइब करें।",
   "main.error.noLinesToAlign": "वहाँ कोई रेखाएं संरेखित करने के लिए नहीं हैं.",
   "main.error.splitFirstAlign": "गीत को पहले स्टेम में विभाजित करें  संरेखण स्वर ट्रैक को सुनता है।",
   "main.error.preciseNeedsPack": "सटीक संरेखण स्प्लिटर पैक के माध्यम से चलता है  इसे पहले मॉडल प्रबंधक में स्थापित करें।",

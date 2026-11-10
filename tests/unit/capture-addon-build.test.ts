@@ -54,6 +54,7 @@ const artifacts = require('../../scripts/capture-artifact.cjs') as {
   machCanonicalSha256(path: string): string
 }
 const captureBuilder = require('../../scripts/build-capture-addon.cjs') as {
+  captureBuildDirectory(root: string, target: string, override?: string): string
   findAddon(buildDir: string): string | null
 }
 const dist = require('../../scripts/dist.cjs') as {
@@ -99,6 +100,51 @@ const root = process.cwd()
 // bare \n, so normalize every read.
 const read = (path: string): string =>
   readFileSync(resolve(root, path), 'utf8').replaceAll('\r\n', '\n')
+
+describe('capture CMake build reuse', () => {
+  function fixture() {
+    const checkout = mkdtempSync(join(tmpdir(), 'singz-capture-build-path-'))
+    const build = join(checkout, 'build', 'native', 'qualified')
+    mkdirSync(build, { recursive: true })
+    writeFileSync(join(build, 'CMakeCache.txt'), `CMAKE_HOME_DIRECTORY:INTERNAL=${checkout}\n`)
+    return { checkout, build }
+  }
+  it('keeps the default path and accepts an existing same-checkout build by relative or absolute path', () => {
+    const { checkout, build } = fixture()
+    try {
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64')).toBe(join(checkout, 'build', 'capture-linux-arm64'))
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/native/qualified')).toBe(build)
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', build)).toBe(build)
+    } finally { rmSync(checkout, { recursive: true, force: true }) }
+  })
+  it('rejects escaped paths, unconfigured directories and CMake trees belonging to a sibling', () => {
+    const { checkout, build } = fixture()
+    const sibling = mkdtempSync(join(tmpdir(), 'singz-capture-sibling-'))
+    try {
+      for (const path of ['../sibling-build', 'build/../outside', sibling, 'build'])
+        expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', path)).toThrow(/beneath/)
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/not-yet-created')).toThrow(/existing configured/)
+      writeFileSync(join(build, 'CMakeCache.txt'), `CMAKE_HOME_DIRECTORY:INTERNAL=${sibling}\n`)
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', build)).toThrow(/different source checkout/)
+    } finally {
+      rmSync(checkout, { recursive: true, force: true })
+      rmSync(sibling, { recursive: true, force: true })
+    }
+  })
+  it('rejects linked components even when the final requested directory does not exist', () => {
+    const { checkout, build } = fixture()
+    const sibling = mkdtempSync(join(tmpdir(), 'singz-capture-linked-build-'))
+    try {
+      symlinkSync(sibling, join(checkout, 'build', 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/linked/future')).toThrow(/symbolic links/)
+      symlinkSync(build, join(checkout, 'build', 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/alias')).toThrow(/symbolic links/)
+    } finally {
+      rmSync(checkout, { recursive: true, force: true })
+      rmSync(sibling, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('Electron capture addon build', () => {
   it('keeps desktop playback on the strict v4 prepare and complete status contract', () => {
@@ -197,8 +243,9 @@ describe('Electron capture addon build', () => {
     expect(main).toContain('if (isMainFrame && !inPlace) detached()')
     expect(main).toContain("ipcMain.handle('audio-host:monitor-begin'")
     expect(main).toContain("ipcMain.handle('audio-host:monitor-end'")
-    expect(main).toContain("app.on('before-quit', event => {")
-    expect(main).toContain('captureOwner.stop()')
+    const quitHandler = main.slice(main.indexOf("app.on('before-quit',"), main.indexOf("app.on('window-all-closed',"))
+    expect(quitHandler).toMatch(/app\.on\('before-quit',\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/)
+    expect(quitHandler).toContain('captureOwner.stop()')
   })
 
   it('binds renderer cleanup before every asynchronous audio startup', () => {
@@ -270,6 +317,42 @@ describe('Electron capture addon build', () => {
     )
     expect(built.status).toBe(0)
     expect(built.stdout.trim()).toBe(captureSourceFingerprint(root, electronVersion))
+    // Builder (explicit target) and loader agree for both the Linux Box build,
+    // which compiles LoopZ routing, and Desktop builds, which do not.
+    const byPlatform = new Map<string, string>()
+    for (const platform of ['linux', 'darwin', 'win32'] as const) {
+      const targeted = spawnSync(
+        process.execPath,
+        [resolve(root, 'scripts/build-capture-addon.cjs'), `${platform}-${process.arch}`, '--print-source-fingerprint'],
+        { cwd: root, encoding: 'utf8' }
+      )
+      expect(targeted.status, targeted.stderr).toBe(0)
+      expect(targeted.stdout.trim()).toBe(captureSourceFingerprint(root, electronVersion, platform))
+      byPlatform.set(platform, targeted.stdout.trim())
+    }
+    expect(byPlatform.get('darwin')).toBe(byPlatform.get('win32'))
+    expect(byPlatform.get('linux')).not.toBe(byPlatform.get('darwin'))
+  })
+
+  it('requires a clean LoopZ checkout only where Box LoopZ routing is compiled', () => {
+    const gitlink = require('../../scripts/zcore-gitlink.cjs') as {
+      boxLoopzRoutingEnabled(platform: string): boolean
+      loopzFingerprintInputs(root: string, platform: string): unknown
+    }
+    // An unrelated empty directory has no LoopZ submodule (nor any Git index).
+    const missing = mkdtempSync(join(tmpdir(), 'singz-no-loopz-'))
+    try {
+      expect(gitlink.boxLoopzRoutingEnabled('linux')).toBe(true)
+      for (const platform of ['darwin', 'win32']) {
+        expect(gitlink.boxLoopzRoutingEnabled(platform)).toBe(false)
+        expect(gitlink.loopzFingerprintInputs(missing, platform)).toBeNull()
+      }
+      expect(() => gitlink.loopzFingerprintInputs(missing, 'linux')).toThrow()
+    } finally {
+      rmSync(missing, { recursive: true, force: true })
+    }
+    expect(read('scripts/build-capture-addon.cjs'))
+      .toContain("-DSINGZ_BOX_LOOPZ_ROUTING=${boxLoopzRoutingEnabled(platform) ? 'ON' : 'OFF'}")
   })
 
   it('invalidates a checksummed artifact after its bytes are corrupted', () => {

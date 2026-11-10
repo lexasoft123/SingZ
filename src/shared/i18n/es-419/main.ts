@@ -76,6 +76,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "No hay líneas para guardar.",
   "main.error.couldNotSaveLyrics": "No se pudo guardar las letras: {message}",
   "main.error.lyricsJobAlreadyRunning": "Ya se está ejecutando una tarea de letras.",
+  "main.error.existingLyricsUnreadable": "No se pudo leer la letra guardada, así que no se modificó. Ábrela en el editor de letras o vuelve a transcribirla.",
   "main.error.noLinesToAlign": "No hay líneas que alinear.",
   "main.error.splitFirstAlign": "Separa primero las pistas — la sincronización utiliza la pista de voz.",
   "main.error.preciseNeedsPack": "La alineación precisa se ejecuta a través del paquete de separadores – instálalo primero en el administrador del modelo.",

@@ -7,6 +7,7 @@ import type {
 } from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
 import { fmtTime, modalCoversApp } from '../model'
+import { lyricSweepProgress, sweepEnds } from '../audio/lyric-timing'
 import type { LyricsState } from '../lyrics-state'
 import { t, tn, T } from '../i18n'
 
@@ -50,29 +51,6 @@ interface Props {
    */
   beginRequest: () => () => boolean
   onCancel: () => void
-}
-
-/**
- * A gap this short before the next word is the aligner's slack rather than a
- * rest — the sweep runs through it so the fill never freezes mid-line. Longer
- * gaps are a real breath or a held note: the word stays lit instead of
- * crawling across the silence. (LRC word times are contiguous by
- * construction, so this only ever engages on aligner timings.)
- */
-const WORD_BRIDGE_S = 0.35
-/** A word can arrive with e <= s (whisper -ml 1 wrote such words into older
- *  lyrics.json files); never divide by zero or sweep backwards. */
-const MIN_WORD_S = 0.05
-
-/** Per word, the moment its sweep should reach the end of the glyphs. */
-function sweepEnds(lines: LyricLine[]): number[][] {
-  return lines.map((l) =>
-    l.words.map((w, i) => {
-      const to = i + 1 < l.words.length ? l.words[i + 1].s : l.end
-      const gap = to - w.e
-      return Math.max(gap > 0 && gap < WORD_BRIDGE_S ? to : w.e, w.s + MIN_WORD_S)
-    })
-  )
 }
 
 function findLine(lines: LyricLine[], t: number, from: number): number {
@@ -168,9 +146,8 @@ export default function LyricsPanel({
           // note stops invalidating style on frames it could not change.
           const lineEnds = ends[li]
           for (let i = 0; i < words.length && i < spans.length; i++) {
-            const span = lineEnds[i] - words[i].s
-            const raw = (pos - words[i].s) / span
-            const p = String(Math.round(Math.min(1, Math.max(0, raw)) * 200) / 200)
+            const raw = lyricSweepProgress(words[i], lineEnds[i], pos)
+            const p = String(Math.round(raw * 200) / 200)
             const sp = spans[i] as HTMLElement
             if (sp.dataset.p !== p) {
               sp.dataset.p = p

@@ -76,6 +76,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "Não há linhas para salvar.",
   "main.error.couldNotSaveLyrics": "Não foi possível salvar as letras: {message}",
   "main.error.lyricsJobAlreadyRunning": "A letra está sendo processada.",
+  "main.error.existingLyricsUnreadable": "Não foi possível ler a letra salva, então ela não foi alterada. Abra-a no editor de letras ou transcreva novamente.",
   "main.error.noLinesToAlign": "Não há linhas para alinhar.",
   "main.error.splitFirstAlign": "Separe as faixas primeiro — a sincronização usa a faixa de voz.",
   "main.error.preciseNeedsPack": "O alinhamento preciso é aplicado através do pacote de separadores — instale-o primeiro no gerenciador de modelos.",

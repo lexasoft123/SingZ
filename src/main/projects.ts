@@ -45,16 +45,25 @@ import { hashFile } from './separation'
 import { isIssuedLead } from './vocal-separation'
 import { readSettings, writeSettings } from './settings'
 import { AUDIO_EXT } from './source'
+import { productProfileDir } from '../shared/product-identity'
+
+function defaultProjectsRoot(): string {
+  return join(app.getPath('documents'), productProfileDir(process.env.SINGZ_SURFACE))
+}
+
+function legacyProjectsRoot(): string {
+  return join(app.getPath('music'), productProfileDir(process.env.SINGZ_SURFACE))
+}
 
 /**
- * User-visible project library: ~/Documents/SingZ/<song name>/ by default,
- * relocatable (settings.json) into a cloud-synced folder — iCloud Drive /
- * Google Drive / OneDrive are plain folders to us; their apps do the syncing.
+ * User-visible project library: ~/Documents/SingZ (Desktop) or
+ * ~/Documents/SingZ Box (Box), relocatable in settings.json to a cloud-synced
+ * folder. Explicitly configured roots may be shared between products.
  */
 export function projectsRoot(): string {
   const custom = readSettings().projectsRoot
   if (custom && existsSync(custom)) return custom
-  return join(app.getPath('documents'), 'SingZ')
+  return defaultProjectsRoot()
 }
 
 /**
@@ -67,7 +76,7 @@ export function inLibrary(dir: string): boolean {
   return dir === root || dir.startsWith(root + sep)
 }
 
-/** Cloud-synced folders present on this machine (each proposes a SingZ subfolder). */
+/** Cloud-synced folders present on this machine, with product-local proposals. */
 export function listCloudRoots(): CloudRoot[] {
   const home = app.getPath('home')
   const candidates: { label: string; base: string }[] = [
@@ -93,7 +102,7 @@ export function listCloudRoots(): CloudRoot[] {
   for (const c of candidates) {
     if (!existsSync(c.base) || seen.has(c.label)) continue
     seen.add(c.label)
-    out.push({ label: c.label, path: join(c.base, 'SingZ') })
+    out.push({ label: c.label, path: join(c.base, productProfileDir(process.env.SINGZ_SURFACE)) })
   }
   return out
 }
@@ -102,13 +111,13 @@ export function getStorage(): { root: string; isDefault: boolean; cloud: CloudRo
   const root = projectsRoot()
   return {
     root,
-    isDefault: root === join(app.getPath('documents'), 'SingZ'),
+    isDefault: root === defaultProjectsRoot(),
     cloud: listCloudRoots()
   }
 }
 
 /**
- * Move the library to a new folder (null = back to Documents/SingZ).
+ * Move the library to a new folder (null = back to the product's Documents folder).
  * Existing projects are copied (never deleted) so a half-synced cloud folder
  * can't lose anything; collisions keep whatever the target already has.
  */
@@ -117,7 +126,7 @@ export async function setProjectsRoot(
 ): Promise<{ ok: true; root: string; copied: number } | { ok: false; error: string }> {
   try {
     const oldRoot = projectsRoot()
-    const newRoot = path ?? join(app.getPath('documents'), 'SingZ')
+    const newRoot = path ?? defaultProjectsRoot()
     if (newRoot === oldRoot) return { ok: true, root: newRoot, copied: 0 }
     await mkdir(newRoot, { recursive: true })
     let copied = 0
@@ -142,9 +151,9 @@ export async function setProjectsRoot(
   }
 }
 
-/** Projects lived in ~/Music/SingZ before 0.2.4 — move them over once. */
+/** Migrate only the active product's pre-0.2.4 library, never Desktop's into Box. */
 export async function migrateProjects(): Promise<void> {
-  const legacy = join(app.getPath('music'), 'SingZ')
+  const legacy = legacyProjectsRoot()
   if (!(await exists(legacy))) return
   try {
     if (!(await exists(projectsRoot()))) {

@@ -1,4 +1,7 @@
 #include "playback_addon_bridge.h"
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+#include "../playback/box_routing_owner.h"
+#endif
 
 #include "native_audio_ownership.h"
 #include "../playback/shared_audio_service.h"
@@ -1393,6 +1396,12 @@ bool consumeProviderDeviceUid(const std::string &provider,
 #elif defined(__APPLE__)
   return provider == "coreaudio";
 #elif defined(__linux__) && !defined(__ANDROID__)
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  // This is the advertised driverless song endpoint, never a physical ALSA UID.
+  // Admit it only after the independent Box host has installed its routing owner.
+  if (boxRoutingInitialized() && provider == "alsa" && *deviceUid == "native:singz")
+    return true;
+#endif
   return provider == "alsa" && deviceUid->starts_with("alsa:");
 #else
   (void)provider;
@@ -2331,6 +2340,7 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
     // fed, and says so in the log.
     setValue(env, lane, "streamed", makeBool(env, source.lanes[index].streamed));
     setCounter(env, lane, "starvedBlocks", source.lanes[index].starvedBlocks);
+    setCounter(env, lane, "stagedJumps", source.lanes[index].stagedJumps);
     // No envelope here: it never changes for a generation. playbackLanePeaks
     // publishes it once instead.
     napi_set_element(env, lanes, index, lane);

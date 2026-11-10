@@ -1,0 +1,117 @@
+# SingZ Box packaging
+
+SingZ Box has a separate Debian identity from SingZ Desktop:
+
+- Application ID: `com.lexasoft.singz.box`
+- Display name: `SingZ Box`
+- Filesystem product name and installation directory: `singz-box` and `/opt/singz-box`
+- Executable and Debian package: `singz-box`
+- Desktop entry: `singz-box.desktop`
+- Packaged metadata: `name: singz-box`, `productName: SingZ Box` and `singzProduct: box`
+
+The builder uses `productName: singz-box` for its Debian installation path. Packaged Electron metadata and the desktop entry retain the display name `SingZ Box`; app ID, preferences and project directories remain unchanged.
+
+The dedicated executable reads the packaged product metadata and starts Box without a `--box` command-line argument. Desktop development and `npm run dist` keep their existing identity and behavior.
+
+## Build
+
+Run the packaging command on a native Linux builder after the normal worktree and engine provisioning described in [development setup](../../DEVELOPMENT.md):
+
+```bash
+npm run dist:box
+npm run dist:box -- --x64
+npm run dist:box -- --arm64
+```
+
+Use only the architecture supported by the builder and its provisioned native inputs. The command uses `scripts/dist.cjs`; do not invoke electron-builder directly. The wrapper prepares and verifies the requested engines and capture-addon snapshots, builds both renderer surfaces, runs the applicable host smoke check, and verifies the snapshots again immediately before packaging.
+
+Container builders need an init/reaper, for example Podman's `--init`, or a
+subreaper around the build command. A container running only `sleep infinity`
+as PID 1 can retain orphaned `esbuild` zombies. Their process group remains
+visible, so the native build guard correctly fails cleanup and retains its lock
+even when a Debian artifact was produced. Preserve the lock owner and process
+evidence; prove the owner and descendants stopped before clearing a stale lock.
+Then retry the normal wrapper with a working reaper, without bypassing the guard.
+
+The internal `--box` selector is consumed by the wrapper. It is not an application launch argument and is never forwarded to electron-builder. After the normal target and safety validation, the wrapper adds the fixed `electron-builder.box.yml` configuration itself. Caller-supplied config, project, prepackaged-input, and unsupported architecture forms are rejected before the build phases.
+
+Artifacts are isolated from Desktop output:
+
+```text
+dist/box/SingZ-Box-<version>-linux-<arch>.deb
+```
+
+The configuration extends `electron-builder.yml`, retaining its native resources, file exclusions, Debian dependencies, packaging hooks, and signing behavior. Box overrides identity, launcher metadata, artifact naming, its own config exclusion, and `dist/box` output. The supported `publish: null` setting explicitly disables the inherited Desktop GitHub publishing/update feed, so the Box package has no inherited Desktop update feed. The wrapper still adds `--publish never` when no explicit publish option is present, so an ordinary packaging run does not publish a release.
+
+## Box audio and CEC resources
+
+`resources/linux` ships once, outside the asar, as
+`/opt/singz-box/resources/box-audio` (`extraResources`); the Box config excludes
+it from `app.asar`, and only unpackaged development runs read it from the
+checkout. It contains the CEC helper `cec-input.py` (hence the `python3`
+dependency), the opt-in user unit `singz-box-audio.service`, its launcher
+`singz-box-with-audio` (executable), and `singz-box-rtprio.conf`. The package
+installs nothing outside `/opt`, `/usr/bin` and desktop metadata, and enables no
+service. The installed CI stage (`scripts/ci/linux-package.sh`) asserts these
+files, the launcher mode, the `python3` dependency, and that the installed Box
+`app.asar` holds no `dist/` or `resources/linux` entries.
+
+### Real-time audio priority
+
+zCore's ALSA I/O threads request `SCHED_FIFO` 20 and the Box song producer a
+lower `SCHED_FIFO` priority. The service is a systemd **user** unit. Its
+`LimitRTPRIO=20` raises only the soft limit, and systemd clamps it to the user
+manager's hard limit, which is 0 on a default Debian system. In that case the
+unit still starts; each thread logs one warning and runs at normal priority.
+
+To grant real-time priority with the least privilege, the appliance image
+installs `box-audio/singz-box-rtprio.conf` as
+`/etc/systemd/system/user@<UID>.service.d/singz-box-rtprio.conf` for the single
+appliance user, then runs `systemctl daemon-reload` and restarts that user's
+manager. The drop-in sets `LimitRTPRIO=0:20`: hard limit 20 and soft limit 0, so
+only the service, which raises its own soft limit, runs real-time. The Debian
+package deliberately does not install it. A package-wide `/etc/security/limits.d`
+grant would apply to every login or `audio` group member without consent. Do not
+use rtkit workarounds, root services, or `--no-sandbox`. The kernel's default
+`sched_rt_runtime_us` throttle remains the runaway guard. Qualify the result with
+`journalctl --user -u singz-box-audio`: no `SCHED_FIFO ... request failed`
+warnings, and `chrt -p` on the ALSA worker threads.
+
+## Product data
+
+Box state is separated from Desktop by product. Preferences, OAuth state, and sessions are stored under `appData/SingZ Box`. Model and accelerator caches are stored under `appData/SingZ Box/models` and `appData/SingZ Box/gpu-splitter`, respectively. Projects are stored under `Documents/SingZ Box`. Desktop preferences, sessions, caches, and project directories remain unchanged.
+
+## Inspect an artifact
+
+Run from the repository root and choose the architecture you built:
+
+```bash
+version=$(node -p 'require("./package.json").version')
+artifact="dist/box/SingZ-Box-${version}-linux-arm64.deb"
+dpkg-deb -f "$artifact" Package Version Architecture
+dpkg-deb -c "$artifact"
+```
+
+The package name must be `singz-box`. Its payload must include `/opt/singz-box/singz-box`, `/usr/share/applications/singz-box.desktop`, and product-specific icons under `/usr/share/icons/hicolor/*/apps/singz-box.*`. It must not replace Desktop's `/opt/SingZ` contents, `singz.desktop`, or `singz` icons.
+
+On an installed test system, separately verify the binary link and check that it resolves to the Box installation rather than Desktop:
+
+```bash
+readlink -f /usr/bin/singz-box
+```
+
+The result must be `/opt/singz-box/singz-box`. Also confirm that `/usr/bin/singz` and the Desktop icons have not been replaced. Launch `singz-box` normally; no profile flag is required.
+
+## Packaging checks
+
+The tooling checks parse the real configurations with the installed electron-builder parser, validate the schema, generate the Linux desktop entry, and exercise the dist-wrapper request parser without producing app or native build output:
+
+```bash
+node --test tests/tooling/box-package*.test.cjs
+```
+
+The main build maps its `index` entry to `src/main/bootstrap.ts`. Consequently the packaged entry remains `out/main/index.js`; the bootstrap selects the profile and dynamically imports the application index as a chunk in that same directory. Renderer staging remains isolated from this main-process output.
+
+### Linux font fallback
+
+The Box Debian package depends on `fonts-noto-cjk` for Chinese labels and lyrics. The appliance runtime image must include that font as well: host font installation alone does not supply fonts inside a container. UIKit remains the primary font; CJK glyphs use the installed fallback. Qualify actual rendered Chinese text in the packaged app.

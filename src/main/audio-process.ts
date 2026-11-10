@@ -1,9 +1,12 @@
+import { retainedPlaybackSnapshot } from '../shared/box-retained-playback'
+import type { BoxRetainedPlaybackSnapshot } from '../shared/box-contract'
 import { app, utilityProcess, type UtilityProcess } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CaptureOwner, type NativeCaptureBinding } from './capture'
 import { log, logChunk } from './log'
+import { createBoxAudioClient } from './box-audio/client'
 import {
   AUDIO_BINDING_METHODS,
   AudioProcessRpc,
@@ -210,7 +213,9 @@ class DesktopAudioProcess {
 
 }
 
-export const desktopAudioProcess = new DesktopAudioProcess()
+const boxAudioProcess = process.env.SINGZ_SURFACE === 'box' && process.env.SINGZ_BOX_AUDIO_SOCKET
+  ? createBoxAudioClient(process.env.SINGZ_BOX_AUDIO_SOCKET) : undefined
+export const desktopAudioProcess = boxAudioProcess ?? new DesktopAudioProcess()
 
 let lastFallbackError = ''
 let lastFallbackLogAt = 0
@@ -243,11 +248,12 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
     get(_target, method: string) {
       if (method === 'bindRendererCleanup') return (id: number) => { if (cleanup.has(id)) return false; cleanup.add(id); return true }
       if (method === 'rendererGone' || method === 'rendererDetached') return (id: number) => lifecycle(method, id)
-      if (method === 'stop') return () => desktopAudioProcess.shutdown()
+      if (method === 'stop') return () => { stopBoxRetainedAssociations(); return desktopAudioProcess.shutdown() }
       return async (...args: unknown[]) => {
         try { return await desktopAudioProcess.call('owner', method, args) }
         catch (error) {
           reportFallback(method, error)
+          if (process.env.SINGZ_SURFACE === 'box' && process.env.SINGZ_BOX_AUDIO_SOCKET) throw error
           const fallback = unavailable[method as keyof CaptureOwner]
           if (typeof fallback !== 'function') throw error
           const result = (fallback as (...args: unknown[]) => unknown).apply(unavailable, args)
@@ -271,4 +277,95 @@ export function remoteCaptureBinding(): AwaitableCaptureBinding {
         : Promise.reject(new Error(`Unknown raw audio method: ${method}`))
     }
   }) as AwaitableCaptureBinding
+}
+
+function requireBoxAudioSocket(): void {
+  if (process.env.SINGZ_SURFACE !== 'box' || !process.env.SINGZ_BOX_AUDIO_SOCKET)
+    throw new Error('Persistent Box audio is not configured')
+}
+/** Trusted main-process routing only; never expose directly to phone guests. */
+export function boxRoutingRequest(json: string): Promise<string> {
+  requireBoxAudioSocket()
+  return boxAudioProcess!.call('routing', 'request', [json])
+}
+export function boxRoutingCapabilities(): Promise<unknown> {
+  requireBoxAudioSocket()
+  return boxAudioProcess!.call('routing', 'capabilities', [])
+}
+export function boxRoutingReconcile(): Promise<unknown> {
+  requireBoxAudioSocket()
+  return boxAudioProcess!.call('service', 'reconcile', [])
+}
+
+/** Explicit retained-session recovery reads are separate from active-player polling. */
+export async function boxRetainedPlaybackSnapshot(): Promise<BoxRetainedPlaybackSnapshot> {
+  requireBoxAudioSocket()
+  return retainedPlaybackSnapshot(await boxAudioProcess!.reconcile())
+}
+export async function boxStopRetainedPlayback(expected: { epoch: string; generation: string }): Promise<BoxRetainedPlaybackSnapshot> {
+  requireBoxAudioSocket()
+  // Clear uncertainty through an idle barrier, retaining the TV's original
+  // expected revision. The serialized host rejects stale epochs/generations.
+  await boxAudioProcess!.reconcile()
+  return retainedPlaybackSnapshot(await boxAudioProcess!.call('service', 'stopRetained', [expected]))
+}
+
+const boxAssociationPending = new Set<Promise<void>>()
+let boxAssociationStopped = false
+
+function stopBoxRetainedAssociations(): void {
+  boxAssociationStopped = true
+  boxAssociationPending.clear()
+}
+
+function scheduleBoxRetainedAssociation(
+  prepared: { epoch: string; generation: string },
+  project: { dir: string; songPath: string },
+  config: import('../shared/types').DesktopPlaybackPrepareConfig,
+  lanes: import('../shared/types').DesktopPlaybackLaneConfig[],
+  roots: { libraryRoot: string; driveProjectsRoot: string }
+): Promise<void> | undefined {
+  if (boxAssociationStopped) return undefined
+  if (boxAssociationPending.size >= 8) {
+    log('box-audio', `retained project association skipped · generation ${prepared.generation} · too many pending associations; relaunch recovery will require Stop`, 'warn')
+    return undefined
+  }
+  const task = (async (): Promise<void> => {
+    const { validateBoxRetainedProject } = await import('./box-audio/retained-project')
+    const descriptor = await validateBoxRetainedProject({ ...project, ...roots, config, lanes })
+    if (boxAssociationStopped) return
+    await boxAudioProcess!.call('service', 'associateRetainedProject', [{ expected: prepared, descriptor }])
+  })()
+  boxAssociationPending.add(task)
+  // Native playback stays valid without association, but relaunch recovery then
+  // falls back to explicit Stop; record why (outside the libraries, changed
+  // files, a descriptor over the control frame limit, a superseded prepare).
+  return task.catch(error => {
+    log('box-audio', `retained project association failed · generation ${prepared.generation} · ${error instanceof Error ? error.message : String(error)}; relaunch recovery will require Stop`, 'warn')
+  }).finally(() => { boxAssociationPending.delete(task) })
+}
+
+/** Native prepare is authoritative before optional retained-project association. */
+export async function boxPrepareRetainedPlayback(
+  rendererId: number,
+  config: import('../shared/types').DesktopPlaybackPrepareConfig,
+  lanes: import('../shared/types').DesktopPlaybackLaneConfig[],
+  roots: { libraryRoot: string; driveProjectsRoot: string }
+): Promise<import('../shared/types').DesktopPlaybackResult> {
+  requireBoxAudioSocket()
+  const nativeConfig = { ...config }
+  delete nativeConfig.retainedProject
+  const prepared = await boxAudioProcess!.callStamped<import('../shared/types').DesktopPlaybackResult>(
+    'owner', 'preparePlayback', [rendererId, nativeConfig, lanes])
+  const receipt = prepared.value
+  if (config.retainedProject && receipt.ok === true && /^[1-9][0-9]{0,19}$/.test(receipt.generation)) {
+    void scheduleBoxRetainedAssociation(
+      { epoch: prepared.epoch, generation: receipt.generation },
+      config.retainedProject,
+      nativeConfig,
+      lanes,
+      roots
+    )
+  }
+  return receipt
 }

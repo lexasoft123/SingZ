@@ -113,6 +113,8 @@ export interface LaneMeasureHost {
    * say so.
    */
   applies?: boolean
+  /** In-memory surface override; never writes the Desktop preference. */
+  nativePlaybackEnabled?: boolean
 }
 
 const liveHost = (): LaneMeasureHost => ({ api: window.singz })
@@ -126,7 +128,8 @@ export async function desktopLaneMeasureApplies(
   host: LaneMeasureHost = liveHost()
 ): Promise<boolean> {
   const platform = host.platform ?? detectedDesktopPlatform()
-  if (!desktopNativePlaybackPreferred(platform)) return false
+  const enabled = desktopNativePlaybackPreferred(platform, host.nativePlaybackEnabled)
+  if (!enabled) return false
   let runtime
   try {
     runtime = await host.api.desktopPlaybackCapability()
@@ -137,7 +140,7 @@ export async function desktopLaneMeasureApplies(
   // the size scripts/check-renderer-split.mjs expects.
   const { selectDesktopPlaybackBackend } = await import('./desktop-native-playback')
   const decision = selectDesktopPlaybackBackend(platform, {
-    enabled: true,
+    enabled,
     playbackRate: 1,
     transpose: 0,
     training: null,

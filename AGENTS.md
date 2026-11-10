@@ -8,6 +8,35 @@ runbooks. Follow relevant references as needed; small documentation or mechanica
 edits do not require unrelated guides. Current user and host instructions take
 precedence; historical memory must be checked against this checkout.
 
+## Private development handbook
+
+Before work involving team-managed hosts, deployment, remote or hardware testing,
+profiling, or shared-device scheduling, read the private `singz-dev` handbook:
+`README.md`, `docs/hosts.md`, `docs/testing.md`, and the relevant platform runbook.
+Use the checkout identified by `SINGZ_DEV_DIR` when set; otherwise locate the
+team's private `singz-dev` checkout or access the private repository through the
+team account. Do not assume a worktree's sibling directory is the handbook.
+
+`singz-dev` owns internal host inventory, access and credential-handling
+instructions, deployment topology, device reservations and host-specific test
+recipes. This repository owns portable build/test commands, product invariants
+and reusable test harnesses. Check dated handbook evidence against the current
+checkout and coordinate any exclusive device window before remote operations.
+Give delegated agents the relevant private runbook references and constraints.
+
+Keep internal addresses, usernames, machine-specific paths, access configuration,
+private recordings and diagnostic receipts in `singz-dev` or approved private
+artifact storage. Do not copy them into this repository, public PRs, issues,
+commit messages, CI logs or release notes; publish only sanitized validation
+summaries. Never put credential values in either repository. Record operational
+changes in the handbook rather than duplicating its inventory here.
+
+If private access is unavailable, continue portable local checks and report the
+missing internal verification. Ask for the handbook location/access before
+host-dependent work; never guess an endpoint or reconstruct private setup from
+historical public notes. Reading a runbook does not authorize deployments,
+reboots, credential access or external publication.
+
 ## Agents and ownership
 
 - For substantial work, state the goal, milestones, ownership, and acceptance

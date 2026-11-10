@@ -2,7 +2,9 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, type Me
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type {
+  CaptureStartConfig,
   DesktopMonitorConfig,
   DesktopPlaybackLaneMeasureRequest,
   DesktopPlaybackLaneMeasureResult,
@@ -65,6 +67,12 @@ import { registerStemExport } from './stem-export'
 import { registerDesktopAudioInput, stopDesktopAudioInput } from './audio-input'
 import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
+import { boxKioskRequested, desktopUpdaterEnabled, developmentRendererUrl, requestedRendererSurface } from './launch-surface'
+import { shouldDeferBoxApplicationQuit } from './box-close-policy'
+import { BoxQuitCoordinator, fromOwnMainFrame, settleWithin } from './box-quit-coordinator'
+import { registerBoxIpc } from './box/ipc'
+import { BoxCecService, boxCecEnabled } from './box/cec'
+import { boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
@@ -81,13 +89,6 @@ if (process.env.SINGZ_MUTE) {
   app.commandLine.appendSwitch('mute-audio')
 }
 
-// Test hook: isolate userData — concurrent E2E drivers (or a driver next to
-// a dev instance) sharing the default "Electron" profile crash each other's
-// renderers. Shared caches (models, GPU pack) stay in appData/SingZ.
-if (process.env.SINGZ_USERDATA_DIR) {
-  app.setPath('userData', resolve(process.env.SINGZ_USERDATA_DIR))
-}
-
 const separator = new Separator()
 const transcriber = new Transcriber()
 const modelManager = new ModelManager()
@@ -96,6 +97,19 @@ const laneMeasureCache = new LaneMeasureCache({
   cacheDir: join(app.getPath('userData'), 'lane-measure-cache-v1'),
   measure: request => captureOwner.measurePlaybackLanes(request),
   onBatch: batch => log('dsp', describeLaneMeasureBatch(batch))
+})
+let boxBackend: ReturnType<typeof registerBoxIpc> = null
+let boxBackendDisposeStarted = false
+let boxCec: BoxCecService | null = null
+// Box close/quit handshake bookkeeping lives in a tested pure module. Windows
+// are keyed by BrowserWindow, never webContents: a destroyed window's
+// webContents getter throws, and the fallback timers can outlive the window.
+const boxQuit = new BoxQuitCoordinator<BrowserWindow>({
+  isDestroyed: win => win.isDestroyed(),
+  requestRendererClose: win => win.webContents.send('box:close-request'),
+  closeWindow: win => win.close(),
+  resumeQuit: () => app.quit(),
+  warn: message => log('app', message, 'warn')
 })
 
 /** Every window hears about Drive: progress while a sync runs, and the state
@@ -156,35 +170,49 @@ const scheduler = new SyncScheduler({
 if (!process.env.SINGZ_NO_SYNC) onDirty(() => scheduler.notifyDirty())
 
 function createWindow(): void {
+  const surface = requestedRendererSurface(process.argv)
   const st = loadWindowState({ width: 1240, height: 820 })
   // Cage needs a mapped Wayland surface before the first frame. Waiting for
   // ready-to-show with an initially hidden window can leave startup blank.
   // Preserve the explicit hidden-window contract used by automated drivers.
   const showOnWayland = process.platform === 'linux'
     && Boolean(process.env.WAYLAND_DISPLAY) && !process.env.SINGZ_E2E_HIDDEN
+  const kiosk = boxKioskRequested(surface, {
+    developmentUrl: process.env['ELECTRON_RENDERER_URL'],
+    hiddenTest: Boolean(process.env.SINGZ_E2E_HIDDEN),
+    windowed: process.env.SINGZ_BOX_WINDOWED === '1'
+  })
   const win = new BrowserWindow({
-    width: st.width,
-    height: st.height,
-    ...(st.x !== undefined && st.y !== undefined ? { x: st.x, y: st.y } : {}),
-    minWidth: 940,
-    minHeight: 600,
+    width: surface === 'box' ? 1600 : st.width,
+    height: surface === 'box' ? 900 : st.height,
+    ...(surface === 'desktop' && st.x !== undefined && st.y !== undefined ? { x: st.x, y: st.y } : {}),
+    minWidth: surface === 'box' ? 640 : 940,
+    minHeight: surface === 'box' ? 360 : 600,
     show: showOnWayland,
-    ...(process.platform === 'darwin'
+    ...(surface === 'box'
       ? {
-          backgroundColor: '#12100d',
-          titleBarStyle: 'hiddenInset' as const,
-          trafficLightPosition: { x: 18, y: 17 }
+          frame: false,
+          autoHideMenuBar: true,
+          fullscreen: kiosk,
+          kiosk,
+          backgroundColor: '#12100d'
         }
-      : process.platform === 'win32'
+      : process.platform === 'darwin'
         ? {
-            // Fully frameless + transparent so the renderer can draw rounded
-            // corners (Windows 10 never rounds native frames). Window buttons
-            // are ours, wired over IPC.
-            frame: false,
-            transparent: true,
-            backgroundColor: '#00000000'
+            backgroundColor: '#12100d',
+            titleBarStyle: 'hiddenInset' as const,
+            trafficLightPosition: { x: 18, y: 17 }
           }
-        : { backgroundColor: '#12100d' }),
+        : process.platform === 'win32'
+          ? {
+              // Fully frameless + transparent so the renderer can draw rounded
+              // corners (Windows 10 never rounds native frames). Window buttons
+              // are ours, wired over IPC.
+              frame: false,
+              transparent: true,
+              backgroundColor: '#00000000'
+            }
+          : { backgroundColor: '#12100d' }),
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.mjs'),
       sandbox: false,
@@ -197,7 +225,31 @@ function createWindow(): void {
   })
 
   attachRendererLogs(win.webContents)
-  trackWindowState(win)
+  boxBackend?.attachRenderer(win.webContents)
+  if (surface === 'box' && boxCec) {
+    let loaded = false
+    const cec = boxCec
+    cec.attach({
+      ready: () => loaded && !win.isDestroyed() && win.isFocused() && !boxQuit.isClosing(win),
+      send: input => { if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.sendInputEvent(input) }
+    })
+    win.webContents.on('did-start-navigation', (_event, _url, _inPlace, mainFrame) => {
+      if (mainFrame) { loaded = false; cec.releaseKeys() }
+    })
+    win.webContents.on('did-finish-load', () => { loaded = true })
+    win.webContents.on('render-process-gone', () => { loaded = false; cec.releaseKeys() })
+    win.on('blur', () => cec.releaseKeys())
+    win.once('closed', () => cec.detach())
+  }
+  if (surface === 'desktop') trackWindowState(win)
+  if (surface === 'box') {
+    win.on('close', (event) => {
+      if (!boxQuit.interceptClose(win)) return
+      event.preventDefault()
+      boxCec?.releaseKeys()
+    })
+    win.once('closed', () => boxQuit.windowClosed(win))
+  }
   win.on('maximize', () => win.webContents.send('win:maximized', true))
   win.on('unmaximize', () => win.webContents.send('win:maximized', false))
   win.on('ready-to-show', () => {
@@ -220,7 +272,7 @@ function createWindow(): void {
       readGpuSoon()
       return
     }
-    if (st.maximized) win.maximize()
+    if (surface === 'desktop' && st.maximized) win.maximize()
     if (win.isVisible()) readGpuSoon()
     else {
       win.once('show', readGpuSoon)
@@ -249,9 +301,9 @@ function createWindow(): void {
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
-    void win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    void win.loadURL(developmentRendererUrl(process.env['ELECTRON_RENDERER_URL'], surface))
   } else {
-    void win.loadFile(join(import.meta.dirname, '../renderer/index.html'))
+    void win.loadFile(join(import.meta.dirname, surface === 'box' ? '../renderer/box/box.html' : '../renderer/index.html'))
   }
 }
 
@@ -265,9 +317,16 @@ function registerIpc(): void {
     else w.maximize()
   })
   ipcMain.on('win:close', (e) => BrowserWindow.fromWebContents(e.sender)?.close())
+  ipcMain.on('box:close-ready', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win.isDestroyed() || !fromOwnMainFrame(e, win.webContents)) return
+    boxQuit.acknowledge(win)
+  })
   ipcMain.handle('win:is-maximized', (e) => BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false)
   ipcMain.handle('update:state', () => updateState())
-  ipcMain.on('update:install', () => installUpdate())
+  ipcMain.on('update:install', () => {
+    if (desktopUpdaterEnabled(requestedRendererSurface(process.argv))) installUpdate()
+  })
 
   ipcMain.handle('splitter:mode', async () => {
     try {
@@ -356,6 +415,12 @@ function registerIpc(): void {
       return res
     }
   )
+
+  ipcMain.handle('lyrics:get-cached', async (_e, raw: string) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
+    return transcriber.readCached(full)
+  })
 
   ipcMain.handle('lyrics:align-caps', async () => ({ precise: await preciseCapable() }))
 
@@ -655,7 +720,7 @@ function registerIpc(): void {
   }
   ipcMain.handle(
     'capture:begin',
-    async (e, config: { deviceUid?: string; inputChannel: number; ringBlocks?: number }, generation: string) => {
+    async (e, config: CaptureStartConfig, generation: string) => {
       try {
         bindNativeAudioCleanup(e.sender)
         const result = await captureOwner.begin(e.sender.id, config, String(generation), (window) => {
@@ -808,7 +873,12 @@ function registerIpc(): void {
       if (!callerIsCurrent())
         return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
       // Lifecycle is already bound and fenced across capability discovery and seed lookup.
-      const result = await captureOwner.preparePlayback(event.sender.id, config, seeded)
+      const persistentBox = process.env.SINGZ_SURFACE === 'box' && Boolean(process.env.SINGZ_BOX_AUDIO_SOCKET)
+      const result = persistentBox
+        ? await boxPrepareRetainedPlayback(event.sender.id, config, seeded, {
+            libraryRoot: projectsRoot(), driveProjectsRoot: join(app.getPath('userData'), 'drive-projects')
+          })
+        : await captureOwner.preparePlayback(event.sender.id, config, seeded)
       // Both outcomes are logged by the owner, which is where the timing, the
       // seam and the negotiated format are known. Saying it twice here only
       // made the log harder to read.
@@ -955,11 +1025,13 @@ app.whenReady().then(async () => {
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
   logHardwareInfo()
-  startUpdater((st) => {
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('update:state', st)
-    }
-  })
+  if (desktopUpdaterEnabled(requestedRendererSurface(process.argv))) {
+    startUpdater((st) => {
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('update:state', st)
+      }
+    })
+  }
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   await migrateProjects()
@@ -970,6 +1042,39 @@ app.whenReady().then(async () => {
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
   registerIpc()
+  boxCec = new BoxCecService({
+    enabled: boxCecEnabled(process.platform, requestedRendererSurface(process.argv), process.env),
+    helperPath: app.isPackaged ? join(process.resourcesPath, 'box-audio/cec-input.py')
+      : join(app.getAppPath(), 'resources/linux/cec-input.py'),
+    device: process.env.SINGZ_BOX_CEC_DEVICE
+  })
+  boxCec.start()
+  boxBackend = registerBoxIpc({
+    userDataDir: app.getPath('userData'),
+    log: message => log('box', message, 'warn'),
+    appVersion: app.isPackaged ? app.getVersion() : 'dev',
+    rendererURL: process.env.ELECTRON_RENDERER_URL
+      ? developmentRendererUrl(process.env.ELECTRON_RENDERER_URL, 'box')
+      : pathToFileURL(join(import.meta.dirname, '../renderer/box/box.html')).toString(),
+    socketPath: process.env.SINGZ_BOX_PLATFORM_SOCKET,
+    retainedPlaybackSnapshot: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRetainedPlaybackSnapshot : undefined,
+    stopRetainedPlayback: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxStopRetainedPlayback : undefined,
+    restoreRetainedPlayback: process.env.SINGZ_BOX_AUDIO_SOCKET ? async (expected) => {
+      const { restoreBoxRetainedPlayback } = await import('./box-audio/retained-recovery')
+      const restored = await restoreBoxRetainedPlayback(expected, {
+        libraryRoot: projectsRoot(),
+        driveProjectsRoot: join(app.getPath('userData'), 'drive-projects'),
+        snapshot: boxRetainedPlaybackSnapshot
+      })
+      allowRoot(restored.project.dir)
+      return restored
+    } : undefined,
+    routingRequest: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRoutingRequest : undefined,
+    routingReconcile: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRoutingReconcile : undefined,
+    cecStatus: () => boxCec!.snapshot(),
+    audioInputs: () => captureOwner.devices(),
+    audioHost: () => captureOwner.hostDevices()
+  })
   createWindow()
 
   // Signed-in libraries reconcile on launch, not only after saves: analysis
@@ -992,7 +1097,25 @@ app.whenReady().then(async () => {
 let audioQuitPending = false
 let audioQuitComplete = false
 app.on('before-quit', event => {
+  void boxCec?.dispose()
   if (audioQuitComplete) return
+  if (shouldDeferBoxApplicationQuit(requestedRendererSurface(process.argv), boxQuit.cleanupFinished) &&
+      boxQuit.beforeQuit(BrowserWindow.getAllWindows())) {
+    event.preventDefault()
+    return
+  }
+  if (boxBackend && !boxBackendDisposeStarted) {
+    event.preventDefault()
+    boxBackendDisposeStarted = true
+    const backend = boxBackend
+    // A hung phone server or controller cannot hold the appliance open.
+    const disposal = backend.dispose().catch(error => log('app', `Box backend shutdown failed · ${String(error)}`, 'warn'))
+    void settleWithin(disposal, 5000, () => log('app', 'Box backend shutdown exceeded 5 seconds; quitting', 'warn')).finally(() => {
+      boxBackend = null
+      app.quit()
+    })
+    return
+  }
   event.preventDefault()
   if (audioQuitPending) return
   audioQuitPending = true
@@ -1006,6 +1129,7 @@ app.on('before-quit', event => {
     if (finishing) return
     finishing = true
     await captureOwner.stop()
+    await boxCec?.dispose()
     audioQuitComplete = true
     app.quit()
   }

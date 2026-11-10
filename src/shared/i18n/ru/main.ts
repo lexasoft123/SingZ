@@ -115,6 +115,7 @@ export const main: Translation<typeof en> = {
   'main.error.noLinesToSave': 'Нет строк для сохранения.',
   'main.error.couldNotSaveLyrics': 'Текст не сохранён: {message}',
   'main.error.lyricsJobAlreadyRunning': 'Задача с текстом уже выполняется.',
+  'main.error.existingLyricsUnreadable': 'Сохранённый текст песни не удалось прочитать, поэтому он не изменён. Откройте его в редакторе текста или распознайте заново.',
   'main.error.noLinesToAlign': 'Нет строк для выравнивания.',
   'main.error.splitFirstAlign': 'Сначала разделите песню на дорожки — выравнивание слушает дорожку вокала.',
   'main.error.preciseNeedsPack': 'Точное выравнивание работает через пакет разделения — установите его в менеджере моделей.',

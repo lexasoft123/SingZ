@@ -1,4 +1,7 @@
 #include "native_playback_session.h"
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+#include "box_routing_owner.h"
+#endif
 
 #include "streaming_lane_feeder.h"
 
@@ -334,6 +337,7 @@ struct PlaybackTransportCommand {
   // queued it; armed if it is the final one-shot of its drain, else discarded
   // there). See SignalsmithTimePitchSeekPlan for the race this closes.
   SignalsmithTimePitchSeekPlan seekPlan{};
+  uint64_t streamingJumpToken{0};
 };
 
 // Where the song is, for a reader that holds NO lock.
@@ -432,6 +436,16 @@ struct PreparedPlaybackTransport {
   std::array<PlaybackTransportCommand, kCommandCapacity> commands{};
   std::atomic<uint32_t> commandWrite{0};
   std::atomic<uint32_t> commandRead{0};
+  // Render-owned pending batch: release mailbox slots while a streamed jump
+  // stages, and retire superseded seek plans without exposing an early receipt.
+  // This storage is fixed at prepare, never shared with the producer.
+  struct PendingCommand {
+    PlaybackTransportCommand command{};
+    uint32_t cursor{0};
+  };
+  std::array<PendingCommand, kCommandCapacity> pendingCommands{};
+  uint32_t pendingCommandCount{0};
+  uint64_t retiredSeekCount{0};
   // The session's lock-free position sink. Set once, at prepare commit,
   // before any callback of this generation can run; never changed after, so
   // the callback reads a plain pointer. Shared, not borrowed: see the struct.
@@ -450,10 +464,28 @@ struct PreparedPlaybackTransport {
   zdsp::ProcessorHandle timePitchProcessor{};
   SignalsmithTimePitchLoopPlan initialTimePitchLoopPlan{};
   SignalsmithTimePitchReanchorPlan initialTimePitchReanchorPlan{};
+  // Streamed lanes' feeder, told at the exact slice the source position
+  // jumps so it can swap each lane's window to the region it staged there
+  // (StreamingLaneGroup::transportJumped). Set once at prepare, before any
+  // callback of this generation; owned by the same prepared graph, which
+  // destroys the transport first. Null for decoded lanes.
+  StreamingLaneGroup *streamingJumps{nullptr};
+  // Source frame of project frame 0 (the cue plan's entry).
+  uint64_t streamingSourceStart{0};
+  uint64_t streamingJumpTimeoutFrames{48000};
+  uint64_t callbackWaitingCommand{0};
+  uint64_t callbackWaitingSince{0};
+  bool callbackWaiting{false};
 
   // Control-domain desired state. Session mutex serialization is sufficient.
   NativePlaybackTransportState desiredState{
       NativePlaybackTransportState::Stopped};
+  // Latest queued seek intent, retained until a telemetry publication has
+  // passed its mailbox cursor. commandRead alone advances before telemetry
+  // and would expose the old position in that callback's publication gap.
+  bool desiredPositionValid{false};
+  uint32_t desiredPositionWrite{0};
+  int64_t desiredPositionFrame{0};
   bool desiredLoopEnabled{false};
   int64_t desiredLoopStart{0};
   int64_t desiredLoopEnd{0};
@@ -533,6 +565,7 @@ struct PreparedPlaybackTransport {
   std::atomic<uint32_t> publishedState{
       static_cast<uint32_t>(NativePlaybackTransportState::Stopped)};
   std::atomic<int64_t> publishedProjectFrame{0};
+  std::atomic<uint32_t> publishedCommandRead{0};
   std::atomic<uint32_t> publishedProjectFractionQ32{0};
   std::atomic<uint64_t> publishedContinuousFrame{0};
   std::atomic<uint64_t> publishedRemainingPreRoll{0};
@@ -653,6 +686,12 @@ struct PreparedPlaybackTransport {
                          std::memory_order_relaxed);
     publishedProjectFrame.store(telemetry.projectFrame,
                                 std::memory_order_relaxed);
+    // A loop setter that observes this receipt must also observe the frame
+    // above, rather than folding stale telemetry over an applied seek.
+    publishedCommandRead.store(pendingCommandCount != 0
+                                   ? pendingCommands[0].cursor
+                                   : commandRead.load(std::memory_order_relaxed),
+                                std::memory_order_release);
     publishedProjectFractionQ32.store(telemetry.projectFractionQ32,
                                       std::memory_order_relaxed);
     publishedContinuousFrame.store(telemetry.continuousFrame,
@@ -740,6 +779,14 @@ struct PreparedPlaybackTransport {
       return;
     const uint32_t read = commandRead.load(std::memory_order_acquire);
     const uint32_t write = commandWrite.load(std::memory_order_acquire);
+    // A seek may have left the mailbox for the render-owned pending batch.
+    // Retain its control-domain intent until telemetry confirms application.
+    const uint32_t distance = desiredPositionWrite -
+        publishedCommandRead.load(std::memory_order_acquire);
+    if (desiredPositionValid && distance != 0 && distance < (uint32_t{1} << 31)) {
+      anchor->projectFrame = desiredPositionFrame;
+      anchor->projectFractionQ32 = 0;
+    }
     // The producer is serialized by the session mutex and the callback never
     // overwrites mailbox entries. Scan the bounded unconsumed suffix so a
     // reanchor queued behind seeks is primed for the last positional intent,
@@ -797,6 +844,14 @@ struct PreparedPlaybackTransport {
   void resetForOpen() noexcept {
     commandRead.store(0, std::memory_order_relaxed);
     commandWrite.store(0, std::memory_order_relaxed);
+    pendingCommandCount = 0;
+    retiredSeekCount = 0;
+    callbackWaiting = false;
+    callbackWaitingCommand = 0;
+    callbackWaitingSince = 0;
+    desiredPositionValid = false;
+    desiredPositionWrite = 0;
+    desiredPositionFrame = initialProjectFrame;
     desiredState = NativePlaybackTransportState::Stopped;
     // Initial/restored transport is published as one prepared contract. The
     // callback still installs it on Start, but control commands issued before
@@ -926,17 +981,42 @@ struct PreparedPlaybackTransport {
                                      PlaybackTransportCommandKind::Seek,
                                      state, projectFrame, 0, 0};
     command.seekPlan = seekPlan;
+    if (!hasCommandCapacity()) return false;
+    if (streamingJumps != nullptr)
+      command.streamingJumpToken = streamingJumps->requestJump(
+          streamingSourceStart + static_cast<uint64_t>(projectFrame));
     if (!enqueue(command))
       return false;
+    desiredPositionFrame = projectFrame;
+    desiredPositionWrite = commandWrite.load(std::memory_order_relaxed);
+    desiredPositionValid = true;
     desiredState = state;
     return true;
   }
 
   bool setLoop(int64_t startFrame, int64_t endFrame,
                SignalsmithTimePitchLoopPlan loopPlan) noexcept {
-    if (!enqueue({generation, PlaybackTransportCommandKind::SetLoop,
-                  desiredState, 0, startFrame, endFrame, loopPlan}))
-      return false;
+    if (!hasCommandCapacity()) return false;
+    PlaybackTransportCommand command{generation, PlaybackTransportCommandKind::SetLoop,
+        desiredState, 0, startFrame, endFrame, loopPlan};
+    const uint32_t publishedRead = publishedCommandRead.load(std::memory_order_acquire);
+    Telemetry intent{};
+    intent.projectFrame = publishedProjectFrame.load(std::memory_order_relaxed);
+    const uint32_t pendingDistance = desiredPositionWrite - publishedRead;
+    if (desiredPositionValid && pendingDistance != 0 &&
+        pendingDistance < (uint32_t{1} << 31))
+      intent.projectFrame = desiredPositionFrame;
+    else
+      desiredPositionValid = false;
+    overlayQueuedPositionIntent(&intent);
+    const int64_t frame = intent.projectFrame;
+    if (streamingJumps != nullptr && frame >= endFrame &&
+        desiredState == NativePlaybackTransportState::Playing) {
+      command.projectFrame = startFrame + (frame - startFrame) % (endFrame - startFrame);
+      command.streamingJumpToken = streamingJumps->requestJump(
+          streamingSourceStart + static_cast<uint64_t>(command.projectFrame));
+    }
+    if (!enqueue(command)) return false;
     desiredLoopEnabled = true;
     desiredLoopStart = startFrame;
     desiredLoopEnd = endFrame;
@@ -1000,32 +1080,131 @@ struct PreparedPlaybackTransport {
     return emitted;
   }
 
+  // Render domain: lock-free and bounded by the lane count.
+  void noteSourceJumped() noexcept {
+    if (streamingJumps != nullptr && callbackProjectFrame >= 0)
+      streamingJumps->transportJumped(
+          streamingSourceStart + static_cast<uint64_t>(callbackProjectFrame));
+  }
+
   void applyCommands() noexcept {
     uint32_t read = commandRead.load(std::memory_order_relaxed);
     const uint32_t write = commandWrite.load(std::memory_order_acquire);
-    uint32_t finalOneShotCommand = 0;
-    bool hasFinalOneShotCommand = false;
-    for (uint32_t cursor = read; cursor != write; ++cursor) {
-      const PlaybackTransportCommand command =
-          commands[cursor % kCommandCapacity];
+    // Copy at most one mailbox's worth per callback. Coalescing here also
+    // works across an earlier SetLoop/Resume: neither can pin a long scrub's
+    // seek plans in the SPSC ring. Non-coalescible commands remain bounded.
+    while (read != write) {
+      const auto command = commands[read % kCommandCapacity];
+      if (command.generation == generation &&
+          command.kind == PlaybackTransportCommandKind::Seek &&
+          command.streamingJumpToken != 0) {
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < pendingCommandCount; ++i) {
+          const auto& previous = pendingCommands[i].command;
+          if (previous.generation == generation &&
+              previous.kind == PlaybackTransportCommandKind::Seek &&
+              previous.streamingJumpToken != 0) {
+            discardSignalsmithTimePitchSeekPlan(timePitchProcessor, previous.seekPlan);
+            increment(&retiredSeekCount);
+          } else {
+            pendingCommands[kept++] = pendingCommands[i];
+          }
+        }
+        pendingCommandCount = kept;
+      }
+      if (pendingCommandCount == kCommandCapacity) break;
+      pendingCommands[pendingCommandCount++] = {command, read++};
+    }
+    commandRead.store(read, std::memory_order_release);
+    uint32_t finalPlanCommand = 0;
+    bool hasFinalPlanCommand = false;
+    uint32_t finalRetirementCommand = 0;
+    bool hasFinalRetirementCommand = false;
+    uint32_t finalStreamingCommand = 0;
+    bool hasStreamingCommand = false;
+    for (uint32_t cursor = 0; cursor < pendingCommandCount; ++cursor) {
+      const PlaybackTransportCommand command = pendingCommands[cursor].command;
+      if (command.generation == generation && command.streamingJumpToken != 0) {
+        finalStreamingCommand = cursor;
+        hasStreamingCommand = true;
+      }
+      if (command.generation == generation &&
+          (command.kind == PlaybackTransportCommandKind::Reanchor ||
+           command.kind == PlaybackTransportCommandKind::Stop)) {
+        if (hasStreamingCommand)
+          streamingJumps->cancelJump(
+              pendingCommands[finalStreamingCommand].command.streamingJumpToken);
+        hasStreamingCommand = false;
+      }
+      // Pause silences the very next callback even while its preceding seek
+      // stages. Keep the command in order so the eventual seek cannot resume
+      // playback; a following Resume still waits for that landing.
+      if (command.generation == generation &&
+          command.kind == PlaybackTransportCommandKind::Pause &&
+          callbackState != NativePlaybackTransportState::Paused) {
+        callbackState = NativePlaybackTransportState::Paused;
+        callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+      }
+      if (command.generation == generation &&
+          (command.kind == PlaybackTransportCommandKind::Seek ||
+           command.kind == PlaybackTransportCommandKind::Reanchor ||
+           command.kind == PlaybackTransportCommandKind::Stop)) {
+        finalRetirementCommand = cursor;
+        hasFinalRetirementCommand = true;
+      }
+      // Stop can retire a streamed seek without moving its source, but a
+      // decoded seek still moves position and needs its prepared DSP plan.
+      // Only another Seek/Reanchor can supersede that plan, never Stop.
       if (command.generation == generation &&
           (command.kind == PlaybackTransportCommandKind::Seek ||
            command.kind == PlaybackTransportCommandKind::Reanchor)) {
-        finalOneShotCommand = cursor;
-        hasFinalOneShotCommand = true;
+        finalPlanCommand = cursor;
+        hasFinalPlanCommand = true;
       }
     }
-    while (read != write) {
-      const uint32_t commandIndex = read;
-      const PlaybackTransportCommand command =
-          commands[read % kCommandCapacity];
-      ++read;
+    // A SetLoop and Seek accepted together are one pending transition: do
+    // not enable the loop and wrap the OLD position while its seek stages.
+    // Inspect once, then either keep playing or drain the bounded batch.
+    if (hasStreamingCommand) {
+      const auto& pending = pendingCommands[finalStreamingCommand].command;
+      if (pending.streamingJumpToken != 0) {
+        const uint32_t cursor = pendingCommands[finalStreamingCommand].cursor;
+        if (!callbackWaiting || callbackWaitingCommand != cursor) {
+          callbackWaiting = true;
+          callbackWaitingCommand = cursor;
+          callbackWaitingSince = callbackContinuousFrame;
+        }
+        const uint64_t sourceFrame = streamingSourceStart +
+            static_cast<uint64_t>(pending.projectFrame);
+        if (!streamingJumps->commitJump(pending.streamingJumpToken, sourceFrame)) {
+          if (callbackContinuousFrame - callbackWaitingSince < streamingJumpTimeoutFrames)
+            return;
+          streamingJumps->cancelJump(pending.streamingJumpToken);
+        }
+        callbackWaiting = false;
+      }
+    }
+    callbackWaiting = false;
+    const uint64_t remainingReceipts = UINT64_MAX - callbackSeekCount;
+    callbackSeekCount += std::min(retiredSeekCount, remainingReceipts);
+    retiredSeekCount = 0;
+    for (uint32_t commandIndex = 0; commandIndex < pendingCommandCount; ++commandIndex) {
+      const PlaybackTransportCommand command = pendingCommands[commandIndex].command;
+      if (command.generation == generation &&
+          command.kind == PlaybackTransportCommandKind::Seek &&
+          command.streamingJumpToken != 0 && hasFinalRetirementCommand &&
+          commandIndex != finalRetirementCommand) {
+        discardSignalsmithTimePitchSeekPlan(timePitchProcessor, command.seekPlan);
+        increment(&callbackSeekCount);
+        continue;
+      }
       if (command.generation != generation)
         continue;
       switch (command.kind) {
       case PlaybackTransportCommandKind::Start:
         callbackProjectFrame = command.projectFrame;
         callbackProjectFractionQ32 = 0;
+        noteSourceJumped();
         callbackState = command.state;
         callbackLoopEnabled = command.loopEndFrame > command.loopStartFrame;
         callbackLoopStart = callbackLoopEnabled ? command.loopStartFrame : 0;
@@ -1051,6 +1230,7 @@ struct PreparedPlaybackTransport {
         const bool cancelsLanding = landingPending;
         callbackProjectFrame = command.projectFrame;
         callbackProjectFractionQ32 = 0;
+        noteSourceJumped();
         pendingSourcePositionMoved = true;
         landingPending = false;
         callbackState = command.state;
@@ -1063,7 +1243,7 @@ struct PreparedPlaybackTransport {
           // This command's own replacement: armed when it is the last one-shot
           // of the drain, returned to the pool otherwise. Never the mailbox —
           // see SignalsmithTimePitchSeekPlan for the seek pair that wedged.
-          if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand) {
+          if (hasFinalPlanCommand && commandIndex == finalPlanCommand) {
             if (armSignalsmithTimePitchSeekPlan(timePitchProcessor,
                                                 command.seekPlan))
               callbackTimePitchBoundaryPrepared = true;
@@ -1088,6 +1268,17 @@ struct PreparedPlaybackTransport {
         break;
       }
       case PlaybackTransportCommandKind::SetLoop:
+        if (command.streamingJumpToken != 0 && hasStreamingCommand &&
+            commandIndex == finalStreamingCommand) {
+          callbackProjectFrame = command.projectFrame;
+          callbackProjectFractionQ32 = 0;
+          noteSourceJumped();
+          pendingSourcePositionMoved = true;
+          callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+          queueDiscontinuity({zdsp::DiscontinuityReason::SourceLoop,
+                              zdsp::DiscontinuityFlagResetState |
+                                  zdsp::DiscontinuityFlagTimeValid});
+        }
         callbackLoopEnabled = true;
         callbackLoopStart = command.loopStartFrame;
         callbackLoopEnd = command.loopEndFrame;
@@ -1105,13 +1296,14 @@ struct PreparedPlaybackTransport {
         if (command.reanchorPlan.valid()) {
           callbackProjectFrame = command.projectFrame;
           callbackProjectFractionQ32 = command.projectFractionQ32;
+          noteSourceJumped();
           pendingSourcePositionMoved = true;
         }
         if (timePitchProcessor.state != nullptr) {
           // No mailbox discard here any more: seeks carry their own plans and
           // discard them in their own case above, and the mailbox holds only a
           // count-in landing's replacement, which a reanchor does not cancel.
-          if (hasFinalOneShotCommand && commandIndex == finalOneShotCommand) {
+          if (hasFinalPlanCommand && commandIndex == finalPlanCommand) {
             callbackTimePitchBoundaryPrepared =
                 armSignalsmithTimePitchReanchor(timePitchProcessor,
                                                 command.reanchorPlan);
@@ -1130,7 +1322,7 @@ struct PreparedPlaybackTransport {
         break;
       }
     }
-    commandRead.store(read, std::memory_order_release);
+    pendingCommandCount = 0;
   }
 
   void beginBlock(const AudioHostRenderBlock &block) noexcept {
@@ -1356,7 +1548,7 @@ struct PreparedPlaybackTransport {
 
   bool mailboxDrained() const noexcept {
     return commandWrite.load(std::memory_order_acquire) ==
-           commandRead.load(std::memory_order_acquire);
+           publishedCommandRead.load(std::memory_order_acquire);
   }
 
   // --- Replacing a generation on the running stream ---------------------
@@ -1501,6 +1693,7 @@ struct PreparedPlaybackTransport {
                              static_cast<uint64_t>(callbackLoopStart);
     callbackProjectFrame = callbackLoopStart +
                            static_cast<int64_t>(elapsed % span);
+    noteSourceJumped();
     pendingSourcePositionMoved = true;
     callbackState = NativePlaybackTransportState::Playing;
     callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
@@ -1586,6 +1779,7 @@ struct PreparedPlaybackTransport {
       landingPending = false;
       callbackProjectFrame = landingProjectFrame;
       callbackProjectFractionQ32 = 0;
+      noteSourceJumped();
       pendingSourcePositionMoved = true;
       callbackState = NativePlaybackTransportState::Playing;
       callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
@@ -1667,6 +1861,13 @@ struct PreparedPlaybackTransport {
     if (slice->discontinuity.reason != zdsp::DiscontinuityReason::None)
       callbackTimePitchBoundaryPrepared = false;
 
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    recordBoxSongSlice(block.callbackHostTimeNs +
+                           uint64_t(offset) * 1000000000ull / 48000,
+                       frames, generation, callbackProjectFrame,
+                       callbackProjectFractionQ32, playbackRateQ32,
+                       advancesProject ? 1u : 0u, callbackSeekCount);
+#endif
     callbackContinuousFrame += frames;
     if (advancesProject) {
       if (!advancePosition(frames)) {
@@ -2393,6 +2594,11 @@ struct PreparedPlaybackGraph {
     // answer through one place instead of at 24 call sites.
     std::shared_ptr<const DecodedAudio> owner;
     zdsp::StreamingWindow *window{nullptr};
+    // The feeder that owns `window`, and this lane's index in it. Frames are
+    // read through it rather than through window->channels, which the render
+    // thread re-points when a staged jump is swapped in.
+    StreamingLaneGroup *streamGroup{nullptr};
+    size_t streamIndex{0};
     uint32_t streamChannels{0};
     uint64_t streamFrames{0};
     uint64_t streamBytes{0};
@@ -2442,13 +2648,8 @@ struct PreparedPlaybackGraph {
         *value = owner->channelData(channel)[frame];
         return true;
       }
-      uint64_t start = 0;
-      uint64_t end = 0;
-      if (!zdsp::streamingWindowResident(window, &start, &end) ||
-          frame < start || frame >= end)
-        return false;
-      *value = window->channels[channel][frame & (window->capacityFrames - 1u)];
-      return true;
+      return streamGroup != nullptr &&
+             streamGroup->sampleAt(streamIndex, channel, frame, value);
     }
     std::array<const float *, zdsp::kMaximumChannelsPerBus> channelPointers{};
     std::array<zdsp::AudioChannelRole, zdsp::kMaximumChannelsPerBus> roles{};
@@ -6157,6 +6358,12 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   std::vector<std::optional<NativePlaybackLanePeaks>> waveformSeeds(sources.size());
   if (config.streamLanes && !adoptedParkedLanes) {
     streamingGroup = std::make_shared<StreamingLaneGroup>();
+    if (impl_->testHooks != nullptr) {
+      auto options = streamingGroup->options();
+      options.beforeStageDecode = impl_->testHooks->beforeStreamingStageDecode;
+      options.stageDecodeContext = impl_->testHooks->context;
+      streamingGroup->setOptions(options);
+    }
     for (size_t sourceIndex = 0; sourceIndex < sources.size(); ++sourceIndex) {
       auto &source = sources[sourceIndex];
       if (combined.isRequested())
@@ -6225,6 +6432,8 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       PreparedPlaybackGraph::Lane lane;
       lane.id = sources[index].id;
       lane.window = streamingGroup->window(index);
+      lane.streamGroup = streamingGroup.get();
+      lane.streamIndex = index;
       lane.streamChannels = info->channels;
       lane.streamFrames = laneFrames;
       lane.waveformKey = sources[index].sourceKey;
@@ -6470,6 +6679,40 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   // here rather than at Start keeps the window ahead of a pre-roll or an
   // initial seek, and an idle feeder costs one timed wait every 4 ms.
   if (streamingGroup != nullptr) {
+    // The lanes were primed at frame zero above, before the cue plan said
+    // where this song starts. Prime them again where the first block will
+    // actually read — the prepared start, or a count-in's landing — so that
+    // block does not play silence while the feeder chases it: a Play from a
+    // paused spot, a rebuild for a metronome or pitch change, and a count-in
+    // all start mid-song. Before the feeder thread runs, so nothing races it.
+    const uint64_t entrySource =
+        prepared->cuePlan != nullptr && prepared->cuePlan->sourceStartFrame > 0
+            ? static_cast<uint64_t>(prepared->cuePlan->sourceStartFrame)
+            : 0;
+    int64_t firstPlayed = preparedStartProjectFrame;
+    if (firstPlayed < 0)
+      firstPlayed = prepared->cuePlan != nullptr &&
+                            prepared->cuePlan->landingProjectFrame > 0
+                        ? prepared->cuePlan->landingProjectFrame
+                        : 0;
+    const uint64_t primeAt = entrySource + static_cast<uint64_t>(firstPlayed);
+    // A failure here leaves the window where the demand path will still
+    // chase it, which is how every start behaved before this prime existed.
+    if (primeAt != 0)
+      (void)streamingGroup->prime(primeAt);
+    if (config.initialTransport.loop.has_value())
+      streamingGroup->setLoop(
+          entrySource + static_cast<uint64_t>(
+                            config.initialTransport.loop->startProjectFrame),
+          entrySource + static_cast<uint64_t>(
+                            config.initialTransport.loop->endProjectFrame));
+    // Start/count-in landing is prepared along with the graph, before a host
+    // can invoke its first callback. It never pays decoder work in start().
+    (void)streamingGroup->stagePreparedStart(primeAt);
+    prepared->transport.streamingJumpTimeoutFrames =
+        static_cast<uint64_t>(prepared->sampleRate);
+    prepared->transport.streamingJumps = streamingGroup.get();
+    prepared->transport.streamingSourceStart = entrySource;
     prepared->streaming = std::move(streamingGroup);
     // Seed each usable lane independently; every other lane keeps its ordinary
     // background measurement. The persisted seed was validated again above.
@@ -7615,6 +7858,13 @@ NativePlaybackResult NativePlaybackSession::setLoop(uint64_t generation,
                                           loopPrepared.plan))
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded transport command mailbox is full");
+  // The feeder keeps the loop's head where the wrap will want it.
+  if (impl_->prepared->streaming != nullptr)
+    impl_->prepared->streaming->setLoop(
+        impl_->prepared->transport.streamingSourceStart +
+            static_cast<uint64_t>(startFrame),
+        impl_->prepared->transport.streamingSourceStart +
+            static_cast<uint64_t>(endFrame));
   return impl_->success(generation);
 }
 
@@ -7639,6 +7889,8 @@ NativePlaybackResult NativePlaybackSession::clearLoop(uint64_t generation) {
   if (!impl_->prepared->transport.clearLoop())
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded transport command mailbox is full");
+  if (impl_->prepared->streaming != nullptr)
+    impl_->prepared->streaming->clearLoop();
   return impl_->success(generation);
 }
 
@@ -8297,6 +8549,24 @@ NativePlaybackStatus NativePlaybackSession::status() const {
             NativePlaybackAudibleProjectionQuality::Current;
       }
     }
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (boxRoutingInitialized()) {
+      const auto projected = boxAudibleProjection(telemetry.generation,
+                                                  telemetry.seekCount, graphLatency);
+      result.audibleProjectionQuality = projected.available
+          ? NativePlaybackAudibleProjectionQuality::Current
+          : NativePlaybackAudibleProjectionQuality::Unavailable;
+      // Never leave the legacy graph-latency projection behind an unavailable
+      // routed clock; the Box output path supersedes it entirely.
+      result.audibleProjectFrame = projected.available ? projected.projectFrame : 0;
+      result.devicePresentationLatencyFrames = projected.routeDelayFrames;
+      result.totalPresentationLatencyFrames = projected.routeDelayFrames + graphLatency;
+      result.presentationLatencyFrames = result.totalPresentationLatencyFrames;
+      result.audibleFrames = projected.available &&
+          result.renderedFrames > result.totalPresentationLatencyFrames
+          ? result.renderedFrames - result.totalPresentationLatencyFrames : 0;
+    }
+#endif
     result.durationFrames = impl_->prepared->durationFrames;
     result.remainingPreRollFrames = telemetry.remainingPreRoll;
     result.cueEventsCompleted = telemetry.cueEventsCompleted;
@@ -8384,7 +8654,9 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       if (lane.streamed() && streaming != nullptr &&
           index < streaming->laneCount()) {
         laneStatus.streamed = true;
-        laneStatus.starvedBlocks = streaming->stats(index).starvedBlocks;
+        const StreamingLaneStats stats = streaming->stats(index);
+        laneStatus.starvedBlocks = stats.starvedBlocks;
+        laneStatus.stagedJumps = stats.swaps;
       }
       result.lanes.push_back(std::move(laneStatus));
     }

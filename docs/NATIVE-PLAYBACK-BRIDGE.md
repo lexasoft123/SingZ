@@ -590,6 +590,21 @@ and **read by nobody**: `parseNativePlaybackSession` parses neither, and the
 park proof in §8 reads them off the *cleanup receipt* instead. On this path
 they are diagnostics, not state.
 
+Streamed lane ring storage is fixed for the generation and is included in
+`retainedBytes`: two reusable 131072-frame rings at the default options,
+2097152 bytes per stereo lane (1048576 mono), versus 4194304 stereo bytes
+with the previous pair of 262144-frame rings. Eight stereo lanes retain
+16777216 ring bytes instead of 33554432. Short songs round each ring down to
+the next power of two covering the lane. The live ring now spans 2.73 s at
+48 kHz; refills target 65536 frames (1.37 s) ahead and stages hold 32768 frames
+(0.68 s) for long lanes. A lane that fits one ring stages its entire extent:
+a Start or seek at its last two frames can wrap to the head in that same
+callback, before the feeder could stage another region. Both ring allocations
+survive swaps and exchange live/standby roles;
+no callback allocation, temporary full-sized third ring or hidden retained
+ring storage is involved. Decoder/resampler scratch and graph arenas are
+separate from this per-lane ring byte count.
+
 ### Mix, training, cues, graph, health
 
 `masterGain`, `referenceGain` (linear); `trainingEnabled` (bool),
@@ -610,8 +625,41 @@ runs several times a second. `lanePeaks` publishes it once instead.
 The desktop's lanes carry two more, which the phones' do not emit yet:
 `streamed` (the lane plays out of the streaming feeder's window rather than a
 whole decode) and `starvedBlocks` (u64 string: render blocks this generation
-that wanted a frame the window did not hold, and played silence). One or two
-per seek is the design; one per block is a lane the feeder has stopped
+that wanted a frame the window did not hold, and played silence). ZERO is the
+design at a seek, a seek while paused, a loop wrap and a mid-song start: the
+session accepts a seek immediately and publishes a coalescing request to the
+feeder thread. The old position keeps playing while the latest landing is
+decoded; the callback changes position only after it can claim every lane's
+armed standby ring. `seekCount` advances when the batch lands, including the
+superseded requests retired with it, so the latest seek's receipt is not
+published early. Each callback drains the mailbox into a fixed render-owned
+batch, releasing superseded seek plans and anchor slots while staging is still
+pending. A long scrub therefore retains only its latest seek, including across
+an earlier loop edit or resume. Pause silences the next callback immediately;
+its ordered application also leaves the eventual landing paused. A following
+Resume still waits for that landing. Stop cancels a pending streamed jump and
+silences any final callback before host quiescence. Loop edits and other
+non-coalescible commands preserve their order in the bounded pending batch;
+a flood of those commands can still exhaust its capacity. After one second
+of output callbacks without an armed stage, transport falls back to reactive
+demand feeding; a stalled decoder can then starve and the counter reports it.
+The deadline advances while paused, because the host still renders callbacks.
+
+Desktop `AudioEngine.play()` and mobile `startHandle()` both replay an ended
+song with seek-to-top (or loop A), then resume, so that path uses the same
+asynchronous staging. Fresh Start, restored mid-song starts and count-in
+landings are primed AND staged during prepare, before any host callback;
+start itself performs no decoding. Setting a loop while already past B stages
+its implicit folded entry before enabling that loop, and the feeder stages A
+again before each wrap when the live ring cannot retain it. The render-side
+handoff (`StreamingLaneGroup::commitJump`/`transportJumped`) only performs
+bounded atomic claims, pointer stores and resident-range publications.
+
+`stagedJumps` (u64 string) is the positive
+half: jumps this generation that landed on a region the feeder had staged and
+the transport swapped in — it moves when a jump was ANSWERED, which is how a
+muted driver proves the lanes were fed rather than merely that nothing was
+counted. One starved block per block is a lane the feeder has stopped
 feeding — the song plays its metronome and none of its stems, and nothing else
 in status can tell that from a healthy song. Main watches the counter and logs
 `lanes starving` once a lane has starved for 3 s without a break
@@ -1052,10 +1100,10 @@ unnoticed, and each is a candidate for its own change — none should be
    `lanePeaks` after the song is already playing and hides nothing, so there
    is nothing for it to measure up front. Deliberate, and pinned as a
    desktop-only export rather than a method the phones forgot.
-14. **Only the desktop's lanes say whether they are starving.** `streamed`
-   and `starvedBlocks` (§5) are emitted by the desktop bridge alone and pinned
+14. **Only the desktop's lanes say whether they are starving.** `streamed`,
+   `starvedBlocks` and `stagedJumps` (§5) are emitted by the desktop bridge alone and pinned
    under `session.desktop.nested.lanes`; the phones' lane objects keep the six
-   common keys. The core fills both fields for every platform — the gap is the
+   common keys. The core fills all three for every platform — the gap is the
    two phone bridges, which would need a native rebuild to carry them — so a
    phone lane the feeder stops feeding is still invisible to every phone
    driver and to the phone's log. Deliberate for now: the desktop is where the

@@ -565,7 +565,8 @@
           "muted",
           "solo",
           "streamed",
-          "starvedBlocks"
+          "starvedBlocks",
+          "stagedJumps"
         ]
       },
       "underFormat": [

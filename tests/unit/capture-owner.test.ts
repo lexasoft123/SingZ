@@ -357,6 +357,51 @@ function fakeBinding(): NativeCaptureBinding & {
 }
 
 describe('CaptureOwner', () => {
+  it('treats an explicit undefined channel option as omitted for desktop capture', () => {
+    const binding = fakeBinding()
+    const begin = vi.spyOn(binding, 'beginCapture')
+    const owner = new CaptureOwner(binding)
+    expect(owner.begin(7, { deviceUid: 'fixture:24', inputChannel: 2, enabledChannels: undefined }, '76', () => {})).toEqual(startResult)
+    expect(begin.mock.calls[0][0]).not.toHaveProperty('enabledChannels')
+  })
+
+  it('passes an exact sparse channel list through the native boundary', () => {
+    const binding = fakeBinding()
+    const stats = binding.captureStats()
+    binding.captureStats = () => ({ ...stats, microphoneLevels: { valid: false, channels: 0, ownershipGeneration: '0', peak: [], rms: [] } })
+    const begin = vi.spyOn(binding, 'beginCapture')
+    const owner = new CaptureOwner(binding)
+    const channels = [2, 17]
+    expect(owner.begin(7, { deviceUid: 'fixture:24', inputChannel: 2, enabledChannels: channels }, '71', () => {})).toEqual(startResult)
+    expect(begin).toHaveBeenCalledWith({ deviceUid: 'fixture:24', inputChannel: 2, enabledChannels: [2, 17] }, 71n, expect.any(Function))
+    expect(begin.mock.calls[0][0].enabledChannels).not.toBe(channels)
+  })
+
+  it('rejects invalid channel selections without cancelling a running capture', () => {
+    const binding = fakeBinding()
+    const stats = binding.captureStats()
+    binding.captureStats = () => ({ ...stats, microphoneLevels: { valid: false, channels: 0, ownershipGeneration: '0', peak: [], rms: [] } })
+    const owner = new CaptureOwner(binding)
+    expect(owner.begin(7, { deviceUid: 'fixture:24', inputChannel: 2 }, '72', () => {})).toEqual(startResult)
+    const begin = vi.spyOn(binding, 'beginCapture')
+    const sparse = [2, 17, 18]; delete sparse[1]
+    for (const enabledChannels of [[], [2, 2], [17, 2], [1, 17], [-1, 2], [2, 2.5], [2, NaN], [2, 24], [2, 64], sparse]) {
+      expect(owner.begin(7, { deviceUid: 'fixture:24', inputChannel: 2, enabledChannels }, '73', () => {})).toMatchObject({ ok: false })
+    }
+    expect(binding.cancelled).toEqual([])
+    expect(begin).not.toHaveBeenCalled()
+    expect(owner.cancel(7, '72')).toEqual({ ok: true, cancelled: true })
+    expect(binding.cancelled).toEqual([72n])
+  })
+
+  it('rejects sparse selection on an unsupported service without cancelling capture', () => {
+    const binding = fakeBinding()
+    const owner = new CaptureOwner(binding)
+    expect(owner.begin(7, { deviceUid: 'fixture:24', inputChannel: 2 }, '74', () => {})).toEqual(startResult)
+    expect(owner.begin(7, { deviceUid: 'fixture:24', inputChannel: 2, enabledChannels: [2, 17] }, '75', () => {})).toMatchObject({ ok: false, error: expect.stringContaining('unavailable') })
+    expect(binding.cancelled).toEqual([])
+  })
+
   it('reports the full decoder matrix only for the exact proven runtime binding', async () => {
     const codecRuntime: CaptureCodecRuntime = {
       format: 1,
@@ -1033,7 +1078,9 @@ describe('CaptureOwner', () => {
     const binding = fakeBinding()
     const healthy = binding.audioHostDevices('alsa')
     const ready = { ...healthy, devices: healthy.devices.map(device => ({
-      ...device, outputChannels: 4, outputChannelLabels: ['USB 1', 'USB 2', 'USB 3', 'USB 4']
+      ...device, inputChannels: 10, outputChannels: 4,
+      inputChannelLabels: Array.from({ length: 10 }, (_, index) => `Input ${index + 1}`),
+      outputChannelLabels: ['USB 1', 'USB 2', 'USB 3', 'USB 4']
     })) }
     const busy = { ...healthy, devices: healthy.devices.map(device => ({
       ...device, outputChannels: 0, outputChannelLabels: []
@@ -1043,7 +1090,7 @@ describe('CaptureOwner', () => {
     binding.audioHostDevices = inventory
     binding.refreshSharedAudioInventory = refresh
     expect(new CaptureOwner(binding).hostDevices('alsa', 'linux')).toMatchObject({
-      ok: true, provider: 'alsa', devices: [{ outputChannels: 4 }]
+      ok: true, provider: 'alsa', devices: [{ inputChannels: 10, outputChannels: 4 }]
     })
     expect(refresh).toHaveBeenCalledOnce()
     expect(inventory).toHaveBeenCalledTimes(2)
@@ -1081,7 +1128,9 @@ describe('CaptureOwner', () => {
       binding.audioHostDevices = vi.fn().mockReturnValueOnce(busy).mockReturnValue(next)
       const refresh = vi.fn(() => ({ ok: true }))
       binding.refreshSharedAudioInventory = refresh
-      expect(new CaptureOwner(binding).hostDevices('alsa', 'linux').ok).toBe(!malformed)
+      const result = new CaptureOwner(binding).hostDevices('alsa', 'linux')
+      expect(result.ok).toBe(!malformed)
+      if (!malformed) expect(result.devices[0].outputChannels).toBe(0)
       expect(refresh).toHaveBeenCalledOnce()
       expect(binding.audioHostDevices).toHaveBeenCalledTimes(2)
     }

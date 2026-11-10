@@ -547,6 +547,16 @@ the executable's embedded fingerprint before reporting readiness. Output names
 what was actually provisioned; optional lyrics engines, splitter packs, and the
 capture addon need their own producers when used.
 
+After completing native tests, the capture producer can reuse that checkout's
+configured CMake build with `SINGZ_CAPTURE_BUILD_DIR=build/native/<name>`.
+The directory must be a real local directory under `build/`, with a regular cache
+naming this exact checkout; escapes and shared links are rejected. The producer
+still holds the native build lock, applies its own configuration and verifies
+immutable output identity. Finish CTest first because addon configuration changes
+the enabled targets in the reused build. This avoids recompiling the same core
+under ARM64 emulation without sharing build state across checkouts.
+
+
 `vendor/` is a real local directory, never a whole-directory shared symlink.
 The analyzer is always local. Bootstrap copies only llama/CrispASR artifacts
 whose receipt matches the current producer scripts, requested revision, target,
@@ -734,6 +744,18 @@ on-screen clock remains compact.
 | `mobile/scripts/test-swift-project-paths.sh` | Swift's half of `tests/shared/project-name-cases.json` — how a phone-added song's folder is named (no leading dot: iOS lists the library without hidden folders) and which project paths are refused; Kotlin runs it in `ProjectPathsTest`, vitest against the reference writer and the desktop's own `safeName` |
 | `bash mobile/scripts/test-native-playback-bridge-schema.sh` | the iOS bridge's request/result validators — one `clang++` call over the real `.mm` sources, no Xcode, no Pods, no simulator; run by the iOS native canary |
 | `bash zdsp/run-sanitizer-gates.sh` | the native gate, three presets (strict, asan/ubsan, tsan): the playback session and its two injected-failure runs, the bridge-contract test against `tests/shared/`, the graph and analysis suites, the realtime-source policies. What each preset runs is the `filter.include.name` regex in `CMakePresets.json` — a new `add_test` is NOT picked up until it is added there and to the build preset's `targets`, which is why `playback_cue_plan_tests` still runs only under the unfiltered Windows job |
+
+After a desktop-only bootstrap, generate the mobile shared modules imported by
+the desktop tests before running the full suite, using the same steps as CI:
+
+```sh
+node mobile/scripts/sync-graph-document.js
+node mobile/scripts/build-training.mjs
+npm test
+```
+
+These generators use the root build dependencies and write ignored outputs in
+this worktree; installing the mobile app dependencies is not required.
 
 The three-language agreement fixtures under `tests/shared/` are read by more
 than one of these at once — `native-playback-bridge-manifest.json` by jest,
@@ -1239,6 +1261,10 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
 - Every rAF loop must be **change-gated** (write DOM/canvas only when the
   value actually changed) and **skip work under `body.modal-open`** — any
   pixel change behind a modal re-rasters the whole blurred backdrop.
+- A compositor-only animation can cost more than a change-gated mask. For Box
+  lyrics, keep word updates on the current row and measure CPU and presented
+  frames on the TV before promoting glyphs or multiplying moving clip layers.
+  Zero Paint events alone is not a performance acceptance check.
 - No infinite CSS animation without a `body.modal-open … animation-play-state:
   paused` rule (see the shimmer/pulse block in styles.css).
 - Windows gets solid surfaces — modal scrim, drop overlay, transport, the

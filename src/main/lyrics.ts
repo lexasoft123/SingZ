@@ -40,6 +40,7 @@ import {
 } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile } from './separation'
+import { parseStrictLyricsCache } from '../shared/strict-lyrics'
 
 /** Recorded in lyrics.json so a re-listen can tell which engine wrote a line. */
 const QWEN_ENGINE_ID = 'qwen3-asr-1.7b'
@@ -395,6 +396,19 @@ export class Transcriber {
     }
   }
 
+  async readCached(songPath: string): Promise<import('../shared/types').CachedLyricsResult> {
+    try {
+      const raw = JSON.parse(await readFile(await this.lyricsFile(songPath), 'utf8')) as unknown
+      const cached = parseStrictLyricsCache(raw)
+      return cached ? { ok: true, cached: true, ...cached } : { ok: true, cached: false }
+    } catch (error) {
+      if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { ok: true, cached: false }
+      }
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   /**
    * Every lyrics write goes through here — LRCLIB hits, the variant picker,
    * on-device transcription, every aligner. It is also where the project is marked for Drive:
@@ -599,6 +613,26 @@ export class Transcriber {
     const dir = await this.cacheDir(songPath)
     const lyricsPath = await this.lyricsFile(songPath)
 
+    // Never let an unreadable existing cache authorize an automatic search or
+    // transcription that could replace it. A missing file, or a readable one
+    // that holds no lines at all, is a miss as before.
+    if (prefer === 'auto') {
+      try {
+        const contents = await readFile(lyricsPath, 'utf8')
+        let usable = false
+        try {
+          const raw = JSON.parse(contents) as unknown
+          const empty = raw !== null && typeof raw === 'object' && Array.isArray((raw as { lines?: unknown }).lines) &&
+            (raw as { lines: unknown[] }).lines.length === 0
+          usable = empty || parseStrictLyricsCache(raw) !== null
+        } catch { /* invalid JSON */ }
+        if (!usable) return { ok: false, error: t('main.error.existingLyricsUnreadable') }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) }
+        }
+      }
+    }
     const cached = await this.readCache(lyricsPath)
     // Alignment refines existing online or hand-edited lyrics; without them,
     // auto. An on-device transcription is the one source with nothing to

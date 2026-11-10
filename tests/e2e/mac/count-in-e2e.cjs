@@ -284,6 +284,13 @@ async function press(win) {
   if (state !== 'pressed') throw new Error(`the transport button is ${state}`)
 }
 
+/** A second press may be deliberately ignored while the engine starts. */
+async function pressOrDisabled(win) {
+  const state = await val(win, '(function(){ const b = document.querySelector("button.play"); if (!b) return "missing"; if (b.disabled) return "disabled"; b.click(); return "pressed" })()')
+  if (state === 'missing') throw new Error('the transport button is missing')
+  return state
+}
+
 /** Press Pause and wait for the BUTTON to show it. The button is React state
  * fed back from the engine, so a Pause the engine refused leaves it on Pause
  * — the divergence `__test.playing` exists to expose — and a driver that
@@ -1034,9 +1041,23 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
     // then started twice, audibly).
     const t7 = Date.now()
     const spot4 = JSON.parse(await val(win, SNAP)).pos
+    const firstPressAt = Date.now()
     await press(win)
-    await press(win)
+    const secondPress = await pressOrDisabled(win)
+    console.log(`   second press: ${secondPress}`)
+    // Poll alongside the trace so waiting for startup cannot miss the count-in.
+    const startingWindow = (async () => {
+      while (true) {
+        const starting = await val(win, '__test.engine.starting')
+        const elapsed = Date.now() - firstPressAt
+        if (!starting || elapsed > 1500) return { starting, elapsed }
+        await sleep(10)
+      }
+    })()
     const twice = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > spot4 + 0.6)
+    const startup = await startingWindow
+    console.log(`   engine starting window: ${startup.elapsed} ms${startup.starting ? ' (still starting)' : ''}`)
+    if (startup.starting || startup.elapsed > 1500) fail.push(`double Play: engine starting exceeded 1500 ms (${startup.elapsed} ms)`)
     const twiceLast = twice[twice.length - 1]
     // Two presses on a TOGGLE: when the button has already flipped by the
     // second press, that press is a Pause and "parked" is the right answer;

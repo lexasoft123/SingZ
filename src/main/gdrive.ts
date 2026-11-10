@@ -104,10 +104,8 @@ function readTokens(): Tokens | null {
 }
 
 function writeTokens(t: Tokens | null): void {
-  const s = readSettings() as Record<string, unknown>
-  if (t) s.gdrive = t
-  else delete s.gdrive
-  writeSettings(s)
+  // Settings merges patches: explicit undefined removes a field; omission preserves it.
+  writeSettings({ gdrive: t ?? undefined })
 }
 
 export const gdriveDeviceConfigured = (): boolean => Boolean(cfg?.tvClientId && cfg?.tvClientSecret)
@@ -383,7 +381,7 @@ async function uploadBytes(
   const done = await responseWithDeadline(session, {
     method: 'PUT',
     headers: { 'Content-Type': mime, 'Content-Length': String(bytes.length) },
-    body: bytes
+    body: new Uint8Array(bytes)
   }, async (res) => {
     if (!res.ok) throw new Error(`Drive upload ${res.status} for ${name}`)
     return await res.json() as { id?: string }

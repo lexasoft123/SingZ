@@ -156,10 +156,12 @@ for (const chunk of [
 // Release launch copy and platform-specific bundler output need a small margin.
 // Immediate Play preparation feedback adds a small eager transport subscription.
 // Terminal audio failures must stop the eager transport and expose recovery feedback.
-// Base 7b3 measures 1,419,986 B; current measures 1,420,178 B (+192 B for
-// required exclusive-output startup fixes: engine.ts silentAudioContext and
-// mic-preview detachment). Retain a measured 822 B platform margin.
-const ENTRY_RAW_BUDGET = 1_421_000
+// Shared native policy, accepted controls and persistent-host detach measure
+// 1,425,386 B. The detach lifecycle adds 994 B of shared player code; Box UI
+// assets remain in their separate renderer tree. Keep 4.6 kB of headroom so
+// small shared behavior additions do not require code golfing, while a lazy
+// feature pulled into the entry still exceeds this bounded limit.
+const ENTRY_RAW_BUDGET = 1_430_000
 // Desktop programs, their seven-day path, and explicit interval-set controls.
 const TRAINING_RAW_BUDGET = 94_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size

@@ -1,4 +1,5 @@
 import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from './training-progress'
+import type { BoxAPI } from './box-contract'
 import { POLICY as WAVEFORM_POLICY, VERSION as WAVEFORM_VERSION } from './waveform-envelope-cache'
 import type { NativeGraphDocumentProjection } from './graph-document'
 
@@ -429,6 +430,19 @@ export type LyricsResult =
       error: string
     }
 
+export type CachedLyricsResult =
+  | {
+      ok: true
+      cached: true
+      lines: LyricLine[]
+      source: LyricsSource
+      credit?: string
+      aligned?: boolean
+      check?: AlignCheck
+    }
+  | { ok: true; cached: false }
+  | { ok: false; error: string }
+
 /**
  * ML beat analysis from the splitter pack's Beat This! runner: peak-picked
  * beat/downbeat times (downbeats snapped onto beats) plus the framewise
@@ -554,6 +568,14 @@ export interface CaptureAnalysisWindow {
   dbfs: number
 }
 
+export interface CaptureStartConfig {
+  deviceUid?: string
+  inputChannel: number
+  ringBlocks?: number
+  /** Box private reader: unique increasing physical channels, including inputChannel. */
+  enabledChannels?: number[]
+}
+
 export interface CaptureStartResult {
   ok: boolean
   state: CaptureStateName
@@ -570,6 +592,8 @@ export interface CaptureStartResult {
 }
 
 export interface CaptureStats {
+  /** Native scalar levels from a private LoopZ history reader, never PCM. */
+  microphoneLevels?: { valid: boolean; channels: number; ownershipGeneration: string; channelIndices?: number[]; peak: number[]; rms: number[] }
   deliveredBlocks: string
   deliveredFrames: string
   overruns: string
@@ -901,6 +925,8 @@ export interface DesktopPlaybackPrepareConfig {
    * prepared ahead. The core resamples into the device rate as it fills and
    * falls back to decoding any lane it cannot stream. Absent = decode. */
   streamLanes?: boolean
+  /** Box-only project hint, stripped before the native owner sees the config. */
+  retainedProject?: { dir: string; songPath: string }
 }
 
 export interface DesktopPlaybackLaneConfig {
@@ -1021,9 +1047,13 @@ export interface DesktopPlaybackLaneStatus {
   /** The lane plays out of a window the streaming feeder keeps ahead. */
   streamed: boolean
   /** Render blocks this generation that wanted a frame the window did not
-   *  hold and played silence. A couple per seek is the design; one per block
-   *  is a lane that has stopped being fed (main logs `lanes starving`). */
+   *  hold and played silence. Zero is the design at seeks, loop wraps and
+   *  starts (the core stages each jump before the transport moves); one per
+   *  block is a lane that has stopped being fed (main logs `lanes starving`). */
   starvedBlocks: string
+  /** Jumps this generation (seeks, loop wraps) that landed on a region the
+   *  feeder had staged for them. Optional: an addon built before it omits it. */
+  stagedJumps?: string
 }
 
 export const DESKTOP_PLAYBACK_GRAPH_MAX_NODES = 128
@@ -1334,6 +1364,9 @@ export interface LocaleState {
 }
 
 export interface SingzApi {
+  /** Main-selected Box socket service owns playback beyond this renderer. */
+  readonly boxAudioPersistent: boolean
+  box: BoxAPI
   /** True only when main was launched with SINGZ_E2E_HOOKS=1: the renderer
    * then publishes `window.__test` (engine, transport, metronome, training,
    * open/back) for the desktop player-session driver. Never set in a
@@ -1350,6 +1383,9 @@ export interface SingzApi {
   winClose: () => void
   winIsMaximized: () => Promise<boolean>
   onWinMaximized: (cb: (maximized: boolean) => void) => () => void
+  /** Box-only normal-close request; other surfaces never receive it. */
+  onBoxCloseRequest(cb: () => void): () => void
+  boxCloseReady(): void
   /** Resolve the on-disk path of a dropped/picked File (empty string if none). */
   pathForFile(file: File): string
   /** Read a registered audio file's bytes (source song or produced stem). */
@@ -1475,6 +1511,9 @@ export interface SingzApi {
     allowDownload?: boolean,
     prefer?: 'auto' | 'transcribe' | 'align' | 'precise'
   ): Promise<LyricsResult>
+  /** Read only an existing validated lyrics cache. Never searches, downloads,
+   * transcribes, aligns, or writes the cache. */
+  getCachedLyrics(songPath: string): Promise<CachedLyricsResult>
   /** Whether the precise (CTC forced-alignment) aligner can run on this machine. */
   alignCaps(): Promise<{ precise: boolean }>
   /** Manual LRCLIB search for the variant picker. */
@@ -1507,7 +1546,7 @@ export interface SingzApi {
     { ok: true; devices: CaptureInputDevice[] } | { ok: false; devices: []; error: string }
   >
   beginCapture(
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number },
+    config: CaptureStartConfig,
     ownershipGeneration: string
   ): Promise<CaptureStartResult>
   cancelCapture(

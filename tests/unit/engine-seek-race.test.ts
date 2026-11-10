@@ -287,3 +287,64 @@ describe('native seeks never pause a playing selection', () => {
     }
   }
 })
+
+/** Desktop-visible: a native receipt for the song being LEFT must not land in
+ *  the next one (the epoch guards in setMasterVolume / setVolume and the
+ *  accepted-control twins). */
+describe('late native control receipts across a song switch', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.resetModules()
+  })
+
+  function later<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(done => { resolve = done })
+    return { promise, resolve }
+  }
+
+  async function nativeSong(): Promise<{ engine: any; gain: ReturnType<typeof later<void>>; lane: ReturnType<typeof later<{ gain: number; muted: boolean; solo: boolean }>> }> {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine: any = new MultitrackEngine()
+    engine.aheadAllowed = false
+    engine.load([{ id: 'vocals', buffer: { duration: 120 }, duration: 120, path: '/vocals.flac' }])
+    const gain = later<void>()
+    const lane = later<{ gain: number; muted: boolean; solo: boolean }>()
+    engine.nativePlayback = {
+      active: true, preparedAhead: false, recoveryPending: false, transportActive: false,
+      setMasterGain: vi.fn(() => gain.promise),
+      updateLane: vi.fn(() => lane.promise),
+      unload: vi.fn(async () => {})
+    }
+    return { engine, gain, lane }
+  }
+
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+
+  it('drops a master gain and lane receipt that settle after the song switched', async () => {
+    const { engine, gain, lane } = await nativeSong()
+    engine.setMasterVolume(0.3)
+    engine.setVolume('vocals', 0.2)
+    const accepted = engine.setMasterVolumeAccepted(0.4)
+    await vi.waitFor(() => expect(engine.nativePlayback.setMasterGain).toHaveBeenCalledTimes(2))
+    engine.retireForSongSwitch()
+    gain.resolve()
+    lane.resolve({ gain: 0.2, muted: false, solo: false })
+    await expect(accepted).rejects.toThrow('song changed')
+    await flush()
+    expect(engine.masterVolume).toBe(1)
+    expect(engine.getTrackStates().find((track: { id: string }) => track.id === 'vocals')?.volume).toBe(1)
+  })
+
+  it('negative control: the same receipts apply when the song did not change', async () => {
+    const { engine, gain, lane } = await nativeSong()
+    engine.setMasterVolume(0.3)
+    engine.setVolume('vocals', 0.2)
+    gain.resolve()
+    lane.resolve({ gain: 0.2, muted: false, solo: false })
+    await flush()
+    expect(engine.masterVolume).toBe(0.3)
+    expect(engine.getTrackStates().find((track: { id: string }) => track.id === 'vocals')?.volume).toBe(0.2)
+  })
+})

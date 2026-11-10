@@ -77,6 +77,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "守るべき線は無い",
   "main.error.couldNotSaveLyrics": "文字は保存できませんでした: {message}",
   "main.error.lyricsJobAlreadyRunning": "歌詞の仕事も始まってる",
+  "main.error.existingLyricsUnreadable": "保存された歌詞を読み込めなかったため、変更していません。歌詞エディターで開くか、もう一度文字起こししてください。",
   "main.error.noLinesToAlign": "線が並べない",
   "main.error.splitFirstAlign": "曲を最初に音声トラックに分け  音声の曲線を聴く.",
   "main.error.preciseNeedsPack": "仕様を正確に調整する 仕様を最初にモデルマネージャにインストールする",

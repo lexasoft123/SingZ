@@ -33,40 +33,93 @@ if [[ $stage == build || $stage == all ]]; then
   cmake -S . -B "$native" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
     -DSINGZ_BUILD_HOST_TOOLS=ON -DSINGZ_CORE_TESTS=ON -DBUILD_TESTING=ON \
+    -DSINGZ_BOX_LOOPZ_ROUTING=ON \
     2>&1 | tee "$report/native-configure.log"
   cmake --build "$native" --parallel "${SINGZ_BUILD_JOBS:-2}" 2>&1 | tee "$report/native-build.log"
   ctest --test-dir "$native" --parallel 1 --timeout 180 --no-tests=error \
     --output-on-failure --output-junit "$report/native-tests.xml" 2>&1 | tee "$report/native-tests.log"
   # CI build-only containers cannot open the desktop. dist still verifies the
   # compiled addon identity/snapshot; the host stage MUST load and run it.
-  SINGZ_CI_STAGE=build node scripts/dist.cjs --linux --"$target_arch" --publish never 2>&1 | tee "$report/dist.log"
+  SINGZ_CAPTURE_BUILD_DIR="$native" SINGZ_CI_STAGE=build node scripts/dist.cjs --linux --"$target_arch" --publish never 2>&1 | tee "$report/dist.log"
+  SINGZ_CAPTURE_BUILD_DIR="$native" SINGZ_CI_STAGE=build node scripts/dist.cjs --box --linux --"$target_arch" --publish never 2>&1 | tee "$report/dist-box.log"
   node scripts/verify-capture-artifact.cjs "linux-$target_arch"
   (cd dist && sha256sum ./*.deb > SHA256SUMS)
+  (cd dist/box && sha256sum ./*.deb > SHA256SUMS)
 fi
 if [[ $stage == installed-test || $stage == all ]]; then
-  mapfile -t packages < <(find "$PWD/dist" -maxdepth 1 -name "SingZ-*-linux-$deb_arch.deb" -type f)
-  [[ ${#packages[@]} == 1 ]] || { echo "Expected exactly one Linux $deb_arch installer" >&2; exit 1; }
-  sudo apt-get install --reinstall --no-install-recommends -y "${packages[0]}" 2>&1 | tee "$report/install.log"
-  dpkg-deb --info "${packages[0]}" > "$report/deb-info.txt"
-  dpkg-deb --contents "${packages[0]}" > "$report/deb-contents.txt"
-  # electron-builder unpacks x64 to dist/linux-unpacked (historical default)
-  # and explicit arches to dist/linux-<arch>-unpacked.
-  unpacked="dist/linux-unpacked"
-  [[ $target_arch == arm64 ]] && unpacked="dist/linux-arm64-unpacked"
-  cmp /opt/SingZ/resources/app.asar "$unpacked/resources/app.asar"
-  for file in singz-capture.node singz-capture.manifest.json singz-capture.node.sha256 singz-capture.node.source-hash singz-analyze llama-server crispasr "gpu-splitter-linux-$target_arch.tar.gz"; do
-    cmp "/opt/SingZ/resources/engines/$file" "$unpacked/resources/engines/$file"
+  mapfile -t desktop_packages < <(find "$PWD/dist" -maxdepth 1 -name "SingZ-[0-9]*-linux-$deb_arch.deb" -type f)
+  mapfile -t box_packages < <(find "$PWD/dist/box" -maxdepth 1 -name "SingZ-Box-[0-9]*-linux-$deb_arch.deb" -type f)
+  [[ ${#desktop_packages[@]} == 1 && ${#box_packages[@]} == 1 ]] || {
+    echo "Expected exactly one Desktop and one Box Linux $deb_arch installer" >&2
+    exit 1
+  }
+  sudo apt-get install --reinstall --no-install-recommends -y \
+    "${desktop_packages[0]}" "${box_packages[0]}" 2>&1 | tee "$report/install.log"
+  desktop_package=$(dpkg-deb -f "${desktop_packages[0]}" Package)
+  box_package=$(dpkg-deb -f "${box_packages[0]}" Package)
+  [[ $desktop_package == singz && $box_package == singz-box && $desktop_package != "$box_package" ]] || {
+    echo "Unexpected Debian identities: Desktop=$desktop_package Box=$box_package" >&2
+    exit 1
+  }
+  [[ $(dpkg-deb -f "${desktop_packages[0]}" Architecture) == "$deb_arch" ]] || { echo 'Desktop installer architecture mismatch' >&2; exit 1; }
+  [[ $(dpkg-deb -f "${box_packages[0]}" Architecture) == "$deb_arch" ]] || { echo 'Box installer architecture mismatch' >&2; exit 1; }
+  [[ $(dpkg-query -W -f='${Package}' "$desktop_package") == singz ]] || { echo 'Desktop package is not installed' >&2; exit 1; }
+  [[ $(dpkg-query -W -f='${Package}' "$box_package") == singz-box ]] || { echo 'Box package is not installed' >&2; exit 1; }
+  dpkg-deb --info "${desktop_packages[0]}" > "$report/deb-info.txt"
+  dpkg-deb --contents "${desktop_packages[0]}" > "$report/deb-contents.txt"
+  dpkg-deb --info "${box_packages[0]}" > "$report/box-deb-info.txt"
+  dpkg-deb --contents "${box_packages[0]}" > "$report/box-deb-contents.txt"
+  [[ $(readlink -f /usr/bin/singz) == /opt/SingZ/singz ]] || { echo 'Desktop launcher does not resolve to its own installation' >&2; exit 1; }
+  [[ $(readlink -f /usr/bin/singz-box) == /opt/singz-box/singz-box ]] || { echo 'Box launcher does not resolve to its own installation' >&2; exit 1; }
+  # electron-builder unpacks x64 to linux-unpacked (historical default) and
+  # explicit arches to linux-<arch>-unpacked beneath each product's output.
+  desktop_unpacked="dist/linux-unpacked"
+  [[ $target_arch == arm64 ]] && desktop_unpacked="dist/linux-arm64-unpacked"
+  box_unpacked="dist/box/$(basename "$desktop_unpacked")"
+  compare_installed() {
+    local install_root=$1 unpacked_root=$2 executable=$3
+    [[ -x $install_root/$executable ]] || { echo "Missing installed executable: $install_root/$executable" >&2; exit 1; }
+    cmp "$install_root/$executable" "$unpacked_root/$executable"
+    cmp "$install_root/resources/app.asar" "$unpacked_root/resources/app.asar"
+    for file in singz-capture.node singz-capture.manifest.json singz-capture.node.sha256 singz-capture.node.source-hash singz-analyze llama-server crispasr "gpu-splitter-linux-$target_arch.tar.gz"; do
+      cmp "$install_root/resources/engines/$file" "$unpacked_root/resources/engines/$file"
+    done
+  }
+  compare_installed /opt/SingZ "$desktop_unpacked" singz
+  compare_installed /opt/singz-box "$box_unpacked" singz-box
+  # The Box CEC helper and opt-in audio service ship once, outside the asar.
+  box_audio=/opt/singz-box/resources/box-audio
+  for file in cec-input.py singz-box-audio.service singz-box-with-audio singz-box-rtprio.conf; do
+    [[ -f $box_audio/$file ]] || { echo "Missing installed Box resource: $box_audio/$file" >&2; exit 1; }
+    cmp "$box_audio/$file" "resources/linux/$file"
   done
+  [[ -x $box_audio/singz-box-with-audio ]] || { echo 'Box audio launcher is not executable' >&2; exit 1; }
+  box_depends=$(dpkg-deb -f "${box_packages[0]}" Depends)
+  [[ ", $box_depends," =~ ,\ python3[\ ,] ]] || { echo "Box package does not depend on python3: $box_depends" >&2; exit 1; }
+  # Write the listing first so an asar failure cannot read as an empty match.
+  node_modules/.bin/asar list /opt/singz-box/resources/app.asar > "$report/box-asar-contents.txt"
+  [[ -s $report/box-asar-contents.txt ]] || { echo 'Installed Box app.asar listing is empty' >&2; exit 1; }
+  if grep -E '^/(dist|resources/linux)(/|$)' "$report/box-asar-contents.txt"; then
+    echo 'Installed Box app.asar embeds package output or duplicated Box resources' >&2
+    exit 1
+  fi
   /opt/SingZ/resources/engines/singz-analyze build-info > "$report/analyze-build-info.txt"
   /opt/SingZ/resources/engines/llama-server --version > "$report/llama-version.txt" 2>&1
   /opt/SingZ/resources/engines/crispasr --help > "$report/crispasr-help.txt" 2>&1
-  sha256sum "${packages[0]}" /opt/SingZ/resources/app.asar /opt/SingZ/resources/engines/singz-capture.node > "$report/installed-sha256.txt"
+  sha256sum "${desktop_packages[0]}" "${box_packages[0]}" \
+    /opt/SingZ/resources/app.asar /opt/SingZ/resources/engines/singz-capture.node \
+    /opt/singz-box/resources/app.asar /opt/singz-box/resources/engines/singz-capture.node \
+    > "$report/installed-sha256.txt"
   export SINGZ_E2E_PACKAGED=${SINGZ_E2E_PACKAGED:-/opt/SingZ/singz}
   # Use the installed Electron runtime for this Node-API-only check. The app
   # UI is tested below through its normal desktop launcher.
   ELECTRON_RUN_AS_NODE=1 /opt/SingZ/singz tests/e2e/capture-addon-smoke.cjs \
     /opt/SingZ/resources/engines/singz-capture.node --current-source \
     2>&1 | tee "$report/installed-addon-smoke.log"
+  # Exercise the installed Box native song producer and LoopZ histories without
+  # opening a physical output; the driver uses normal headless sandboxing.
+  SINGZ_BOX_AUDIO_HOST_EXECUTABLE=${SINGZ_BOX_AUDIO_HOST_EXECUTABLE:-/opt/singz-box/singz-box} \
+    node tests/e2e/box-audio-host-smoke.cjs 2>&1 | tee "$report/installed-box-audio-host-smoke.log"
   # Private software sink gives Chromium a running clock on hardware-free CI.
   # Do not redirect a real user's PulseAudio daemon or expose a network socket.
   pulse_dir=$(mktemp -d "${TMPDIR:-/tmp}/singz-ci-pulse.XXXXXX")
@@ -111,4 +164,48 @@ EOF
     xvfb-run -a -s '-screen 0 1920x1080x24' \
     dbus-run-session -- node tests/e2e/linux/package-smoke.cjs \
     2>&1 | tee "$report/x11-e2e.log"
+  # The packaged Box fixture checks its normal entry, default identity and
+  # Settings navigation without songs or playback. CEC uses a synthetic helper.
+  E2E_PACKAGED=/opt/singz-box/singz-box \
+    SINGZ_E2E_RESULTS="$PWD/build/native/linux-package-e2e-$target_arch/box" \
+    xvfb-run -a -s '-screen 0 1920x1080x24' \
+    dbus-run-session -- node tests/e2e/box-package-launch-smoke.cjs \
+    2>&1 | tee "$report/box-package-launch-e2e.log"
+  # The development CEC driver needs the lockfile-pinned Electron binary and a
+  # real root-owned sandbox helper. Never disable Chromium's sandbox.
+  env -u ELECTRON_SKIP_BINARY_DOWNLOAD node node_modules/electron/install.js
+  node - <<'NODE'
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'))
+const expected = lock.packages['node_modules/electron'].version
+const installed = JSON.parse(fs.readFileSync('node_modules/electron/package.json', 'utf8')).version
+const distributed = fs.readFileSync('node_modules/electron/dist/version', 'utf8').trim()
+assert.equal(installed, expected, 'Electron module version must match package-lock')
+assert.equal(distributed, expected, 'Electron dist version must match package-lock')
+const moduleDir = path.resolve('node_modules/electron')
+assert.equal(fs.realpathSync(moduleDir), moduleDir, 'Electron module must stay inside the owned checkout')
+const expectedDist = path.resolve('node_modules/electron/dist')
+const distStat = fs.lstatSync(expectedDist)
+assert.ok(distStat.isDirectory() && !distStat.isSymbolicLink(), 'Electron dist must be a real directory, not a symlink')
+const dist = fs.realpathSync(expectedDist)
+assert.equal(dist, expectedDist, 'Electron dist realpath must stay inside the owned checkout')
+const sandbox = path.join(dist, 'chrome-sandbox')
+const stat = fs.lstatSync(sandbox)
+assert.ok(stat.isFile() && !stat.isSymbolicLink(), 'chrome-sandbox must be a regular non-symlink file')
+assert.equal(stat.nlink, 1, 'chrome-sandbox must have exactly one link')
+assert.equal(fs.realpathSync(sandbox), sandbox, 'chrome-sandbox must stay inside Electron dist')
+NODE
+  electron_sandbox="$PWD/node_modules/electron/dist/chrome-sandbox"
+  sudo chown root:root "$electron_sandbox"
+  sudo chmod 4755 "$electron_sandbox"
+  xvfb-run -a -s '-screen 0 1920x1080x24' \
+    dbus-run-session -- node_modules/.bin/electron tests/e2e/box-cec-input-smoke.cjs \
+    2>&1 | tee "$report/box-cec-input-smoke.log"
+  E2E_PACKAGED=/opt/singz-box/singz-box \
+    SINGZ_BOX_AUDIO_HOST_EXECUTABLE=${SINGZ_BOX_AUDIO_HOST_EXECUTABLE:-/opt/singz-box/singz-box} \
+    xvfb-run -a -s '-screen 0 1920x1080x24' \
+    dbus-run-session -- node tests/e2e/box-retained-recovery.cjs \
+    2>&1 | tee "$report/box-retained-recovery-e2e.log"
 fi
