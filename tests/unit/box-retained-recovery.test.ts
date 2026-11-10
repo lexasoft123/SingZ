@@ -138,7 +138,7 @@ function nativeStatus(generation = '7'): DesktopPlaybackStatus {
   } as unknown as DesktopPlaybackStatus
 }
 
-async function fixture(options: { source?: boolean; graph?: boolean; extraFormat?: boolean; drive?: boolean } = {}): Promise<Fixture> {
+async function fixture(options: { source?: boolean; graph?: boolean; extraFormat?: boolean; drive?: boolean; lyrics?: typeof lyricsDocument } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'box-retained-recovery-'))
   roots.push(root)
   const libraryRoot = join(root, 'library')
@@ -174,7 +174,7 @@ async function fixture(options: { source?: boolean; graph?: boolean; extraFormat
     }
   }
 
-  const lyricsText = JSON.stringify(lyricsDocument)
+  const lyricsText = JSON.stringify(options.lyrics ?? lyricsDocument)
   await writeFile(join(requestedDir, 'lyrics.json'), lyricsText)
   const lyricsInfo = await stat(join(requestedDir, 'lyrics.json'))
   const graphText = options.graph === false ? null : JSON.stringify({
@@ -319,6 +319,17 @@ describe('trusted retained recovery reader', () => {
       expect(after.get(path)?.mtimeMs, path).toBe(previous.mtimeMs)
       expect(after.get(path)?.bytes.equals(previous.bytes), path).toBe(true)
     }
+  })
+
+  it('recovers legacy backward word timings without rewriting the file', async () => {
+    const legacy = structuredClone(lyricsDocument)
+    legacy.lines[0].words[0].s = 1.4
+    legacy.lines[0].words[1].s = 1.3
+    const f = await fixture({ lyrics: legacy })
+    const before = await readFile(join(f.dir, 'lyrics.json'), 'utf8')
+    const result = await restore(f)
+    expect(result.lyrics[0].words[1]).toEqual({ w: 'cached', s: 1.4, e: 2.5 })
+    expect(await readFile(join(f.dir, 'lyrics.json'), 'utf8')).toBe(before)
   })
 
   it('reports a validated Drive-cache project as outside the user library', async () => {

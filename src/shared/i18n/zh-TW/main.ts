@@ -77,6 +77,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "沒有可儲存的歌詞行。",
   "main.error.couldNotSaveLyrics": "無法儲存歌詞：{message}",
   "main.error.lyricsJobAlreadyRunning": "已經有一個歌詞任務在執行。",
+  "main.error.existingLyricsUnreadable": "無法讀取已儲存的歌詞，因此未做變更。請在歌詞編輯器中開啟，或重新轉寫。",
   "main.error.noLinesToAlign": "沒有可對齊的歌詞行。",
   "main.error.splitFirstAlign": "請先將歌曲拆分為分軌——對齊需要聽取人聲音軌。",
   "main.error.preciseNeedsPack": "精確對齊需要透過分離引擎包執行——請先在模型管理器中安裝它。",

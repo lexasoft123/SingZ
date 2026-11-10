@@ -7,8 +7,6 @@ export interface StrictLyricsCache {
   aligned?: boolean
 }
 
-const TIME_ROUNDING_TOLERANCE_S = 0.05
-
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -24,34 +22,44 @@ function word(value: unknown): LyricWord | null {
   if (!raw || typeof raw.w !== 'string' || raw.w.trim().length === 0) return null
   const s = time(raw.s)
   const e = time(raw.e)
-  if (s === null || e === null || e < s) return null
+  if (s === null || e === null) return null
   return { w: raw.w.trim(), s, e }
 }
 
 export function parseStrictLyricsCache(value: unknown): StrictLyricsCache | null {
   const raw = record(value)
-  if (!raw || !Array.isArray(raw.lines) || raw.lines.length === 0) return null
+  if (!raw || !Array.isArray(raw.lines)) return null
   if (raw.source !== undefined && raw.source !== 'lrclib' && raw.source !== 'whisper' && raw.source !== 'edited') return null
-  const lines: LyricLine[] = []
-  let previousLineStart = -1
-  for (const candidate of raw.lines) {
+
+  const candidates = raw.lines.flatMap(candidate => {
     const line = record(candidate)
-    if (!line || typeof line.text !== 'string' || line.text.trim().length === 0 || !Array.isArray(line.words) || line.words.length === 0) return null
-    const start = time(line.start)
-    const end = time(line.end)
-    if (start === null || end === null || end <= start || start < previousLineStart) return null
-    const words: LyricWord[] = []
-    let previousWordStart = -1
-    for (const candidateWord of line.words) {
-      const parsed = word(candidateWord)
-      if (!parsed || parsed.s < previousWordStart ||
-          parsed.s < start - TIME_ROUNDING_TOLERANCE_S || parsed.e > end + TIME_ROUNDING_TOLERANCE_S) return null
-      words.push(parsed)
-      previousWordStart = parsed.s
+    const start = line && time(line.start)
+    if (!line || start === null || typeof line.text !== 'string' || !line.text.trim()) return []
+    return [{ start, end: time(line.end), text: line.text.trim(), words: Array.isArray(line.words) ? line.words : [] }]
+  }).sort((a, b) => a.start - b.start)
+
+  const lines: LyricLine[] = []
+  for (let i = 0; i < candidates.length; i++) {
+    const line = candidates[i]
+    const parsedWords = line.words.map(word).filter((w): w is LyricWord => w !== null)
+    let end = line.end
+    if (end === null || end <= line.start) {
+      // Prefer the next strictly later line; on the last line use its furthest
+      // usable word end. Without either there is no defensible duration.
+      end = candidates.slice(i + 1).find(next => next.start > line.start)?.start ??
+        parsedWords.reduce((latest, w) => Math.max(latest, w.e), line.start)
     }
-    lines.push({ start, end, text: line.text.trim(), words })
-    previousLineStart = start
+    if (end <= line.start) continue
+    let previousStart = line.start
+    const words = parsedWords.map(w => {
+      const s = Math.max(previousStart, Math.min(end, Math.max(line.start, w.s)))
+      const e = Math.max(s, Math.min(end, Math.max(line.start, w.e)))
+      previousStart = s
+      return { w: w.w, s, e }
+    })
+    lines.push({ start: line.start, end, text: line.text, words })
   }
+  if (lines.length === 0) return null
   return {
     lines,
     source: raw.source ?? 'whisper',

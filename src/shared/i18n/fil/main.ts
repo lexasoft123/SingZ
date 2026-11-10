@@ -77,6 +77,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "Walang mga linya na dapat i-save.",
   "main.error.couldNotSaveLyrics": "Hindi ko na mai-save ang lyrics: {message}",
   "main.error.lyricsJobAlreadyRunning": "Ang isang gawaing lyrics ay tumatakbo na.",
+  "main.error.existingLyricsUnreadable": "Hindi mabasa ang naka-save na lyrics, kaya hindi ito binago. Buksan ito sa lyrics editor o i-transcribe ulit.",
   "main.error.noLinesToAlign": "Walang mga linya na dapat i-align.",
   "main.error.splitFirstAlign": "Ibahagi ang kanta sa mga stems muna  alignment nakikinig sa vocal track.",
   "main.error.preciseNeedsPack": "Ang tumpak na alignment ay lumilipat sa splitter pack  i-install ito sa model manager una.",

@@ -77,6 +77,7 @@ export const main: Translation<typeof en> = {
   "main.error.noLinesToSave": "구해야 할 경계가 없습니다.",
   "main.error.couldNotSaveLyrics": "가사를 저장할 수 없었어요: {message}",
   "main.error.lyricsJobAlreadyRunning": "이미 가사 작업이 진행중입니다.",
+  "main.error.existingLyricsUnreadable": "저장된 가사를 읽을 수 없어 변경하지 않았습니다. 가사 편집기에서 열거나 다시 받아쓰기하세요.",
   "main.error.noLinesToAlign": "정렬할 줄이 없습니다.",
   "main.error.splitFirstAlign": "먼저 곡을 오디오 트랙로 나누세요.",
   "main.error.preciseNeedsPack": "정확한 조정은 스플리터 팩을 통해 진행됩니다. 먼저 모델 관리자에게 설치합니다.",
