@@ -759,9 +759,18 @@ fn command(
 }
 
 /// Advisory helper diagnostics reuse the owned child tree and bounded readers.
+#[cfg(test)]
 pub(crate) fn diagnostic_command(cmd: Command, timeout: Duration, limit: usize) -> Result<Vec<u8>> {
+    diagnostic_command_cancellable(cmd, timeout, limit, &|| false)
+}
+pub(crate) fn diagnostic_command_cancellable(
+    cmd: Command,
+    timeout: Duration,
+    limit: usize,
+    cancel: &impl Fn() -> bool,
+) -> Result<Vec<u8>> {
     ensure!(limit > 0 && limit <= 65536, "Invalid diagnostic output budget");
-    command_limited(cmd, timeout, limit, &|| false, &|_| {})
+    command_limited(cmd, timeout, limit, cancel, &|_| {})
 }
 fn command_limited(
     cmd: Command,

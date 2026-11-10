@@ -113,6 +113,7 @@ impl Player {
         self.drive_service.take();
         self.project_library_service.take();
         self.release_service.take();
+        crate::analyze_provenance::shutdown();
         diagnostics::event("app", "Native desktop stopped.", diagnostics::Level::Info);
         self.diagnostics.take();
     }

@@ -10,7 +10,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        OnceLock,
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender},
     },
     thread,
@@ -20,7 +21,79 @@ const OUTPUT_LIMIT: usize = 16384;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_EXECUTABLE: u64 = 512 * 1024 * 1024;
 const MEMO_LIMIT: usize = 64;
-static CHECKS: OnceLock<Option<SyncSender<PathBuf>>> = OnceLock::new();
+static CHECKS: OnceLock<Option<Service>> = OnceLock::new();
+
+struct Service {
+    stopped: Arc<AtomicBool>,
+    sender: SyncSender<PathBuf>,
+    worker: Mutex<Option<thread::JoinHandle<()>>>,
+}
+impl Service {
+    fn start() -> Option<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<PathBuf>(16);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let cancel = stopped.clone();
+        let worker = thread::Builder::new()
+            .name("analyzer-provenance".into())
+            .spawn(move || {
+                let cancelled = || cancel.load(Ordering::Acquire);
+                let mut memo = VecDeque::new();
+                while !cancelled() {
+                    let path = match receiver.recv_timeout(Duration::from_millis(20)) {
+                        Ok(path) => path,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
+                    if cancelled() {
+                        break;
+                    }
+                    if let Some(verdict) =
+                        check_cancellable(&path, expected(), &mut memo, &cancelled)
+                    {
+                        if !cancelled() {
+                            diagnostics::log(
+                                "analyze",
+                                &format!("[{}] {}", verdict.state, verdict.line),
+                                verdict.level,
+                            );
+                        }
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            stopped,
+            sender,
+            worker: Mutex::new(Some(worker)),
+        })
+    }
+    fn enqueue(&self, path: PathBuf) {
+        if !self.stopped.load(Ordering::Acquire) {
+            let _ = self.sender.try_send(path);
+        }
+    }
+    fn shutdown(&self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            // The active probe checks cancellation every 20ms, retires its owned
+            // tree and joins its pipe readers before this worker can settle.
+            let _ = worker.join();
+        }
+    }
+}
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Called by graceful desktop teardown before the diagnostic sink is drained.
+/// Initializing an unused slot to None also prevents probes after shutdown.
+pub(crate) fn shutdown() {
+    if let Some(service) = CHECKS.get_or_init(|| None) {
+        service.shutdown();
+    }
+}
 
 pub(crate) fn resolve() -> Result<PathBuf> {
     let path = resolve_path(
@@ -29,27 +102,8 @@ pub(crate) fn resolve() -> Result<PathBuf> {
     );
     // The queue, hashing, probe and log belong to one background worker. A full
     // diagnostic queue cannot delay pitch, key or beat analysis.
-    if let Some(sender) = CHECKS.get_or_init(|| {
-        let (tx, rx) = mpsc::sync_channel::<PathBuf>(16);
-        thread::Builder::new()
-            .name("analyzer-provenance".into())
-            .spawn(move || {
-                let mut memo = VecDeque::new();
-                for path in rx {
-                    let result = check(&path, expected(), &mut memo);
-                    if let Some(verdict) = result {
-                        diagnostics::log(
-                            "analyze",
-                            &format!("[{}] {}", verdict.state, verdict.line),
-                            verdict.level,
-                        );
-                    }
-                }
-            })
-            .ok()
-            .map(|_| tx)
-    }) {
-        let _ = sender.try_send(path.clone());
+    if let Some(service) = CHECKS.get_or_init(Service::start) {
+        service.enqueue(path.clone());
     }
     Ok(path)
 }
@@ -148,7 +202,12 @@ fn sidecar(path: &Path) -> Option<String> {
     let text = std::str::from_utf8(&bytes).ok()?.trim();
     valid_hash(text).then(|| text.to_owned())
 }
+#[cfg(test)]
 fn identity(path: &Path) -> Result<Identity> {
+    identity_cancellable(path, &|| false)
+}
+fn identity_cancellable(path: &Path, cancel: &impl Fn() -> bool) -> Result<Identity> {
+    ensure!(!cancel(), "Analyzer provenance stopped");
     let path = path.canonicalize()?;
     let mut file = File::open(&path)?;
     let before = file.metadata()?;
@@ -161,6 +220,7 @@ fn identity(path: &Path) -> Result<Identity> {
     let mut bytes = [0; 65536];
     let mut count = 0;
     loop {
+        ensure!(!cancel(), "Analyzer provenance stopped");
         ensure!(Instant::now() < deadline, "Analyzer identity timed out");
         let n = file.read(&mut bytes)?;
         if n == 0 {
@@ -184,8 +244,20 @@ fn identity(path: &Path) -> Result<Identity> {
         sidecar,
     })
 }
+#[cfg(test)]
 fn check(path: &Path, expected: Option<&str>, memo: &mut VecDeque<Identity>) -> Option<Verdict> {
-    let before = match identity(path) {
+    check_cancellable(path, expected, memo, &|| false)
+}
+fn check_cancellable(
+    path: &Path,
+    expected: Option<&str>,
+    memo: &mut VecDeque<Identity>,
+    cancel: &impl Fn() -> bool,
+) -> Option<Verdict> {
+    if cancel() {
+        return None;
+    }
+    let before = match identity_cancellable(path, cancel) {
         Ok(identity) => identity,
         Err(_) => return Some(Verdict { state: "unchecked", level: Level::Warn, line: "core singz-analyze provenance unchecked: executable identity unavailable. Analysis continues.".into() }),
     };
@@ -194,11 +266,15 @@ fn check(path: &Path, expected: Option<&str>, memo: &mut VecDeque<Identity>) -> 
     }
     let mut cmd = Command::new(&before.path);
     cmd.arg("build-info");
-    let reported = crate::lyrics_align::diagnostic_command(cmd, TIMEOUT, OUTPUT_LIMIT)
-        .ok()
-        .and_then(|bytes| parse(&bytes));
+    let reported =
+        crate::lyrics_align::diagnostic_command_cancellable(cmd, TIMEOUT, OUTPUT_LIMIT, cancel)
+            .ok()
+            .and_then(|bytes| parse(&bytes));
     // An in-place replacement while probing must never inherit a green match.
-    if identity(path).ok().as_ref() != Some(&before) {
+    if cancel() {
+        return None;
+    }
+    if identity_cancellable(path, cancel).ok().as_ref() != Some(&before) {
         return Some(Verdict { state: "unchecked", level: Level::Warn, line: "core singz-analyze provenance unchecked: executable changed during probe. Analysis continues.".into() });
     }
     let result = verdict(reported.as_ref(), before.sidecar.as_deref(), expected);
@@ -339,6 +415,122 @@ mod tests {
             crate::lyrics_align::diagnostic_command(good, Duration::from_secs(3), OUTPUT_LIMIT)
                 .unwrap();
         assert!(parse(&bytes).is_some());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_retires_started_probe_tree_and_suppresses_queued_and_future_work() {
+        use std::os::unix::fs::PermissionsExt;
+        fn process(pid: u32) -> Option<Vec<String>> {
+            let output = Command::new("/bin/ps")
+                .env("LC_ALL", "C")
+                .args([
+                    "-p",
+                    &pid.to_string(),
+                    "-o",
+                    "pid=",
+                    "-o",
+                    "pgid=",
+                    "-o",
+                    "lstart=",
+                    "-o",
+                    "stat=",
+                ])
+                .output()
+                .unwrap();
+            if !output.status.success() {
+                return None;
+            }
+            let fields = String::from_utf8(output.stdout)
+                .unwrap()
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            (fields.len() >= 8).then_some(fields)
+        }
+        fn retired(pid: u32, owned: &[String]) -> bool {
+            match process(pid) {
+                None => true,
+                Some(now) => now[..7] != owned[..7] || now[7].starts_with('Z'),
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "singz-provenance-shutdown-{}-{}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("probe");
+        let receipt = root.join("started");
+        // Record both owned PIDs only after the descendant exists. The private
+        // process group and ps start identity establish ownership before Quit.
+        fs::write(&path, format!("#!/bin/sh\nsleep 30 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" > '{}'\nwait\n", receipt.display())).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let queued = root.join("queued");
+        let queued_receipt = root.join("unexpected");
+        fs::write(
+            &queued,
+            format!(
+                "#!/bin/sh\nprintf unexpected > '{}'\n",
+                queued_receipt.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&queued, fs::Permissions::from_mode(0o700)).unwrap();
+        let service = Service::start().unwrap();
+        service.enqueue(path);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pids = loop {
+            if let Ok(text) = fs::read_to_string(&receipt) {
+                let values = text
+                    .split_whitespace()
+                    .filter_map(|p| p.parse::<u32>().ok())
+                    .collect::<Vec<_>>();
+                if values.len() == 2 {
+                    break values;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Probe never reported its child start"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        let owned = pids
+            .iter()
+            .map(|pid| process(*pid).expect("Owned probe process already stopped"))
+            .collect::<Vec<_>>();
+        for identity in &owned {
+            assert_eq!(
+                identity[1],
+                pids[0].to_string(),
+                "Probe escaped its private process group"
+            );
+        }
+        service.enqueue(queued.clone());
+        let shutdown_start = Instant::now();
+        service.shutdown();
+        assert!(
+            shutdown_start.elapsed() < Duration::from_secs(3),
+            "Shutdown ignored active probe cancellation"
+        );
+        assert!(service.worker.lock().unwrap().is_none());
+        assert!(service.stopped.load(Ordering::Acquire));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !pids
+            .iter()
+            .zip(&owned)
+            .all(|(pid, identity)| retired(*pid, identity))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "Owned diagnostic descendant survived shutdown"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        service.enqueue(queued);
+        service.shutdown(); // Idempotent; a local service never resets globals.
+        assert!(!queued_receipt.exists(), "Probe ran after retirement began");
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn in_place_replacement_with_same_size_changes_memo_identity() {
