@@ -476,8 +476,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.upload_finish(match[1], data)
             raise FixtureError(404, 'Unknown fixture route')
         except Disconnected:
+            self.close_connection = True
             self.server.state.finish(self.row, 499, cancelled=True)
         except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            self.close_connection = True
             self.server.state.finish(self.row, 499, cancelled=True)
         except FixtureError as error:
             try:
