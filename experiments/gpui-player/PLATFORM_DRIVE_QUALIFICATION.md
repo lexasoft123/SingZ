@@ -1,6 +1,56 @@
 # Native Drive platform qualification
 
-## Current state — 2026-11-09
+## Current state — 2026-11-10
+
+VM403 now passes both complete native Drive journeys from published app
+`03c22a6c` / UIKit `6f694bf0`, using observer `36c2ea5d` in a separate directory:
+
+| Journey | Actual app runs | Captures | Result |
+| --- | --- | --- | --- |
+| `drive-retirement` | 2 | 20 | Both sizes pass Delete-last, name reuse, typed Rename and separate-lineage retirement proofs. |
+| `drive-empty` | 6 | 14 | Both sizes pass writer publication, fresh download/open and server-stopped offline reopen. |
+
+All 34 full screenshots and their hashes/state metadata received independent
+visual review. Pending status remains pending until the final sync settles;
+fresh and offline empty-player images match exactly at each size. One visual
+defect remains: the library's literal folder emoji renders as a missing-glyph
+box in 12 retirement and four empty-publication captures. No additional button/
+message overlap or clipped rename/delete controls was observed. These are native
+state/regression results, not matched production visual parity.
+
+The observers retain 815 retirement and 303 empty-journey CPU/RSS samples,
+actual per-run process/window identities, natural exits and unchanged private-
+display foreground. No input helper was observed. Live FPS is null; per-process
+GPU counters and a shown native frame remain unqualified.
+
+The dedicated rootless container `singz-gpui-loopback-36c2ea5d` exposes only
+`/dev/snd/controlC2` and the unused virtual playback endpoint
+`/dev/snd/pcmC2D1p`. Native inventory reports ALSA, `fixture:false`, no input
+channels and default output `alsa:id:SingZLoop:pcm:1`. Physical audio endpoints
+and existing VM app owners are untouched. The first attempt stopped before
+launch on inaccessible foreign `/proc/1/exe`; the reviewed observer fix skips
+foreign permission denials while preserving owned identity/cleanup failures.
+The next attempt correctly failed because the original container exposed no
+audio devices. Both rejected runs are retained.
+
+Evidence is under `/tmp/singz-native-tour-a11y-20261109/`:
+`linux-drive-retirement-03c22a6c-v3`, `linux-drive-empty-03c22a6c-v1`, and their
+`linux-drive-*-visual-review-v1.md` reports. Target originals remain in
+`/lab/checkpoint-711ac271/`. Compiled source/runtime stayed frozen; the observer
+bundle is separately pinned. The nine-stage Linux build/test pipeline and
+34-case relocated canonical decoder matrix pass; see
+`NATIVE_CODEC_STATUS_REVIEW.md`.
+
+Dell now has the exact public `39ba720e` / UIKit `6f694bf0` source and a
+successfully published pinned codec SDK. Windows helper/app and Drive journey
+qualification remain open. Newer analyzer provenance/shutdown changes need
+their own target evidence. Real Google consent, physical audio and the broader
+platform/visual/accessibility matrix are separate open gates.
+
+## Historical transfer and rejected checkpoints — 2026-11-09
+
+The following record preserves the earlier state and failed attempts. Its
+pending descriptions apply to those snapshots, not to the Linux results above.
 
 The maintained Windows and Linux observers now accept `drive-retirement` and
 `drive-empty`. These are qualification adapters, **not platform passes**. The
@@ -32,7 +82,7 @@ configuration, account tokens or compiled app was included. A fresh source
 snapshot must be audited after the current checkpoint is published. Transfer
 alone is not a remote build, codec or UI workflow pass; those gates remain open.
 
-## Current public-checkpoint follow-up
+## Historical public-checkpoint follow-up
 
 Published app `711ac271` and UIKit `6f694bf` were transferred to both VM403 and
 Dell as `source-711ac271-public.zip`: SHA-256
