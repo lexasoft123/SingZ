@@ -112,16 +112,13 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .player-header-actions { margin-left: auto; }
 .player-header-actions .pill { min-height: var(--box-compact-height); font-size: var(--box-label-size); padding: 8px 16px; }
 .box-player[data-controls="hidden"] .player-chrome { visibility: hidden; pointer-events: none; }
-.player-lyrics { position: absolute; left: 100px; right: 80px; top: 130px; height: 550px; overflow: hidden; }
+.player-lyrics { position: absolute; left: 100px; right: 80px; top: 130px; height: 550px; overflow: hidden; mask-image: linear-gradient(to bottom, transparent, #000 64px, #000 calc(100% - 64px), transparent); }
 .player-lyrics-track { position: absolute; left: 20px; right: 20px; top: 0; will-change: transform; }
-.player-lyric-slot { position: absolute; left: 0; right: 0; padding-top: 40px; min-width: 0; transition: opacity 260ms ease-out; }
+.player-lyric-slot { position: absolute; left: 0; right: 0; padding-top: 40px; min-width: 0; transition: opacity var(--lyric-glide-duration) var(--lyric-glide-curve); }
 .player-lyric-slot[data-context="outside"] { opacity: 0; }
-/* Fixed layout size: only transform and opacity animate between contextual roles. */
-.player-lyric { padding: 0; margin: 0; width: calc(100% / 1.03); font-size: 68px; line-height: 1.2; font-weight: 650; font-variation-settings: 'wdth' 92; letter-spacing: -.02em; min-height: 82px; overflow-wrap: anywhere; color: var(--sz-faint); transform-origin: left center; transform: scale(calc(52 / 68)); opacity: .72; transition: transform 260ms ease-out, opacity 260ms ease-out; }
-.player-lyric.past { color: var(--sz-dim); opacity: .6; }
-.player-lyric.up-next { color: color-mix(in srgb, var(--sz-text) 76%, var(--sz-faint)); }
-.player-lyric.current { transform: scale(1); color: var(--sz-text); opacity: 1; }
-.player-lyric.current[data-started="true"] { transform: scale(1.03); }
+/* Only the seven row wrappers need compositor hints; glyph masks paint normally. */
+.player-lyric-scale { transform-origin: left center; will-change: transform, opacity; }
+.player-lyric { padding: 0; margin: 0; width: calc(100% / 1.03); font-size: 68px; line-height: 1.2; font-weight: 650; font-variation-settings: 'wdth' 92; letter-spacing: -.02em; min-height: 82px; overflow-wrap: anywhere; color: var(--sz-text); transform-origin: left center; transform: scale(1.03); }
 .player-shaped-word { display: inline-block; position: relative; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; --lyric-edge: var(--lyric-feather-start); --lyric-pen: 0px; }
 .player-shaped-word > .lyric-ink-base { color: inherit; }
 .player-shaped-word > .lyric-ink-halo,

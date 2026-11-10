@@ -1261,6 +1261,10 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
 - Every rAF loop must be **change-gated** (write DOM/canvas only when the
   value actually changed) and **skip work under `body.modal-open`** — any
   pixel change behind a modal re-rasters the whole blurred backdrop.
+- A compositor-only animation can cost more than a change-gated mask. For Box
+  lyrics, keep word updates on the current row and measure CPU and presented
+  frames on the TV before promoting glyphs or multiplying moving clip layers.
+  Zero Paint events alone is not a performance acceptance check.
 - No infinite CSS animation without a `body.modal-open … animation-play-state:
   paused` rule (see the shimmer/pulse block in styles.css).
 - Windows gets solid surfaces — modal scrim, drop overlay, transport, the

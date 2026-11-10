@@ -54,34 +54,26 @@ export function lyricBandSlices(): { left: number; right: number; core: number; 
   })
 }
 
-/** Static masks: only the edge/pen custom properties change during playback. */
-export function lyricHighlightMasks(): { amber: string; core: string; glow: string } {
-  const at = (property: string, offset: number): string => `calc(var(${property}) + ${offset}px)`
-  const stop = (alpha: number, property: string, offset: number): string => `rgb(0 0 0 / ${alpha}) ${at(property, offset)}`
-  const band = (glow: boolean): string => {
-    const pad = glow ? LYRIC_GLOW_PAD : 0
-    const slices = lyricBandSlices()
-    return `linear-gradient(90deg, ${[
-      stop(0, '--lyric-pen', slices[0].left + pad),
-      ...slices.flatMap(slice => [stop(glow ? slice.glow : slice.core, '--lyric-pen', slice.left + pad),
-        stop(glow ? slice.glow : slice.core, '--lyric-pen', slice.right + pad)]),
-      stop(0, '--lyric-pen', slices[11].right + pad)
-    ].join(', ')})`
-  }
-  const feather = Array.from({ length: 12 }, (_, slice) => {
-    const alpha = 1 - (slice + .5) / 12
-    return [stop(alpha, '--lyric-edge', -LYRIC_FEATHER + slice * 2 * LYRIC_FEATHER / 12),
-      stop(alpha, '--lyric-edge', -LYRIC_FEATHER + (slice + 1) * 2 * LYRIC_FEATHER / 12)]
-  }).flat()
-  return { amber: `linear-gradient(90deg, ${[stop(1, '--lyric-edge', -LYRIC_FEATHER), ...feather,
-    stop(0, '--lyric-edge', LYRIC_FEATHER)].join(', ')})`, core: band(false), glow: band(true) }
+// Smoothstep/Hermite: gentle initial acceleration avoids a jump on a late TV
+// frame (141ms = 16.3%). Retargets carry the analytic velocity in px/ms.
+export const LYRIC_GLIDE = { duration: 550, curve: 'cubic-bezier(.333333,0,.666667,1)' } as const
+export function createLyricGlide(offset: number) {
+  return { offset, target: offset, from: offset, velocity: 0, initialVelocity: 0, started: 0 }
 }
-
-/** Native 16%/120Hz response, expressed in elapsed seconds for 30Hz TVs. */
-export function lyricScrollStep(offset: number, target: number, dt: number, snap = false): number {
-  if (snap || Math.abs(target - offset) <= .2) return target
-  const next = offset + (target - offset) * (1 - Math.pow(1 - .16, Math.max(0, dt) * 120))
-  return Math.abs(target - next) <= .2 ? target : next
+export type LyricGlide = ReturnType<typeof createLyricGlide>
+export function sampleLyricGlide(g: LyricGlide, now: number): { offset: number; velocity: number } {
+  const u = Math.max(0, Math.min(1, (now - g.started) / LYRIC_GLIDE.duration))
+  const distance = g.target - g.from, tangent = g.initialVelocity * LYRIC_GLIDE.duration
+  g.offset = u === 1 ? g.target : g.from + distance * (3 * u * u - 2 * u * u * u) + tangent * (u * u * u - 2 * u * u + u)
+  g.velocity = u === 1 ? 0 : (distance * (6 * u - 6 * u * u) + tangent * (3 * u * u - 4 * u + 1)) / LYRIC_GLIDE.duration
+  return { offset: g.offset, velocity: g.velocity }
+}
+export function retargetLyricGlide(g: LyricGlide, target: number, now: number, snap = false): void {
+  sampleLyricGlide(g, now)
+  g.from = snap ? target : g.offset
+  g.offset = g.from; g.target = target; g.started = now
+  g.initialVelocity = snap ? 0 : g.velocity
+  if (snap) g.velocity = 0
 }
 
 export function lyricScrollShouldSnap(previousLine: number, nextLine: number, seek: boolean): boolean {
@@ -112,4 +104,30 @@ export function shapedWordWidth(element: HTMLElement): number | null {
 export function setLyricSinging(element: Pick<HTMLElement, 'dataset'>, singing: boolean, hasGeometry: boolean): void {
   const active = String(singing && hasGeometry)
   if (element.dataset.singing !== active) element.dataset.singing = active
+}
+
+/** Context rows stay nearly full size so the TV track reads as a flat slide. */
+export const LYRIC_ROW_SCALE = .94
+
+/** Cached masks: only the current row’s edge/pen properties change during playback. */
+export function lyricHighlightMasks(): { amber: string; core: string; glow: string } {
+  const at = (property: string, offset: number): string => `calc(var(${property}) + ${offset}px)`
+  const stop = (alpha: number, property: string, offset: number): string => `rgb(0 0 0 / ${alpha}) ${at(property, offset)}`
+  const band = (glow: boolean): string => {
+    const pad = glow ? LYRIC_GLOW_PAD : 0
+    const slices = lyricBandSlices()
+    return `linear-gradient(90deg, ${[
+      stop(0, '--lyric-pen', slices[0].left + pad),
+      ...slices.flatMap(slice => [stop(glow ? slice.glow : slice.core, '--lyric-pen', slice.left + pad),
+        stop(glow ? slice.glow : slice.core, '--lyric-pen', slice.right + pad)]),
+      stop(0, '--lyric-pen', slices[11].right + pad)
+    ].join(', ')})`
+  }
+  const feather = Array.from({ length: 12 }, (_, slice) => {
+    const alpha = 1 - (slice + .5) / 12
+    return [stop(alpha, '--lyric-edge', -LYRIC_FEATHER + slice * 2 * LYRIC_FEATHER / 12),
+      stop(alpha, '--lyric-edge', -LYRIC_FEATHER + (slice + 1) * 2 * LYRIC_FEATHER / 12)]
+  }).flat()
+  return { amber: `linear-gradient(90deg, ${[stop(1, '--lyric-edge', -LYRIC_FEATHER), ...feather,
+    stop(0, '--lyric-edge', LYRIC_FEATHER)].join(', ')})`, core: band(false), glow: band(true) }
 }

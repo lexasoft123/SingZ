@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { LyricLine } from '../../src/shared/types'
 import { PlayerLyrics } from '../../src/renderer/src/box/PlayerLyrics'
-import { LYRIC_DESKTOP_SCALE, LYRIC_FEATHER, LYRIC_LIGHT_WIDTH, lyricBandSlices, lyricHighlightMasks, lyricScrollStep, lyricScrollShouldSnap, lyricWindow, lyricInkGeometry, lyricPaintPosition, shapedWordWidth, setLyricSinging, singingCountdown } from '../../src/renderer/src/box/player-lyrics-model'
+import { LYRIC_DESKTOP_SCALE, LYRIC_FEATHER, LYRIC_LIGHT_WIDTH, lyricBandSlices, lyricHighlightMasks, lyricScrollShouldSnap, lyricWindow, lyricInkGeometry, lyricPaintPosition, shapedWordWidth, setLyricSinging, singingCountdown } from '../../src/renderer/src/box/player-lyrics-model'
 const lines: LyricLine[] = [
   { start: 10, end: 13, text: 'Wide iii', words: [{ w: 'Wide', s: 10, e: 11 }, { w: 'iii', s: 11, e: 13 }] },
   { start: 25, end: 29, text: '你好 é', words: [{ w: '你好', s: 25, e: 27 }, { w: 'é', s: 27, e: 29 }] }
@@ -154,25 +154,6 @@ describe('approved GPUI band and Box geometry', () => {
 })
 
 describe('Box lyric track motion', () => {
-  it('matches the 120Hz native response at 30, 60 and 120Hz', () => {
-    const offsets = [30, 60, 120].map(hz => {
-      let offset = 0
-      for (let frame = 0; frame < hz / 5; frame++) offset = lyricScrollStep(offset, 100, 1 / hz)
-      return offset
-    })
-    offsets.forEach(offset => expect(offset).toBeCloseTo(100 * (1 - .84 ** 24), 10))
-    expect(lyricScrollStep(0, 100, 1 / 120)).toBeCloseTo(16)
-    // Negative control: a fixed 16% step at 30Hz would still be only 64.87px.
-    expect(offsets[0]).toBeGreaterThan(100 * (1 - .84 ** 6) + 30)
-  })
-  it('converges exactly, snaps within 0.2px and ignores negative elapsed time', () => {
-    let offset = -150
-    for (let frame = 0; frame < 30; frame++) offset = lyricScrollStep(offset, 250, 1 / 30)
-    expect(offset).toBe(250)
-    expect(lyricScrollStep(249.81, 250, 0)).toBe(250)
-    expect(lyricScrollStep(0, 100, -1)).toBe(0)
-    expect(lyricScrollStep(0, 100, 0, true)).toBe(100)
-  })
   it('snaps seeks and jumps over two lines, preserving easing for adjacent and two-line changes', () => {
     expect(lyricScrollShouldSnap(3, 4, false)).toBe(false)
     expect(lyricScrollShouldSnap(3, 5, false)).toBe(false)

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { lyricScrollStep } from '../../src/renderer/src/box/player-lyrics-model'
-import { lyricPaintAllowed, watchLyricPaint, watchLyricTransform } from '../../src/renderer/src/box/player-lyrics-loop'
+import { createLyricGlide, retargetLyricGlide, sampleLyricGlide } from '../../src/renderer/src/box/player-lyrics-model'
+import { deferLyricMeasure, lyricPaintAllowed, watchLyricPaint, watchLyricTransform } from '../../src/renderer/src/box/player-lyrics-loop'
 function fixture() {
   let modal = false, hidden = false, observe!: () => void, id = 0
   const frames = new Map<number, (time: number) => void>()
@@ -54,15 +54,17 @@ describe('lyric paint under UIKit modal occlusion', () => {
   it('applies the track transform while paused and stops requesting frames once settled', () => {
     const f = fixture()
     let offset = 0
+    const glide = createLyricGlide(0); retargetLyricGlide(glide, 100, 0)
     const track = { style: { transform: '' } }
-    const paint = (): void => {
-      offset = lyricScrollStep(offset, 100, 1 / 30)
+    const paint = (time: number): void => {
+      offset = sampleLyricGlide(glide, time).offset
       track.style.transform = `translateY(${-offset}px)`
     }
     const stop = watchLyricPaint(null, false, paint, () => {}, () => offset !== 100)
     expect(f.frames.size).toBe(1)
-    f.tick(0)
-    expect(offset).toBeCloseTo(100 * (1 - .84 ** 4))
+    f.tick(1000 / 30)
+    expect(offset).toBeGreaterThan(0)
+    expect(offset).toBeLessThan(15)
     expect(track.style.transform).toBe(`translateY(${-offset}px)`)
     for (let frame = 1; frame < 30; frame++) f.tick(frame * 1000 / 30)
     expect(track.style.transform).toBe('translateY(-100px)')
@@ -76,5 +78,19 @@ describe('lyric paint under UIKit modal occlusion', () => {
     expect(f.paint).not.toHaveBeenCalled(); expect(f.frames.size).toBe(0)
     stop(); f.setModal(false); queued(200)
     expect(f.paint).not.toHaveBeenCalled(); expect(f.frames.size).toBe(0)
+  })
+})
+
+describe('line-change measurement scheduling', () => {
+  it('coalesces a commit, ResizeObserver and refresh into at most one measure after the first motion frame', () => {
+    const f = fixture(), measure = vi.fn(), deferred = deferLyricMeasure(measure)
+    deferred.schedule(); deferred.schedule(); deferred.schedule()
+    expect(measure).not.toHaveBeenCalled()
+    f.tick(33); deferred.schedule()
+    expect(measure).not.toHaveBeenCalled()
+    f.tick(66)
+    expect(measure).toHaveBeenCalledTimes(1)
+    deferred.stop(); deferred.schedule(); f.tick(100)
+    expect(measure).toHaveBeenCalledTimes(1)
   })
 })

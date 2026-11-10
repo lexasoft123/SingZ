@@ -41,3 +41,18 @@ export function watchLyricTransform(root: HTMLElement | null, measure: () => voi
   observer.observe(tv, { attributes: true, attributeFilter: ['style'] })
   return () => { disposed = true; observer.disconnect() }
 }
+
+/** Coalesce layout invalidations and leave the first motion frame read-free. */
+export function deferLyricMeasure(measure: () => void): { schedule: () => void; stop: () => void } {
+  let first = 0, second = 0, disposed = false
+  return {
+    schedule() {
+      if (disposed || first || second) return
+      first = requestAnimationFrame(() => {
+        first = 0
+        if (!disposed) second = requestAnimationFrame(() => { second = 0; if (!disposed) measure() })
+      })
+    },
+    stop() { disposed = true; cancelAnimationFrame(first); cancelAnimationFrame(second) }
+  }
+}
