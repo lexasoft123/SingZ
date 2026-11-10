@@ -50,7 +50,7 @@ fn move_live_bar(view: &Entity<Player>, w: &mut Window, cx: &mut App) -> anyhow:
     let bar=handles.iter().find(|h|(h.time-2.4).abs()<1e-5).ok_or_else(||anyhow::anyhow!("No manual-grid bar at2.4s"))?;
     let start=point(bounds.left()+px(bar.x),bounds.center().y);
     let start_time=p.view_start*p.duration;let span=(p.view_end-p.view_start)*p.duration;
-    let end=point(bounds.left()+bounds.size.width*((3.-start_time)/span),bounds.bottom()+px(20.));
+    let end=point(bounds.left()+bounds.size.width*(((3.-start_time)/span) as f32),bounds.bottom()+px(20.));
     w.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent{position:start,pressed_button:None,modifiers:Default::default()}),cx);draw(w,cx);
     w.dispatch_event(PlatformInput::MouseDown(MouseDownEvent{position:start,button:MouseButton::Left,click_count:1,..Default::default()}),cx);draw(w,cx);
     w.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent{position:end,pressed_button:Some(MouseButton::Left),modifiers:Default::default()}),cx);draw(w,cx);

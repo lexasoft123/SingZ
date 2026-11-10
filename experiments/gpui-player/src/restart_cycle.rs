@@ -1,7 +1,7 @@
 //! Transport's Restart alternates selection start/song start until its inputs change.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Inputs {
-    selection: Option<(f32, f32)>,
+    selection: Option<(f64, f64)>,
     playing: bool,
 }
 #[derive(Clone, Debug, Default)]
@@ -18,12 +18,12 @@ impl RestartCycle {
             self.reset();self.component+=1;self.mounted=mounted;
         }
     }
-    pub fn snapshot(&self, selection:Option<(f32,f32)>, playing:bool)->Self {
+    pub fn snapshot(&self, selection:Option<(f64,f64)>, playing:bool)->Self {
         let mut snapshot=self.clone();
         snapshot.observe(selection,playing);
         snapshot
     }
-    pub fn restore_same_song(&mut self, snapshot:Self, selection:Option<(f32,f32)>, playing:bool)->bool {
+    pub fn restore_same_song(&mut self, snapshot:Self, selection:Option<(f64,f64)>, playing:bool)->bool {
         let inputs=Inputs{selection,playing};
         if self.mounted && self.component==snapshot.component && snapshot.inputs==Some(inputs) {
             *self=snapshot;true
@@ -31,11 +31,11 @@ impl RestartCycle {
             self.observe(selection,playing);false
         }
     }
-    pub fn observe(&mut self, selection:Option<(f32,f32)>, playing:bool) {
+    pub fn observe(&mut self, selection:Option<(f64,f64)>, playing:bool) {
         let inputs=Inputs{selection,playing};
         if self.inputs!=Some(inputs) {self.reset();self.inputs=Some(inputs);}
     }
-    pub fn next(&mut self, selection:Option<(f32,f32)>, playing:bool)->f32 {
+    pub fn next(&mut self, selection:Option<(f64,f64)>, playing:bool)->f64 {
         self.observe(selection,playing);
         let target=selection.filter(|_|!self.start_at_song).map_or(0.,|(start,_)|start);
         self.start_at_song=selection.is_some()&&!self.start_at_song;

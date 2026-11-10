@@ -2,14 +2,14 @@
 //! playback and accepted transport positions continue independently.
 #[derive(Default)]
 pub(crate) struct Clock {
-    frozen: Option<(u64, f32)>,
-    last_painted: Option<(u64, f32)>,
+    frozen: Option<(u64, f64)>,
+    last_painted: Option<(u64, f64)>,
 }
 impl Clock {
     pub fn is_open(&self) -> bool {
         self.frozen.is_some()
     }
-    pub fn observe(&mut self, open: bool, epoch: u64, actual: f32) {
+    pub fn observe(&mut self, open: bool, epoch: u64, actual: f64) {
         if !open {
             self.frozen = None;
         } else if !self.frozen.is_some_and(|(old, _)| old == epoch) {
@@ -20,12 +20,12 @@ impl Clock {
             );
         }
     }
-    pub fn position(&self, epoch: u64, actual: f32) -> f32 {
+    pub fn position(&self, epoch: u64, actual: f64) -> f64 {
         self.frozen
             .filter(|(old, _)| *old == epoch)
             .map_or(actual, |(_, position)| position)
     }
-    pub fn painted(&mut self, epoch: u64, actual: f32) {
+    pub fn painted(&mut self, epoch: u64, actual: f64) {
         if self.frozen.is_none() {
             self.last_painted = Some((epoch, actual));
         }

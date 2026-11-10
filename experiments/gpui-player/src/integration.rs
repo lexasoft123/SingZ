@@ -37,15 +37,15 @@ pub struct Project {
     pub metronome: crate::beat::Metronome,
     pub beat: Option<crate::beat::Beats>,
     pub vocal_stamp: Option<(u64, std::time::SystemTime)>,
-    pub vocal_duration: Option<f32>,
+    pub vocal_duration: Option<f64>,
     pub lane_stamps: Vec<(u64, std::time::SystemTime)>,
     pub tempo: f32,
     pub transpose: i32,
     pub raw: Value,
     pub metadata_hash: String,
     pub looping: bool,
-    pub selection: Option<(f32, f32)>,
-    pub view: Option<(f32, f32)>,
+    pub selection: Option<(f64, f64)>,
+    pub view: Option<(f64, f64)>,
     pub pitch: Arc<crate::project_pitch::Pitch>,
     pub has_lyrics: bool,
     pub lyrics: Option<Arc<crate::project_lyrics::Document>>,
@@ -96,6 +96,12 @@ fn number(value: Option<&Value>, default: f32, min: f32, max: f32) -> Result<f32
     if !n.is_finite() || n < min || n > max {
         bail!("Project setting is outside supported range")
     };
+    Ok(n)
+}
+// JSON/native seconds enter the timeline without a single-precision round trip.
+fn seconds(value: Option<&Value>, default: f64, min: f64, max: f64) -> Result<f64> {
+    let n = match value { None => default, Some(v) => v.as_f64().context("Invalid project number")? };
+    anyhow::ensure!(n.is_finite() && n >= min && n <= max, "Project setting is outside supported range");
     Ok(n)
 }
 pub fn read_project(path: &Path) -> Result<Project> {
@@ -196,12 +202,12 @@ fn read_project_mode_overlay(path:&Path,full:bool,overlay:Option<&OpenCustomOver
         bail!("Transpose must be a whole semitone")
     }
     let tempo = number(settings.get("tempo"), 1., 0.25, 4.)?;
-    let range = |name: &str| -> Result<Option<(f32, f32)>> {
+    let range = |name: &str| -> Result<Option<(f64, f64)>> {
         if settings[name].is_null() {
             return Ok(None);
         }
-        let s = number(settings[name].get("s"), 0., 0., 86400. * 365.)?;
-        let e = number(settings[name].get("e"), 0., 0., 86400. * 365.)?;
+        let s = seconds(settings[name].get("s"), 0., 0., 86400. * 365.)?;
+        let e = seconds(settings[name].get("e"), 0., 0., 86400. * 365.)?;
         if e <= s {
             bail!("Invalid saved {name} range")
         };
@@ -390,11 +396,11 @@ pub struct Status {
     pub transpose: i32,
     pub seek_count: u64,
     pub loop_count: u64,
-    pub loop_range: Option<(f32, f32)>,
-    pub region_range: Option<(f32, f32)>,
+    pub loop_range: Option<(f64, f64)>,
+    pub region_range: Option<(f64, f64)>,
     pub audible_current: bool,
-    pub position: f32,
-    pub duration: f32,
+    pub position: f64,
+    pub duration: f64,
     pub playing: bool,
 }
 impl Status {
@@ -421,8 +427,8 @@ impl Status {
             );
             bail!("Native output stopped unexpectedly")
         }
-        let position = number(v.get("position"), 0., 0., 86400. * 365.)?;
-        let duration = number(v.get("duration"), 0., 0., 86400. * 365.)?;
+        let position = seconds(v.get("position"), 0., 0., 86400. * 365.)?;
+        let duration = seconds(v.get("duration"), 0., 0., 86400. * 365.)?;
         if v["trainingOnly"] == true {
             anyhow::ensure!(
                 duration == 0. && position == 0. && v["playing"] == false,
@@ -437,8 +443,8 @@ impl Status {
         }
         let count_in_heard=crate::transport_timing::Heard::parse(v.get("countInHeard"))?;
         if count_in_heard.is_some(){anyhow::ensure!(!empty_project&&v["trainingOnly"]!=true&&v["playing"]==true&&v["countingIn"]==true,"Inconsistent native heard count-in state");}
-        let start = number(v.get("loopStart"), 0., 0., 86400. * 365.)?;
-        let end = number(v.get("loopEnd"), 0., 0., 86400. * 365.)?;
+        let start = seconds(v.get("loopStart"), 0., 0., 86400. * 365.)?;
+        let end = seconds(v.get("loopEnd"), 0., 0., 86400. * 365.)?;
         let state = match v.get("state") {
             None => 0,
             Some(value) => value.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(u32::MAX),
@@ -501,8 +507,8 @@ impl Status {
             seek_count: v["seekCount"].as_u64().unwrap_or(0),
             loop_count: v["loopCount"].as_u64().unwrap_or(0),
             region_range: if v["regionEnabled"]==true {
-                let start=number(v.get("regionStart"),0.,0.,86400.*365.)?;
-                let end=number(v.get("regionEnd"),0.,0.,86400.*365.)?;
+                let start=seconds(v.get("regionStart"),0.,0.,86400.*365.)?;
+                let end=seconds(v.get("regionEnd"),0.,0.,86400.*365.)?;
                 anyhow::ensure!(end>start,"Invalid native playback region");
                 Some((start,end))
             } else {None},
@@ -518,7 +524,7 @@ impl Status {
         })
     }
 }
-fn validate_empty_status(v:&Value,position:f32,duration:f32)->Result<()> {
+fn validate_empty_status(v:&Value,position:f64,duration:f64)->Result<()> {
     anyhow::ensure!(v["trainingOnly"]==false&&v["laneSetRevision"].as_u64().is_some_and(|n|n>0)&&v["graphGeneration"]==0&&v["state"]==0&&position==0.&&duration==0.&&v["playing"]==false&&!v["countingIn"].as_bool().unwrap_or(false)&&!v["looping"].as_bool().unwrap_or(false),"Invalid empty-project playback state");
     for key in ["lanes","laneIds","laneDurations","peaks"]{anyhow::ensure!(v[key].as_array().is_some_and(Vec::is_empty),"Empty project contains native {key}");}
     let cue_owns_output=v["physicalOutputReleased"]==false&&v["baseHostState"]==2&&v["baseCallbacks"].as_u64().is_some()&&v["cueGeneration"].as_u64().is_some_and(|n|n>0)&&v["cueStartHostNs"].as_str().and_then(|n|n.parse::<u64>().ok()).is_some_and(|n|n>0);
@@ -588,7 +594,7 @@ fn accepted_output(before:&Value,reply:&Value,uid:&str)->Result<Status> {
     for key in ["laneIds","lanes","masterGain","referenceGain","trainingOnly","emptyProject","explicitGraph","graphNodeCount","graphConnectionCount"] {
         anyhow::ensure!(before[key]==reply[key],"Native playback {key} changed during output selection");
     }
-    anyhow::ensure!((status.duration-old.duration).abs()<=0.001+f32::EPSILON*old.duration.abs(),"Native duration changed during output selection");
+    anyhow::ensure!((status.duration-old.duration).abs()<=0.001+f64::EPSILON*old.duration.abs(),"Native duration changed during output selection");
     anyhow::ensure!(status.loop_range==old.loop_range||status.loop_range.zip(old.loop_range).is_some_and(|(a,b)|(a.0-b.0).abs()<=0.001&&(a.1-b.1).abs()<=0.001),"Native loop changed during output selection");
     Ok(status)
 }
@@ -735,7 +741,7 @@ pub struct OwnedAudioProbe {
 enum Request {
     Provider(u64,u64,u64,u64,crate::audio_devices::Provider),
     KaraokePref(u64,bool),
-    Region(u64,u64,crate::region_gesture::Target,f32),
+    Region(u64,u64,crate::region_gesture::Target,f64),
     Rate(u64,u64,f32,i32),
     Carry(u64,u64,crate::carry_line::Plan,Arc<AtomicU64>),
     AdoptCarryPreferences(u64,crate::carry_line::Config),
@@ -762,7 +768,7 @@ enum Request {
     Catalog(u64,Arc<AtomicU64>),
     Open(u64, PathBuf, Option<crate::beat::Metronome>, Option<crate::project_delete::Target>, Option<OpenCustomOverlay>),
     Control(u64, String),
-    RestoreSeek(u64,f32),
+    RestoreSeek(u64,f64),
     Playback(u64,u64,String,Arc<AtomicBool>),
     Rename(u64, PathBuf, String, String),
     ImportLibrary(u64, crate::project_import::Input),
@@ -961,7 +967,7 @@ impl Backend {
             .try_send(Request::Output(uid))
             .context("Native command queue is full")
     }
-    pub fn restore_seek(&self,epoch:u64,position:f32)->Result<()> {
+    pub fn restore_seek(&self,epoch:u64,position:f64)->Result<()> {
         self.requests.try_send(Request::RestoreSeek(epoch,position)).context("Native command queue is full")
     }
     pub fn recover_output(&self, epoch: u64, serial: u64, request: AudioRecovery, uid: String) -> Result<()> {
@@ -1165,7 +1171,7 @@ impl Backend {
         validate_playback_command(&command)?;
         admit_playback_request(&self.requests,&self.playback_intent,serial,|armed|Request::Playback(epoch,serial,command,armed))
     }
-    pub fn region(&self,epoch:u64,serial:u64,target:crate::region_gesture::Target,duration:f32)->Result<()> {
+    pub fn region(&self,epoch:u64,serial:u64,target:crate::region_gesture::Target,duration:f64)->Result<()> {
         self.requests.try_send(Request::Region(epoch,serial,target,duration)).context("Native command queue is full")
     }
     pub fn control(&self, epoch: u64, command: String) -> Result<()> {
@@ -1612,14 +1618,14 @@ fn restart_analysis(snapshot:Option<Project>,epoch:u64,events:&mpsc::Sender<Even
         }))
     });
 }
-fn vocal_lane_duration(value:&Value)->Result<Option<f32>> {
+fn vocal_lane_duration(value:&Value)->Result<Option<f64>> {
     let Some(durations)=value.get("laneDurations")else{return Ok(None);};
     let durations=durations.as_array().context("Invalid native lane durations")?;let ids=value["laneIds"].as_array().context("Missing native lane IDs")?;
     anyhow::ensure!(durations.len()==ids.len()&&durations.len()<=crate::tracks::MAX_ACTIVE_LANES,"Invalid native lane duration count");
     for duration in durations{anyhow::ensure!(duration.as_f64().is_some_and(|n|n.is_finite()&&n>0.&&n<=86400.*365.),"Invalid native lane source duration");}
-    Ok(ids.iter().position(|id|id.as_str()==Some("vocals")).map(|index|durations[index].as_f64().unwrap() as f32))
+    Ok(ids.iter().position(|id|id.as_str()==Some("vocals")).map(|index|durations[index].as_f64().unwrap()))
 }
-fn replacement_reply(value:Value,expected_ids:&[String])->std::result::Result<(Status,Vec<Vec<f32>>,Option<f32>),LaneReplaceFailure> {
+fn replacement_reply(value:Value,expected_ids:&[String])->std::result::Result<(Status,Vec<Vec<f32>>,Option<f64>),LaneReplaceFailure> {
     if value["lanesCommitted"]==true {
         let result=(||->Result<_>{
             let ids=value["laneIds"].as_array().context("Missing committed native lane IDs")?;
@@ -1832,7 +1838,7 @@ impl Connection {
         admit_carry_revision(&mut self.carry_revision,&status).map_err(|e|LaneReplaceFailure::Disconnected(e.to_string()))?;
         Ok(status)
     }
-    fn replace_lanes(&mut self,candidate:&Project)->std::result::Result<(Status,Vec<Vec<f32>>,Option<f32>),LaneReplaceFailure> {
+    fn replace_lanes(&mut self,candidate:&Project)->std::result::Result<(Status,Vec<Vec<f32>>,Option<f64>),LaneReplaceFailure> {
         let commands=lane_transaction(candidate).map_err(|e|LaneReplaceFailure::Refused(e.to_string()))?;
         for command in commands {
             let packet=(||->Result<Value>{writeln!(self.input,"{command}")?;self.input.flush()?;self.read(Duration::from_secs(10))})();
@@ -1850,7 +1856,7 @@ impl Connection {
             Err(error)=>Err(LaneReplaceFailure::Committed(format!("Could not confirm track replacement: {error:#}. Playback was stopped; requested tracks were retained. Save and reopen."))),
         }
     }
-    fn region(&mut self,target:crate::region_gesture::Target,duration:f32)->std::result::Result<Status,RateFailure> {
+    fn region(&mut self,target:crate::region_gesture::Target,duration:f64)->std::result::Result<Status,RateFailure> {
         let before=self.raw_command_for("status",Duration::from_secs(10)).map_err(|e|RateFailure::Transport(e.to_string()))?;
         let old=Status::parse(&before).map_err(|e|RateFailure::Transport(e.to_string()))?;
         let same_ownership=|after:&Value|->Result<()> {
@@ -1870,7 +1876,7 @@ impl Connection {
             return Err(RateFailure::Refused(reply["error"].as_str().unwrap_or("Playback region was refused").into()));
         }
         let expected=target.selection.or_else(||target.looping.then_some((0.,duration)));
-        let close=|a:Option<(f32,f32)>,b:Option<(f32,f32)>| a==b || a.zip(b).is_some_and(|(a,b)|(a.0-b.0).abs()<0.001&&(a.1-b.1).abs()<0.001);
+        let close=|a:Option<(f64,f64)>,b:Option<(f64,f64)>| a==b || a.zip(b).is_some_and(|(a,b)|(a.0-b.0).abs()<0.001&&(a.1-b.1).abs()<0.001);
         let deadline=Instant::now()+Duration::from_secs(2);
         let mut current=reply;
         let status=loop {
@@ -3622,3 +3628,7 @@ mod carry_line_tests;
 #[cfg(test)]
 #[path="integration_transport_timing_tests.rs"]
 mod transport_timing_tests;
+
+#[cfg(test)]
+#[path="integration_timeline_tests.rs"]
+mod timeline_tests;

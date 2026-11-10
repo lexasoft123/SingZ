@@ -19,7 +19,7 @@ struct Mark {
 #[derive(Default)]
 pub struct Cache {
     grid: Option<Rc<Beats>>,
-    geometry: Option<[u32; 4]>,
+    geometry: Option<[u64; 4]>,
     marks: Vec<Mark>,
     ghost: Option<f64>,
 }
@@ -27,16 +27,16 @@ impl Cache {
     fn marks(
         &mut self,
         g: &Rc<Beats>,
-        start: f32,
-        end: f32,
+        start: f64,
+        end: f64,
         width: f32,
         scale: f32,
     ) -> &mut [Mark] {
         let geometry = [
             start.to_bits(),
             end.to_bits(),
-            width.to_bits(),
-            scale.to_bits(),
+            width.to_bits() as u64,
+            scale.to_bits() as u64,
         ];
         if self.grid.as_ref().is_some_and(|old| Rc::ptr_eq(old, g))
             && self.geometry == Some(geometry)
@@ -103,8 +103,8 @@ impl Cache {
     fn handles(
         &mut self,
         g: &Rc<Beats>,
-        start: f32,
-        end: f32,
+        start: f64,
+        end: f64,
         width: f32,
         scale: f32,
     ) -> Vec<Handle> {
@@ -123,8 +123,8 @@ impl Cache {
 pub fn paint(
     cache: &mut Cache,
     g: &Rc<Beats>,
-    start: f32,
-    end: f32,
+    start: f64,
+    end: f64,
     b: Bounds<Pixels>,
     ruler: bool,
     w: &mut Window,
@@ -237,11 +237,11 @@ fn hit_handle(handles: &[Handle], x: f32) -> Option<Handle> {
         .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))
 }
 
-fn snapped_time(grid: &Beats, start: f32, end: f32, width: f32, x: f32) -> Option<f64> {
+fn snapped_time(grid: &Beats, start: f64, end: f64, width: f32, x: f32) -> Option<f64> {
     if width <= 0. || end <= start || !x.is_finite() {
         return None;
     }
-    let time = start as f64 + (x / width).clamp(0., 1.) as f64 * (end - start) as f64;
+    let time = start as f64 + (x as f64 / width as f64).clamp(0., 1.) * (end - start) as f64;
     grid.nearest_beat(time).map(|i| grid.beats[i])
 }
 
@@ -250,8 +250,8 @@ fn snapped_time(grid: &Beats, start: f32, end: f32, width: f32, x: f32) -> Optio
 /// local capture listeners keep a drag alive outside the 30px ruler strip.
 pub struct Handles {
     grid: Option<Rc<Beats>>,
-    start: f32,
-    end: f32,
+    start: f64,
+    end: f64,
     cache: Rc<RefCell<Cache>>,
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     drawn: Rc<RefCell<Vec<Handle>>>,
@@ -274,9 +274,9 @@ impl Handles {
     pub fn set_context(
         &mut self,
         grid: Option<Rc<Beats>>,
-        start: f32,
-        end: f32,
-        _duration: f32,
+        start: f64,
+        end: f64,
+        _duration: f64,
         cx: &mut Context<Self>,
     ) {
         let same = match (&self.grid, &grid) {

@@ -316,8 +316,8 @@ const LYRICS: [&str; 6] = [
     "Let the moment find its place",
     "And begin again with me",
 ];
-const DURATION: f32 = 192.;
-fn clock(s: f32) -> String {
+const DURATION: f64 = 192.;
+fn clock(s: f64) -> String {
     format!("{}:{:02}", s as u32 / 60, s as u32 % 60)
 }
 #[derive(Default)]
@@ -388,7 +388,7 @@ enum DeferredAudio {
     Region(u64),
     Rate(f32, i32),
     Command(String),
-    Seek(f32),
+    Seek(f64),
     Output(String),
     Open(std::path::PathBuf),
     SourceOutput(source_jobs::Output, Option<SourceResume>, u64),
@@ -397,7 +397,7 @@ enum DeferredAudio {
 struct SourceResume {
     restart_cycle: restart_cycle::RestartCycle,
     play_serial: u64,
-    position: f32,
+    position: f64,
     playing: bool,
     mode: Option<source_jobs::Mode>,
     title: Option<String>,
@@ -486,9 +486,9 @@ struct Player {
     native_rate: f32,
     native_seek_count: u64,
     native_loop_count: u64,
-    native_loop: Option<(f32, f32)>,
-    pending_seek: Option<(u64, f32)>,
-    native_floor: Option<(f32, u64)>,
+    native_loop: Option<(f64, f64)>,
+    pending_seek: Option<(u64, f64)>,
+    native_floor: Option<(f64, u64)>,
     edit_seq: u64,
     saved_seq: u64,
     saving: bool,
@@ -578,8 +578,8 @@ struct Player {
     native_glows: Rc<RefCell<project_lyrics::GlowCache>>,
     project: Option<integration::Project>,
     loading: bool,
-    duration: f32,
-    native_anchor: Option<(f32, Instant)>,
+    duration: f64,
+    native_anchor: Option<(f64, Instant)>,
     screen: Screen,
     #[cfg(feature = "ui-tests")]
     text_phase_check: bool,
@@ -620,7 +620,7 @@ struct Player {
     met_prefs_ready: bool,
     metronome_pending: Option<u64>,
     metronome_requested: Option<(u64, beat::Metronome, Option<beat::Beats>)>,
-    count_in_anchor: Option<f32>,
+    count_in_anchor: Option<f64>,
     counting_in: bool,
     timing_status: Option<integration::Status>,
     count_in_cache: Option<transport_host::CountInCache>,
@@ -714,7 +714,7 @@ struct Player {
     lyric_scroll_active: Rc<Cell<bool>>,
     lyric_hits: Rc<RefCell<Vec<(usize, Bounds<Pixels>)>>>,
     playing: bool,
-    position: f32,
+    position: f64,
     track_name_input: Entity<gpui_kit::component::input::InputState>,
     track_rename: Option<(u64,String)>,
     tracks_pending: Option<(u64,u64)>,
@@ -745,8 +745,8 @@ struct Player {
     looping: bool,
     region: region_host::State,
     restart_cycle: restart_cycle::RestartCycle,
-    view_start: f32,
-    view_end: f32,
+    view_start: f64,
+    view_end: f64,
     timeline: timeline_viewport::Navigation,
     transpose: i32,
     header_drag: Rc<Cell<bool>>,
@@ -910,7 +910,7 @@ impl Player {
                 lyrics_editor::Event::Play=>{if !this.loading&&this.lyrics_editor_epoch==this.native_epoch{this.native_command(if this.playing{"pause"}else{"play-flat"}.into(),cx);}},
                 lyrics_editor::Event::Seek{position,play}=>{
                     if this.loading||this.lyrics_editor_epoch!=this.native_epoch{return;}
-                    this.position=*position as f32;this.seek_native(cx);if *play&&!this.playing{this.native_command("play-flat".into(),cx);}
+                    this.position=*position;this.seek_native(cx);if *play&&!this.playing{this.native_command("play-flat".into(),cx);}
                 }
                 lyrics_editor::Event::Align(precise,download)=>this.start_lyrics_alignment(*precise,*download,cx),
                 lyrics_editor::Event::CancelAlign=>this.cancel_lyrics_alignment(cx),
@@ -3136,7 +3136,11 @@ impl Player {
                         if self.edit_seq == seq {
                             project.raw = raw;
                         } else {
-                            project.raw["savedAt"] = raw["savedAt"].clone();
+                            // An unchanged save keeps the old savedAt, which may be absent:
+                            // never replace a known value with null.
+                            if !raw["savedAt"].is_null() {
+                                project.raw["savedAt"] = raw["savedAt"].clone();
+                            }
                             project.raw["stemHashes"] = raw["stemHashes"].clone();
                             project.raw["settings"]["custom"] = raw["settings"]["custom"].clone();
                         }
@@ -4412,18 +4416,18 @@ impl Player {
     }
     fn lyric_countdown_cue(&self,playing:bool)->Option<lyrics_countdown::Cue> {
         let position=self.display_position()+0.15;
-        let next=self.lyric_document.lines.partition_point(|line|line.start<=position);
+        let next=self.lyric_document.lines.partition_point(|line|line.start as f64<=position);
         let start=self.lyric_document.lines.get(next)?.start;
         lyrics_countdown::at_target(next,start as f64,next.checked_sub(1).map(|i|self.lyric_document.lines[i].end as f64),position as f64,playing)
     }
     fn lyric_countdown_preload(&self)->Option<lyrics_countdown::Cue> {
         let position=self.display_position()+0.15;
-        let next=self.lyric_document.lines.partition_point(|line|line.start<=position);
+        let next=self.lyric_document.lines.partition_point(|line|line.start as f64<=position);
         let start=self.lyric_document.lines.get(next)?.start;
         let previous_end=next.checked_sub(1).map(|i|self.lyric_document.lines[i].end);
         // Prepare a gap's first label before the previous line ends. This is
         // only an asset key: the visible cue still uses the exact source policy.
-        let at=previous_end.map_or(position,|end|position.max(end));
+        let at=previous_end.map_or(position,|end|position.max(end as f64));
         lyrics_countdown::at_target(next,start as f64,previous_end.map(|end|end as f64),at as f64,true)
             .or_else(||(if next==0{start>=1.2}else{start-previous_end.unwrap_or(0.)>=3.})
                 .then_some(lyrics_countdown::Cue{line:next,kind:lyrics_countdown::Kind::Dots(3)}))
@@ -4459,7 +4463,8 @@ impl Player {
                 .child(message)
                 .into_any_element();
         }
-        let position = self.display_position() + 0.15;
+        // Lyric documents and their paint interpolation retain their existing f32 API.
+        let position = (self.display_position() + 0.15) as f32;
         let document = self.lyric_document.clone();
         let active = document.active(position);
         let line_started = position >= document.lines[0].start;
@@ -4530,7 +4535,7 @@ impl Player {
                     for (index, bounds) in hits.borrow().iter() {
                         if bounds.contains(&e.position) {
                             this.position =
-                                this.lyric_document.start(*index).clamp(0., this.duration);
+                                (this.lyric_document.start(*index) as f64).clamp(0., this.duration);
                             this.seek_native(cx);
                             cx.notify();
                             break;
@@ -5247,7 +5252,7 @@ impl Player {
             || self.library_import_open || self.stem_export_open
             || self.engine_setup.read(cx).is_open() || self.whats_new.read(cx).is_open()
     }
-    fn display_position(&self) -> f32 {
+    fn display_position(&self) -> f64 {
         self.backdrop_clock.position(self.native_epoch, self.position)
     }
     fn backdrop_content_revision(&self, cx: &App) -> u64 {
@@ -5509,7 +5514,7 @@ impl Render for Player {
         if self.playing && self.backend.is_some() && !self.counting_in {
             if let Some((position, anchor)) = self.native_anchor {
                 self.position =
-                    position + anchor.elapsed().as_secs_f32().min(0.1) * self.native_rate;
+                    position + anchor.elapsed().as_secs_f64().min(0.1) * self.native_rate as f64;
                 if let Some((s, e)) = self.native_loop {
                     if self.position >= e {
                         self.position = s + (self.position - e) % (e - s);
@@ -5520,7 +5525,7 @@ impl Render for Player {
             animating = true;
         }
         if self.playing && self.backend.is_none() && self.screen == Screen::Player && !modal_open {
-            self.position += dt * self.tempo;
+            self.position += dt as f64 * self.tempo as f64;
             if self.looping && self.position >= self.duration {
                 self.position %= self.duration;
             }
@@ -5533,7 +5538,7 @@ impl Render for Player {
         // Deterministic capture only: external runner advances song time one display-frame at a time.
         if let Some(path) = self.capture_file.clone() {
             if let Ok(value) = std::fs::read_to_string(&path) {
-                if let Ok(position) = value.trim().parse::<f32>() {
+                if let Ok(position) = value.trim().parse::<f64>() {
                     self.position = position.clamp(0., self.duration);
                     self.playing = false;
                     window.on_next_frame(move |_, _| {
@@ -5567,23 +5572,18 @@ impl Render for Player {
             0.1, 0.2, 0.5, 1., 2., 5., 10., 15., 30., 60., 120., 300., 600.,
         ]
         .into_iter()
-        .find(|step| span>0.&&timeline_width * step / span >= 74.)
+        .find(|step| span>0.&&timeline_width as f64 * step / span >= 74.)
         .unwrap_or(600.);
-        let mut ticks = vec![];
-        let mut tick = (self.view_start * self.duration / step).ceil() * step;
-        while tick < self.view_end * self.duration - step * 0.2 {
-            let fraction = (tick - self.view_start * self.duration) / span;
-            if tick > 0.000001 {
-                ticks.push((tick, fraction));
-            }
-            tick += step;
-        }
+        let ticks = timeline_host::ruler_ticks(timeline_viewport::View {
+            start: self.view_start * self.duration,
+            end: self.view_end * self.duration,
+        }, step);
         let scrub_bounds = self.region.bounds.clone();
         let scrub_hit = scrub_bounds.clone();
         let head =
             if self.duration>0.&&self.view_end>self.view_start{(self.display_position()/self.duration-self.view_start)/(self.view_end-self.view_start)}else{-1.};
         let head_pixels =
-            (head * timeline_width * window.scale_factor()).round() / window.scale_factor();
+            (head * timeline_width as f64 * window.scale_factor() as f64).round() as f32 / window.scale_factor();
         let region_owner=cx.entity().downgrade();
         let selection=self.region_target().selection.and_then(|(s,e)| {
             let span=(self.view_end-self.view_start)*self.duration;
@@ -5630,7 +5630,7 @@ impl Render for Player {
                 .inset_0(),
             )
             .when_some(selection,|overlay,(left,right)|overlay.child(div().absolute().top_0().bottom_0()
-                .left(relative(left)).w(relative((right-left).max(0.)))
+                .left(relative(left as f32)).w(relative((right-left).max(0.) as f32))
                 .bg(rgba(0xffa02817)).border_l_1().border_r_1().border_color(rgba(0xffa02899))))
             .when((0. ..=1.).contains(&head), |overlay| {
                 overlay.child(
@@ -5765,8 +5765,8 @@ impl Render for Player {
                                     }))
                                     .child(canvas(|b,_,_|b,move|_,b,w,cx|{if let Some(g)=&ruler_grid{beat_grid::paint(&mut ruler_grid_cache.borrow_mut(),g,ruler_view.0,ruler_view.1,b,true,w,cx);}}).absolute().top_0().left_0().size_full())
                                     .children(ticks.into_iter().map(|(tick,fraction)| {
-                                        let text=if step<1. {format!("{}.{:01}",clock(tick),((tick.fract()*10.).floor() as i32).clamp(0,9))}else{clock(tick)};
-                                        div().absolute().left(relative(fraction)).ml(px(-30.)).w(px(60.)).top(px(8.)).flex().justify_center()
+                                        let text=timeline_host::ruler_label(tick,step);
+                                        div().absolute().left(relative(fraction as f32)).ml(px(-30.)).w(px(60.)).top(px(8.)).flex().justify_center()
                                             .child(ruler_frame.label(text.clone(),singz_uikit::tracked_text(text,"SingZ Mono 400",9.,0.54,FAINT),ruler_column_right))
                                     }))
                                     .child(self.beat_handles.clone())

@@ -37,7 +37,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                     let requested_position = start + index as f64 / 120.;
                     let frame = handle.update(cx, |_, window, cx| -> anyhow::Result<_> {
                         view.update(cx, |this, cx| {
-                            this.position = requested_position as f32;
+                            this.position = requested_position;
                             this.last = Instant::now();
                             cx.notify();
                         });
@@ -58,7 +58,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                         let effective = position + 0.15;
                         let line = ((effective / 8.).floor() as usize).min(23);
                         let total: usize = LYRICS[line % 6].split_whitespace().map(str::len).sum();
-                        let singing = effective - line as f32 * 8.;
+                        let singing = effective - line as f64 * 8.;
                         if singing > 0.01 && singing < 6.49 {
                             // Count actual successful image draws, not merely entry into an active-word branch.
                             anyhow::ensure!(draws >= 12, "advancing glow missing at {position}: {draws} draws; {total} chars");

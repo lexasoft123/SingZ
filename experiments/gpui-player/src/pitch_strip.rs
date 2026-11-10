@@ -15,7 +15,7 @@ pub enum PitchEvent {
 impl EventEmitter<PitchEvent> for PitchStrip {}
 #[derive(Clone, Copy)]
 struct TrailPoint {
-    time: f32,
+    time: f64,
     midi: f32,
     hit: bool,
 }
@@ -38,7 +38,7 @@ fn key_shadow() -> Arc<RenderImage> {
 
 const CONTROLS_W: f32 = 228.;
 const KEYBOARD_W: f32 = 60.;
-const DURATION: f32 = 192.;
+const DURATION: f64 = 192.;
 const MIC_UNAVAILABLE: &str = "Microphone unavailable";
 
 pub struct PitchStrip {
@@ -54,14 +54,14 @@ pub struct PitchStrip {
     beat_progress: Option<f32>,
     rate: f32,
     transpose: i32,
-    position: f32,
+    position: f64,
     note_bars: bool,
     fit: bool,
-    view_start: f32,
-    view_end: f32,
+    view_start: f64,
+    view_end: f64,
 }
 impl PitchStrip {
-    pub fn new(position: f32, _: &mut Context<Self>) -> Self {
+    pub fn new(position: f64, _: &mut Context<Self>) -> Self {
         Self {
             timeline_bounds: Default::default(),
             #[cfg(feature = "ui-tests")]
@@ -90,7 +90,7 @@ impl PitchStrip {
     pub fn set_microphone(
         &mut self,
         view: crate::microphone::View,
-        position: f32,
+        position: f64,
         playing: bool,
         cx: &mut Context<Self>,
     ) {
@@ -164,7 +164,7 @@ impl PitchStrip {
         self.data=Some(data);cx.notify();
     }
     #[cfg(feature="ui-tests")]
-    pub fn native_duration(&self)->Option<f32>{self.data.as_ref().map(|p|p.duration)}
+    pub fn native_duration(&self)->Option<f64>{self.data.as_ref().map(|p|p.duration)}
     pub fn set_native(&mut self, data: Arc<crate::project_pitch::Pitch>, cx: &mut Context<Self>) {
         self.trail.borrow_mut().clear();
         self.hits = 0;
@@ -189,13 +189,13 @@ impl PitchStrip {
             cx.notify();
         }
     }
-    pub fn set_position(&mut self, position: f32, cx: &mut Context<Self>) {
+    pub fn set_position(&mut self, position: f64, cx: &mut Context<Self>) {
         if self.position != position {
             self.position = position;
             cx.notify();
         }
     }
-    pub fn set_view(&mut self, start: f32, end: f32, cx: &mut Context<Self>) {
+    pub fn set_view(&mut self, start: f64, end: f64, cx: &mut Context<Self>) {
         let (start, end) = normalized_view(start, end);
         if (self.view_start, self.view_end) != (start, end) {
             self.view_start = start;
@@ -204,7 +204,7 @@ impl PitchStrip {
         }
     }
     #[cfg(feature = "ui-tests")]
-    pub fn view(&self) -> (f32, f32) {
+    pub fn view(&self) -> (f64, f64) {
         (self.view_start, self.view_end)
     }
     #[cfg(feature = "ui-tests")]
@@ -361,7 +361,7 @@ impl Render for PitchStrip {
     }
 }
 
-fn normalized_view(start: f32, end: f32) -> (f32, f32) {
+fn normalized_view(start: f64, end: f64) -> (f64, f64) {
     if !start.is_finite() || !end.is_finite() {
         return (0., 1.);
     }
@@ -380,11 +380,11 @@ fn scene(
     rate: f32,
     beat_tempo: Option<f64>,
     transpose: i32,
-    position: f32,
+    position: f64,
     note_bars: bool,
     fit: bool,
-    view_start: f32,
-    view_end: f32,
+    view_start: f64,
+    view_end: f64,
     timeline_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     window: &Window,
 ) -> Div {
@@ -624,11 +624,11 @@ fn paint_roll(
     data: Option<&crate::project_pitch::Pitch>,
     trail: &[TrailPoint],
     transpose: i32,
-    position: f32,
+    position: f64,
     note_bars: bool,
     fit: bool,
-    view_start: f32,
-    view_end: f32,
+    view_start: f64,
+    view_end: f64,
     w: &mut Window,
     cx: &mut App,
 ) {
@@ -737,7 +737,7 @@ fn paint_roll(
                         continue;
                     }
                     let center = point(
-                        x0 + roll_w * ((fraction - view_start) / view_span),
+                        x0 + roll_w * (((fraction - view_start) / view_span) as f32),
                         y_of(dot.midi),
                     );
                     let _ = singz_uikit::paint_pitch_match_dot(w, center, radius, dot.hit);
@@ -759,9 +759,9 @@ fn paint_roll(
         if trace_end > trace_start {
             rect(
                 w,
-                x0 + roll_w * ((trace_start - view_start) / view_span),
+                x0 + roll_w * (((trace_start - view_start) / view_span) as f32),
                 y - px(0.5),
-                roll_w * ((trace_end - trace_start) / view_span),
+                roll_w * (((trace_end - trace_start) / view_span) as f32),
                 px(1.),
                 rgba(0xffd6964d).into(),
             );
@@ -769,15 +769,15 @@ fn paint_roll(
     }
     // The fixture's single A2 note is intersected with the current time viewport.
     // A clipped note edge stays square; only the note's actual endpoints are rounded.
-    let note_start = 0_f32;
+    let note_start = 0_f64;
     // The canonical fixture stores 7,626 voiced frames at a 0.025125s hop;
     // production segmentMelodyNotes ends the run after its final frame.
     let note_end = (7626. * 0.025125) / DURATION;
     let visible_start = note_start.max(view_start);
     let visible_end = note_end.min(view_end);
     let note_visible = visible_end > visible_start;
-    let note_x = x0 + roll_w * ((visible_start - view_start) / view_span);
-    let note_width = roll_w * ((visible_end - visible_start).max(0.) / view_span);
+    let note_x = x0 + roll_w * (((visible_start - view_start) / view_span) as f32);
+    let note_width = roll_w * (((visible_end - visible_start).max(0.) / view_span) as f32);
     let radius = bar_h / 2.;
     if note_visible {
         w.paint_quad(quad(
@@ -850,7 +850,7 @@ fn paint_roll(
     }
     let fraction = position / DURATION;
     if (view_start..=view_end).contains(&fraction) {
-        let x = x0 + roll_w * ((fraction - view_start) / view_span);
+        let x = x0 + roll_w * (((fraction - view_start) / view_span) as f32);
         // Quantize to physical pixels like ps-now's JS renderer.
         let scale = w.scale_factor();
         let x = px((f32::from(x) * scale).round() / scale);
@@ -873,16 +873,16 @@ fn paint_native_notes(
     lo: f32,
     hi: f32,
     transpose: i32,
-    position: f32,
+    position: f64,
     note_bars: bool,
-    start: f32,
-    end: f32,
+    start: f64,
+    end: f64,
     w: &mut Window,
     cx: &mut App,
 ) {
     let duration = data.duration.max(0.001);
     let span = (end - start) * duration;
-    let x = |time: f32| x0 + width * ((time - start * duration) / span);
+    let x = |time: f64| x0 + width * (((time - start * duration) / span) as f32);
     let row = f32::from(b.size.height) / (hi - lo);
     let y = |note: f32| b.bottom() - px((note - lo) / (hi - lo) * f32::from(b.size.height));
     w.with_content_mask(
@@ -907,7 +907,7 @@ fn paint_native_notes(
                     continue;
                 }
                 let point = point(
-                    x(index as f32 * data.hop),
+                    x(index as f64 * data.hop),
                     y(crate::project_pitch::midi(hz) + transpose as f32),
                 );
                 if connected {

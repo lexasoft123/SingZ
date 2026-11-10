@@ -74,7 +74,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, output: PathBuf, cx: &
                     let stats=view.read(cx).frame_stats.clone();
                     let before_glow=stats.borrow().advancing_glow_draws;
                     view.update(cx,|this,cx| {
-                        this.position=64.+scenario_start.elapsed().as_secs_f32();
+                        this.position=64.+scenario_start.elapsed().as_secs_f64();
                         this.playing=false; this.last=Instant::now(); cx.notify();
                     });
                     window.simulate_next_frame(cx); window.refresh(); let _=window.draw(cx);

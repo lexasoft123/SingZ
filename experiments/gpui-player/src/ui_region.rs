@@ -34,7 +34,7 @@ fn restart(view:&Entity<Player>,w:&mut Window,cx:&mut App)->anyhow::Result<()> {
     let b=view.read(cx).transport.read(cx).bounds("transport-restart").ok_or_else(||anyhow::anyhow!("Native Restart control is missing"))?;
     super::ui_training_run::click(w,cx,b.center());Ok(())
 }
-fn playing_restart(view:&Entity<Player>,w:&mut Window,cx:&mut App,target:f32)->anyhow::Result<mpsc::Receiver<Result<(u64,serde_json::Value),String>>> {
+fn playing_restart(view:&Entity<Player>,w:&mut Window,cx:&mut App,target:f64)->anyhow::Result<mpsc::Receiver<Result<(u64,serde_json::Value),String>>> {
     anyhow::ensure!(view.read(cx).pending_seek.is_none(),"Playing Restart began before the previous seek settled");
     let before=view.read(cx).native_seek_count;
     restart(view,w,cx)?;
@@ -56,7 +56,7 @@ fn playing_restart(view:&Entity<Player>,w:&mut Window,cx:&mut App,target:f32)->a
     });
     Ok(receive)
 }
-fn close(a:Option<(f32,f32)>,b:Option<(f32,f32)>)->bool {
+fn close(a:Option<(f64,f64)>,b:Option<(f64,f64)>)->bool {
     match (a,b){(None,None)=>true,(Some(a),Some(b))=>(a.0-b.0).abs()<0.002&&(a.1-b.1).abs()<0.002,_=>false}
 }
 fn state(p:&Player,w:&Window)->serde_json::Value {
@@ -118,7 +118,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
                 wait!(p,w,app => !p.loading&&p.native_epoch>epoch&&p.project.is_some()&&!p.playing);
             }};}
-            let duration=handle.update(cx,|_,_,cx|->anyhow::Result<f32>{let p=view.read(cx);
+            let duration=handle.update(cx,|_,_,cx|->anyhow::Result<f64>{let p=view.read(cx);
                 anyhow::ensure!(p.backend.is_some()&&p.screen==Screen::Player&&!p.playing&&!p.region_busy()
                     &&p.project.as_ref().is_some_and(|p|p.selection.is_none())&&!p.looping&&p.duration>=4.,"Region fixture starts in an unexpected state");Ok(p.duration)})??;
             for (width,height) in [(1280.,800.),(1060.,640.)] {

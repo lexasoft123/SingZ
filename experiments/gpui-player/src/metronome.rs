@@ -230,7 +230,7 @@ impl MetPopover {
         }
         cx.notify();
     }
-    pub fn context(&mut self, position: f32, duration: f32) {
+    pub fn context(&mut self, position: f64, duration: f64) {
         self.position = position as f64;
         self.duration = duration as f64;
     }

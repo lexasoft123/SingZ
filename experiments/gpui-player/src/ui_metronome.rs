@@ -101,7 +101,7 @@ fn bar_target(view: &Entity<Player>, cx: &App, time: f64) -> anyhow::Result<Poin
 fn paused_unchanged(
     view: &Entity<Player>,
     cx: &App,
-    position: f32,
+    position: f64,
     seeks: u64,
     stage: &str,
 ) -> anyhow::Result<()> {

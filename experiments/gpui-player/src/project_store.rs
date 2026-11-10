@@ -48,8 +48,8 @@ pub struct Mix {
     pub transpose: i32,
     pub tempo: f32,
     pub looping: bool,
-    pub selection: Option<(f32, f32)>,
-    pub view: (f32, f32),
+    pub selection: Option<(f64, f64)>,
+    pub view: (f64, f64),
 }
 fn gain(value: f32, max: f32) -> Result<Value> {
     if !value.is_finite() || !(0. ..=max).contains(&value) {
@@ -58,6 +58,7 @@ fn gain(value: f32, max: f32) -> Result<Value> {
     Ok(json!((value as f64 * 1e6).round() / 1e6))
 }
 pub fn update_mix(mut raw: Value, mix: &Mix) -> Result<Value> {
+    let original = raw.clone();
     let empty = !mix.original && mix.lanes.is_empty() && mix.custom.is_empty();
     ensure!(
         empty || !mix.lanes.is_empty(),
@@ -151,10 +152,16 @@ pub fn update_mix(mut raw: Value, mix: &Mix) -> Result<Value> {
             if !start.is_finite() || !end.is_finite() || start < 0. || end <= start {
                 bail!("Invalid project time range");
             }
-            settings.insert(
-                name.into(),
-                json!({"s":(start as f64*1e6).round()/1e6,"e":(end as f64*1e6).round()/1e6}),
-            );
+            // View normalization can perturb loaded seconds by an f64 ULP.
+            // Compare at the writer's existing microsecond edit precision so
+            // an equivalent Save retains the original numbers and spelling.
+            let saved_seconds = |seconds: f64| (seconds * 1e6).round() / 1e6;
+            if !settings.get(name).is_some_and(|range|
+                range["s"].as_f64().map(saved_seconds) == Some(saved_seconds(start))
+                    && range["e"].as_f64().map(saved_seconds) == Some(saved_seconds(end)))
+            {
+                settings.insert(name.into(), json!({"s":saved_seconds(start),"e":saved_seconds(end)}));
+            }
         }
     }
     let tracks = settings
@@ -209,10 +216,12 @@ pub fn update_mix(mut raw: Value, mix: &Mix) -> Result<Value> {
         track.insert("muted".into(), json!(mix.muted[lane]));
         track.insert("solo".into(), json!(mix.solo[lane]));
     }
-    object.insert(
-        "savedAt".into(),
-        json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-    );
+    if raw != original {
+        raw.as_object_mut().unwrap().insert(
+            "savedAt".into(),
+            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
+    }
     Ok(raw)
 }
 struct Pending(PathBuf);
@@ -705,9 +714,16 @@ pub(crate) fn commit_expected_locked(
         bail!("Invalid project member")
     }
     let destination = dir.join(name);
-    let current = member_bytes(dir, name)?.map(|b| fingerprint(&b));
+    let current_bytes = member_bytes(dir, name)?;
+    let current = current_bytes.as_ref().map(|b| fingerprint(b));
     if current.as_deref() != expected {
         bail!("Project changed outside this app. Reopen it before saving.")
+    }
+    // An unchanged document must not acquire a new formatting-only fingerprint.
+    if current_bytes.as_ref().is_some_and(|bytes| {
+        serde_json::from_slice::<Value>(bytes).is_ok_and(|old| old == *value)
+    }) {
+        return Ok(current.unwrap());
     }
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
@@ -749,6 +765,7 @@ pub(crate) fn commit_expected_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("project_store_timeline_tests.rs");
     fn mix() -> Mix {
         Mix {
             carry: Default::default(),

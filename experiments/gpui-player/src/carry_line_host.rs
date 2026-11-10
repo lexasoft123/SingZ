@@ -1,6 +1,6 @@
 //! Accepted Carry settings, serialized rescheduling and native receipt fences.
 use super::*;
-pub(super) type Stamp = (u64, u64, usize, u32);
+pub(super) type Stamp = (u64, u64, usize, u64);
 pub(super) struct Pending {
     pub epoch: u64,
     pub serial: u64,

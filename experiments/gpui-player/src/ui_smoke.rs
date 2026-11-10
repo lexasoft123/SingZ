@@ -164,7 +164,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                         let center=f32::from(bounds.top()+bounds.size.height*0.5);
                         *index!=8 && center>200. && center<600.
                     }).ok_or_else(||anyhow::anyhow!("No visible lyric tap target after manual scroll"))?;
-                    (*index as f32*8.,point(bounds.left()+bounds.size.width*0.5,bounds.top()+bounds.size.height*0.5))
+                    (*index as f64*8.,point(bounds.left()+bounds.size.width*0.5,bounds.top()+bounds.size.height*0.5))
                 };
                 click(window,cx,f32::from(point.x),f32::from(point.y));
                 anyhow::ensure!((view.read(cx).position-expected).abs()<0.01,"Lyric tap did not seek its line: expected{expected},actual{}",view.read(cx).position);

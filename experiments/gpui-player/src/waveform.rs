@@ -35,7 +35,7 @@ fn peaks() -> &'static [Vec<f32>; 6] {
 
 struct Layers {
     color: u32,
-    key: (u32, u32, u32, u8, u32, u32),
+    key: (u32, u32, u32, u8, u64, u64),
     base: Arc<RenderImage>,
     bright: Arc<RenderImage>,
     mask: GrayImage,
@@ -67,8 +67,8 @@ fn mask(
     width: u32,
     height: u32,
     dpr: f32,
-    view_start: f32,
-    view_end: f32,
+    view_start: f64,
+    view_end: f64,
 ) -> GrayImage {
     let pad = (PAD * dpr).round() as u32;
     let mut image = GrayImage::new(
@@ -134,7 +134,7 @@ fn texture(
     Arc::new(RenderImage::new(vec![image::Frame::new(image)]))
 }
 
-fn normalized_view(start: f32, end: f32) -> (f32, f32) {
+fn normalized_view(start: f64, end: f64) -> (f64, f64) {
     if !start.is_finite() || !end.is_finite() {
         return (0., 1.);
     }
@@ -155,14 +155,14 @@ fn normalized_view(start: f32, end: f32) -> (f32, f32) {
 pub fn paint(
     index: usize,
     color: u32,
-    position: f32,
-    duration: f32,
+    position: f64,
+    duration: f64,
     fade: f32,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     enter: f32,
-    view_start: f32,
-    view_end: f32,
+    view_start: f64,
+    view_end: f64,
 ) {
     if index >= crate::tracks::LANE_SLOTS || bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
         return;
@@ -254,7 +254,7 @@ pub fn paint(
         } else {
             0.
         };
-        let progress = (fraction * f32::from(bounds.size.width) * dpr).floor() / dpr;
+        let progress = (fraction * f32::from(bounds.size.width) as f64 * dpr as f64).floor() as f32 / dpr;
         if progress > 0. {
             let clip = Bounds::new(origin, size(px(progress), bounds.size.height));
             window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {

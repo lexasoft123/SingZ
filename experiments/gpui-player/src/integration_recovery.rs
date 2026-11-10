@@ -5,11 +5,11 @@ pub struct AudioRecovery {
     pub replace: bool,
     pub project: Project,
     pub mix: crate::project_store::Mix,
-    pub position: f32,
+    pub position: f64,
 }
 pub struct RecoveredMedia {
     pub peaks: Vec<Vec<f32>>,
-    pub vocal_duration: Option<f32>,
+    pub vocal_duration: Option<f64>,
 }
 pub struct RecoveredAudio {
     pub media: Option<RecoveredMedia>,
@@ -181,7 +181,7 @@ pub(super) fn prepare(
 
 /// A source handoff must finish the callback-applied paused seek before a
 /// queued Loop/Play can be mistaken for its acknowledgement.
-pub(super) fn settled_seek(child: &mut Connection, position: f32) -> Result<Status> {
+pub(super) fn settled_seek(child: &mut Connection, position: f64) -> Result<Status> {
     anyhow::ensure!(
         position.is_finite() && position >= 0.,
         "Invalid restored position"
@@ -296,7 +296,7 @@ mod tests {
         request.mix.lanes.clear();
         assert!(captured_project(&request).is_err());
         let mut request = fixture.request();
-        request.position = f32::NAN;
+        request.position = f64::NAN;
         assert!(captured_project(&request).is_err());
         let mut request = fixture.request();
         request.project.lane_stamps.clear();

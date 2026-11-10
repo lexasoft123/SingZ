@@ -187,7 +187,7 @@ fn capture(
 fn raw(path: &Path) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
-fn paused_transport(player: &Player, position: f32, seeks: u64, stage: &str) -> anyhow::Result<()> {
+fn paused_transport(player: &Player, position: f64, seeks: u64, stage: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!player.playing&&!player.counting_in&&player.pending_seek.is_none()
         && (player.position-position).abs()<=2./44100.&&player.native_seek_count==seeks,
         "Editor {stage} leaked into paused transport: position {position} -> {}, seeks {seeks} -> {}",player.position,player.native_seek_count);
@@ -461,7 +461,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     anyhow::ensure!(Instant::now()<deadline,"Editor play failed to advance before the gridless count-in would finish");
                 }
                 press!("lyed-play".to_owned());wait!(p,w,app => !p.playing);
-                let row_start=handle.update(cx,|_,_,cx|rows(&view,cx)[0].start.unwrap() as f32)?;
+                let row_start=handle.update(cx,|_,_,cx|rows(&view,cx)[0].start.unwrap())?;
                 let row_id=handle.update(cx,|_,_,cx|rows(&view,cx)[0].id)?;
                 let seeks=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count)?;
                 press!(format!("lyed-stamp-{row_id}"));

@@ -251,7 +251,7 @@ fn read_progress(mut source: impl Read, emit: &dyn Fn(f32)) {
         }
     }
 }
-fn encode(raw: &Value, duration: f32) -> Result<Value> {
+fn encode(raw: &Value, duration: f64) -> Result<Value> {
     ensure!(
         // The analyzer itself must emit exactly the current integer detector version.
         raw["detVersion"].as_u64() == Some(crate::project_pitch::VERSION),

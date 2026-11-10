@@ -36,7 +36,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             let count=(span*120.).ceil() as usize;
             let mut hashes=vec![];
             for index in 0..=count{
-                let position=(start+index as f64/120.) as f32;
+                let position=start+index as f64/120.;
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.position=position;p.seek_native(cx);}))?;
                 let deadline=Instant::now()+Duration::from_secs(3);
                 loop{
@@ -69,7 +69,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 Ok(target)
             })??;
             cx.background_executor().timer(Duration::from_millis(150)).await;
-            handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!((view.read(cx).position-target).abs()<0.001,"Lyric tap failed to seek native transport");Ok(())})??;
+            handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!((view.read(cx).position-target as f64).abs()<0.001,"Lyric tap failed to seek native transport");Ok(())})??;
             Ok(())
         }.await;
         match result{Ok(())=>{eprintln!("NATIVE_LYRICS passed: saved text/timing, native masks, 120Hz partial-glyph sweep samples, advancing glow, lyric-tap seek");let _=cx.update(|cx|cx.quit());},Err(error)=>{eprintln!("NATIVE_LYRICS failed: {error:#}");let _=view.update(cx,|p,_|{p.backend.take();});std::process::exit(1);}}

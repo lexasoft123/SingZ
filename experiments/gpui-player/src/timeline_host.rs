@@ -11,8 +11,8 @@ impl Player {
     }
     fn apply_timeline_view(&mut self, view: View) {
         if self.duration > 0. {
-            self.view_start = (view.start / self.duration as f64) as f32;
-            self.view_end = (view.end / self.duration as f64) as f32;
+            self.view_start = view.start / self.duration;
+            self.view_end = view.end / self.duration;
         }
     }
     pub(super) fn timeline_input(&mut self, input: Input, cx: &mut Context<Self>) {
@@ -104,3 +104,27 @@ impl Player {
             "position":self.position,"playing":self.playing,"epoch":self.native_epoch})
     }
 }
+
+// Pure ruler arithmetic shared with the renderer's labels.
+pub(super) fn ruler_ticks(view: View, step: f64) -> Vec<(f64, f64)> {
+    let mut ticks = vec![];
+    let mut index = (view.start / step).ceil() as i64;
+    let mut tick = index as f64 * step;
+    while tick < view.end - step * 0.2 {
+        let fraction = (tick - view.start) / view.span();
+        if tick > 0.000001 { ticks.push((tick, fraction)); }
+        index += 1;
+        tick = index as f64 * step;
+    }
+    ticks
+}
+pub(super) fn ruler_label(tick: f64, step: f64) -> String {
+    if step < 1. {
+        // Even an index product can lie just below a decimal tenth in binary.
+        let tenths = (tick * 10.).round() as u64;
+        format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
+    } else { clock(tick) }
+}
+#[cfg(test)]
+#[path="timeline_host_tests.rs"]
+mod tests;

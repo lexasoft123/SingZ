@@ -191,8 +191,8 @@ struct Retained {
     lyric_scroll: (f32, f32),
     lyric_handle: (f32, f32),
     lyric_active: usize,
-    position: f32,
-    duration: f32,
+    position: f64,
+    duration: f64,
     screen: u8,
     karaoke: bool,
     master: f32,
@@ -202,8 +202,8 @@ struct Retained {
     tempo: f32,
     transpose: i32,
     looping: bool,
-    selection: Option<(f32, f32)>,
-    view: (f32, f32),
+    selection: Option<(f64, f64)>,
+    view: (f64, f64),
 }
 
 fn retained(view: &Entity<Player>, cx: &App) -> Retained {
@@ -458,7 +458,7 @@ fn original_lane_accepted(player: &Player, gain: f64) -> bool {
 fn native_paused(
     player: &Player,
     uid: &str,
-    position: f32,
+    position: f64,
     rate: f32,
     transpose: i32,
     looping: bool,
@@ -1035,7 +1035,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         let original_bytes=std::fs::read(&held)?;
                         anyhow::ensure!(!metadata.exists()&&hash(&original_bytes)==receipt["metadataSha256"].as_str().unwrap(),"Live fault did not preserve exact writer bytes");
                         std::fs::write(out.join("publication-original-metadata.json"),&original_bytes)?;
-                        let mut paused_position:Option<f32>=None;
+                        let mut paused_position:Option<f64>=None;
                         let paused_started=Instant::now();
                         for index in 0..7 {
                             cx.background_executor().timer(Duration::from_millis(100)).await;

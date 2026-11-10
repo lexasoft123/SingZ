@@ -3,22 +3,22 @@ use serde_json::Value;
 include!(concat!(env!("OUT_DIR"), "/pitch_detector_version.rs"));
 #[derive(Clone, Debug)]
 pub struct Note {
-    pub start: f32,
-    pub end: f32,
+    pub start: f64,
+    pub end: f64,
     pub midi: f32,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Pitch {
     pub f0: Vec<f32>,
-    pub hop: f32,
+    pub hop: f64,
     pub notes: Vec<Note>,
     pub frame_notes: Vec<Note>,
     pub key: String,
     pub tempo: String,
     /// Full playback timeline, including longer custom lanes.
-    pub duration: f32,
+    pub duration: f64,
     /// Independently measured vocal source coverage; never an inferred f0 length.
-    source_duration: Option<f32>,
+    source_duration: Option<f64>,
     pub warning: Option<String>,
     pub det_version: f64,
     cached_range: Option<(i32, i32)>,
@@ -59,8 +59,8 @@ impl Pitch {
         }
         let raw = &settings["melody"];
         data.det_version = raw["detVersion"].as_f64().filter(|v| v.is_finite()).unwrap_or(0.);
-        let result = (|| -> Option<(Vec<f32>, f32)> {
-            let hop = raw["hopSec"].as_f64()? as f32;
+        let result = (|| -> Option<(Vec<f32>, f64)> {
+            let hop = raw["hopSec"].as_f64()?;
             if !(0.001..0.5).contains(&hop) {
                 return None;
             }
@@ -123,13 +123,13 @@ impl Pitch {
             })
             .unwrap_or_else(|| self.key.clone())
     }
-    pub fn bind_duration(&mut self, duration: f32) {
+    pub fn bind_duration(&mut self, duration: f64) {
         self.bind_duration_for_lane(duration, None);
     }
     /// Drawing uses the whole timeline, but a saved vocal line covers its own
     /// source. None retains the old strict timeline check; it never guesses a
     /// shorter source from the stored analysis it is supposed to validate.
-    pub fn bind_duration_for_lane(&mut self, timeline: f32, source_duration: Option<f32>) {
+    pub fn bind_duration_for_lane(&mut self, timeline: f64, source_duration: Option<f64>) {
         let valid_timeline = timeline.is_finite() && timeline > 0.;
         self.duration = if valid_timeline { timeline } else { 0. };
         let valid_source = source_duration.is_none_or(|duration| {
@@ -140,7 +140,7 @@ impl Pitch {
             if !valid_timeline || !valid_source {
                 self.warning = Some("Saved pitch has an invalid source duration.".into());
                 self.f0.clear();
-            } else if (self.f0.len() as f32 * self.hop - self.analysis_duration()).abs() > 2. {
+            } else if (self.f0.len() as f64 * self.hop - self.analysis_duration()).abs() > 2. {
                 self.warning = Some("Saved pitch belongs to a different song duration.".into());
                 self.f0.clear();
             } else if self.det_version < VERSION as f64 {
@@ -155,7 +155,7 @@ impl Pitch {
     }
     /// Offline vocal detection uses the same measured-source coverage check as
     /// cached adoption; a custom lane extending playback cannot relax it.
-    pub fn analysis_duration(&self) -> f32 {
+    pub fn analysis_duration(&self) -> f64 {
         self.source_duration.unwrap_or(self.duration)
     }
     pub fn range(&self) -> Option<(i32, i32)> {
@@ -197,7 +197,7 @@ fn median(values: &[f32]) -> f32 {
 }
 /// Production score-like segmentation: 80 cents from a 12-frame upper median,
 /// time-based gap bridge, contiguous micro-tail merging, and a 90ms note floor.
-pub fn segments(f0: &[f32], hop: f32) -> Vec<Note> {
+pub fn segments(f0: &[f32], hop: f64) -> Vec<Note> {
     if f0.is_empty() || hop <= 0. {
         return vec![];
     }
@@ -207,7 +207,7 @@ pub fn segments(f0: &[f32], hop: f32) -> Vec<Note> {
         end: usize,
         cents: Vec<f32>,
     }
-    let bridge = 0.06_f32.max(hop * 1.6);
+    let bridge = 0.06_f64.max(hop * 1.6);
     let bridge_frames = (bridge / hop).round() as usize;
     let mut raw: Vec<Raw> = vec![];
     let mut current: Option<Raw> = None;
@@ -251,8 +251,8 @@ pub fn segments(f0: &[f32], hop: f32) -> Vec<Note> {
     let mut merged: Vec<Raw> = vec![];
     for note in raw {
         if let Some(previous) = merged.last_mut() {
-            if (note.start - previous.end) as f32 * hop <= bridge
-                && (note.end - note.start) as f32 * hop < 0.15
+            if (note.start - previous.end) as f64 * hop <= bridge
+                && (note.end - note.start) as f64 * hop < 0.15
             {
                 previous.end = note.end;
                 previous.cents.extend(note.cents);
@@ -263,10 +263,10 @@ pub fn segments(f0: &[f32], hop: f32) -> Vec<Note> {
     }
     merged
         .into_iter()
-        .filter(|n| (n.end - n.start) as f32 * hop >= 0.09)
+        .filter(|n| (n.end - n.start) as f64 * hop >= 0.09)
         .map(|n| Note {
-            start: n.start as f32 * hop,
-            end: n.end as f32 * hop,
+            start: n.start as f64 * hop,
+            end: n.end as f64 * hop,
             midi: (69. + (median(&n.cents) - 1200. * 440_f32.log2()) / 100.).round(),
         })
         .collect()
@@ -392,8 +392,8 @@ mod tests {
         let notes = segments(&frames, 0.025);
         assert_eq!(notes.len(), 2);
         assert_eq!(notes[0].midi, 45.);
-        assert_eq!(notes[0].end, 0.6);
-        assert_eq!(notes[1].start, 0.85);
+        assert_eq!(notes[0].end, 24_f64 * 0.025);
+        assert_eq!(notes[1].start, 34_f64 * 0.025);
         assert_eq!(notes[1].midi, 57.);
     }
     #[test]
@@ -474,13 +474,13 @@ mod tests {
     }
     #[test]
     fn invalid_source_measurements_cannot_bypass_coverage_checks() {
-        for duration in [f32::NAN, f32::INFINITY, 0., -5., 101.] {
+        for duration in [f64::NAN, f64::INFINITY, 0., -5., 101.] {
             let mut pitch = stored_vocal(4);
             pitch.bind_duration_for_lane(100., Some(duration));
             assert!(pitch.f0.is_empty(), "invalid measured duration {duration}");
             assert!(pitch.warning.is_some());
         }
-        for timeline in [f32::NAN, f32::INFINITY, 0., -5.] {
+        for timeline in [f64::NAN, f64::INFINITY, 0., -5.] {
             let mut pitch = stored_vocal(4);
             pitch.bind_duration_for_lane(timeline, Some(5.));
             assert!(pitch.f0.is_empty());
@@ -498,7 +498,7 @@ mod tests {
     }
 }
 
-fn frame_segments(f0: &[f32], hop: f32) -> Vec<Note> {
+fn frame_segments(f0: &[f32], hop: f64) -> Vec<Note> {
     let mut notes: Vec<Note> = vec![];
     let mut current = None;
     for (index, hz) in f0.iter().copied().enumerate() {
@@ -506,19 +506,19 @@ fn frame_segments(f0: &[f32], hop: f32) -> Vec<Note> {
             current = None;
             continue;
         }
-        let time = index as f32 * hop;
+        let time = index as f64 * hop;
         let midi = midi(hz).round();
         if let Some(i) = current {
             let n: &mut Note = &mut notes[i];
-            if n.midi == midi && time - n.end <= 0.06_f32.max(hop * 1.6) {
-                n.end = time + hop;
+            if n.midi == midi && time - n.end <= 0.06_f64.max(hop * 1.6) {
+                n.end = (index + 1) as f64 * hop;
                 continue;
             }
         }
         current = Some(notes.len());
         notes.push(Note {
             start: time,
-            end: time + hop,
+            end: (index + 1) as f64 * hop,
             midi,
         });
     }
@@ -527,3 +527,7 @@ fn frame_segments(f0: &[f32], hop: f32) -> Vec<Note> {
         .filter(|n| n.end - n.start >= 0.09)
         .collect()
 }
+
+#[cfg(test)]
+#[path="project_pitch_timeline_tests.rs"]
+mod timeline_tests;

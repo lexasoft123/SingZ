@@ -6,7 +6,7 @@ use std::{path::PathBuf, time::Duration};
 #[derive(Debug)]
 pub(super) struct ResumeProbe {
     pub epoch:u64,
-    pub position:f32,
+    pub position:f64,
     pub at:Instant,
     pub initial_loop_count:u64,
     pub expected_seek_count:u64,
@@ -14,7 +14,7 @@ pub(super) struct ResumeProbe {
 // Heard position and render loop_count are different clock domains. Compare
 // adjacent heard samples modulo the actual loop, with a wall-clock bound shorter
 // than one loop; never combine heard position with render loop_count.
-fn forward_delta(before: &integration::Status, after: &integration::Status) -> anyhow::Result<f32> {
+fn forward_delta(before: &integration::Status, after: &integration::Status) -> anyhow::Result<f64> {
     anyhow::ensure!(before.loop_range == after.loop_range, "Native loop changed between receipts");
     Ok(if let Some((start, end)) = before.loop_range {
         anyhow::ensure!((start..=end).contains(&before.position) && (start..=end).contains(&after.position), "Heard position outside its loop");
@@ -23,10 +23,10 @@ fn forward_delta(before: &integration::Status, after: &integration::Status) -> a
         after.position-before.position
     })
 }
-fn bounded_progress(before: &integration::Status, after: &integration::Status) -> anyhow::Result<f32> {
+fn bounded_progress(before: &integration::Status, after: &integration::Status) -> anyhow::Result<f64> {
     anyhow::ensure!(after.sampled_at > before.sampled_at, "Native receipt is not fresh");
-    let elapsed=after.sampled_at.duration_since(before.sampled_at).as_secs_f32();
-    let bound=elapsed*after.rate+0.05;
+    let elapsed=after.sampled_at.duration_since(before.sampled_at).as_secs_f64();
+    let bound=elapsed*after.rate as f64+0.05;
     anyhow::ensure!(before.loop_range.is_none_or(|(start,end)|bound<end-start), "Receipt interval spans a whole loop");
     let delta=forward_delta(before,after)?;
     anyhow::ensure!(delta>=-0.025 && delta<=bound, "Native position discontinuity: before={}, after={}, forward={delta}, elapsed={elapsed}, bound={bound}",before.position,after.position);
@@ -184,10 +184,10 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     let delta=bounded_progress(paused,status);
     std::fs::write(out.join("split-handoff-receipt.json"),serde_json::to_vec_pretty(&serde_json::json!({
         "epoch":p.native_epoch,"requestedPosition":probe.position,
-        "requestElapsedSeconds":status.sampled_at.saturating_duration_since(probe.at).as_secs_f32(),
+        "requestElapsedSeconds":status.sampled_at.saturating_duration_since(probe.at).as_secs_f64(),
         "pausedPosition":paused.position,"pausedPlaying":paused.playing,"pausedSeekCount":paused.seek_count,
         "pausedGraph":paused.graph_generation,"pausedRate":paused.rate,"pausedTranspose":paused.transpose,
-        "actualPosition":status.position,"elapsedSincePausedSeconds":status.sampled_at.saturating_duration_since(paused.sampled_at).as_secs_f32(),
+        "actualPosition":status.position,"elapsedSincePausedSeconds":status.sampled_at.saturating_duration_since(paused.sampled_at).as_secs_f64(),
         "heardForwardDelta":delta.as_ref().ok(),"progressError":delta.as_ref().err().map(ToString::to_string),
         "loopCountDiagnosticOnly":status.loop_count,"initialLoopCountDiagnosticOnly":probe.initial_loop_count,
         "seekCount":status.seek_count,"expectedSeekCount":probe.expected_seek_count,

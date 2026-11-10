@@ -107,7 +107,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    let _=std::fs::remove_file(&old_status_ready);std::fs::write(&old_status,"hold outstanding old-epoch status read")?;
    wait!(p,w,app=>old_status_ready.is_file());
    let old_epoch=std::fs::read_to_string(&old_status_ready)?.trim().parse::<u64>()?;
-   let before_position=handle.update(cx,|_,w,cx|->anyhow::Result<f32>{
+   let before_position=handle.update(cx,|_,w,cx|->anyhow::Result<f64>{
        draw(w,cx);anyhow::ensure!(view.read(cx).native_epoch==old_epoch,"Status gate did not capture current old epoch");
        let position=view.read(cx).position;press(&view,w,cx,"library-import-copy")?;Ok(position)})??;
    wait!(p,w,app=>p.import_pending.is_some()&&p.native_epoch!=old_epoch);

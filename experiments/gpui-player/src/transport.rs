@@ -59,9 +59,9 @@ pub struct Transport {
     pub met_enabled: bool,
     carry_enabled: bool,
     carry_ducking: bool,
-    duration: f32,
+    duration: f64,
     audio_available: bool,
-    position: f32,
+    position: f64,
     playing: bool,
     transpose: i32,
     looping: bool,
@@ -608,7 +608,7 @@ impl Transport {
     }
     pub fn set_state(
         &mut self,
-        position: f32,
+        position: f64,
         playing: bool,
         transpose: i32,
         looping: bool,
@@ -647,7 +647,7 @@ impl Transport {
             cx.notify();
         }
     }
-    pub fn set_duration(&mut self, duration: f32, cx: &mut Context<Self>) {
+    pub fn set_duration(&mut self, duration: f64, cx: &mut Context<Self>) {
         if self.duration != duration {
             self.duration = duration;
             cx.notify();
@@ -689,7 +689,7 @@ impl Transport {
             .line_height(px(12.))
             .child(text.into())
     }
-    fn clock(position: f32) -> String {
+    fn clock(position: f64) -> String {
         let tenths = (position.max(0.) * 10.).floor() as u32;
         format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
     }

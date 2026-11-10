@@ -51,7 +51,7 @@ fn state(p:&Player,w:&Window)->serde_json::Value {
         "native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"position":s.position,"playing":s.playing})),
         "liveFps":"unmeasured","productionParity":"source behavior; matched reference capture pending"})
 }
-fn near(a:f32,b:f32)->bool {(a-b).abs()<0.002}
+fn near(a:f64,b:f64)->bool {(a-b).abs()<0.002}
 fn seek_visible(view:&Entity<Player>,w:&mut Window,cx:&mut App,fraction:f32)->anyhow::Result<()> {
     super::ui_training_run::draw(w,cx);let b=bounds(view.read(cx),cx,false)?;
     super::ui_training_run::click(w,cx,point(b.left()+b.size.width*fraction,b.top()+px(50.)));Ok(())
@@ -136,24 +136,24 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 wait!(p,w,app => p.pending_seek.is_none()&&p.position.abs()<0.03);
                 fit!();zoom!(0.3);
                 wait!(p,w,app => near(p.view_start,0.1971)&&near(p.view_end,0.5401));
-                let (before,span,pan_width)=handle.update(cx,|_,w,cx|->anyhow::Result<(f32,f32,f32)>{
+                let (before,span,pan_width)=handle.update(cx,|_,w,cx|->anyhow::Result<(f64,f64,f32)>{
                     super::ui_training_run::draw(w,cx);let p=view.read(cx);let before=p.view_start;let span=p.view_end-p.view_start;
                     let width=f32::from(bounds(p,cx,false)?.size.width);
                     for _ in 0..5 {wheel(&view,w,cx,false,0.5,100.,10.,false)?;}
                     Ok((before,span,width))
                 })??;
-                let expected=(before+500./pan_width*span).clamp(0.,1.-span);
+                let expected=(before+500./pan_width as f64*span).clamp(0.,1.-span);
                 wait!(p,w,app => near(p.view_start,expected)&&near(p.view_end-p.view_start,span));
-                let (before,pitch_width)=handle.update(cx,|_,w,cx|->anyhow::Result<(f32,f32)>{
+                let (before,pitch_width)=handle.update(cx,|_,w,cx|->anyhow::Result<(f64,f32)>{
                     super::ui_training_run::draw(w,cx);let before=view.read(cx).view_start;
                     let width=wheel(&view,w,cx,true,0.5,10.,-60.,false)?;Ok((before,width))
                 })??;
-                let expected=(before-60./pitch_width*span).clamp(0.,1.-span);
+                let expected=(before-60./pitch_width as f64*span).clamp(0.,1.-span);
                 wait!(p,w,app => near(p.view_start,expected)&&near(p.view_end-p.view_start,span));
                 // Retain the real keyboard → pinch regression even though the
                 // zoom-button checks above changed pointer input modality.
                 save!();
-                let (anchor,old_span)=handle.update(cx,|_,w,cx|->anyhow::Result<(f32,f32)>{
+                let (anchor,old_span)=handle.update(cx,|_,w,cx|->anyhow::Result<(f64,f64)>{
                     super::ui_training_run::draw(w,cx);let p=view.read(cx);let span=p.view_end-p.view_start;
                     let anchor=p.view_start+0.7*span;let b=bounds(p,cx,true)?;
                     w.dispatch_event(PlatformInput::Pinch(PinchEvent{position:point(b.left()+b.size.width*0.7,b.top()+px(10.)),delta:0.1,..Default::default()}),cx);
