@@ -590,6 +590,21 @@ and **read by nobody**: `parseNativePlaybackSession` parses neither, and the
 park proof in §8 reads them off the *cleanup receipt* instead. On this path
 they are diagnostics, not state.
 
+Streamed lane ring storage is fixed for the generation and is included in
+`retainedBytes`: two reusable 131072-frame rings at the default options,
+2097152 bytes per stereo lane (1048576 mono), versus 4194304 stereo bytes
+with the previous pair of 262144-frame rings. Eight stereo lanes retain
+16777216 ring bytes instead of 33554432. Short songs round each ring down to
+the next power of two covering the lane. The live ring now spans 2.73 s at
+48 kHz; refills target 65536 frames (1.37 s) ahead and stages hold 32768 frames
+(0.68 s) for long lanes. A lane that fits one ring stages its entire extent:
+a Start or seek at its last two frames can wrap to the head in that same
+callback, before the feeder could stage another region. Both ring allocations
+survive swaps and exchange live/standby roles;
+no callback allocation, temporary full-sized third ring or hidden retained
+ring storage is involved. Decoder/resampler scratch and graph arenas are
+separate from this per-lane ring byte count.
+
 ### Mix, training, cues, graph, health
 
 `masterGain`, `referenceGain` (linear); `trainingEnabled` (bool),
@@ -612,12 +627,35 @@ The desktop's lanes carry two more, which the phones' do not emit yet:
 whole decode) and `starvedBlocks` (u64 string: render blocks this generation
 that wanted a frame the window did not hold, and played silence). ZERO is the
 design at a seek, a seek while paused, a loop wrap and a mid-song start: the
-session stages the target in each lane's standby ring before it queues the
-seek, the feeder keeps a loop's head staged, the prepare primes where the first
-block reads, and the transport swaps the window at the slice the position
-jumps (`StreamingLaneGroup::stageJump`/`transportJumped`). A jump nobody
-staged (a loop set while already past its end) still costs the old one or two
-blocks while the feeder chases it. `stagedJumps` (u64 string) is the positive
+session accepts a seek immediately and publishes a coalescing request to the
+feeder thread. The old position keeps playing while the latest landing is
+decoded; the callback changes position only after it can claim every lane's
+armed standby ring. `seekCount` advances when the batch lands, including the
+superseded requests retired with it, so the latest seek's receipt is not
+published early. Each callback drains the mailbox into a fixed render-owned
+batch, releasing superseded seek plans and anchor slots while staging is still
+pending. A long scrub therefore retains only its latest seek, including across
+an earlier loop edit or resume. Pause silences the next callback immediately;
+its ordered application also leaves the eventual landing paused. A following
+Resume still waits for that landing. Stop cancels a pending streamed jump and
+silences any final callback before host quiescence. Loop edits and other
+non-coalescible commands preserve their order in the bounded pending batch;
+a flood of those commands can still exhaust its capacity. After one second
+of output callbacks without an armed stage, transport falls back to reactive
+demand feeding; a stalled decoder can then starve and the counter reports it.
+The deadline advances while paused, because the host still renders callbacks.
+
+Desktop `AudioEngine.play()` and mobile `startHandle()` both replay an ended
+song with seek-to-top (or loop A), then resume, so that path uses the same
+asynchronous staging. Fresh Start, restored mid-song starts and count-in
+landings are primed AND staged during prepare, before any host callback;
+start itself performs no decoding. Setting a loop while already past B stages
+its implicit folded entry before enabling that loop, and the feeder stages A
+again before each wrap when the live ring cannot retain it. The render-side
+handoff (`StreamingLaneGroup::commitJump`/`transportJumped`) only performs
+bounded atomic claims, pointer stores and resident-range publications.
+
+`stagedJumps` (u64 string) is the positive
 half: jumps this generation that landed on a region the feeder had staged and
 the transport swapped in — it moves when a jump was ANSWERED, which is how a
 muted driver proves the lanes were fed rather than merely that nothing was

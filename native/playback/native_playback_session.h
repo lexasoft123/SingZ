@@ -860,9 +860,11 @@ struct NativePlaybackTestHooks {
       nullptr};
   // Pretend priming a Stretch stage took this long (a phone's price, where
   // the host suite's takes microseconds): a swap's landing budget grows by
-  // twice it. Zero measures. Last on purpose: the hooks are brace-initialized
+  // twice it. Zero measures. Keep its position: the hooks are brace-initialized
   // positionally throughout the suite.
   uint64_t timePitchPrimeNs{0};
+  // Test-only slow/blocked streaming decoder, called on the staging thread.
+  void (*beforeStreamingStageDecode)(void*) noexcept {nullptr};
 };
 
 // Reusable ordinary-thread composition owner. It accepts only already-opened

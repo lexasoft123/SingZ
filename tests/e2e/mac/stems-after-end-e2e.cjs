@@ -8,7 +8,7 @@
  * Play then seeks the SAME native graph to the top and resumes (with the
  * count-in off — with it on, Play builds a fresh graph); a scrub back out of
  * the last seconds is the same jump mid-song. Every lane is streamed: it
- * plays out of a window the core's feeder thread keeps ~2.7 s ahead of the
+ * plays out of a window the core's feeder thread keeps ~1.4 s ahead of the
  * playhead, and renders silence for any frame the window does not hold. The
  * feeder had taken each lane to its end, and a lane that had ENDED returned
  * before the feeder looked at where playback wanted it now — so the jump back
@@ -95,8 +95,8 @@ const STARVE_ALLOWANCE = 5
 // How far ahead of the playhead the feeder keeps each lane, in OUTPUT frames
 // (`StreamingLaneOptions::targetAheadFrames`, native/playback/
 // streaming_lane_feeder.h): leg 2 must be inside that distance of the end for
-// the feeder to have read every lane to it. ~2.7 s at 48 kHz, ~1.4 s at 96.
-const FEEDER_LEAD_FRAMES = 131072
+// the feeder to have read every lane to it. ~1.4 s at 48 kHz, ~0.7 s at 96.
+const FEEDER_LEAD_FRAMES = 65536
 const STREAM_KEY = 'singz.desktop.stream-lanes'
 // The metronome panel's own saved settings, which this driver changes through
 // the app (count-in, click, volume); put back as found, like the song.
@@ -166,9 +166,9 @@ function fileRate(path) {
 /** The lanes are fed RIGHT NOW: nothing starves over a short stretch of
  * playing. Taken before each jump, so a red after it belongs to the jump and
  * not to a graph that was already silent. */
-async function fedBeforeJump(win, label, fail) {
+async function fedBeforeJump(win, label, fail, durationMs = 400) {
   const a = await snapshot(win)
-  await sleep(400)
+  await sleep(durationMs)
   const b = await snapshot(win)
   const starving = b.lanes.filter((lane) => {
     const before = a.lanes.find((l) => l.id === lane.id)
@@ -246,8 +246,8 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
     inconclusive.push(`2. the count-in Play kept generation ${fresh.generation}, so this leg ran on leg 1's feeder`)
   if (!(await waitFor(win, `__test.engine.position >= ${jumpFrom}`, 8000)))
     throw new Error('the song never reached its last seconds')
-  const late = await fedBeforeJump(win, '2. the last seconds', fail)
-  if (!(late.pos < duration - 0.8)) throw new Error(`the song was at ${late.pos.toFixed(2)} s — too close to its end to scrub back from`)
+  const late = await fedBeforeJump(win, '2. the last seconds', fail, 250)
+  if (!(late.pos < duration - 0.5)) throw new Error(`the song was at ${late.pos.toFixed(2)} s — too close to its end to scrub back from`)
   const back = Math.min(30, duration / 3)
   await val(win, `__test.engine.seek(${back})`)
   console.log(`2. scrub back from ${late.pos.toFixed(2)} s to ${back.toFixed(1)} s: ` +
@@ -365,7 +365,7 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
     // the song runs out: on a fast output rate the lead is too short for both.
     const lead = FEEDER_LEAD_FRAMES / first.rate
     const jumpFrom = duration - lead + 0.3
-    if (jumpFrom + 0.4 > duration - 0.8)
+    if (jumpFrom + 0.25 > duration - 0.5)
       inconclusive.push(`2. at ${first.rate} Hz the feeder reads only ${lead.toFixed(2)} s ahead — too close to the end to scrub back from with room to land; leg 2 skipped`)
     else await scrubBackFromEnd(win, duration, first.generation, jumpFrom, fail, inconclusive)
 

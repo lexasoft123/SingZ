@@ -311,6 +311,7 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
       if (!reclaimStage(lane))
         return true;
     }
+    lane.stageRequest.store(0, std::memory_order_relaxed);
     return stageLane(lane, head);
   }
 
@@ -443,15 +444,22 @@ bool StreamingLaneGroup::repositionDecoder(Lane& lane, uint64_t outputFrame) {
 // swaps the window over, so it may take as long as the decoder needs.
 // Precondition: the stage is Idle (the feeder owns both rings).
 bool StreamingLaneGroup::stageLane(Lane& lane, uint64_t frame) {
+  if (options_.beforeStageDecode != nullptr)
+    options_.beforeStageDecode(options_.stageDecodeContext);
   const uint64_t total = lane.window.totalFrames;
   if (frame >= total)
     return false;
+  const uint64_t capacity = lane.window.capacityFrames;
+  // A short lane fits completely. Keep it complete in either ring, including
+  // its loop head: a Start/seek two frames before B can wrap in this very
+  // callback, before the feeder could stage a second region after the swap.
+  const bool wholeLane = total <= capacity;
+  if (wholeLane) frame = 0;
   if (!repositionDecoder(lane, frame)) {
     lane.ended.store(true, std::memory_order_relaxed);
     return false;
   }
-  const uint64_t capacity = lane.window.capacityFrames;
-  const uint64_t span =
+  const uint64_t span = wholeLane ? total :
       std::max<uint64_t>(2, std::min(options_.stageFrames, capacity));
   const uint64_t end = std::min(frame + span, total);
   float* const* ring = lane.rings[1 - lane.live].data();
@@ -610,6 +618,96 @@ size_t StreamingLaneGroup::stageJump(uint64_t sourceFrame) {
   return staged;
 }
 
+size_t StreamingLaneGroup::stagePreparedStart(uint64_t sourceFrame) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t staged = 0;
+  for (auto& lane : lanes_)
+    if (stageLane(*lane, sourceFrame)) ++staged;
+  return staged;
+}
+
+uint64_t StreamingLaneGroup::requestJump(uint64_t sourceFrame) noexcept {
+  const uint64_t token = jumpSequence_.load(std::memory_order_relaxed) + 2;
+  jumpSequence_.store(token - 1, std::memory_order_seq_cst);
+  jumpFrame_.store(sourceFrame, std::memory_order_seq_cst);
+  jumpSequence_.store(token, std::memory_order_seq_cst);
+  wake_.notify_all();
+  return token;
+}
+
+void StreamingLaneGroup::cancelJump(uint64_t token) noexcept {
+  completedJump_.store(token, std::memory_order_release);
+}
+
+bool StreamingLaneGroup::serviceJumpRequest() {
+  const uint64_t token = jumpSequence_.load(std::memory_order_seq_cst);
+  if (token == 0 || (token & 1u) ||
+      completedJump_.load(std::memory_order_acquire) == token)
+    return false;
+  const uint64_t frame = jumpFrame_.load(std::memory_order_seq_cst);
+  if (jumpSequence_.load(std::memory_order_seq_cst) != token)
+    return false;
+  for (auto& holder : lanes_) {
+    Lane& lane = *holder;
+    if (frame >= lane.window.totalFrames) continue;
+    uint32_t state = lane.stage.load(std::memory_order_acquire);
+    if (stagePhase(state) == kStageSwapping) return false;
+    if (stagePhase(state) == kStageSwapped) adoptSwap(lane, state);
+    state = lane.stage.load(std::memory_order_acquire);
+    if (stagePhase(state) == kStageArmed &&
+        lane.stageRequest.load(std::memory_order_relaxed) == token)
+      continue;
+    if (!reclaimStage(lane)) return true;
+    // Only one lane per round: visit/refill the live lanes between decodes,
+    // and observe a superseding drag request before starting another decoder.
+    lane.stageRequest.store(token, std::memory_order_relaxed);
+    return stageLane(lane, frame);
+  }
+  return false;
+}
+
+bool StreamingLaneGroup::commitJump(uint64_t token, uint64_t frame) noexcept {
+  if (jumpSequence_.load(std::memory_order_acquire) != token) return false;
+  size_t claimed = 0;
+  for (; claimed < lanes_.size(); ++claimed) {
+    Lane& lane = *lanes_[claimed];
+    if (frame >= lane.window.totalFrames) continue;
+    uint32_t state = lane.stage.load(std::memory_order_acquire);
+    if (stagePhase(state) != kStageArmed ||
+        lane.stageRequest.load(std::memory_order_relaxed) != token ||
+        lane.stageStart.load(std::memory_order_relaxed) > frame ||
+        (lane.stageEnd.load(std::memory_order_relaxed) <= frame + 1u &&
+         lane.stageEnd.load(std::memory_order_relaxed) < lane.window.totalFrames) ||
+        !lane.stage.compare_exchange_strong(state,
+            nextStage(state, kStageSwapping), std::memory_order_acq_rel,
+            std::memory_order_relaxed))
+      break;
+  }
+  if (claimed != lanes_.size()) {
+    for (size_t i = 0; i < claimed; ++i) {
+      Lane& lane = *lanes_[i];
+      if (frame >= lane.window.totalFrames) continue;
+      const uint32_t state = lane.stage.load(std::memory_order_relaxed);
+      lane.stage.store(nextStage(state, kStageArmed), std::memory_order_release);
+    }
+    return false;
+  }
+  for (auto& holder : lanes_) {
+    Lane& lane = *holder;
+    if (frame >= lane.window.totalFrames) continue;
+    const uint32_t state = lane.stage.load(std::memory_order_relaxed);
+    auto channels = lane.stageChannels.load(std::memory_order_relaxed);
+    lane.window.channels = channels;
+    lane.windowChannels.store(channels, std::memory_order_release);
+    zdsp::streamingWindowPublishResident(&lane.window,
+        lane.stageStart.load(std::memory_order_relaxed),
+        lane.stageEnd.load(std::memory_order_relaxed));
+    lane.stage.store(nextStage(state, kStageSwapped), std::memory_order_release);
+  }
+  completedJump_.store(token, std::memory_order_release);
+  return true;
+}
+
 void StreamingLaneGroup::setLoop(uint64_t startFrame, uint64_t endFrame) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -745,7 +843,7 @@ uint64_t StreamingLaneGroup::fillLane(Lane& lane, float* const* ring,
 
 bool StreamingLaneGroup::serviceOnceForTesting() {
   std::lock_guard<std::mutex> lock(mutex_);
-  bool progressed = false;
+  bool progressed = serviceJumpRequest();
   for (std::unique_ptr<Lane>& lane : lanes_)
     progressed = serviceLane(*lane) || progressed;
   return progressed;
@@ -946,6 +1044,7 @@ void StreamingLaneGroup::loop() {
     bool progressed = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      progressed = serviceJumpRequest();
       for (std::unique_ptr<Lane>& lane : lanes_)
         progressed = serviceLane(*lane) || progressed;
     }

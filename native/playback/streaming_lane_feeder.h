@@ -55,12 +55,13 @@ namespace singz {
 inline constexpr size_t kStreamingWaveformBuckets = 96;
 
 struct StreamingLaneOptions {
-  // Ring capacity per lane, in frames. Must be a power of two. 262144 frames
-  // is ~5.9 s at 44.1 kHz and ~2 MB per stereo lane — against ~109 MB for a
-  // fully decoded 5-minute stereo lane.
-  uint64_t windowFrames{262144};
+  // Capacity of EACH of the two reusable rings. Must be a power of two.
+  // The default pair totals 2097152 bytes per stereo lane (2 MiB), including
+  // standby: the same ring budget as the old single 262144-frame window.
+  // Each ring spans 2.73 s at 48 kHz; ordinary refills target 1.37 s ahead.
+  uint64_t windowFrames{131072};
   // How far ahead of the render thread the feeder tries to stay.
-  uint64_t targetAheadFrames{131072};
+  uint64_t targetAheadFrames{65536};
   // Frames behind the render position that are never overwritten. This is the
   // guard that makes the ring safe without a lock: the feeder stops filling
   // rather than write within it.
@@ -69,9 +70,14 @@ struct StreamingLaneOptions {
   uint64_t primeFrames{32768};
   // How much of a jump target is decoded into the standby ring before the
   // transport moves there. Enough for the feeder to find the swap and resume
-  // ordinary refills from the stage's end (0.68 s at 48 kHz), small enough
-  // that staging a seek synchronously costs one decoder seek and one refill.
+  // ordinary refills from the stage's end (0.68 s at 48 kHz). Caller seeks
+  // only publish a request; this decode runs on the feeder thread. A lane
+  // that fits the ring stages its whole extent so even an immediate wrap
+  // within the landing callback already has its head.
   uint64_t stageFrames{32768};
+  // Test-only decoder latency seam; invoked off the render thread.
+  void (*beforeStageDecode)(void*) noexcept {nullptr};
+  void* stageDecodeContext{nullptr};
 };
 
 // Diagnostics. Every one of these is a thing that would otherwise be invisible
@@ -160,13 +166,23 @@ class StreamingLaneGroup {
   void start();
   void stop();
 
-  // Control domain: the transport is about to jump to `sourceFrame` (a seek,
-  // a Play from the top after the song ran out). Decodes the target into each
-  // lane's standby ring BEFORE the jump is queued, so that the render thread
-  // can swap to it at the slice the jump lands in. A lane that already holds
-  // the target where it stands needs nothing. Blocking: one decoder seek and
-  // `stageFrames` of decode per lane. Returns how many lanes were staged.
+  // Blocking ordinary-thread helpers. stageJump is for deterministic
+  // feeder tests/explicit offline staging; it skips an already resident
+  // target. stagePreparedStart always prepares the first Start/count-in
+  // landing, before the feeder/host starts. Neither is called by seek/start.
   size_t stageJump(uint64_t sourceFrame);
+  size_t stagePreparedStart(uint64_t sourceFrame);
+  // Control domain: accept/coalesce a seek or an implicit loop-entry jump
+  // without taking the decoder mutex. Play-after-end uses seek then resume
+  // on both desktop and mobile. Even a wholly resident target supersedes
+  // earlier stages: an older queued jump must not replace its live window.
+  uint64_t requestJump(uint64_t sourceFrame) noexcept;
+  // Render domain: claim ALL lanes before publishing ANY. A failed claim
+  // leaves the old position playing; no lock, retry loop or allocation.
+  bool commitJump(uint64_t token, uint64_t sourceFrame) noexcept;
+  // Render/control domain: stop staging a consumed/timed-out request.
+  void cancelJump(uint64_t token) noexcept;
+
   // Control domain: the loop the transport wraps in, in SOURCE frames, end
   // exclusive. While playback is inside it the feeder never decodes past its
   // end and keeps its head where the wrap will want it — resident when the
@@ -275,6 +291,7 @@ class StreamingLaneGroup {
     // Swapped: the render thread swapped the window to the standby and
     //   published the stage; the feeder adopts it and returns to Idle.
     std::atomic<uint32_t> stage{0};
+    std::atomic<uint64_t> stageRequest{0};
     std::atomic<uint64_t> stageStart{0};
     std::atomic<uint64_t> stageEnd{0};
     std::atomic<float* const*> stageChannels{nullptr};
@@ -328,6 +345,7 @@ class StreamingLaneGroup {
     std::atomic<bool> ended{false};
   };
 
+  bool serviceJumpRequest();
   bool serviceLane(Lane& lane);
   bool seekLane(Lane& lane, uint64_t outputFrame);
   bool repositionDecoder(Lane& lane, uint64_t outputFrame);
@@ -342,6 +360,10 @@ class StreamingLaneGroup {
   void loop();
   void waveformLoop();
 
+  // Single control-domain writer, feeder reader: even sequence = published.
+  std::atomic<uint64_t> jumpSequence_{0};
+  std::atomic<uint64_t> jumpFrame_{0};
+  std::atomic<uint64_t> completedJump_{0};
   StreamingLaneOptions options_{};
   std::vector<std::unique_ptr<Lane>> lanes_;
   std::thread thread_;

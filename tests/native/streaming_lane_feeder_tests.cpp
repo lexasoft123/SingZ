@@ -326,6 +326,7 @@ void checkJumpsNeverStarve(uint32_t sourceRate, uint32_t outputRate) {
   uint64_t loopEnd = 0;
   bool pendingSeek = false;
   uint64_t seekTarget = 0;
+  uint64_t seekToken = 0;
   bool matched = true;
   uint64_t silentFrames = 0;
   std::vector<std::vector<float>> slice(2, std::vector<float>(kCallback, 0.0F));
@@ -360,22 +361,23 @@ void checkJumpsNeverStarve(uint32_t sourceRate, uint32_t outputRate) {
     }
   };
   auto callback = [&]() {
-    if (pendingSeek) {
-      // The mailbox drains at the top of the callback, paused or not.
+    if (pendingSeek && (seekToken == 0 || group.commitJump(seekToken, seekTarget))) {
       pendingSeek = false;
       position = seekTarget;
-      group.transportJumped(position);
     }
     if (playing) {
       uint32_t remaining = kCallback;
       while (remaining != 0) {
-        if (looping && position >= loopEnd) {
+        // Match the session's pending SetLoop+Seek batch: the new loop is
+        // installed only when its landing has been staged across all lanes.
+        if (looping && !pendingSeek && position >= loopEnd) {
           position = loopStart + (position - loopStart) % (loopEnd - loopStart);
           group.transportJumped(position);
         }
         if (position >= total) break;
         uint64_t boundary = total;
-        if (looping && position < loopEnd) boundary = std::min(boundary, loopEnd);
+        if (looping && !pendingSeek && position < loopEnd)
+          boundary = std::min(boundary, loopEnd);
         const uint32_t frames = static_cast<uint32_t>(
             std::min<uint64_t>(remaining, boundary - position));
         renderSlice(position, frames);
@@ -393,8 +395,8 @@ void checkJumpsNeverStarve(uint32_t sourceRate, uint32_t outputRate) {
     for (uint64_t i = 0; i < callbacks; ++i) callback();
   };
   auto seek = [&](uint64_t target) {
-    // NativePlaybackSession::seek(): stage, then queue the transport's seek.
-    group.stageJump(target);
+    // The caller only publishes; the feeder stages on subsequent rounds.
+    seekToken = group.requestJump(target);
     pendingSeek = true;
     seekTarget = target;
   };
@@ -424,8 +426,17 @@ void checkJumpsNeverStarve(uint32_t sourceRate, uint32_t outputRate) {
     play(64);
     expectClean("a far seek while playing lands on resident audio");
 
+    const auto stagesBeforeDrag = group.stats(0).stages;
+    seek(100000);
+    const auto superseded = seekToken;
+    seek(180000);
     seek(20000);
+    check(group.stats(0).stages == stagesBeforeDrag,
+          "rapid requests do no decoder work on the caller");
+    check(!group.commitJump(superseded, 100000), "a superseded request cannot commit");
     play(64);
+    check(group.stats(0).stages == stagesBeforeDrag + 1,
+          "only the final scrub target is staged");
     expectClean("a seek back while playing lands on resident audio");
 
     playing = false;
@@ -499,9 +510,51 @@ void checkJumpsNeverStarve(uint32_t sourceRate, uint32_t outputRate) {
   std::remove(path.c_str());
 }
 
+void checkResidentRequestSupersedesPendingStage() {
+  const auto path = encodeFlac(40000, kRate, 2);
+  singz::StreamingLaneGroup group;
+  singz::StreamingLaneOptions options;
+  options.windowFrames = 65536;
+  group.setOptions(options);
+  check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+        "the short coalescing lane opens");
+  check(group.prime(0) == singz::DecodedAudioStatus::Ok,
+        "the short coalescing lane primes partially");
+  const auto old = group.requestJump(1000);
+  group.serviceOnceForTesting();
+  // No callbacks: model a held output. Once the abandoned stage is reclaimed,
+  // the old live ring finishes this short song and becomes wholly resident.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1050));
+  group.serviceOnceForTesting();
+  uint64_t start = 0, end = 0;
+  check(zdsp::streamingWindowResident(group.window(0), &start, &end) &&
+        start == 0 && end == 40000, "the short live lane is now wholly resident");
+  const auto latest = group.requestJump(39000);
+  check(latest != 0 && latest != old,
+        "a resident request must still supersede an older pending stage");
+  group.serviceOnceForTesting();
+  check(!group.commitJump(old, 1000), "a superseded stage cannot replace the full live ring");
+  check(group.commitJump(latest, 39000), "the final short-lane target commits its own stage");
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  checkResidentRequestSupersedesPendingStage();
+  if (std::getenv("SINGZ_STAGING_RESIDENT_ONLY") != nullptr) return failures ? 1 : 0;
+  {
+    const auto path = encodeFlac(kFrames, kRate, 2);
+    singz::StreamingLaneGroup group;
+    check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+          "the default-memory lane opens");
+    std::fprintf(stderr, "default stereo lane retained ring bytes: %zu\n", group.retainedBytes(0));
+    check(group.retainedBytes(0) == 2097152,
+          "two default stereo rings together retain exactly 2097152 bytes");
+    std::remove(path.c_str());
+    if (std::getenv("SINGZ_STAGING_MEMORY_ONLY") != nullptr) return failures ? 1 : 0;
+  }
+
   // How long does the waveform pass ACTUALLY take, with nothing competing?
   //
   //   SINGZ_WAVEFORM_BENCH=1 streaming_lane_feeder_tests lane.flac [lane.flac...]

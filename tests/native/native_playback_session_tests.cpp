@@ -387,6 +387,11 @@ public:
 
   void stop() noexcept override {
     ++stops;
+    if (renderDuringStop && state == singz::AudioHostState::Running) {
+      stopRenderSucceeded = true;
+      for (uint32_t i = 0; i < stopRenderCallbacks; ++i)
+        stopRenderSucceeded = drive(256) && stopRenderSucceeded;
+    }
     if (graphTerminalDuringStop && renderingGraph() != nullptr) {
       auto *graph = renderingGraph();
       graph->firstTerminalCause.publish(
@@ -528,6 +533,9 @@ public:
   bool uncertainStop{false};
   bool renderTerminalDuringStart{false};
   bool graphTerminalDuringStop{false};
+  bool renderDuringStop{false};
+  bool stopRenderSucceeded{false};
+  uint32_t stopRenderCallbacks{1};
   bool providerTerminalDuringStop{false};
   bool hiddenOpenResources{false};
   bool hiddenStartResources{false};
@@ -704,6 +712,228 @@ graphConnection(const singz::NativePlaybackGraphSnapshot &graph,
 // the transport swaps each lane's window at the slice the position jumps.
 // 44.1 kHz stems into a 48 kHz device and 256-frame callbacks, as the Box
 // plays them; the feeder runs on its own thread at ~10x realtime.
+// Stop cancels streamed position changes, but a decoded seek already owns
+// its source move. Its time-pitch plan must still arm in a [Seek, Stop] drain.
+void decodedSeekThenStopKeepsItsTimePitchBoundaryPrepared() {
+  std::vector<float> tone(96000);
+  for (size_t i = 0; i < tone.size(); ++i)
+    tone[i] = 0.25F * std::sin(static_cast<double>(i) * 0.031);
+  const auto path = writeWav("decoded-seek-stop.wav", 1, tone);
+  for (const bool tempoOnly : {false, true}) {
+    auto backend = std::make_unique<ManualOutputBackend>();
+    auto* fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    auto request = config();
+    request.streamLanes = false;
+    request.transposeSemitones = tempoOnly ? 0.0 : 2.0;
+    request.playbackRate = tempoOnly ? 0.75 : 1.0;
+    const auto prepare = [&](uint64_t generation) {
+      std::vector<singz::NativePlaybackLaneSource> lanes;
+      lanes.push_back(lane("lead", path));
+      return session.prepare(request, std::move(lanes), generation);
+    };
+    CHECK(prepare(1).ok);
+    CHECK(session.openOutput(1).ok && session.start(1).ok);
+    for (int i = 0; i < 8; ++i) CHECK(fake->drive(256));
+    const auto before = session.status();
+    CHECK(before.graphLatencyFrames > 0 && !before.lanes[0].streamed);
+    CHECK(session.seek(1, 24000).ok);
+    fake->renderDuringStop = true;
+    fake->stopRenderCallbacks = 2;
+    CHECK(session.stop(1).ok);
+    const auto stopped = session.status();
+    std::fprintf(stderr, "decoded Seek/Stop (%s): detail=%u, failures=%llu\n",
+        tempoOnly ? "tempo" : "transpose", stopped.graphStatusDetail,
+        static_cast<unsigned long long>(stopped.adapterRenderFailures));
+    CHECK(stopped.graphStatusDetail != 202 && stopped.adapterRenderFailures == 0);
+    CHECK(fake->stopRenderSucceeded);
+    CHECK(stopped.transportState == singz::NativePlaybackTransportState::Stopped);
+    CHECK(stopped.renderedProjectFrame == 24000 && stopped.seekCount == 1);
+    CHECK(stopped.timePitchAnchorsPublished > before.timePitchAnchorsPublished);
+    CHECK(session.unload(1).ok);
+
+    // Public Stop cancels the generation; the next Play prepares a fresh one.
+    // It must start normally, advance at the requested rate, and render sound.
+    fake->renderDuringStop = false;
+    CHECK(prepare(2).ok);
+    CHECK(session.openOutput(2).ok && session.start(2).ok);
+    for (int i = 0; i < 80; ++i) CHECK(fake->drive(256));
+    const auto restarted = session.status();
+    CHECK(restarted.graphStatusDetail != 202 && restarted.adapterRenderFailures == 0);
+    CHECK(restarted.transportState == singz::NativePlaybackTransportState::Playing);
+    CHECK(restarted.renderedProjectFrame == (tempoOnly ? 15360 : 20480));
+    CHECK(std::any_of(fake->left.begin(), fake->left.begin() + 256,
+                      [](float sample) { return std::abs(sample) > 0.001F; }));
+    CHECK(session.unload(2).ok);
+  }
+  std::remove(path.c_str());
+}
+
+void streamingSeekReturnsBeforeDecoder() {
+  struct DecoderGate {
+    std::atomic<bool> enabled{false};
+    std::atomic<bool> entered{false};
+    std::atomic<bool> released{false};
+  } gate;
+  singz::NativePlaybackTestHooks hooks{};
+  hooks.context = &gate;
+  hooks.beforeStreamingStageDecode = [](void* context) noexcept {
+    auto& g = *static_cast<DecoderGate*>(context);
+    if (!g.enabled.load()) return;
+    g.entered.store(true);
+    while (!g.released.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  };
+  std::vector<float> tone(1500000, 0.25F);
+  const auto path = writeWav("slow-stage.wav", 1, tone, 44100);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  auto* fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend), &hooks);
+  auto request = config();
+  request.streamLanes = true;
+  std::vector<singz::NativePlaybackLaneSource> lanes;
+  lanes.push_back(lane("lead", path));
+  CHECK(session.prepare(std::move(request), std::move(lanes), 1).ok);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  for (int i = 0; i < 100; ++i) {
+    CHECK(fake->drive(256));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  gate.enabled.store(true);
+  std::thread release([&] {
+    const auto safetyDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!gate.released.load() && std::chrono::steady_clock::now() < safetyDeadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    gate.released.store(true);
+  });
+  const auto before = std::chrono::steady_clock::now();
+  const auto accepted = session.seek(1, 1000000);
+  const auto ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - before).count();
+  std::fprintf(stderr, "blocked decoder: seek accepted in %.3f ms (decoder held through the scrub)\n", ms);
+  // Render old audio while the landing's decoder is blocked. A scrub drag
+  // must not block subsequent caller requests either; only its final target
+  // should be decoded once this in-flight stage is released.
+  if (ms < 50.0) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (!gate.entered.load() && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(gate.entered.load());
+    // A preceding loop edit must not pin the superseded seeks either.
+    CHECK(session.setLoop(1, 200000, 1400000).ok);
+    for (int i = 0; i < 128; ++i) {
+      const auto callAt = std::chrono::steady_clock::now();
+      CHECK(session.seek(1, 500000 + i * 1000).ok);
+      CHECK(std::chrono::steady_clock::now() - callAt < std::chrono::milliseconds(50));
+      CHECK(fake->drive(256));
+    }
+    const auto waiting = session.status();
+    CHECK(waiting.seekCount == 0 && waiting.renderedProjectFrame < 100000);
+    CHECK(!waiting.loopEnabled);
+    CHECK(waiting.lanes[0].starvedBlocks == 0);
+  }
+  gate.released.store(true);
+  release.join();
+  CHECK(accepted.ok);
+  CHECK(ms < 50.0);
+  CHECK(gate.entered.load());
+  for (int i = 0; i < 100; ++i) {
+    CHECK(fake->drive(256));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const auto after = session.status();
+  CHECK(after.seekCount == 129 && after.renderedProjectFrame >= 627000 &&
+        after.renderedProjectFrame < 700000);
+  CHECK(after.lanes[0].stagedJumps <= 3);
+  CHECK(after.lanes[0].stagedJumps > 0 && after.lanes[0].starvedBlocks == 0);
+
+  CHECK(after.loopEnabled);
+  CHECK(session.clearLoop(1).ok && fake->drive(256));
+
+  // Pause overtakes the staging wait within one callback. Resume remains
+  // ordered after that seek, so it cannot restart the old position.
+  gate.entered.store(false);
+  gate.released.store(false);
+  CHECK(session.seek(1, 1100000).ok);
+  const auto pauseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (!gate.entered.load() && std::chrono::steady_clock::now() < pauseDeadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(gate.entered.load());
+  CHECK(session.pause(1).ok && fake->drive(256));
+  const auto paused = session.status();
+  CHECK(paused.transportState == singz::NativePlaybackTransportState::Paused);
+  CHECK(paused.seekCount == 129 && paused.renderedProjectFrame < 700000);
+  CHECK(std::all_of(fake->left.begin(), fake->left.begin() + 256,
+                    [](float sample) { return sample == 0.0F; }));
+  CHECK(std::all_of(fake->right.begin(), fake->right.begin() + 256,
+                    [](float sample) { return sample == 0.0F; }));
+  CHECK(session.resume(1).ok);
+  for (int i = 0; i < 2; ++i) {
+    CHECK(fake->drive(256));
+    const auto stillWaiting = session.status();
+    CHECK(stillWaiting.transportState == singz::NativePlaybackTransportState::Paused);
+    CHECK(stillWaiting.seekCount == 129 &&
+          stillWaiting.renderedProjectFrame == paused.renderedProjectFrame);
+  }
+  gate.released.store(true);
+  for (int i = 0; i < 100; ++i) {
+    CHECK(fake->drive(256));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const auto resumed = session.status();
+  CHECK(resumed.seekCount == 130 && resumed.renderedProjectFrame >= 1100000 &&
+        resumed.renderedProjectFrame < 1200000);
+  CHECK(resumed.transportState == singz::NativePlaybackTransportState::Playing);
+  CHECK(resumed.lanes[0].starvedBlocks == 0);
+
+  // A decoder that never arms cannot wedge a paused transport. The bounded
+  // output-frame deadline advances even though no source samples are read.
+  CHECK(session.pause(1).ok && fake->drive(256));
+  gate.entered.store(false);
+  gate.released.store(false);
+  CHECK(session.seek(1, 1400000).ok);
+  const auto decoderDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (!gate.entered.load() && std::chrono::steady_clock::now() < decoderDeadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(gate.entered.load());
+  for (int i = 0; i < 190; ++i) CHECK(fake->drive(256));
+  const auto timedOut = session.status();
+  CHECK(timedOut.seekCount == 131 && timedOut.renderedProjectFrame == 1400000);
+  CHECK(timedOut.transportState == singz::NativePlaybackTransportState::Paused);
+  CHECK(timedOut.lanes[0].starvedBlocks == 0);
+  gate.released.store(true);
+  // Release the timed-out decode, then block another stage. The first
+  // resumed callback may starve after that deliberate reactive fallback.
+  for (int i = 0; i < 100; ++i) {
+    CHECK(fake->drive(256));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  CHECK(session.resume(1).ok && fake->drive(256));
+  gate.entered.store(false);
+  gate.released.store(false);
+  CHECK(session.seek(1, 200000).ok);
+  const auto stopDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (!gate.entered.load() && std::chrono::steady_clock::now() < stopDeadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(gate.entered.load());
+  // A final hardware callback can race host quiescence; it must already be
+  // silent, with the pending seek cancelled rather than waiting to decode.
+  const auto starvationBeforeStop = session.status().lanes[0].starvedBlocks;
+  fake->renderDuringStop = true;
+  CHECK(session.stop(1).ok);
+  CHECK(fake->stopRenderSucceeded);
+  CHECK(std::all_of(fake->left.begin(), fake->left.begin() + 256,
+                    [](float sample) { return sample == 0.0F; }));
+  CHECK(std::all_of(fake->right.begin(), fake->right.begin() + 256,
+                    [](float sample) { return sample == 0.0F; }));
+  const auto stopped = session.status();
+  CHECK(stopped.transportState == singz::NativePlaybackTransportState::Stopped);
+  CHECK(stopped.renderedProjectFrame >= 1400000 && stopped.seekCount == 132);
+  CHECK(stopped.lanes[0].starvedBlocks == starvationBeforeStop);
+  gate.released.store(true);
+  CHECK(session.unload(1).ok);
+  std::remove(path.c_str());
+}
+
 void streamedJumpsNeverStarve() {
   const size_t sourceFrames = 1500000;  // 34 s at 44.1 kHz
   std::vector<float> tone(sourceFrames, 0.0F);
@@ -719,13 +949,29 @@ void streamedJumpsNeverStarve() {
   ManualOutputBackend *fake = backend.get();
   singz::NativePlaybackSession session(std::move(backend));
   constexpr uint32_t kCallback = 256;
+  // TSan instruments every resampler sample. It proves ordering/races, not
+  // decoder throughput, so give its feeder device-time (256/48000 = 5.33 ms)
+  // between callbacks. Release retains the roughly 10x-realtime stress pace.
+  constexpr auto callbackPace = std::chrono::microseconds(
+#if defined(__SANITIZE_THREAD__)
+      6000
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+      6000
+#else
+      500
+#endif
+#else
+      500
+#endif
+  );
   bool first = true;
   auto play = [&](uint64_t callbacks) {
     for (uint64_t i = 0; i < callbacks; ++i) {
       CHECK(fake->drive(kCallback, first ? singz::AudioHostDiscontinuityStart
                                          : singz::AudioHostDiscontinuityNone));
       first = false;
-      std::this_thread::sleep_for(std::chrono::microseconds(500));
+      std::this_thread::sleep_for(callbackPace);
     }
   };
   auto starved = [&](const char *what) {
@@ -735,6 +981,13 @@ void streamedJumpsNeverStarve() {
     for (const auto &laneStatus : status.lanes) {
       CHECK(laneStatus.streamed);
       sum += laneStatus.starvedBlocks;
+      if (laneStatus.starvedBlocks)
+        std::fprintf(stderr, "lane %s staged=%llu starved=%llu frame=%lld loops=%llu seeks=%llu\n",
+            laneStatus.id.c_str(), static_cast<unsigned long long>(laneStatus.stagedJumps),
+            static_cast<unsigned long long>(laneStatus.starvedBlocks),
+            static_cast<long long>(status.renderedProjectFrame),
+            static_cast<unsigned long long>(status.loopCount),
+            static_cast<unsigned long long>(status.seekCount));
     }
     if (sum != 0)
       std::fprintf(stderr, "streamed jumps: %s starved %llu blocks\n", what,
@@ -756,31 +1009,62 @@ void streamedJumpsNeverStarve() {
     first = true;
   };
 
+  auto awaitSeek = [&](uint64_t before) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    do {
+      play(1);
+      if (session.status().seekCount > before) return;
+    } while (std::chrono::steady_clock::now() < deadline);
+    CHECK(false && "the asynchronously staged seek must settle before its deadline");
+  };
+  auto seekApplied = [&](int64_t target) {
+    const uint64_t before = session.status().seekCount;
+    CHECK(session.seek(1, target).ok);
+    awaitSeek(before);
+  };
+
   open(1, std::nullopt);
   const uint64_t total = session.status().durationFrames;
   CHECK(total > 1600000);
   play(200);
-  starved("playing from the top");
+  const auto started = starved("playing from the top");
+  CHECK(started.lanes[0].stagedJumps > 0);
 
-  CHECK(session.seek(1, 1000000).ok);
+  seekApplied(1000000);
   play(200);
   starved("a far seek while playing");
 
   // A 4 s loop, entered the way the Box enters one: set it, seek to its
-  // start. The ring holds it whole, so after the first lap its head stays.
+  // start. It exceeds the bounded live ring, so every wrap stages its head.
   const int64_t shortStart = 400000;
   const int64_t shortEnd = shortStart + 192000;
   CHECK(session.setLoop(1, shortStart, shortEnd).ok);
-  CHECK(session.seek(1, shortStart).ok);
+  // Exact field order: SetLoop while already beyond B, let callbacks observe
+  // it, THEN seek to A. The implicit fold and all later wraps need audio.
+  play(12);
+  starved("SetLoop while past B, before the following seek to A");
+  seekApplied(shortStart);
   play(3 * 192000 / kCallback + 20);
   const auto shortLoop = starved("three wraps of a 4 s loop");
   CHECK(shortLoop.loopCount >= 3);
+
+  // Reverse command order must preserve the queued seek's position, rather
+  // than fold the stale far-away telemetry position over the seek to A.
+  CHECK(session.clearLoop(1).ok);
+  seekApplied(1000000);
+  const uint64_t beforeReverse = session.status().seekCount;
+  CHECK(session.seek(1, shortStart).ok);
+  CHECK(session.setLoop(1, shortStart, shortEnd).ok);
+  awaitSeek(beforeReverse);
+  const auto reverse = starved("Seek A before SetLoop while telemetry is past B");
+  CHECK(reverse.loopEnabled && reverse.renderedProjectFrame >= shortStart &&
+        reverse.renderedProjectFrame < shortStart + 4096);
 
   // A 10 s loop, longer than the ring: every wrap lands on a staged head.
   const int64_t longStart = 600000;
   const int64_t longEnd = longStart + 480000;
   CHECK(session.setLoop(1, longStart, longEnd).ok);
-  CHECK(session.seek(1, longStart).ok);
+  seekApplied(longStart);
   play(2 * 480000 / kCallback + 20);
   const auto longLoop = starved("two wraps of a 10 s loop");
   CHECK(longLoop.loopCount >= shortLoop.loopCount + 2);
@@ -789,11 +1073,24 @@ void streamedJumpsNeverStarve() {
   CHECK(session.clearLoop(1).ok);
   CHECK(session.pause(1).ok);
   play(8);
-  CHECK(session.seek(1, 1300000).ok);
+  seekApplied(1300000);
   play(8);
   CHECK(session.resume(1).ok);
   play(200);
   starved("Play after a seek while paused");
+  seekApplied(static_cast<int64_t>(total - 4096));
+  play(100);
+  CHECK(session.status().transportState == singz::NativePlaybackTransportState::Completed);
+  CHECK(session.pause(1).ok);
+  play(4);
+  const auto ended = starved("the song ran out");
+  CHECK(session.seek(1, 0).ok);
+  CHECK(session.resume(1).ok);
+  play(200);
+  const auto replayed = starved("Play after the song ran out: seek(0), resume");
+  CHECK(replayed.renderedProjectFrame > 0 && replayed.renderedProjectFrame < 100000);
+  for (size_t i = 0; i < replayed.lanes.size(); ++i)
+    CHECK(replayed.lanes[i].stagedJumps > ended.lanes[i].stagedJumps);
   CHECK(session.unload(1).ok);
 
   // A graph prepared to start mid-song — a Play from a paused spot, a
@@ -6158,17 +6455,38 @@ void roundedWholeSongLoopsUseTheResampledTimeline() {
           status.loopEndFrame == mediaEnd && status.loopCount == 1 &&
           status.renderedProjectFrame == 4 &&
           status.transportState == singz::NativePlaybackTransportState::Playing);
+    if (streamed && status.lanes[0].starvedBlocks != 0)
+      std::fprintf(stderr, "short streamed Start at the tail starved %llu blocks\n",
+          static_cast<unsigned long long>(status.lanes[0].starvedBlocks));
+    CHECK(!streamed || status.lanes[0].starvedBlocks == 0);
 
     // Turning the loop on after playback starts uses the same conversion and
     // must have the same answer as the initial transport snapshot.
     CHECK(session.clearLoop(generation).ok && fake->drive(1));
     CHECK(!session.status().loopEnabled);
     CHECK(session.setLoop(generation, 1, requestedEnd).ok);
-    CHECK(session.seek(generation, mediaEnd - 2).ok && fake->drive(6));
+    // Use ordinary host callbacks to apply the asynchronous seek while
+    // parked, then judge the exact six-frame timeline below. Six-frame
+    // callbacks at a 1 ms poll would slow the output-frame timeout by 8x.
+    CHECK(session.pause(generation).ok);
+    const uint64_t beforeSeek = session.status().seekCount;
+    CHECK(session.seek(generation, mediaEnd - 2).ok);
+    const auto seekDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    do {
+      CHECK(fake->drive(256));
+      status = session.status();
+      if (status.seekCount > beforeSeek) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (streamed && std::chrono::steady_clock::now() < seekDeadline);
+    CHECK(status.seekCount == beforeSeek + 1);
+    CHECK(status.transportState == singz::NativePlaybackTransportState::Paused &&
+          status.renderedProjectFrame == mediaEnd - 2);
+    CHECK(session.resume(generation).ok && fake->drive(6));
     status = session.status();
     CHECK(status.loopEnabled && status.loopStartFrame == 1 &&
           status.loopEndFrame == mediaEnd && status.loopCount == 2 &&
           status.renderedProjectFrame == 5);
+    CHECK(!streamed || status.lanes[0].starvedBlocks == 0);
     CHECK(session.setLoop(generation, 0, mediaEnd + 1).error ==
           singz::NativePlaybackError::InvalidConfiguration);
     CHECK(session.setLoop(generation, mediaEnd, requestedEnd).error ==
@@ -7826,6 +8144,8 @@ void portableGraphDocumentMaterializesActualTopology() {
 } // namespace
 
 int main() {
+  decodedSeekThenStopKeepsItsTimePitchBoundaryPrepared();
+  streamingSeekReturnsBeforeDecoder();
   outputMeterSeparatesStereoEnergyFromPeaks();
   if (std::getenv("SINGZ_NATIVE_PLAYBACK_PROVIDER_DISPOSE_FAILURE") !=
       nullptr) {
