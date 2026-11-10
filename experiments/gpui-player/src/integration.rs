@@ -3404,7 +3404,7 @@ mod tests {
             assert!(project.muted[0]);
             assert_eq!(project.lanes[0].1.extension().unwrap(), "flac");
             assert!(crate::project_analysis::needed(&project));
-            Arc::make_mut(&mut project.pitch).det_version = 5;
+            Arc::make_mut(&mut project.pitch).det_version = 5.;
             assert!(
                 !crate::project_analysis::needed(&project),
                 "Newer detector results must not be downgraded"

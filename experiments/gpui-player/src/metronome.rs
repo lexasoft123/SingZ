@@ -459,16 +459,9 @@ fn enabled_for(key: &str, i: usize, s: &MetPopover) -> bool {
     s.grid.is_some() || !matches!(key, "click" | "grid" | "meter") || i == 0 && key != "meter"
 }
 fn version() -> f64 {
-    include_str!("../../../src/renderer/src/audio/analysis-contract.ts")
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("export const BEAT_DETECT_VERSION = ")?
-                .trim()
-                .parse()
-                .ok()
-        })
-        .expect("Source beat detector version")
+    crate::beat_analysis::version() as f64
 }
+
 impl Render for MetPopover {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.recover_removed_focus(w, cx);

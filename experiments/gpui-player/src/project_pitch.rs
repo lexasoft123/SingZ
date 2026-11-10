@@ -1,5 +1,6 @@
 //! Saved analysis format shared with desktop/mobile. Reading does not re-stamp it.
 use serde_json::Value;
+include!(concat!(env!("OUT_DIR"), "/pitch_detector_version.rs"));
 #[derive(Clone, Debug)]
 pub struct Note {
     pub start: f32,
@@ -19,7 +20,7 @@ pub struct Pitch {
     /// Independently measured vocal source coverage; never an inferred f0 length.
     source_duration: Option<f32>,
     pub warning: Option<String>,
-    pub det_version: u64,
+    pub det_version: f64,
     cached_range: Option<(i32, i32)>,
     key_inferred: bool,
 }
@@ -57,7 +58,7 @@ impl Pitch {
             data.tempo = format!("{bpm:.0}");
         }
         let raw = &settings["melody"];
-        data.det_version = raw["detVersion"].as_u64().unwrap_or(0);
+        data.det_version = raw["detVersion"].as_f64().filter(|v| v.is_finite()).unwrap_or(0.);
         let result = (|| -> Option<(Vec<f32>, f32)> {
             let hop = raw["hopSec"].as_f64()? as f32;
             if !(0.001..0.5).contains(&hop) {
@@ -142,7 +143,7 @@ impl Pitch {
             } else if (self.f0.len() as f32 * self.hop - self.analysis_duration()).abs() > 2. {
                 self.warning = Some("Saved pitch belongs to a different song duration.".into());
                 self.f0.clear();
-            } else if self.det_version < 4 {
+            } else if self.det_version < VERSION as f64 {
                 self.warning = Some("Saved pitch needs updating.".into());
                 self.f0.clear();
             }
@@ -329,6 +330,24 @@ fn melody_key(f0: &[f32]) -> Option<(usize, bool)> {
 mod tests {
     use super::*;
     #[test]
+    fn saved_detector_stamp_retains_numeric_fractions_and_rejects_coercion() {
+        for stamp in [serde_json::json!(4.0), serde_json::json!(4.5), serde_json::json!(99.5)] {
+            let mut pitch = Pitch::read(&serde_json::json!({"melody": {
+                "detVersion": stamp, "hopSec": 0.025, "f0": vec!["1200"; 200].join(" ")
+            }}));
+            assert_eq!(pitch.det_version, stamp.as_f64().unwrap());
+            pitch.bind_duration(5.);
+            assert_eq!(pitch.f0.len(), 200, "equal/newer stamps must be adopted");
+        }
+        for stamp in [serde_json::json!("4"), serde_json::json!(true), Value::Null, serde_json::json!(3.5)] {
+            let mut pitch = Pitch::read(&serde_json::json!({"melody": {
+                "detVersion": stamp, "hopSec": 0.025, "f0": vec!["1200"; 200].join(" ")
+            }}));
+            pitch.bind_duration(5.);
+            assert!(pitch.f0.is_empty(), "nonnumeric/lower stamps must re-derive");
+        }
+    }
+    #[test]
     fn key_stamps_and_display_only_histogram_follow_source_contract() {
         for version in [2, 99] {
             let raw = serde_json::json!({"key":{"pc":8,"minor":true,"detVersion":version}});
@@ -405,7 +424,7 @@ mod tests {
         assert_eq!(pitch.duration, 100.);
         assert_eq!(pitch.analysis_duration(), 5.);
         assert_eq!(pitch.f0, frames);
-        assert_eq!(pitch.det_version, 4);
+        assert_eq!(pitch.det_version, 4.);
         assert!(pitch.warning.is_none());
         assert_eq!(pitch.range(), Some((45, 45)));
         assert!(!pitch.notes.is_empty());
@@ -430,7 +449,7 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("different song duration"));
-        assert_eq!(pitch.det_version, 4);
+        assert_eq!(pitch.det_version, 4.);
         let mut same_timeline = stored_vocal(4);
         same_timeline.bind_duration_for_lane(5., Some(1.));
         assert!(
@@ -443,7 +462,7 @@ mod tests {
         let mut old = stored_vocal(3);
         old.bind_duration_for_lane(100., Some(5.));
         assert!(old.f0.is_empty());
-        assert_eq!(old.det_version, 3);
+        assert_eq!(old.det_version, 3.);
         assert_eq!(old.warning.as_deref(), Some("Saved pitch needs updating."));
         let mut unknown = stored_vocal(4);
         unknown.bind_duration_for_lane(100., None);

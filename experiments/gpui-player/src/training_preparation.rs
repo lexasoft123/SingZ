@@ -28,7 +28,7 @@ pub struct Context {
     pub choice: Choice,
 }
 pub fn effective_key(raw: &Value, transpose: i32) -> Option<Key> {
-    if raw["detVersion"].as_u64()? < 2 {
+    if !crate::project_key::stored_current(raw) {
         return None;
     }
     let pc = raw["pc"].as_u64()?;
@@ -84,6 +84,13 @@ pub fn requirements(config: &Config) -> (bool, bool, bool) {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn floating_current_and_newer_key_stamps_authorize_training() {
+        let actual: Vec<_> = [2.0, 2.5].into_iter().map(|stamp| {
+            effective_key(&json!({"pc":11,"minor":true,"detVersion":stamp}), 2)
+        }).collect();
+        assert_eq!(actual, vec![Some(Key { tonic: 1, minor: true }); 2]);
+    }
     #[test]
     fn only_a_valid_current_key_stamp_can_authorize_transposition() {
         let key = json!({"pc":11,"minor":true,"detVersion":2});

@@ -23,15 +23,10 @@ const OUTPUT_LIMIT: usize = 32 * 1024 * 1024;
 const NATIVE_LINE_LIMIT: usize = 2 * 1024 * 1024;
 const ML_LINE_LIMIT: usize = OUTPUT_LIMIT;
 const MAX_DURATION: f64 = 43_200.;
-const CONTRACT: &str = include_str!("../../../src/renderer/src/audio/analysis-contract.ts");
+include!(concat!(env!("OUT_DIR"), "/beat_detector_version.rs"));
 
 pub fn version() -> u64 {
-    CONTRACT
-        .split("export const BEAT_DETECT_VERSION = ")
-        .nth(1)
-        .and_then(|s| s.lines().next())
-        .and_then(|s| s.trim().parse().ok())
-        .expect("embedded source beat detector stamp")
+    VERSION
 }
 
 /// Source's stale predicate never downgrades a newer stamped automatic grid.
@@ -193,6 +188,7 @@ pub fn grid_from_detection(raw: &Value, duration: f64) -> Result<Option<Beats>> 
         "Invalid beat result duration"
     );
     ensure!(
+        // The analyzer itself must emit exactly the current integer detector version.
         raw["detVersion"].as_u64() == Some(version()),
         "Native beat detector version differs from the app"
     );

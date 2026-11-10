@@ -134,23 +134,7 @@ fn native_stale(kind: &str, stamp: Option<&Value>) -> bool {
     }
 }
 
-const STALENESS_DRIFTS: &[Drift] = &[
-    Drift {
-        case: "beat: string stamp is nonsense",
-        package: "C-14",
-        reason: "Beats::sanitize reads a numeric string as a number through `number`, so a string stamp is adopted; the TypeScript rule re-derives it",
-    },
-    Drift {
-        case: "pitch: float spelling of the current stamp (4.0) is adopted",
-        package: "C-14",
-        reason: "as_u64 refuses a float-spelled 4.0, so the current stamp reads as 0 and the saved line is discarded",
-    },
-    Drift {
-        case: "pitch: fractional above current is adopted",
-        package: "C-14",
-        reason: "Pitch::read takes the stamp with as_u64, so 4.5 reads as 0 and the saved line is discarded and re-tracked",
-    },
-];
+const STALENESS_DRIFTS: &[Drift] = &[];
 
 #[test]
 fn staleness_cases_match_the_typescript_rule() {
@@ -176,6 +160,25 @@ fn staleness_cases_match_the_typescript_rule() {
 fn staleness_table_names_the_native_detector_versions() {
     let table: Value = serde_json::from_str(STALENESS).unwrap();
     assert_eq!(table["detectors"]["beat"], json!(crate::beat_analysis::version()));
+}
+
+#[test]
+fn generated_detector_versions_follow_native_headers() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let headers = root.join("zcore/include/zcore/legacy");
+    for (header, name, actual) in [
+        ("beats.h", "kBeatDetectVersion", crate::beat_analysis::version()),
+        ("analysis.h", "kKeyDetectVersion", crate::project_key::VERSION),
+        ("melody.h", "kPitchDetectVersion", crate::project_pitch::VERSION),
+    ] {
+        let source = std::fs::read_to_string(headers.join(header)).unwrap();
+        let pattern = regex::Regex::new(&format!(r"(?m)^constexpr\s+int\s+{name}\s*=\s*(\d+)\s*;")).unwrap();
+        let expected: u64 = pattern.captures(&source).unwrap()[1].parse().unwrap();
+        assert_eq!(actual, expected, "{name} must flow from {header} into Rust");
+    }
+    let table: Value = serde_json::from_str(STALENESS).unwrap();
+    assert_eq!(table["detectors"]["key"], json!(crate::project_key::VERSION));
+    assert_eq!(table["detectors"]["pitch"], json!(crate::project_pitch::VERSION));
 }
 
 // ---------------------------------------------------------------- lyrics

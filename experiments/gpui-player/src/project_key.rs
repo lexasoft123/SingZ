@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 const LIMIT: u64 = 64 * 1024;
-const VERSION: u64 = 2;
+include!(concat!(env!("OUT_DIR"), "/key_detector_version.rs"));
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -111,6 +111,7 @@ fn parse(bytes: &[u8]) -> Result<Outcome> {
     // treat analyze's independent JSON-line melody/key records as one object.
     let raw: Value = serde_json::from_slice(bytes)?;
     ensure!(
+        // The analyzer itself must emit exactly the current integer detector version.
         raw["detVersion"].as_u64() == Some(VERSION),
         "Unsupported native key detector version"
     );
@@ -279,10 +280,21 @@ mod tests {
         }
     }
     #[test]
+    fn future_fractional_melody_is_not_downgraded_when_frames_are_unreadable() {
+        let fixture = Fixture::new(&["vocals"]);
+        let mut project = fixture.project();
+        project.pitch = std::sync::Arc::new(crate::project_pitch::Pitch::read(&json!({
+            "melody": {"detVersion": 4.5, "f0": {"futureFormat": true}}
+        })));
+        assert!(project.pitch.f0.is_empty());
+        assert!(!crate::project_analysis::melody_needed(&project),
+            "an unreadable newer melody must never be replaced by this detector");
+    }
+    #[test]
     fn key_need_is_independent_of_current_or_future_melody_and_allows_harmonic_only() {
         let fixture = Fixture::new(&["vocals", "bass"]);
         let mut project = fixture.project();
-        for melody_version in [4, 8] {
+        for melody_version in [4., 8.] {
             let pitch = std::sync::Arc::make_mut(&mut project.pitch);
             pitch.det_version = melody_version;
             pitch.f0 = vec![110.];

@@ -85,7 +85,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             if std::env::var_os("SINGZ_GPUI_TEST_ANALYSIS").is_some(){
                 let deadline=Instant::now()+Duration::from_secs(60);
                 loop{cx.background_executor().timer(Duration::from_millis(20)).await;
-                    let ready=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);let project=p.project.as_ref().unwrap();if let Some(warning)=&project.pitch.warning{anyhow::ensure!(!warning.starts_with("Pitch analysis failed"),"{warning}");}Ok(project.pitch.det_version==4&&!project.pitch.notes.is_empty()&&project.raw["settings"]["melody"]["detVersion"]==4)})??;
+                    let ready=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);let project=p.project.as_ref().unwrap();if let Some(warning)=&project.pitch.warning{anyhow::ensure!(!warning.starts_with("Pitch analysis failed"),"{warning}");}Ok(project.pitch.det_version==4.0&&!project.pitch.notes.is_empty()&&project.raw["settings"]["melody"]["detVersion"]==4)})??;
                     if ready{break;}anyhow::ensure!(Instant::now()<deadline,"Native analysis did not reach the active project");
                 }
                 eprintln!("NATIVE_ANALYSIS passed: native vocal detection, saved-format adoption and pitch notes");

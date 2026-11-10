@@ -21,8 +21,8 @@ pub struct Output {
     pub warnings: Vec<String>,
 }
 pub fn melody_needed(project: &Project) -> bool {
-    project.pitch.det_version <= 4
-        && (project.pitch.det_version < 4 || project.pitch.f0.is_empty())
+    project.pitch.det_version <= crate::project_pitch::VERSION as f64
+        && (project.pitch.det_version < crate::project_pitch::VERSION as f64 || project.pitch.f0.is_empty())
         && project.lanes.iter().any(|(i, _)| *i == 0)
 }
 pub fn needed(project: &Project) -> bool {
@@ -253,7 +253,8 @@ fn read_progress(mut source: impl Read, emit: &dyn Fn(f32)) {
 }
 fn encode(raw: &Value, duration: f32) -> Result<Value> {
     ensure!(
-        raw["detVersion"].as_u64() == Some(4),
+        // The analyzer itself must emit exactly the current integer detector version.
+        raw["detVersion"].as_u64() == Some(crate::project_pitch::VERSION),
         "Unsupported native pitch detector version"
     );
     let hop = raw["hopSec"].as_f64().context("Missing analysis hop")?;
@@ -297,7 +298,7 @@ fn encode(raw: &Value, duration: f32) -> Result<Value> {
         tokens.push(format!("{cents:.0}"));
     }
     flush(&mut gap, &mut tokens);
-    Ok(json!({"detVersion":4,"hopSec":(hop*1e7).round()/1e7,"f0":tokens.join(" ")}))
+    Ok(json!({"detVersion":crate::project_pitch::VERSION,"hopSec":(hop*1e7).round()/1e7,"f0":tokens.join(" ")}))
 }
 #[cfg(test)]
 mod tests {

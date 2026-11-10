@@ -18,6 +18,7 @@ fn main() {
     .unwrap();
     println!("cargo:rerun-if-changed=build_config.rs");
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    generate_detector_versions(&root);
     embed_analyzer_source_hash(&root);
     for directive in build_config::rerun_directives(&root) {
         println!("{directive}");
@@ -90,5 +91,41 @@ fn embed_analyzer_source_hash(root: &std::path::Path) {
         println!(
             "cargo:warning=Analyzer source fingerprint unavailable; runtime provenance will be unchecked"
         );
+    }
+}
+
+// Detector stamps belong to the native implementation, not to this port.
+fn generate_detector_versions(root: &std::path::Path) {
+    let headers = root.join("zcore/include/zcore/legacy");
+    let output = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    for (detector, header, name) in [
+        ("beat", "beats.h", "kBeatDetectVersion"),
+        ("key", "analysis.h", "kKeyDetectVersion"),
+        ("pitch", "melody.h", "kPitchDetectVersion"),
+    ] {
+        let path = headers.join(header);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let source = fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "Cannot read detector version header {}: {err}",
+                path.display()
+            )
+        });
+        let declarations: Vec<_> = source
+            .lines()
+            .map(|line| line.split("//").next().unwrap().trim())
+            .filter_map(|line| line.strip_prefix("constexpr int "))
+            .filter_map(|line| line.split_once('='))
+            .filter(|(lhs, _)| lhs.trim() == name)
+            .collect();
+        let version = match declarations.as_slice() {
+            [(_, rhs)] => rhs.trim().strip_suffix(';').and_then(|s| s.trim().parse::<u64>().ok()),
+            _ => None,
+        }.unwrap_or_else(|| panic!("Missing or invalid detector constant {name} in {}: expected one constexpr int {name} = <unsigned integer>;", path.display()));
+        fs::write(
+            output.join(format!("{detector}_detector_version.rs")),
+            format!("pub(crate) const VERSION: u64 = {version};\n"),
+        )
+        .expect("Could not write generated detector version");
     }
 }

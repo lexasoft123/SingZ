@@ -77,8 +77,22 @@ pub struct Beats {
     pub user_bars: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspect_at: Option<Vec<f64>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_detector_version")]
     pub det_version: Option<f64>,
+}
+// Numeric stamps stay tolerant on read; integral stamps retain their JSON integer spelling.
+fn serialize_detector_version<S: serde::Serializer>(
+    stamp: &Option<f64>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match *stamp {
+        // u64::MAX rounds up to 2^64 in f64, so the upper bound must be strict.
+        Some(value) if value.fract() == 0. && value >= 0. && value < u64::MAX as f64 =>
+            serializer.serialize_some(&(value as u64)),
+        Some(value) if value.fract() == 0. && value >= i64::MIN as f64 && value < 0. =>
+            serializer.serialize_some(&(value as i64)),
+        _ => stamp.serialize(serializer),
+    }
 }
 impl Beats {
     pub fn sanitize(raw: &Value) -> Option<Self> {
@@ -156,7 +170,7 @@ impl Beats {
             auto_downbeats: indexes("autoDownbeats"),
             user_bars: times("userBars"),
             suspect_at: times("suspectAt"),
-            det_version: raw.get("detVersion").and_then(number),
+            det_version: raw.get("detVersion").and_then(Value::as_f64).filter(|v| v.is_finite()),
             beats,
         })
     }
@@ -577,6 +591,30 @@ pub fn commands(met: &Metronome, grid: Option<&Beats>) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn saved_project_detector_stamp_round_trips_byte_identically() {
+        let mix = crate::project_store::Mix {
+            carry: Default::default(), metronome: Default::default(),
+            beat: Some(Beats::constant(120., 0., 3., 4).unwrap()),
+            original: false, lanes: vec![0], custom: vec![],
+            gain: [0.4; crate::tracks::LANE_SLOTS],
+            muted: [false; crate::tracks::LANE_SLOTS], solo: [false; crate::tracks::LANE_SLOTS],
+            master: 0.7, transpose: 0, tempo: 1., looping: false,
+            selection: None, view: (0., 3.),
+        };
+        for stamp in [json!(23), json!(4.5), json!(-2),
+            json!(18446744073709549568u64), json!(i64::MIN), json!(18446744073709551616.0)] {
+            let mut raw = crate::project_store::update_mix(json!({"version":2}), &mix).unwrap();
+            raw["settings"]["beat"]["detVersion"] = stamp;
+            let original = serde_json::to_vec(&raw).unwrap();
+            let raw: Value = serde_json::from_slice(&original).unwrap();
+            let mut reopened = mix.clone();
+            reopened.beat = Beats::sanitize(&raw["settings"]["beat"]);
+            let saved = crate::project_store::update_mix(raw, &reopened).unwrap();
+            assert_eq!(serde_json::to_vec(&saved).unwrap(), original,
+                "saving a reopened project must preserve its detector stamp bytes");
+        }
+    }
     fn detector_track(user_bars: Vec<f64>, auto: Vec<usize>) -> Beats {
         let mut grid = Beats::constant(60., 0., 63., 4).unwrap();
         grid.source = "auto".into();
