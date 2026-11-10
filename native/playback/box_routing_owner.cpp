@@ -286,6 +286,14 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
       return std::make_unique<loopz::runtime::Control>(statePath, std::move(runtime));
     };
     auto next = build();
+    // Another process holding the LoopZ state lock also reports not-ready, but
+    // the saved file is valid and was never read: never move it aside.
+    const auto unowned = [](loopz::runtime::Control& candidate) {
+      const auto snapshot = candidate.request({{"version", 1}, {"operation", "state"}});
+      return "Saved routing is unavailable: " +
+             snapshot.at("snapshot").at("restoration").at("error").get<std::string>();
+    };
+    if (!next->ownsState()) throw std::runtime_error(unowned(*next));
     std::string recovery;
     // Control fails closed on a saved document it cannot restore; every edit
     // then reports storage-unavailable and retry re-reads the same file. With
@@ -312,6 +320,8 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
       } else {
         next.reset(); // Release the first runtime's hosts before rebuilding.
         next = build();
+        // The lock was released for the rebuild; another owner may have won it.
+        if (!next->ownsState()) throw std::runtime_error(unowned(*next));
         recovery = "Saved routing could not be restored (" + reason + "); moved to " +
                    aside.string() + " and started without saved routing";
       }

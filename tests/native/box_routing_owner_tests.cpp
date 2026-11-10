@@ -7,6 +7,7 @@
 #include <loopz/document_json.hpp>
 #include <loopz/audio_scene.hpp>
 #include <loopz/audio_resampler.hpp>
+#include <loopz/runtime/control.hpp>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <thread>
 #include <stdexcept>
 #include <unistd.h>
@@ -239,6 +241,37 @@ void corruptStateRecoveryRegression() {
     std::filesystem::remove(aside.front());
   }
   unlink(path.c_str()); unlink(target.c_str());
+}
+// LoopZ reports a state file locked by another owner as not-ready, exactly like
+// an unrestorable one. Recovery must not mistake that for corruption and move a
+// valid file aside; initialization fails instead and the bytes stay put.
+void lockedStateIsNotQuarantined() {
+  const auto path = std::string("/tmp/box-locked-state-") + std::to_string(getpid()) + ".json";
+  unlink(path.c_str());
+  for (const auto& stale : asideFiles(path)) std::filesystem::remove(stale);
+  std::ofstream(path) << loopz::JSON{{"version", 1}, {"generation", "1"},
+                                    {"document", loopz::encodeDocument({})}};
+  std::string before;
+  { std::ifstream in(path); before.assign(std::istreambuf_iterator<char>(in), {}); }
+  auto probe = std::make_shared<DiscoveryProbe>();
+  auto factory = [probe] { return std::make_unique<DiscoveryHost>(probe); };
+  {
+    loopz::runtime::Control holder(path); // another owner of the same state
+    CHECK(holder.ownsState());
+    std::string error;
+    CHECK(!initializeBoxRoutingWithHost(path, error, factory));
+    CHECK(error.find("in use") != std::string::npos);
+    CHECK(!boxRoutingInitialized());
+    CHECK(asideFiles(path).empty());
+    std::string after;
+    { std::ifstream in(path); after.assign(std::istreambuf_iterator<char>(in), {}); }
+    CHECK(after == before);
+  }
+  std::string error;
+  CHECK(initializeBoxRoutingWithHost(path, error, factory)); // released: normal start
+  CHECK(boxRoutingStateRecovery().empty());
+  shutdownBoxRouting();
+  unlink(path.c_str()); unlink((path + ".lock").c_str());
 }
 // Host labels (e.g. a Latin-1 USB product string) are not validated UTF-8.
 // Old boxRoutingRequest used strict dump() and threw type_error.316 on every
@@ -507,6 +540,7 @@ int main() {
   inventoryCacheRegression();
   controlPollThrottleRegression();
   corruptStateRecoveryRegression();
+  lockedStateIsNotQuarantined();
   invalidUtf8LabelRegression();
   std::puts("Box routing physical delay/seek/generation/stop regression passed");
 }

@@ -98,6 +98,16 @@ callback-safe; the presentation query samples the clock and scans retained state
 A lost journal reservation latches presentation unavailable until a full worker
 drain/restart, while audio routing continues.
 
+LoopZ Control holds an advisory lock on `<statePath>.lock` for its lifetime.
+When another owner holds it, initialization fails with that error and the saved
+routing is left untouched; only an unrestorable file is moved aside as
+`<statePath>.corrupt-<ms>`. Automatic activation retries after a failure are
+throttled to 2 s inside Control. A capture that delivers nothing for 2 s is
+reopened, with backoff to 32 s while it keeps stalling. On Linux the mix
+renderer asks for `SCHED_FIFO` 19, below zCore's ALSA I/O threads (20) and above
+the song producer (18). It keeps normal scheduling when `RLIMIT_RTPRIO` does not
+allow that (see the opt-in drop-in in [packaging](packaging.md)).
+
 Song stop/change detaches or silences only the song producer. Enabled routes
 remain alive. TV renderer reload, owning-window destruction and Box main exit
 must not terminate the independently supervised host. Explicit host stop drains
