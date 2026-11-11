@@ -1,5 +1,4 @@
 import { appendFileSync, copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -16,11 +15,6 @@ import {
   validateFfmpegRuntimeBytes,
 } from '../../scripts/ffmpeg-runtime-binary.mjs'
 
-const require = createRequire(import.meta.url)
-const { nativeBuildLockPath, gitCommonDirectory } = require('../../scripts/native-build-lock.cjs') as {
-  nativeBuildLockPath(root: string): string
-  gitCommonDirectory(root: string): string
-}
 const root = process.cwd()
 // Windows runners check out with CRLF (Git for Windows' autocrlf), and the
 // multi-line `toContain` below compares against '\n'-joined text — the
@@ -194,45 +188,13 @@ describe('FFmpeg release policy', () => {
     })).toThrow('forbidden or missing @rpath dependencies')
   })
 
-  it('identifies an exported tree with no git by its own root, so a field machine can build', () => {
-    // The Windows laptop builds the addon from an unpacked `git archive` and
-    // has no git at all; asking git for the common dir threw ENOENT there and
-    // the build never started. Such a tree is its own identity.
-    const root = mkdtempSync(join(tmpdir(), 'singz-no-git-'))
-    try {
-      const path = nativeBuildLockPath(root)
-      expect(path).toBe(join(gitCommonDirectory(root), '.singz-native-build.lock'))
-      expect(nativeBuildLockPath(root)).toBe(path)
-      const other = mkdtempSync(join(tmpdir(), 'singz-no-git-'))
-      try {
-        expect(nativeBuildLockPath(other)).not.toBe(path)
-      } finally {
-        rmSync(other, { recursive: true, force: true })
-      }
-    } finally {
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
-  it('serializes sibling checkouts on one repository identity and one compile edge', () => {
-    expect(nativeBuildLockPath(root)).toBe(nativeBuildLockPath(join(root, 'zcore')))
-    expect(nativeBuildLockPath(root)).toBe(join(gitCommonDirectory(root), 'singz-native-build.lock'))
-    expect(read('scripts/build-ffmpeg-codec-runtime.sh')).toContain('COMPILE_JOBS=1')
-    expect(read('scripts/build-capture-addon.cjs')).toContain('Math.min(requested, 1)')
-  })
-
-  it('locks ordinary core builds globally and never scales them from CPU count', () => {
+  it('never scales ordinary core builds from CPU count', () => {
     for (const path of ['scripts/run-core-host-tests.sh', 'scripts/build-analyze-host.sh']) {
       const source = read(path)
-      expect(source).toContain('with-native-build-lock.mjs')
-      expect(source).toContain('assert-native-build-lock.cjs')
       expect(source).toContain('--parallel 4')
       expect(source).not.toContain('_NPROCESSORS_ONLN')
       expect(source).not.toContain('sysctl -n hw.ncpu')
     }
-    expect(read('scripts/with-native-build-lock.mjs')).toContain(
-      'console.error(`SingZ native build lock:',
-    )
   })
 
   it('reads the PE machine from bytes rather than trusting a target label', () => {

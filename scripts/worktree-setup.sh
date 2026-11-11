@@ -28,10 +28,6 @@ if [ "$MODE" != "--desktop-only" ] && [ "$(uname)" = Darwin ]; then
     exit 1
   }
 fi
-if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
-  exec node "$WT/scripts/with-native-build-lock.mjs" --owner worktree-setup -- bash "$WT/scripts/worktree-setup.sh" "$@"
-fi
-node "$WT/scripts/assert-native-build-lock.cjs"
 
 # The audio engine is a public, pinned git submodule. Initialize it before any
 # dependency checks, fingerprints or native mirror generation. Refuse a flat

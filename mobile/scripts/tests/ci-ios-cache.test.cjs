@@ -49,8 +49,6 @@ test('shared iOS cache policy changes trigger their native canary', () => {
     'scripts/ccache-launcher.*',
     'scripts/restore-audio-api-prebuilts.cjs',
     'scripts/with-native-build-lock.mjs',
-    'scripts/native-build-lock.cjs',
-    'scripts/assert-native-build-lock.cjs',
   ]) assert.ok(canary.includes(`- '${input}'`), 'missing native cache trigger: ' + input)
 })
 

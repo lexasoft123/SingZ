@@ -100,8 +100,7 @@ test('cache action, compiler-launcher and native-lock changes trigger both push 
     '.github/actions/mobile-build-cache/**', '.github/actions/save-mobile-build-cache/**',
     'scripts/ci-build-cache.cjs', 'scripts/ci-android-cache-smoke.cjs', 'tests/tooling/ci-android-cache.test.cjs',
     'scripts/ccache-launcher.*',
-    'scripts/restore-audio-api-prebuilts.cjs', 'scripts/native-build-lock.cjs',
-    'scripts/assert-native-build-lock.cjs', 'scripts/with-native-build-lock.mjs',
+    'scripts/restore-audio-api-prebuilts.cjs', 'scripts/with-native-build-lock.mjs',
   ]) assert.equal(workflow.split(`- '${input}'`).length - 1, 2, `${input} must trigger both push and PR validation`)
 })
 

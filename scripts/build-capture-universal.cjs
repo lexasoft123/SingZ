@@ -16,18 +16,6 @@ if (process.platform !== 'darwin') throw new Error('Universal capture snapshots 
 const root = resolve(__dirname, '..')
 const electronVersion = require(join(root, 'node_modules/electron/package.json')).version
 
-if (!process.env.SINGZ_NATIVE_BUILD_LOCK_HELD) {
-  const locked = spawnSync(process.execPath, [
-    join(root, 'scripts', 'with-native-build-lock.mjs'),
-    '--owner', 'capture-universal:darwin',
-    '--', process.execPath, __filename, ...process.argv.slice(2)
-  ], { cwd: process.cwd(), stdio: 'inherit' })
-  if (locked.error) throw locked.error
-  process.exit(locked.status ?? 1)
-}
-require('./native-build-lock.cjs').assertNativeBuildLockHeld(
-  root, process.env.SINGZ_NATIVE_BUILD_LOCK_HELD
-)
 
 function input(target) {
   const rootPath = packageRoot(root, target)
