@@ -99,9 +99,112 @@ def validate_report(report: dict[str, Any]) -> None:
         raise ValueError("packageSizeBytes must be measured")
     if not isinstance(metrics["starvedBlocks"], dict) or not isinstance(metrics["starvedBlocks"].get("lanes"), dict):
         raise ValueError("starvedBlocks.lanes is required")
-    frames = metrics.get("frames")
-    if not isinstance(frames, dict) or any(k not in frames or frames[k] is not None for k in ("fps", "frameTimeMs", "dropped")):
-        raise ValueError("C-07 frame metrics must be present and null")
+    validate_frames(metrics.get("frames"))
+
+
+FRAME_KEYS = ("fps", "frameTimeMs", "dropped")
+HIDDEN_REASON = "hidden window presents no frames"
+
+
+def frames_null(reason: str) -> dict[str, Any]:
+    """Frame slots that were not measured: null with a reason, never zero."""
+    return {"fps": None, "frameTimeMs": None, "dropped": None, "reason": _required(reason, "frames reason")}
+
+
+def _finite(value: Any, minimum: float = 0) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= minimum
+
+
+def validate_frames(frames: Any) -> None:
+    """C-07 slots: all null with a reason (hidden, unavailable) or all measured."""
+    if not isinstance(frames, dict) or any(k not in frames for k in FRAME_KEYS):
+        raise ValueError("metrics.frames must contain fps, frameTimeMs and dropped")
+    values = [frames[k] for k in FRAME_KEYS]
+    if all(v is None for v in values):
+        if not isinstance(frames.get("reason"), str) or not frames["reason"].strip():
+            raise ValueError("null frame metrics need a reason")
+        return
+    if any(v is None for v in values):
+        raise ValueError("frame metrics are measured together or not at all")
+    frame_time = frames["frameTimeMs"]
+    if not _finite(frames["fps"]) or frames["fps"] <= 0:
+        raise ValueError("fps must be a positive measurement")
+    if not isinstance(frame_time, dict) or not all(_finite(frame_time.get(k)) for k in ("p50", "p99", "max")):
+        raise ValueError("frameTimeMs must have measured p50, p99 and max")
+    if isinstance(frames["dropped"], bool) or not isinstance(frames["dropped"], int) or frames["dropped"] < 0:
+        raise ValueError("dropped must be a non-negative integer")
+    if frames.get("reason") is not None:
+        raise ValueError("measured frame metrics must not carry a null reason")
+
+
+def frame_slots(detail: Any) -> dict[str, Any]:
+    """Frame slots from a `frames` stop receipt's detail, or null with a reason."""
+    if not isinstance(detail, dict) or "fps" not in detail:
+        return frames_null("driver did not report presented frames")
+    slots = {k: detail.get(k) for k in FRAME_KEYS}
+    slots["reason"] = detail.get("reason")
+    for key in ("presentedSamples", "skipped", "windowS", "demandSamples", "hidden", "timeSource", "windowTicks", "windowLostTicks", "perSecond", "stallsInjected"):
+        if key in detail: slots[key] = detail[key]
+    validate_frames(slots)
+    return slots
+
+
+def mac_frame_environment() -> dict[str, Any]:
+    """Display mode, power source, Low Power Mode and thermal state, for visible runs (D-02 5.3)."""
+    def run(*cmd: str) -> str:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
+    display = run("system_profiler", "SPDisplaysDataType")
+    import re
+    modes = re.findall(r"UI Looks like:\s*(\d+) x (\d+) @ ([\d.]+)Hz", display)
+    batt, settings, therm = run("pmset", "-g", "batt"), run("pmset", "-g"), run("pmset", "-g", "therm")
+    low = re.search(r"lowpowermode\s+(\d)", settings)
+    limit = re.search(r"CPU_Scheduler_Limit\s*=\s*(\d+)", therm)
+    nominal = "No thermal warning level has been recorded" in therm and not (limit and int(limit.group(1)) < 100)
+    return {"loadAvg1": os.getloadavg()[0], "cpuCount": os.cpu_count(),
+            "displays": [{"width": int(w), "height": int(h), "refreshHz": float(hz)} for w, h, hz in modes],
+            "powerSource": "ac" if "AC Power" in batt else ("battery" if "Battery Power" in batt else "unknown"),
+            "lowPowerMode": bool(low and low.group(1) == "1"), "thermalNominal": nominal}
+
+
+def reject_unfit_environment(environment: dict[str, Any]) -> None:
+    """A visible run in Low Power Mode, off mains, or above Nominal thermal state is rejected, not averaged."""
+    if environment.get("lowPowerMode") is not False:
+        raise ValueError("run rejected: Low Power Mode is on (GPUI caps presents at 30 fps)")
+    if environment.get("powerSource") != "ac":
+        raise ValueError("run rejected: not on mains power")
+    if environment.get("thermalNominal") is not True:
+        raise ValueError("run rejected: thermal state is not Nominal")
+    if not environment.get("displays"):
+        raise ValueError("run rejected: display mode unavailable")
+
+
+def reject_busy_machine(load_avg1: float, cpu_count: int, max_per_core: float) -> None:
+    """Presented-frame timing is meaningless on a machine other work is saturating."""
+    if not _finite(load_avg1) or not isinstance(cpu_count, int) or cpu_count <= 0:
+        raise ValueError("run rejected: machine load unavailable")
+    if load_avg1 > max_per_core * cpu_count:
+        raise ValueError(f"run rejected: machine busy (1-minute load {load_avg1:.1f} on {cpu_count} cores, limit {max_per_core * cpu_count:.1f})")
+
+
+def merge_frames_json(report: dict[str, Any], document: dict[str, Any]) -> None:
+    """Merge the Windows sampler's (tests/windows_gpu_sampler.ps1) JSON into a C-06 report."""
+    if document.get("schema") != "singz.perf.windows-frames.v1":
+        raise ValueError("unsupported frames document schema")
+    frames = document.get("frames")
+    slots = {k: (frames or {}).get(k) for k in FRAME_KEYS}
+    slots["reason"] = (frames or {}).get("reason")
+    for key in ("presentedSamples", "skipped", "windowS", "demandSamples"):
+        if frames and key in frames: slots[key] = frames[key]
+    slots["hidden"] = bool(document.get("hidden"))
+    if document.get("expectedHz") is not None: slots["expectedHz"] = document["expectedHz"]
+    validate_frames(slots)
+    metrics = report["metrics"]
+    metrics["frames"] = slots
+    metrics["gpu"] = document.get("gpu")
+    metrics["dwm"] = document.get("dwm")
+    report.setdefault("run", {})["frameCapture"] = {"tool": document.get("presentMon"), "adapters": document.get("adapters"),
+                                                      "captureSeconds": document.get("captureSeconds")}
+    validate_report(report)
 
 
 def _tree(root: int) -> list[int]:
@@ -222,19 +325,24 @@ def _command(command: str, phase: str, pid: int, timeout: float) -> dict[str, An
     return receipt
 
 
-def request_action(directory: Path, phase: str, timeout: float) -> dict[str, Any]:
+def request_action(directory: Path, phase: str, timeout: float, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     request, receipt = directory / "request.json", directory / "receipt.json"
     if request.exists() or receipt.exists():
         raise FileExistsError("stale request or receipt in scenario control directory")
     temp = directory / "request.tmp"
-    temp.write_text(json.dumps({"action": phase}))
+    temp.write_text(json.dumps({**(extra or {}), "action": phase}))
     temp.replace(request)
     deadline = time.monotonic() + timeout
-    while not receipt.exists():
+    while True:
+        if receipt.exists():
+            try:
+                value = json.loads(receipt.read_text())  # a writer may still be mid-write
+                break
+            except ValueError:
+                pass
         if time.monotonic() >= deadline:
             raise TimeoutError(f"{phase} action timed out")
         time.sleep(.025)
-    value = json.loads(receipt.read_text())
     receipt.unlink()
     if not isinstance(value, dict) or value.get("action") != phase or value.get("completed") is not True:
         raise ValueError(f"{phase} action failed: {value}")
@@ -361,12 +469,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if proc.poll() is not None:
                 raise RuntimeError(f"app exited before {phase}")
             begin = time.monotonic()
+            record_frames = control_dir and args.app == "native" and phase == "play"
+            if record_frames:
+                details["framesStart"] = request_action(control_dir, "frames", deadlines[phase], {"op": "start"})
             if control_dir:
                 details[phase] = request_action(control_dir, phase, deadlines[phase])
             elif args.action_command:
                 details[phase] = _command(args.action_command, phase, proc.pid, deadlines[phase])
             if phase == "open": open_ms = (time.monotonic() - begin) * 1000
             if durations[phase] and (not control_dir or phase not in ("burst", "cycles")): time.sleep(durations[phase])
+            if record_frames:
+                details["frames"] = request_action(control_dir, "frames", deadlines[phase], {"op": "stop"})
             if proc.poll() is not None:
                 raise RuntimeError(f"app exited during {phase}")
             elapsed = time.monotonic() - begin
@@ -422,12 +535,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     raw_lanes = burst_details.get("observedLanes", burst_details.get("lanes"))
     lanes = {str(lane.get("id")): lane_counter(lane.get("starvedBlocks")) for lane in raw_lanes if isinstance(lane, dict) and lane.get("id") is not None} if isinstance(raw_lanes, list) else {}
     steady = primary_sample(samples)
+    if args.app != "native" or not control_dir:
+        frames_metric = frames_null("presented-frame capture is not wired for this driver (Electron: ScreenCaptureKit/PresentMon leg)")
+    else:
+        frames_metric = frame_slots(details.get("frames", {}).get("detail"))
+        if args.display == "hidden" and frames_metric["fps"] is not None:
+            raise ValueError("a hidden run cannot have presented frames")
     report = {"schema": SCHEMA, "run": metadata, "phases": phases,
               "metrics": {"processTreeCpu": steady, "footprintBytes": steady["footprintBytes"],
                           "startupMs": startup_ms, "songOpenMs": open_ms,
                           "starvedBlocks": {"lanes": lanes, "reason": None if lanes and all(value is not None for value in lanes.values()) else "driver or playback helper did not expose lane starvation counters"},
                           "packageSizeBytes": package.stat().st_size if package and package.is_file() else None,
-                          "frames": {"fps": None, "frameTimeMs": None, "dropped": None}},
+                          "frames": frames_metric},
               "packageArtifact": package.name if package else None,
               "sampling": {"cpu": ("sum of per-process CPU counter deltas for processes present in both snapshots; short-lived processes between snapshots are excluded" if control_dir and sys.platform == "darwin" or os.name == "nt" else "sum of per-process ps CPU percentages") + "; 100 percent is one core",
                            "memory": "macOS physical footprint, Windows working set, or resident set on other platforms",
@@ -447,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-kind", choices=("smoke", "benchmark"), default="benchmark")
     parser.add_argument("--reference-json", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--frames-json", type=Path, help="merge the Windows sampler's frames/GPU/DWM JSON (C-07)")
     parser.add_argument("--profile", required=True); parser.add_argument("--display", required=True)
     parser.add_argument("--machine", required=True); parser.add_argument("--commit", required=True)
     parser.add_argument("--package")
@@ -457,6 +577,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         report = run(args)
+        if args.frames_json:
+            merge_frames_json(report, json.loads(args.frames_json.read_text()))
         args.out.parent.mkdir(parents=True, exist_ok=True); args.out.write_text(json.dumps(report, indent=2) + "\n")
     except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as error:
         parser.error(str(error))

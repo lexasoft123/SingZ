@@ -12,7 +12,10 @@ def report(**metadata):
             "displayMode": "hidden", "machine": "mac", "commit": "abc", **metadata}, "phases": phases,
             "metrics": {"processTreeCpu": {"cpuPercent": 1}, "footprintBytes": 1, "startupMs": 1, "songOpenMs": 1,
                         "starvedBlocks": {"lanes": {}}, "packageSizeBytes": 1,
-                        "frames": {"fps": None, "frameTimeMs": None, "dropped": None}}}
+                        "frames": {"fps": None, "frameTimeMs": None, "dropped": None, "reason": perf.HIDDEN_REASON}}}
+
+
+MEASURED = {"fps": 60.0, "frameTimeMs": {"p50": 16.7, "p99": 17.0, "max": 18.0}, "dropped": 0, "reason": None}
 
 
 class SchemaTests(unittest.TestCase):
@@ -24,10 +27,60 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
                 perf.validate_report(report(**{key: ""}))
 
-    def test_frames_are_reserved_for_c07(self):
-        value = report(); value["metrics"]["frames"]["fps"] = 60
-        with self.assertRaisesRegex(ValueError, "null"):
+    def test_null_frames_need_a_reason_and_are_never_zero(self):
+        perf.validate_report(report())
+        value = report(); del value["metrics"]["frames"]["reason"]
+        with self.assertRaisesRegex(ValueError, "reason"):
             perf.validate_report(value)
+        value = report(); value["metrics"]["frames"].update(fps=0, frameTimeMs=0, dropped=0, reason=None)
+        with self.assertRaisesRegex(ValueError, "fps|frameTimeMs"):
+            perf.validate_report(value)
+
+    def test_measured_frames_are_complete_together(self):
+        value = report(); value["metrics"]["frames"] = MEASURED
+        perf.validate_report(value)
+        for patch in ({"dropped": None}, {"frameTimeMs": {"p50": 16.6}}, {"dropped": 1.5}, {"reason": "x"}, {"fps": float("nan")}):
+            with self.subTest(patch=patch):
+                value = report(); value["metrics"]["frames"] = {**MEASURED, **patch}
+                with self.assertRaises(ValueError):
+                    perf.validate_report(value)
+
+    def test_hidden_receipt_reports_null_with_the_reason(self):
+        slots = perf.frame_slots({"fps": None, "frameTimeMs": None, "dropped": None, "reason": perf.HIDDEN_REASON, "presentedSamples": 0})
+        self.assertEqual((slots["fps"], slots["frameTimeMs"], slots["dropped"], slots["reason"]), (None, None, None, "hidden window presents no frames"))
+        self.assertEqual(perf.frame_slots({})["reason"], "driver did not report presented frames")
+        with self.assertRaises(ValueError):
+            perf.frame_slots({"fps": 60, "frameTimeMs": None, "dropped": None})
+
+    def test_unfit_visible_environment_is_rejected_not_averaged(self):
+        good = {"displays": [{"width": 1920, "height": 1080, "refreshHz": 60.}], "powerSource": "ac", "lowPowerMode": False, "thermalNominal": True}
+        perf.reject_unfit_environment(good)
+        for patch, text in (({"lowPowerMode": True}, "Low Power"), ({"powerSource": "battery"}, "mains"), ({"thermalNominal": False}, "thermal"),
+                            ({"displays": []}, "display"), ({"lowPowerMode": None}, "Low Power")):
+            with self.subTest(patch=patch), self.assertRaisesRegex(ValueError, text):
+                perf.reject_unfit_environment({**good, **patch})
+
+    def test_busy_machine_is_rejected_not_averaged(self):
+        perf.reject_busy_machine(6.9, 14, 0.5)
+        for load in (7.1, 52.7, float("nan")):
+            with self.subTest(load=load), self.assertRaisesRegex(ValueError, "busy|load"):
+                perf.reject_busy_machine(load, 14, 0.5)
+        with self.assertRaisesRegex(ValueError, "load"):
+            perf.reject_busy_machine(1.0, 0, 0.5)
+
+    def test_windows_sampler_document_merges_into_the_c06_schema(self):
+        doc = {"schema": "singz.perf.windows-frames.v1", "hidden": False, "expectedHz": 60, "frames": {**MEASURED, "presentedSamples": 3600},
+               "gpu": {"perAdapter": []}, "dwm": {"cpuPercent": 1.0}, "adapters": [], "presentMon": {"version": "2.3.1"}, "captureSeconds": 60}
+        value = report(); perf.merge_frames_json(value, doc)
+        self.assertEqual(value["metrics"]["frames"]["fps"], 60.0)
+        self.assertEqual(value["metrics"]["dwm"], {"cpuPercent": 1.0})
+        hidden = {**doc, "hidden": True, "frames": {"fps": None, "frameTimeMs": None, "dropped": None, "reason": perf.HIDDEN_REASON}}
+        value = report(); perf.merge_frames_json(value, hidden)
+        self.assertIsNone(value["metrics"]["frames"]["fps"]); self.assertEqual(value["metrics"]["frames"]["reason"], perf.HIDDEN_REASON)
+        with self.assertRaisesRegex(ValueError, "schema"):
+            perf.merge_frames_json(report(), {**doc, "schema": "other"})
+        with self.assertRaises(ValueError):
+            perf.merge_frames_json(report(), {**doc, "frames": {**MEASURED, "dropped": None}})
 
     def test_incomplete_scenario_is_rejected(self):
         value = report(); value["phases"] = value["phases"][:-1]
@@ -288,8 +341,10 @@ class EvaluatorTests(unittest.TestCase):
             env['SINGZ_GPUI_PERF_SECOND_PROJECT'] = str(root / 'second')
             with patch.dict(os.environ, env), patch.object(perf.sys, 'platform', 'linux'), patch.object(perf, 'sample_tree', return_value={'cpuPercent': 1, 'footprintBytes': 1}):
                 result = perf.run(args)
-            self.assertEqual(list(result['actionReceipts']), list(perf.PHASES))
+            self.assertEqual(list(result['actionReceipts']), ['launch', 'open', 'framesStart', 'play', 'frames', 'burst', 'pause', 'cycles', 'quit'])
             self.assertTrue(result['complete'])
+            self.assertIsNone(result['metrics']['frames']['fps'])
+            self.assertEqual(result['metrics']['frames']['reason'], 'driver did not report presented frames')
 
     def test_retired_child_does_not_cancel_remaining_cpu(self):
         from unittest.mock import patch

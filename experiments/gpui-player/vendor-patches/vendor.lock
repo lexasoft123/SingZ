@@ -14,7 +14,7 @@
       "version": "0.3.11",
       "archive_sha256": "8c0bea8ffa563d3a1ada533e148bb55be7fb873c178979e889a3d1204f8e1b91",
       "patch": "gpui-pre-apple.patch",
-      "patch_sha256": "12693a4397def51d04869fce3a3cf63a2a79dc5b146b9042a27cb3aef9374286"
+      "patch_sha256": "0880518d5ce4c6981981e967de6cd768d39f058499f39fea3c50bfeb1c53cc89"
     },
     {
       "name": "gpui-pre-linux",

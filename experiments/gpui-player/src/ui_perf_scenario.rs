@@ -259,6 +259,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                             handle.update(cx,|_,_,app|view.update(app,|p,app| {p.notice=None;app.notify();}))?;
                             Ok(serde_json::json!({"before":before,"after":after,"helperPid":retained.helper_pid,"statusSucceeded":true}))
                         }
+                        "frames" => frames_action(&command, handle, cx, &dir),
                         "quit" => Ok(serde_json::json!({"quit": true})),
                         _ => anyhow::bail!("unknown scenario action {action}"),
                     }
@@ -271,6 +272,150 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
             Ok(())
         }.await;
         if let Err(error) = result { eprintln!("PERF_SCENARIO failed: {error:#}"); std::process::exit(1); }
+        let _ = cx.update(|app| app.quit());
+    }).detach();
+}
+
+/// `frames` action: `{"op":"start"}` begins recording presented frames,
+/// `{"op":"stop"}` ends it and returns the frame slots (and writes `frames.json`).
+/// A hidden window reports the slots as null with a reason, never zero.
+fn frames_action(command: &serde_json::Value, handle: AnyWindowHandle, cx: &mut gpui::AsyncApp, dir: &Path) -> anyhow::Result<serde_json::Value> {
+    match command["op"].as_str() {
+        Some("start") => {
+            super::frame_log::start()?;
+            Ok(serde_json::json!({"recording": true}))
+        }
+        Some("stop") => {
+            let hidden = handle.update(cx, |_, window, _| !window.is_visible())?;
+            let samples = super::frame_log::stop();
+            let period = command["periodS"].as_f64();
+            let mut value = super::frame_log::report(&samples, period, hidden);
+            value["hidden"] = hidden.into();
+            let tmp = dir.join("frames.tmp");
+            let mut file = value.clone();
+            file["presentedTimes"] = samples.iter().map(|s| s.presented).collect::<Vec<_>>().into();
+            std::fs::write(&tmp, serde_json::to_vec(&file)?)?;
+            std::fs::rename(tmp, dir.join("frames.json"))?;
+            Ok(value)
+        }
+        other => anyhow::bail!("frames op must be start or stop, got {other:?}"),
+    }
+}
+
+/// Visible live driver for presented-frame measurement (D-02 5.3): the window is
+/// shown and active, muted. Actions: `launch`, `animate` (`mode`: off, static,
+/// stall, notify100), `frames` (start/stop), `quit`.
+pub fn run_visible(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut App) {
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+    use std::sync::Arc;
+    const OFF: u8 = 0; const STATIC: u8 = 1; const STALL: u8 = 2; const NOTIFY: u8 = 3;
+    fn pump(window: &mut Window, mode: Arc<AtomicU8>, count: Arc<AtomicU64>, stalls: Arc<AtomicU64>, id: EntityId) {
+        window.on_next_frame(move |window, cx| {
+            let current = mode.load(Ordering::Relaxed);
+            if current != STATIC && current != STALL { return; }
+            // An injected stall: a 25 ms sleep on every 60th frame.
+            if current == STALL && count.fetch_add(1, Ordering::Relaxed) % 60 == 59 {
+                stalls.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            cx.notify(id);
+            pump(window, mode, count, stalls, id);
+        });
+    }
+    cx.spawn(async move |cx| {
+        let result: anyhow::Result<()> = async {
+            anyhow::ensure!(std::env::var("SINGZ_MUTE").as_deref() == Ok("1") && std::env::var_os("SINGZ_GPUI_BACKGROUND").is_none(), "visible frame run requires a muted, visible window");
+            std::fs::create_dir_all(&dir)?;
+            let mode = Arc::new(AtomicU8::new(OFF));
+            let count = Arc::new(AtomicU64::new(0));
+            let stalls = Arc::new(AtomicU64::new(0)); // stalls injected so far, for the drop check
+            let mut stalls_at_start = 0_u64;
+            // While recording, the window must stay visible and key (D-02 5.3): count the
+            // idle-loop ticks on which it was not, so a run another app disturbed is rejected.
+            let (mut recording, mut ticks, mut lost, mut poll) = (false, 0_u64, 0_u64, true);
+            loop {
+                let request = dir.join("request.json");
+                if !request.exists() {
+                    if recording && poll {
+                        let fit = handle.update(cx, |_, window, _| window.is_visible() && window.is_window_active())?;
+                        ticks += 1; lost += u64::from(!fit);
+                    }
+                    cx.background_executor().timer(Duration::from_millis(25)).await;
+                    continue;
+                }
+                let command: serde_json::Value = serde_json::from_slice(&std::fs::read(&request)?)?;
+                std::fs::remove_file(&request)?;
+                let action = command["action"].as_str().ok_or_else(|| anyhow::anyhow!("missing action"))?.to_owned();
+                let step: anyhow::Result<serde_json::Value> = async {
+                    match action.as_str() {
+                        "launch" => {
+                            handle.update(cx, |_, window, _| { window.resize(size(px(1280.), px(800.))); window.activate_window(); })?;
+                            let deadline = Instant::now() + Duration::from_secs(30);
+                            loop {
+                                let (visible, active, scale) = handle.update(cx, |_, window, _| (window.is_visible(), window.is_window_active(), window.scale_factor()))?;
+                                if visible && active { break Ok(serde_json::json!({"visible": visible, "active": active, "scale": scale})); }
+                                anyhow::ensure!(Instant::now() < deadline, "window did not become visible and active");
+                                cx.background_executor().timer(Duration::from_millis(50)).await;
+                            }
+                        }
+                        "animate" => {
+                            let next = match command["mode"].as_str() {
+                                Some("off") => OFF, Some("static") => STATIC, Some("stall") => STALL, Some("notify100") => NOTIFY,
+                                other => anyhow::bail!("unknown animate mode {other:?}"),
+                            };
+                            mode.store(next, Ordering::Relaxed);
+                            count.store(0, Ordering::Relaxed);
+                            super::frame_log::force_demand(next == STATIC || next == STALL);
+                            if next == STATIC || next == STALL {
+                                let (mode, count, stalls, view) = (mode.clone(), count.clone(), stalls.clone(), view.clone());
+                                handle.update(cx, |_, window, app| { pump(window, mode, count, stalls, view.entity_id()); app.notify(view.entity_id()); })?;
+                            } else if next == NOTIFY {
+                                let (mode, view) = (mode.clone(), view.clone());
+                                cx.spawn(async move |cx| {
+                                    while mode.load(Ordering::Relaxed) == NOTIFY {
+                                        let _ = cx.update(|app| app.notify(view.entity_id()));
+                                        cx.background_executor().timer(Duration::from_millis(100)).await;
+                                    }
+                                }).detach();
+                            }
+                            Ok(serde_json::json!({"mode": command["mode"]}))
+                        }
+                        "probe" => handle.update(cx, |_, window, app| {
+                            let p = view.read(app);
+                            serde_json::json!({
+                                "screen": p.screen as u8, "playing": p.playing, "visible": window.is_visible(), "active": window.is_window_active(),
+                                "quickStartOpen": p.quick_start.read(app).is_open(), "whatsNewOpen": p.whats_new.read(app).is_open(),
+                                "engineSetupOpen": p.engine_setup.read(app).is_open(),
+                                "localeLoaded": p.locale_service.snapshot().loaded, "localePending": p.locale_service.snapshot().pending,
+                                "screenName": format!("{}", ["Training", "Player", "Library", "Settings", "Log", "Models"][p.screen as usize]), "noticeOpen": p.notice.is_some(),
+                                "libraryAnimationSuspended": matches!(p.screen, Screen::Settings | Screen::Log | Screen::Models)
+                                    || p.notice.is_some() || p.quick_start.read(app).is_open() || p.whats_new.read(app).is_open() || p.engine_setup.read(app).is_open(),
+                            })
+                        }).map_err(Into::into),
+                        "frames" => {
+                            let op = command["op"].as_str().map(str::to_owned);
+                            if op.as_deref() == Some("start") { (recording, ticks, lost) = (true, 0, 0); poll = command["poll"].as_bool().unwrap_or(true); stalls_at_start = stalls.load(Ordering::Relaxed); }
+                            let mut value = frames_action(&command, handle, cx, &dir)?;
+                            if op.as_deref() == Some("stop") {
+                                recording = false;
+                                value["windowTicks"] = ticks.into();
+                                value["windowLostTicks"] = lost.into();
+                                value["stallsInjected"] = (stalls.load(Ordering::Relaxed) - stalls_at_start).into();
+                            }
+                            Ok(value)
+                        }
+                        "quit" => Ok(serde_json::json!({"quit": true})),
+                        _ => anyhow::bail!("unknown scenario action {action}"),
+                    }
+                }.await;
+                let failed = step.is_err();
+                receipt(&dir, &action, step)?;
+                if failed { anyhow::bail!("scenario action {action} failed"); }
+                if action == "quit" { break; }
+            }
+            Ok(())
+        }.await;
+        if let Err(error) = result { eprintln!("FRAMES_SCENARIO failed: {error:#}"); std::process::exit(1); }
         let _ = cx.update(|app| app.quit());
     }).detach();
 }

@@ -51,11 +51,58 @@ index 0000000..9761ffe
 +
 +Verification must compare opt-in live and hidden output against the same source
 +tile and pixel contract, and confirm clear/zero-opacity paths remain unchanged.
+diff --git a/PRESENT_OBSERVER.md b/PRESENT_OBSERVER.md
+new file mode 100644
+index 0000000..73381cb
+--- /dev/null
++++ b/PRESENT_OBSERVER.md
+@@ -0,0 +1,41 @@
++# Present observer (SingZ C-07, mac leg)
++
++Local extension to the published `gpui-pre-apple 0.3.11` baseline, next to the
++grain extension. It lets an application record when each GPUI drawable actually
++reached the display (D-02 sections 5 and 6).
++
++```rust
++gpui_apple::set_present_observer(Some(Arc::new(|sample: gpui_apple::PresentSample| { /* copy numbers */ })));
++gpui_apple::set_present_observer(None);
++```
++
++- `MetalRenderer::draw` calls `present_observer::attach` just before
++  `presentDrawable` / `present`, on both branches (display-link and detached
++  drawables, and the live-resize `presents_with_transaction` path).
++- With no observer: one relaxed atomic load per present, no handler attached.
++- With one: `MTLDrawable.addPresentedHandler` delivers a `PresentSample`
++  (`presented_time` host seconds, `0.0` when the drawable was skipped;
++  `commit_time` and `handler_time` on the same clock; `drawable_id`). The handler runs on a system
++  thread and must only copy numbers into preallocated storage.
++- **`presentedTime` is not populated on every display.** On the development Mac
++  mini (Apple M4 Pro, one 1920x1080@60 Hz display) every drawable reports
++  `presentedTime == 0`, even when read 100 ms after the handler; the handler itself
++  fires about 2 refresh periods after commit. `handler_time` (the callback at
++  presentation) is then the only timestamp. `frame_log` in the app uses it when all
++  of at least 10 samples are zero and labels the report `timeSource:
++  "handler-callback-time"`; otherwise zero still means a skipped drawable. The
++  callback jitters by about 2 ms, below the half-period that frame counting needs.
++  Whether a real panel (or a MacBook / ProMotion display) fills `presentedTime` is
++  unverified here.
++- The display link's `targetPresentationTimestamp` and frame work are not
++  exposed here; GPUI drops the former before the app sees a frame (D-02 2.1).
++  The app derives the period from the median presented delta.
++- A hidden or fully occluded window has no display link and no drawable, so it
++  delivers no samples.
++
++## TODO
++
++ScreenCaptureKit cross-check (D-02 5.2: count within 1% of the handler count,
++and the like-for-like leg for Electron) is not implemented. It needs Screen
++Recording permission for the runner, which has not been granted yet. Add
++`tests/perf/sck_observer.swift` and its wrapper once it is.
 diff --git a/src/gpui_apple.rs b/src/gpui_apple.rs
-index 4ce5848..7bdf427 100644
+index 4ce5848..c30558a 100644
 --- a/src/gpui_apple.rs
 +++ b/src/gpui_apple.rs
-@@ -6,6 +6,10 @@
+@@ -6,10 +6,16 @@
  //! while leaving application lifecycle, windowing, and input to each platform backend.
  
  mod dispatcher;
@@ -66,6 +113,12 @@ index 4ce5848..7bdf427 100644
  pub mod display_link;
  pub mod keychain;
  mod metal_atlas;
+ pub mod metal_renderer;
++mod present_observer;
++pub use present_observer::{PresentObserver, PresentSample, host_time, set_present_observer};
+ pub mod process_info;
+ 
+ #[cfg(feature = "font-kit")]
 diff --git a/src/grain_effect.rs b/src/grain_effect.rs
 new file mode 100644
 index 0000000..e0c58b8
@@ -183,7 +236,7 @@ index 0000000..e0c58b8
 +    configuration().lock().backdrop.clone()
 +}
 diff --git a/src/metal_renderer.rs b/src/metal_renderer.rs
-index 9b98a23..c747e67 100644
+index 9b98a23..f6ee3f9 100644
 --- a/src/metal_renderer.rs
 +++ b/src/metal_renderer.rs
 @@ -16,18 +16,18 @@ use objc2_core_video::{
@@ -244,7 +297,16 @@ index 9b98a23..c747e67 100644
              #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
              headless_render_target: None,
          })
-@@ -672,16 +684,22 @@ impl MetalRenderer {
+@@ -636,6 +648,8 @@ impl MetalRenderer {
+             }
+         };
+ 
++        // One relaxed atomic load when no observer is installed.
++        crate::present_observer::attach(ProtocolObject::from_ref(&*drawable));
+         if self.presents_with_transaction {
+             command_buffer.commit();
+             command_buffer.waitUntilScheduled();
+@@ -672,16 +686,22 @@ impl MetalRenderer {
                  scene.surfaces.len(),
              )
          })?;
@@ -268,7 +330,7 @@ index 9b98a23..c747e67 100644
          let instance_buffer_pool = self.instance_buffer_pool.clone();
          let frame_resources = Cell::new(Some((writer.finish(), surface_textures)));
          let block = RcBlock::new(
-@@ -854,7 +872,8 @@ impl MetalRenderer {
+@@ -854,7 +874,8 @@ impl MetalRenderer {
          let command_buffer = command_queue
              .commandBuffer()
              .context("creating command buffer")?;
@@ -278,7 +340,7 @@ index 9b98a23..c747e67 100644
  
          let mut command_encoder = new_command_encoder_for_texture(
              &command_buffer,
-@@ -2142,3 +2161,253 @@ mod tests {
+@@ -2142,3 +2163,253 @@ mod tests {
          assert_eq!(read_texture_to_image(&target_texture).unwrap(), image);
      }
  }
@@ -531,6 +593,203 @@ index 9b98a23..c747e67 100644
 +        );
 +    }
 +    Ok(texture)
++}
+diff --git a/src/present_observer.rs b/src/present_observer.rs
+new file mode 100644
+index 0000000..8962eb6
+--- /dev/null
++++ b/src/present_observer.rs
+@@ -0,0 +1,191 @@
++//! Optional observer of presented drawables, for frame-rate measurement.
++//!
++//! With no observer installed the cost on the present path is one relaxed
++//! atomic load and no Metal handler is attached. With one installed, every
++//! drawable gets an `addPresentedHandler` block; the block runs on a system
++//! thread and only calls the observer, which must copy numbers and return.
++
++use objc2::runtime::ProtocolObject;
++use objc2_metal::MTLDrawable;
++use parking_lot::RwLock;
++use std::{
++    ptr::NonNull,
++    sync::{
++        Arc,
++        atomic::{AtomicBool, AtomicU64, Ordering},
++    },
++};
++
++#[link(name = "QuartzCore", kind = "framework")]
++unsafe extern "C-unwind" {
++    /// Host time in seconds, the clock `MTLDrawable.presentedTime` uses.
++    fn CACurrentMediaTime() -> f64;
++}
++
++fn now() -> f64 {
++    // SAFETY: a pure clock read.
++    unsafe { CACurrentMediaTime() }
++}
++
++/// One presented (or skipped) drawable.
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct PresentSample {
++    /// Host time (seconds, `CACurrentMediaTime` clock) the drawable reached the
++    /// display. `0.0` when the drawable was skipped and never shown.
++    pub presented_time: f64,
++    /// Host time (seconds, same clock) at which the present was queued.
++    pub commit_time: f64,
++    /// Host time (same clock) at which the handler ran: the callback arrives at
++    /// presentation. Some displays report `presented_time == 0` for every drawable;
++    /// this is the only timestamp then.
++    pub handler_time: f64,
++    /// Monotonic drawable id within its `CAMetalLayer`.
++    pub drawable_id: u64,
++}
++
++pub type PresentObserver = Arc<dyn Fn(PresentSample) + Send + Sync>;
++
++static ENABLED: AtomicBool = AtomicBool::new(false);
++/// Bumped on every install/removal. A handler attached under an older generation
++/// never delivers to a newer observer (stop/start race: an old drawable's callback
++/// must not leak into the next capture).
++static GENERATION: AtomicU64 = AtomicU64::new(0);
++static OBSERVER: RwLock<Option<PresentObserver>> = RwLock::new(None);
++
++/// Install or remove the process-wide observer. Drawables already queued keep
++/// whatever handler decision was made when they were queued.
++pub fn set_present_observer(observer: Option<PresentObserver>) {
++    let enabled = observer.is_some();
++    let mut slot = OBSERVER.write();
++    GENERATION.fetch_add(1, Ordering::SeqCst);
++    *slot = observer;
++    ENABLED.store(enabled, Ordering::Release);
++}
++
++/// Current host time in seconds, on the clock `PresentSample` uses.
++pub fn host_time() -> f64 {
++    now()
++}
++
++#[inline]
++pub(crate) fn is_enabled() -> bool {
++    ENABLED.load(Ordering::Relaxed)
++}
++
++/// Attach the presented handler, if an observer is installed. Returns whether
++/// a handler was attached. Call before `present` / `presentDrawable`.
++pub(crate) fn attach(drawable: &ProtocolObject<dyn MTLDrawable>) -> bool {
++    if !is_enabled() {
++        return false;
++    }
++    let commit_time = now();
++    let generation = GENERATION.load(Ordering::SeqCst);
++    let block = block2::RcBlock::new(move |presented: NonNull<ProtocolObject<dyn MTLDrawable>>| {
++        // SAFETY: Metal passes a live drawable for the duration of the call.
++        let presented = unsafe { presented.as_ref() };
++        deliver(generation, PresentSample {
++            // `presentedTime` is bound only with objc2-metal's CoreFoundation feature,
++            // which this crate does not enable; call the selector directly.
++            presented_time: unsafe { objc2::msg_send![presented, presentedTime] },
++            commit_time,
++            handler_time: now(),
++            drawable_id: presented.drawableID() as u64,
++        });
++    });
++    // SAFETY: the block pointer is valid for the call; Metal copies the block.
++    unsafe { drawable.addPresentedHandler(&*block as *const _ as *mut _) };
++    true
++}
++
++fn deliver(generation: u64, sample: PresentSample) {
++    // Clone the Arc out so the observer never runs under the lock; the generation is
++    // checked under the same read lock so a concurrent install cannot interleave.
++    let observer = {
++        let slot = OBSERVER.read();
++        if GENERATION.load(Ordering::SeqCst) != generation { return; }
++        slot.clone()
++    };
++    if let Some(observer) = observer {
++        observer(sample);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use objc2_core_foundation::CGSize;
++    use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLPixelFormat};
++    use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
++    use std::sync::atomic::AtomicUsize;
++    static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
++
++    /// With no observer no handler is attached; with one, a presented drawable
++    /// delivers exactly one sample. Process-global observer: one test owns it.
++    #[test]
++    fn handler_attaches_only_with_an_observer_and_delivers_one_sample() {
++        let _serial = SERIAL.lock();
++        set_present_observer(None);
++        let device = MTLCreateSystemDefaultDevice().expect("a Metal device");
++        let queue = device.newCommandQueue().expect("command queue");
++        let layer = CAMetalLayer::new();
++        layer.setDevice(Some(&device));
++        layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
++        layer.setDrawableSize(CGSize { width: 64., height: 64. });
++        let drawable = layer.nextDrawable().expect("drawable");
++        assert!(!is_enabled());
++        assert!(!attach(ProtocolObject::from_ref(&*drawable)), "no observer: no handler");
++
++        let count = Arc::new(AtomicUsize::new(0));
++        let (tx, rx) = std::sync::mpsc::channel();
++        let counter = count.clone();
++        set_present_observer(Some(Arc::new(move |sample| {
++            counter.fetch_add(1, Ordering::SeqCst);
++            let _ = tx.send(sample);
++        })));
++        assert!(attach(ProtocolObject::from_ref(&*drawable)), "observer installed: handler attached");
++        let buffer = queue.commandBuffer().expect("command buffer");
++        buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
++        buffer.commit();
++        let sample = rx.recv_timeout(std::time::Duration::from_secs(5));
++        set_present_observer(None);
++        let sample = sample.expect("presented handler never ran");
++        assert_eq!(count.load(Ordering::SeqCst), 1);
++        assert!(sample.commit_time > 0.0 && sample.handler_time >= sample.commit_time);
++        assert!(!is_enabled(), "removing the observer disables attaching");
++    }
++
++    #[test]
++    fn a_drawable_queued_under_an_old_observer_never_reaches_the_next_one() {
++        let _serial = SERIAL.lock();
++        let device = MTLCreateSystemDefaultDevice().expect("a Metal device");
++        let queue = device.newCommandQueue().expect("command queue");
++        let layer = CAMetalLayer::new();
++        layer.setDevice(Some(&device));
++        layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
++        layer.setDrawableSize(CGSize { width: 64., height: 64. });
++        let old_hits = Arc::new(AtomicUsize::new(0));
++        let new_hits = Arc::new(AtomicUsize::new(0));
++        let counter = old_hits.clone();
++        set_present_observer(Some(Arc::new(move |_| { counter.fetch_add(1, Ordering::SeqCst); })));
++        let stale = layer.nextDrawable().expect("drawable");
++        assert!(attach(ProtocolObject::from_ref(&*stale)));
++        // stop, then start a new capture, before the stale drawable is presented
++        set_present_observer(None);
++        let counter = new_hits.clone();
++        set_present_observer(Some(Arc::new(move |_| { counter.fetch_add(1, Ordering::SeqCst); })));
++        let buffer = queue.commandBuffer().expect("command buffer");
++        buffer.presentDrawable(ProtocolObject::from_ref(&*stale));
++        buffer.commit();
++        std::thread::sleep(std::time::Duration::from_millis(500));
++        // A fresh drawable under the new observer does deliver (negative control).
++        let fresh = layer.nextDrawable().expect("drawable");
++        assert!(attach(ProtocolObject::from_ref(&*fresh)));
++        let buffer = queue.commandBuffer().expect("command buffer");
++        buffer.presentDrawable(ProtocolObject::from_ref(&*fresh));
++        buffer.commit();
++        std::thread::sleep(std::time::Duration::from_millis(500));
++        set_present_observer(None);
++        assert_eq!(old_hits.load(Ordering::SeqCst), 0, "old observer was removed");
++        assert_eq!(new_hits.load(Ordering::SeqCst), 1, "only the drawable attached under the new observer is delivered");
++    }
 +}
 diff --git a/src/shaders.metal b/src/shaders.metal
 index 2b52bb9..837e3f3 100644

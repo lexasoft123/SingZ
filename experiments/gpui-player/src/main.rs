@@ -213,6 +213,8 @@ mod ui_integration;
 #[cfg(feature = "ui-tests")]
 mod ui_perf_scenario;
 #[cfg(feature = "ui-tests")]
+mod frame_log;
+#[cfg(feature = "ui-tests")]
 mod ui_library_review;
 #[cfg(feature = "ui-tests")]
 mod ui_log_review;
@@ -5688,6 +5690,8 @@ impl Render for Player {
         demand.set(frame_demand::Source::CountIn, self.playing && self.transport_flight.timing_status.as_ref().is_some_and(|status|status.count_in_heard.is_some()));
         #[cfg(feature = "ui-tests")]
         UI_FRAME_DEMAND_BITS.store(demand.bits(), std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "ui-tests")]
+        frame_log::note_frame(!demand.is_empty(), self.display_position());
         if !demand.is_empty() && self.screen == Screen::Player && !modal_open {
             #[cfg(feature = "ui-tests")]
             UI_FRAME_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -6660,6 +6664,11 @@ fn main() {
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_PERF_SCENARIO") {
             assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
             ui_perf_scenario::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_FRAMES_VISIBLE") {
+            assert!(!background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
+            ui_perf_scenario::run_visible(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_UI_SMOKE") {
