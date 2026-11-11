@@ -362,57 +362,6 @@ test('an old-format lock directory occupies every slot until it is gone', (t) =>
   track(locks.acquireNativeBuildLock(root, 'new script', FOUR))
 })
 
-test('a stale slot is reclaimed only once its owner and descendants are gone', {
-  skip: process.platform === 'win32',
-}, async (t) => {
-  const { root, track } = fixture(t)
-  const slot = slotDirectory(root, 1)
-  const options = { env: { SINGZ_NATIVE_BUILD_SLOTS: '1' } }
-  const free = () => { try { locks.acquireNativeBuildLock(root, 'next', options).release(); return true } catch { return false } }
-  const release = () => rmSync(locks.nativeBuildSlotsPath(root), { recursive: true, force: true })
-
-  // Owner alive: kept.
-  plantRecord(slot, staleRecord({ pid: process.pid }))
-  assert.equal(free(), false)
-  // Another host's record cannot be proven dead.
-  plantRecord(slot, staleRecord({ hostname: 'some-other-host' }))
-  assert.equal(free(), false)
-  // An old-format record is not reclaimed.
-  plantRecord(slot, staleRecord({ format: 1 }))
-  assert.equal(free(), false)
-  // Recorded child tree still running although the wrapper is gone: kept.
-  const orphan = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
-  orphan.unref()
-  t.after(() => { try { process.kill(-orphan.pid, 'SIGKILL') } catch { /* already gone */ } })
-  plantRecord(slot, staleRecord({ childPid: orphan.pid, processGroup: orphan.pid }))
-  assert.equal(free(), false)
-  assert.equal(existsSync(slot), true)
-  // The group exits: now owner and descendants are provably gone.
-  process.kill(-orphan.pid, 'SIGKILL')
-  await until(() => { try { process.kill(-orphan.pid, 0); return false } catch (error) { return error.code === 'ESRCH' } })
-  assert.equal(free(), true)
-  release()
-  // A record with no child ever recorded and a dead owner is stale too.
-  plantRecord(slot, staleRecord())
-  assert.equal(free(), true)
-  release()
-  // An unrecorded directory is only reclaimed after the grace period.
-  mkdirSync(slot, { recursive: true })
-  assert.equal(free(), false)
-  const { utimesSync } = require('node:fs')
-  const old = new Date(Date.now() - 120_000)
-  utimesSync(slot, old, old)
-  assert.equal(free(), true)
-})
-
-test('a stale exclusive claim is reclaimed like a stale slot', (t) => {
-  const { root, track } = fixture(t)
-  plantRecord(locks.nativeBuildLockPath(root), staleRecord({ exclusive: true, draining: true }))
-  const handle = track(locks.acquireNativeBuildLock(root, 'after crash', FOUR))
-  assert.equal(handle.slot, 1)
-  assert.equal(existsSync(locks.nativeBuildLockPath(root)), false)
-})
-
 test('token and identity checks fail closed across slots', (t) => {
   const first = fixture(t)
   const second = fixture(t)
@@ -514,82 +463,130 @@ test('wrapper runs four builds at once, queues the fifth, and exclusive runs alo
   assert.equal(existsSync(locks.nativeBuildLockPath(root)), false)
 })
 
-// ---- Atomic reclamation (reclaimers and fresh claimants interleaved) ----
+// ---- No automatic reclamation: dead holders cost a slot until freed by hand ----
 
-function liveRecord(root, extra = {}) {
-  return {
-    format: 2, token: `live-${randomHex()}-token`, pid: process.pid, owner: 'live',
-    hostname: require('node:os').hostname(), repoIdentity: locks.gitCommonDirectory(root),
-    checkout: root, startedAt: new Date().toISOString(), ...extra,
+const POSIX = { skip: process.platform === 'win32' }
+
+function spawnOrphanGroup(t) {
+  const orphan = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
+  orphan.unref()
+  t.after(() => { try { process.kill(-orphan.pid, 'SIGKILL') } catch { /* already gone */ } })
+  return orphan
+}
+async function killGroup(orphan) {
+  process.kill(-orphan.pid, 'SIGKILL')
+  await until(() => { try { process.kill(-orphan.pid, 0); return false } catch (error) { return error.code === 'ESRCH' } })
+}
+
+test('a slot whose wrapper was killed before its child was recorded is never taken by waiters', POSIX, async (t) => {
+  const { root, wrapper, lockPath, groupPids } = wrapperFixture(t)
+  // What SIGKILL between spawn() and the child-identity write leaves behind: a
+  // dead wrapper, a record without child/group, and a build still running.
+  const orphan = spawnOrphanGroup(t)
+  groupPids.push(orphan.pid)
+  plantRecord(lockPath, staleRecord())
+  assert.throws(() => locks.acquireNativeBuildLock(root, 'waiter', ONE_SLOT), /busy/)
+  const marker = join(root, 'waiter-started')
+  const waiter = startWrapper(wrapper, process.execPath,
+    ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '1')`],
+    { env: { ...process.env, SINGZ_NATIVE_BUILD_SLOTS: '1' } })
+  t.after(() => { try { process.kill(waiter.child.pid, 'SIGKILL') } catch { /* done */ } })
+  await sleep(1500)
+  assert.equal(existsSync(marker), false, 'a second build must not start beside the orphaned one')
+  assert.equal(existsSync(lockPath), true)
+  assert.doesNotThrow(() => process.kill(-orphan.pid, 0), 'the orphaned build is still running')
+  assert.match(waiter.diagnostics(), /wrapper pid \d+ gone/)
+  assert.match(waiter.diagnostics(), /--release-stale/)
+})
+
+test('a missing or partial record is unknown, never stale, however old', (t) => {
+  const { root } = fixture(t)
+  const { utimesSync } = require('node:fs')
+  const old = new Date(Date.now() - 3_600_000)
+  const slot = slotDirectory(root, 1)
+  const legacy = locks.nativeBuildLockPath(root)
+  for (const [directory, content] of [[slot, null], [slot, '{"format": 2, "token": "tr'], [legacy, null], [legacy, '{"format"']]) {
+    rmSync(directory, { recursive: true, force: true })
+    mkdirSync(directory, { recursive: true })
+    if (content !== null) writeFileSync(join(directory, 'owner.json'), content)
+    utimesSync(directory, old, old)
+    const busy = { code: 'SINGZ_NATIVE_BUILD_BUSY' }
+    assert.throws(() => locks.acquireNativeBuildLock(root, 'next', ONE_SLOT), busy)
+    assert.throws(() => locks.acquireNativeBuildLock(root, 'next exclusive', { ...ONE_SLOT, exclusive: true }), busy)
+    assert.equal(existsSync(directory), true, `${directory} (${content}) must be left alone`)
+    assert.throws(() => locks.releaseStaleNativeBuildLock(root, directory === legacy ? 'exclusive' : 1), /Refusing.*unknown/)
+    assert.equal(existsSync(directory), true)
+    rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('owner.json is replaced, never rewritten in place: the draining=false update is a rename', async (t) => {
+  const { root, track } = fixture(t)
+  const { readdirSync, statSync } = require('node:fs')
+  const holder = track(locks.acquireNativeBuildLock(root, 'running', ONE_SLOT))
+  const legacy = locks.nativeBuildLockPath(root)
+  const waiting = locks.acquireNativeBuildLockWait(root, 'exclusive waiter', { ...ONE_SLOT, exclusive: true, pollMs: 20 })
+  await until(() => existsSync(join(legacy, 'owner.json')))
+  const drainingInode = statSync(join(legacy, 'owner.json')).ino
+  assert.equal(JSON.parse(readFileSync(join(legacy, 'owner.json'), 'utf8')).draining, true)
+  holder.release()
+  const handle = track(await waiting)
+  assert.equal(JSON.parse(readFileSync(join(legacy, 'owner.json'), 'utf8')).draining, false)
+  // An in-place truncate+write keeps the inode and exposes a truncated file to
+  // readers in between; a temp file renamed into place always changes it.
+  assert.notEqual(statSync(join(legacy, 'owner.json')).ino, drainingInode)
+  assert.deepEqual(readdirSync(handle.path), ['owner.json'], 'no temp file is left behind')
+})
+
+test('--release-stale refuses while the wrapper, group or child lives, and works once all are gone', POSIX, async (t) => {
+  const { root, wrapper, lockPath } = wrapperFixture(t)
+  const release = (...args) => spawnSync(process.execPath, [wrapper, '--release-stale', ...args], { encoding: 'utf8' })
+  const orphan = spawnOrphanGroup(t)
+  const refuses = (record, pattern) => {
+    plantRecord(lockPath, record)
+    const result = release('1')
+    assert.notEqual(result.status, 0, result.stderr)
+    assert.match(result.stderr, pattern)
+    assert.equal(existsSync(lockPath), true, 'a refused release must leave the lock')
+  }
+  refuses(staleRecord({ pid: process.pid, childPid: orphan.pid, processGroup: orphan.pid }), /wrapper process \d+ is still running/)
+  refuses(staleRecord({ childPid: deadPid(), processGroup: orphan.pid }), /process group \d+ still has processes/)
+  refuses(staleRecord({ childPid: orphan.pid }), /build process \d+ is still running/)
+  refuses(staleRecord({ childPid: orphan.pid, processGroup: orphan.pid, hostname: 'another-host' }), /another host/)
+  refuses(staleRecord({ childPid: orphan.pid, processGroup: orphan.pid, format: 1 }), /complete format-2/)
+  refuses(staleRecord(), /no build process recorded/)
+  assert.notEqual(release('not-a-slot').status, 0)
+  await killGroup(orphan)
+  plantRecord(lockPath, staleRecord({ childPid: orphan.pid, processGroup: orphan.pid }))
+  const done = release('1')
+  assert.equal(done.status, 0, done.stderr)
+  assert.equal(existsSync(lockPath), false)
+  assert.equal(locks.acquireNativeBuildLock(root, 'next', ONE_SLOT).slot, 1)
+  // A dead exclusive claim that never started a build can be freed too.
+  rmSync(locks.nativeBuildSlotsPath(root), { recursive: true })
+  plantRecord(locks.nativeBuildLockPath(root), staleRecord({ exclusive: true, draining: true }))
+  assert.equal(release('exclusive').status, 0)
+  assert.equal(existsSync(locks.nativeBuildLockPath(root)), false)
+})
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  test(`${signal} while waiting removes the pending exclusive claim`, POSIX, async (t) => {
+    const { root, wrapper } = wrapperFixture(t)
+    const holder = locks.acquireNativeBuildLock(root, 'running build', ONE_SLOT)
+    t.after(() => holder.release())
+    const waiter = startWrapper(wrapper, process.execPath, ['-e', 'process.exit(0)'],
+      { flags: ['--exclusive'], env: { ...process.env, SINGZ_NATIVE_BUILD_SLOTS: '1' } })
+    t.after(() => { try { process.kill(waiter.child.pid, 'SIGKILL') } catch { /* done */ } })
+    const legacy = locks.nativeBuildLockPath(root)
+    await until(() => existsSync(join(legacy, 'owner.json')))
+    assert.equal(JSON.parse(readFileSync(join(legacy, 'owner.json'), 'utf8')).draining, true)
+    process.kill(waiter.child.pid, signal)
+    const [code] = await waiter.completed
+    assert.notEqual(code, 0, waiter.diagnostics())
+    assert.equal(existsSync(legacy), false, 'the cancelled wait must not leave its claim')
+    assert.equal(existsSync(join(locks.nativeBuildSlotsPath(root), 'slot-1')), true, 'the running holder is untouched')
+    // The slot stays usable: the next build is admitted as soon as it is freed.
+    holder.release()
+    assert.equal(locks.acquireNativeBuildLock(root, 'next', ONE_SLOT).slot, 1)
+  })
 }
-function leftovers(root) {
-  return require('node:fs').readdirSync(locks.nativeBuildSlotsPath(root))
-    .filter(name => name !== 'slot-1')
-}
-
-test('two reclaimers and a fresh claimant never remove or hide a live slot', (t) => {
-  const { root } = fixture(t)
-  t.after(() => locks.setNativeBuildLockTestHooks({}))
-  const slot = slotDirectory(root, 1)
-  plantRecord(slot, staleRecord())
-  let rival = 'not run', fresh = null
-  locks.setNativeBuildLockTestHooks({
-    // Reclaimer A has judged the slot stale and holds the reclaim mutex:
-    // reclaimer B must not be able to act on the same directory.
-    afterJudge() {
-      try { locks.acquireNativeBuildLock(root, 'reclaimer B', ONE_SLOT).release(); rival = 'acquired' }
-      catch (error) { rival = error.code }
-      assert.equal(existsSync(slot), true, 'B must not touch the slot A is reclaiming')
-    },
-    // A has moved the stale directory away; the slot name is free for a
-    // fresh claimant before A deletes the tombstone.
-    afterRename() {
-      locks.setNativeBuildLockTestHooks({})
-      fresh = locks.acquireNativeBuildLock(root, 'fresh claimant', ONE_SLOT)
-    },
-  })
-  assert.throws(() => locks.acquireNativeBuildLock(root, 'reclaimer A', ONE_SLOT), /busy/)
-  assert.equal(rival, 'SINGZ_NATIVE_BUILD_BUSY')
-  assert.ok(fresh, 'the fresh claimant takes the freed slot')
-  assert.equal(JSON.parse(readFileSync(join(slot, 'owner.json'), 'utf8')).token, fresh.token)
-  assert.equal(locks.assertNativeBuildLockHeld(root, fresh.token).owner, 'fresh claimant')
-  assert.deepEqual(leftovers(root), [], 'no tombstone or reclaim mutex is left behind')
-  fresh.release()
-})
-
-test('an owner that slips in after staleness was judged is put back, not deleted', (t) => {
-  const { root } = fixture(t)
-  t.after(() => locks.setNativeBuildLockTestHooks({}))
-  const slot = slotDirectory(root, 1)
-  plantRecord(slot, staleRecord())
-  const live = liveRecord(root)
-  locks.setNativeBuildLockTestHooks({
-    afterJudge() {
-      // Everything a late reclaimer cannot see: the stale directory is gone
-      // and a live owner holds a brand new one.
-      rmSync(slot, { recursive: true })
-      plantRecord(slot, live)
-    },
-  })
-  assert.throws(() => locks.acquireNativeBuildLock(root, 'reclaimer', ONE_SLOT), /busy/)
-  assert.equal(JSON.parse(readFileSync(join(slot, 'owner.json'), 'utf8')).token, live.token)
-  assert.equal(locks.assertNativeBuildLockHeld(root, live.token).owner, 'live')
-  assert.deepEqual(leftovers(root), [])
-})
-
-test('if the live owner cannot be put back reclamation fails closed and keeps it', (t) => {
-  const { root } = fixture(t)
-  t.after(() => locks.setNativeBuildLockTestHooks({}))
-  const slot = slotDirectory(root, 1)
-  plantRecord(slot, staleRecord())
-  const live = liveRecord(root)
-  locks.setNativeBuildLockTestHooks({
-    afterJudge() { rmSync(slot, { recursive: true }); plantRecord(slot, live) },
-    afterRename() { plantRecord(slot, liveRecord(root, { owner: 'newer' })) },
-  })
-  assert.throws(() => locks.acquireNativeBuildLock(root, 'reclaimer', ONE_SLOT), /changed owner during reclamation/)
-  const [tombstone] = leftovers(root).filter(name => name.includes('.reclaim-'))
-  assert.ok(tombstone, 'the displaced live owner stays recoverable')
-  assert.equal(JSON.parse(readFileSync(join(locks.nativeBuildSlotsPath(root), tombstone, 'owner.json'), 'utf8')).token, live.token)
-})

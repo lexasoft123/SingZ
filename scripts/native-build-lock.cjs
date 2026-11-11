@@ -1,14 +1,16 @@
 const { randomBytes } = require('node:crypto')
 const {
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
   rmSync,
-  statSync,
-  writeFileSync
+  writeSync
 } = require('node:fs')
 const { hostname } = require('node:os')
 const { isAbsolute, join, resolve } = require('node:path')
@@ -20,9 +22,10 @@ const { execFileSync } = require('node:child_process')
 const MAX_NATIVE_BUILD_SLOTS = 4
 const SLOT_NAME = /^slot-[1-9][0-9]*$/
 const RECORD_FORMAT = 2
-// A claim directory with no readable owner.json this old died between mkdir
-// and its first write; no child can exist yet because children start later.
-const UNRECORDED_GRACE_MS = 30_000
+// There is deliberately NO automatic reclamation. A holder that died costs one
+// slot until a human runs `with-native-build-lock.mjs --release-stale`, because
+// a lock that frees itself on a guess can overlap a live build (a child started
+// but not yet recorded, a record mid-rewrite, a reclaimer paused mid-step).
 
 /** The identity every worktree of one repository shares: its common git
  *  directory. An exported tree (a `git archive` unpacked on a field machine
@@ -106,95 +109,96 @@ function groupExists(pid) {
   try { process.kill(-pid, 0); return true } catch (error) { return error.code !== 'ESRCH' }
 }
 
-/** Whether a lock directory provably has no live owner or descendants. Anything
- *  that cannot be proven stays held: foreign hosts, old-format records, and
- *  Windows (Node cannot show a process tree has quiesced). */
-function provenStale(directory) {
+/** What a holder's record says about its processes, for diagnostics and for
+ *  `--release-stale`. `complete` means the record is a readable format-2 record
+ *  with the fields needed to prove the owner stopped. */
+function holderState(directory) {
   const record = readRecord(directory)
-  if (!record) {
-    try { return Date.now() - statSync(directory).mtimeMs > UNRECORDED_GRACE_MS } catch { return false }
+  if (!record) return { record: null, complete: false }
+  const complete = record.format >= RECORD_FORMAT && typeof record.token === 'string' &&
+    Number.isInteger(record.pid) && typeof record.hostname === 'string'
+  const sameHost = record.hostname === hostname()
+  return {
+    record, complete, sameHost,
+    wrapperGone: complete && sameHost ? !processExists(record.pid) : null,
+    groupGone: record.processGroup && sameHost ? !groupExists(record.processGroup) : null,
+    childGone: record.childPid && sameHost ? !processExists(record.childPid) : null
   }
-  if (process.platform === 'win32' || !(record.format >= RECORD_FORMAT) || record.hostname !== hostname())
-    return false
-  if (processExists(record.pid)) return false
-  if (record.processGroup && groupExists(record.processGroup)) return false
-  if (record.childPid && !record.processGroup && processExists(record.childPid)) return false
-  return true
 }
 
-// Test seam: lets a regression interleave other actors between reclaim steps.
-const testHooks = {}
-function setNativeBuildLockTestHooks(hooks = {}) {
-  for (const key of Object.keys(testHooks)) delete testHooks[key]
-  Object.assign(testHooks, hooks)
-}
-// A reclaim mutex directory older than this has no live holder: a holder
-// needs milliseconds (one read, one rename, one delete).
-const RECLAIM_MUTEX_STALE_MS = 60_000
-
-/** Remove a provably stale lock directory, atomically with respect to other
- *  reclaimers and fresh claimants.
- *
- *  1. Take `<dir>.reclaiming` (mkdir, single winner). Losers return false and
- *     simply retry their acquisition; only one reclaimer ever acts on `dir`.
- *  2. Judge staleness while holding it, so a directory a fresh claimant
- *     created after an earlier look is judged on its own record.
- *  3. Rename to a unique tombstone (single-winner, and the slot name is free
- *     for no one until the directory is gone), re-read the tombstone's record
- *     and delete only if it carries the token that was proven stale. If a
- *     different owner slipped in anyway, put it back; if that is impossible,
- *     fail closed by keeping the tombstone and throwing. */
-function reclaimIfStale(directory) {
-  if (!existsSync(directory) || !provenStale(directory)) return false
-  const mutex = `${directory}.reclaiming`
-  try {
-    mkdirSync(mutex)
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error
-    try {
-      if (Date.now() - statSync(mutex).mtimeMs > RECLAIM_MUTEX_STALE_MS)
-        rmSync(mutex, { recursive: true, force: true })
-    } catch { /* gone already */ }
-    return false
-  }
-  try {
-    if (!existsSync(directory) || !provenStale(directory)) return false
-    const judged = readRecord(directory)?.token ?? null
-    testHooks.afterJudge?.(directory, judged)
-    const tombstone = `${directory}.reclaim-${process.pid}-${randomBytes(4).toString('hex')}`
-    try { renameSync(directory, tombstone) } catch { return false }
-    testHooks.afterRename?.(directory, tombstone)
-    if ((readRecord(tombstone)?.token ?? null) !== judged) {
-      try {
-        renameSync(tombstone, directory)
-      } catch (error) {
-        throw new Error(`Native build lock ${directory} changed owner during reclamation; the live owner's directory was kept at ${tombstone}: ${error.message}`)
-      }
-      return false
-    }
-    rmSync(tombstone, { recursive: true, force: true })
-    return true
-  } finally {
-    rmSync(mutex, { recursive: true, force: true })
-  }
+/** Why `directory` may NOT be freed by hand, or null when every process it
+ *  recorded is provably gone. Fails closed: anything unprovable refuses. */
+function releaseRefusal(directory) {
+  const state = holderState(directory)
+  const { record } = state
+  if (!record) return 'its owner.json is missing or unreadable, so its owner is unknown'
+  if (process.platform === 'win32') return 'Node cannot prove a Windows process tree has stopped'
+  if (!state.complete) return 'its record is not a complete format-2 record (old-format holders cannot be verified)'
+  if (!state.sameHost) return `it was recorded on another host (${record.hostname})`
+  if (!state.wrapperGone) return `its wrapper process ${record.pid} is still running`
+  if (record.processGroup && !state.groupGone) return `its process group ${record.processGroup} still has processes`
+  if (record.childPid && !state.childGone) return `its build process ${record.childPid} is still running`
+  // A draining exclusive claim has not started any build. Otherwise the record
+  // must show the build's identity: without it a started child cannot be ruled out.
+  if (record.draining !== true && !record.childPid)
+    return 'its record has no build process recorded, so a started build cannot be ruled out; inspect it and remove the directory by hand'
+  return null
 }
 
 function occupiedSlots(slotsPath) {
   try { return readdirSync(slotsPath).filter(name => SLOT_NAME.test(name)) } catch { return [] }
 }
 
-function describeHolders(directories) {
-  const parts = []
-  for (const directory of directories) {
-    let current = 'unreadable owner'
-    try { current = readFileSync(join(directory, 'owner.json'), 'utf8').replace(/\s+/g, ' ').trim() } catch { /* diagnostic only */ }
-    parts.push(`${directory}: ${current}`)
-  }
-  return parts.join('; ')
+function describeHolder(directory, label) {
+  const state = holderState(directory)
+  const { record } = state
+  if (!record) return `${label}: record unknown (missing or unreadable; never freed automatically)`
+  const tag = (gone) => gone === null ? 'unverifiable' : gone ? 'gone' : 'alive'
+  const parts = [`owner "${record.owner}"`, `wrapper pid ${record.pid} ${tag(state.wrapperGone)}`]
+  if (record.processGroup) parts.push(`group ${record.processGroup} ${tag(state.groupGone)}`)
+  if (record.childPid) parts.push(`child ${record.childPid} ${tag(state.childGone)}`)
+  if (record.hostname && !state.sameHost) parts.push(`host ${record.hostname}`)
+  return `${label}: ${parts.join(', ')}`
 }
 
+/** One line per holder, plus the manual command when any might be dead. */
+function describeHolders(entries) {
+  const lines = entries.map(({ directory, label }) => describeHolder(directory, label))
+  const dead = entries.some(({ directory }) => holderState(directory).wrapperGone === true)
+  const hint = dead
+    ? ' | a holder whose wrapper is gone costs a slot until freed by hand after verifying it stopped: node scripts/with-native-build-lock.mjs --release-stale <slot-number|exclusive>'
+    : ''
+  return `${lines.join('; ')}${hint}`
+}
+
+/** Publish `record` as `directory/owner.json` so readers see the old record or
+ *  the new one, never a truncated file: write a temp file in the same
+ *  directory, fsync it, rename over the target. */
 function writeRecord(directory, record) {
-  writeFileSync(join(directory, 'owner.json'), `${JSON.stringify(record, null, 2)}\n`)
+  const target = join(directory, 'owner.json')
+  const temp = join(directory, `owner.json.tmp-${process.pid}-${randomBytes(4).toString('hex')}`)
+  const fd = openSync(temp, 'wx')
+  try {
+    writeSync(fd, `${JSON.stringify(record, null, 2)}\n`)
+    fsyncSync(fd)
+  } catch (error) {
+    closeSync(fd)
+    rmSync(temp, { force: true })
+    throw error
+  }
+  closeSync(fd)
+  try { renameSync(temp, target) } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
+}
+
+/** Merge `patch` into the record this handle owns (atomically). */
+function updateNativeBuildLockRecord(handle, patch) {
+  const record = readRecord(handle.path)
+  if (!record || record.token !== handle.token)
+    throw new Error(`Native build lock ownership changed before update: ${handle.path}`)
+  writeRecord(handle.path, { ...record, ...patch })
 }
 
 function makeHandle(path, token, extra) {
@@ -244,8 +248,7 @@ function attempt(repoRoot, owner, options, state) {
         mkdirSync(legacy)
       } catch (error) {
         if (error.code !== 'EEXIST') throw error
-        reclaimIfStale(legacy)
-        state.busy = `the build lock is held (${describeHolders([legacy])})`
+        state.busy = `the build lock is held (${describeHolders([{ directory: legacy, label: 'exclusive/old-format' }])})`
         return null
       }
       state.claimed = true
@@ -256,10 +259,9 @@ function attempt(repoRoot, owner, options, state) {
       }
     }
     // The claim already stops new slots; wait for running ones to finish.
-    for (const name of occupiedSlots(slotsPath)) reclaimIfStale(join(slotsPath, name))
     const running = occupiedSlots(slotsPath)
     if (running.length) {
-      state.busy = `waiting for running builds: ${describeHolders(running.map(name => join(slotsPath, name)))}`
+      state.busy = `waiting for running builds: ${describeHolders(running.map(name => ({ directory: join(slotsPath, name), label: name })))}`
       return null
     }
     writeRecord(legacy, { ...base(), exclusive: true, draining: false })
@@ -267,9 +269,8 @@ function attempt(repoRoot, owner, options, state) {
   }
 
   // An old-format holder, or an exclusive claim, occupies every slot.
-  if (existsSync(legacy)) reclaimIfStale(legacy)
   if (existsSync(legacy)) {
-    state.busy = `an exclusive or old-format build holds every slot (${describeHolders([legacy])})`
+    state.busy = `an exclusive or old-format build holds every slot (${describeHolders([{ directory: legacy, label: 'exclusive/old-format' }])})`
     return null
   }
   const limit = nativeBuildSlotCount(options.env ?? process.env)
@@ -280,8 +281,7 @@ function attempt(repoRoot, owner, options, state) {
       mkdirSync(path)
     } catch (error) {
       if (error.code !== 'EEXIST') throw error
-      if (!reclaimIfStale(path)) continue
-      try { mkdirSync(path) } catch (retry) { if (retry.code === 'EEXIST') continue; throw retry }
+      continue
     }
     try {
       writeRecord(path, { ...base(), slot: n, exclusive: false })
@@ -291,12 +291,13 @@ function attempt(repoRoot, owner, options, state) {
     }
     if (existsSync(legacy)) {
       rmSync(path, { recursive: true, force: true })
-      state.busy = `an exclusive or old-format build holds every slot (${describeHolders([legacy])})`
+      state.busy = `an exclusive or old-format build holds every slot (${describeHolders([{ directory: legacy, label: 'exclusive/old-format' }])})`
       return null
     }
     return makeHandle(path, state.token, { exclusive: false, slot: n })
   }
-  const all = Array.from({ length: limit }, (_, index) => join(slotsPath, `slot-${index + 1}`))
+  const all = Array.from({ length: limit }, (_, index) =>
+    ({ directory: join(slotsPath, `slot-${index + 1}`), label: `slot-${index + 1}` }))
   state.busy = `all ${limit} native build slot(s) are busy (${describeHolders(all)})`
   return null
 }
@@ -322,23 +323,53 @@ function acquireNativeBuildLock(repoRoot, owner, options = {}) {
 /** Like acquireNativeBuildLock but waits, polling, until admitted. An
  *  exclusive waiter keeps its claim so later builds queue behind it. */
 async function acquireNativeBuildLockWait(repoRoot, owner, options = {}) {
-  const { pollMs = 500, reportMs = 30_000, onWait = () => {} } = options
+  const { pollMs = 500, reportMs = 30_000, onWait = () => {}, signal } = options
   const state = {}
   let reported = -Infinity
   try {
     for (;;) {
+      // Cancellation removes this process's own pending claim (below) and
+      // nothing else.
+      if (signal?.aborted) throw new Error('Waiting for the native build lock was cancelled')
       const handle = attempt(repoRoot, owner, options, state)
       if (handle) return handle
       if (Date.now() - reported >= reportMs) {
         reported = Date.now()
         onWait(`Waiting for SingZ native build ${options.exclusive ? 'exclusivity' : 'slot'}: ${state.busy}`)
       }
-      await new Promise(resolveWait => setTimeout(resolveWait, pollMs))
+      await new Promise(resolveWait => {
+        const timer = setTimeout(done, pollMs)
+        function done() { clearTimeout(timer); signal?.removeEventListener('abort', done); resolveWait() }
+        signal?.addEventListener('abort', done, { once: true })
+      })
     }
   } catch (error) {
     abandon(repoRoot, state)
     throw error
   }
+}
+
+/** Free a slot (a number) or the exclusive/old-format claim ('exclusive') whose
+ *  holder is provably gone. This is the only way a dead holder's lock is ever
+ *  removed: it refuses unless the record is complete, same host, and the
+ *  wrapper pid, process group and build process have all stopped. The caller is
+ *  a human who has decided to free it; no further confirmation is asked. */
+function releaseStaleNativeBuildLock(repoRoot, which) {
+  const exclusive = which === 'exclusive'
+  if (!exclusive && !/^[1-9][0-9]*$/.test(String(which)))
+    throw new Error(`--release-stale takes a slot number or "exclusive" (got ${which})`)
+  const directory = exclusive
+    ? nativeBuildLockPath(repoRoot)
+    : join(nativeBuildSlotsPath(repoRoot), `slot-${which}`)
+  if (!existsSync(directory)) throw new Error(`Nothing to release: ${directory} does not exist`)
+  const refusal = releaseRefusal(directory)
+  if (refusal) throw new Error(`Refusing to release ${directory}: ${refusal}`)
+  const token = readRecord(directory)?.token
+  // Narrow the window against a concurrent --release-stale plus a new claimant:
+  // run one release at a time (it is a manual, human-run command).
+  if (readRecord(directory)?.token !== token) throw new Error(`Refusing to release ${directory}: it changed owner`)
+  rmSync(directory, { recursive: true, force: false })
+  return { directory, token }
 }
 
 /** The record proving `token` holds a slot (or the exclusive/old-format lock)
@@ -371,5 +402,6 @@ module.exports = {
   nativeBuildLockPath,
   nativeBuildSlotCount,
   nativeBuildSlotsPath,
-  setNativeBuildLockTestHooks
+  releaseStaleNativeBuildLock,
+  updateNativeBuildLockRecord
 }

@@ -615,20 +615,39 @@ edge). Four slots give a machine-wide ceiling of sixteen process command lines
 containing `clang` (slots x four); stop above it. Compiler-cache settings stay
 per build as described above.
 
-**Stale locks.** A waiter reclaims a slot or exclusive claim only when its
-record was written by this host, the wrapper pid is gone, and no recorded child
-process group (or child pid) exists; an unrecorded directory is reclaimed after
-30 seconds. Reclamation is single-winner: the reclaimer holds a `<dir>.reclaiming`
-mutex, judges staleness under it, renames the directory to a unique
-`.reclaim-<pid>-<random>` tombstone and deletes it only if the tombstone's token
-is the one proven stale (otherwise it is put back, or kept and reported); a
-leftover mutex older than a minute is ignored. Old-format records, other hosts and Windows (where `taskkill /T`
-cannot prove the tree stopped) are never reclaimed automatically: inspect the
-recorded owner/tree, confirm it stopped, then remove that directory. On POSIX,
-the wrapper forwards signals to the complete child process group and retains
-the slot while that group exists. Normal direct commands must await all
-descendants before returning. Never remove a live lock to make another build
-start.
+**Dead holders are never reclaimed automatically.** Every automatic rule
+(wrapper pid gone, record unreadable for 30 seconds, a reclaim mutex) was shown
+to let a live build overlap another: a child started but not yet recorded, a
+record caught mid-rewrite, a reclaimer paused mid-step. So a holder that died
+costs one slot until a human frees it, as the pre-slot lock always did. A waiting
+wrapper prints each holder (owner, wrapper pid, process group and child, each
+marked alive or gone) and, when a wrapper is gone, the command to free it:
+
+```bash
+node scripts/with-native-build-lock.mjs --release-stale <slot-number|exclusive>
+```
+
+It asks for no confirmation (running it is the decision) but refuses unless the
+record is a complete format-2 record from this host, and the wrapper pid, the
+process group and the build process are all gone. A record with no build process
+recorded (the wrapper died before publishing it, or the holder never used the
+wrapper), a missing or truncated `owner.json`, old-format holders, other hosts
+and Windows (where `taskkill /T` cannot prove the tree stopped) are refused:
+inspect the recorded owner/tree, confirm nothing of it runs, then remove the
+directory by hand. Records are written as temp file + fsync + rename inside the
+claim directory, so readers see a whole record or none; a missing record means
+"owner unknown", never stale. SIGINT/SIGTERM/SIGHUP while a wrapper is still
+waiting removes its own pending claim; once it runs a build the signal is
+forwarded to the complete child process group and the slot is retained while
+that group exists. Normal direct commands must await all descendants before
+returning. Run one `--release-stale` at a time. Never remove a live lock to make
+another build start.
+
+`scripts/ensure-git-exclude.cjs` (shared `info/exclude` updates from
+`worktree-setup.sh`) takes no lock either: writers append only their missing
+lines in one write and re-read until all are present, so concurrent writers lose
+nothing (distinct lines are never duplicated; the same line added in the same
+instant can appear twice, which git treats as one).
 
 **Rollout with old scripts.** Scripts from before slots only know
 `singz-native-build.lock` and do not see slots. New scripts treat that
