@@ -162,6 +162,21 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){l
    handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;wait!(p,w,app=>w.viewport_size()==size(px(width),px(height)));
   }
   if stage=="exercise" {
+   // Record the actual minimum-width routes for every shipped language.
+   handle.update(cx,|_,w,_|w.resize(size(px(1060.),px(640.))))?;
+   wait!(p,w,app=>w.viewport_size()==size(px(1060.),px(640.)));
+   for language in Language::ALL {
+    choose!(language,"enter");
+    handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let header=view.read(cx).header.clone();let b=header.read(cx).rename_bounds.get().ok_or_else(||anyhow::anyhow!("Title pencil missing"))?;click(w,cx,b.center());draw(w,cx);anyhow::ensure!(header.read(cx).is_editing(),"Title editor did not open");let bounds=header.read(cx).guides.get("title-editor").ok_or_else(||anyhow::anyhow!("Title editor bounds missing"))?;anyhow::ensure!(bounds.size.width>=px(96.),"Narrow title editor too small for {}: {:?}",language.as_str(),bounds);shot(&view,w,cx,&out,&format!("narrow-title-{}",language.as_str()))?;key(w,cx,"escape");Ok(())})??;
+    handle.update(cx,|_,w,cx|header(&view,w,cx,"settings"))??;wait!(p,w,app=>p.screen==Screen::Settings);
+    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("narrow-settings-{}",language.as_str())))??;
+    handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;wait!(p,w,app=>p.screen==Screen::Player);
+    handle.update(cx,|_,w,cx|header(&view,w,cx,"catalog"))??;wait!(p,w,app=>p.screen==Screen::Library);
+    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("narrow-library-{}",language.as_str())))??;
+    handle.update(cx,|_,w,cx|header(&view,w,cx,"catalog"))??;wait!(p,w,app=>p.screen==Screen::Player);
+   }
+  }
+  if stage=="exercise" {
    // User-facing Training, help and release routes consume the current locale.
    // Training intentionally pauses the song; native continuity was checked above.
    for (width,height) in [(1280.,800.),(1060.,640.)] {

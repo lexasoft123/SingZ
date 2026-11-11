@@ -201,6 +201,18 @@ with tempfile.TemporaryDirectory(prefix='singz-locale-ui-') as temporary:
         saved = json.loads((preferences/'language.json').read_text())
         assert saved['language'] == 'ja' and saved['foreign'] == {'preserve': 23}, saved
         (out/stage/'persisted-preference.json').write_text(json.dumps(saved, indent=2))
+        if stage == 'exercise':
+            # This additional matrix records the actual window scale. The existing
+            # 2x qualification assertions below remain unchanged.
+            from PIL import Image
+            for language, _ in LANGUAGES:
+                for route in ('title', 'settings', 'library'):
+                    name = f'narrow-{route}-{language}'
+                    data = json.loads((out/stage/(name+'.json')).read_text())
+                    assert data['viewport'] == [1060, 640] and data['hidden']
+                    assert data['locale']['language'] == language
+                    scale = data['scale']
+                    assert Image.open(out/stage/(name+'.png')).size == (1060*scale, 640*scale)
         for width, height in ((1280,800),(1060,640)):
             if stage == 'restart':
                 data = capture(out/stage, f'restored-ja-{width}', (width,height))

@@ -444,7 +444,6 @@ impl Render for Header {
             } else {
                 1100.
             });
-        let tiny = available <= px(1000.);
         let catalog = self.catalog;
         // Blink rounds this bundled face's hhea ascent/descent (930/-270,
         // UPEM1000) in device-scaled layout units before normal line spacing.
@@ -718,7 +717,7 @@ impl Render for Header {
                                         },
                                     ),
                             )
-                            .when(!tiny, |d| {
+                            .when(!compact, |d| {
                                 d.child(
                                     div()
                                         .when(compact, |label| label.min_w_0().truncate())
