@@ -262,7 +262,7 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,config:Option<&Path>,canc
         promoted: false,
     };
     let mut cache = config.map(|config| crate::drive_hash_cache::Cache::load(
-        config, &source, capture.local_identity.clone()));
+        config, &source, capture.local_identity.clone())).transpose()?;
     let mut doc = parsed.unwrap_or(Value::Null);
     if explicit_empty {
         let object=doc.as_object_mut().context("Invalid empty project document")?;

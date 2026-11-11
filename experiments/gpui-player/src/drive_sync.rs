@@ -100,6 +100,24 @@ pub fn run(
     progress: &impl Fn(String, f32),
     capturing: &impl Fn(Option<PathBuf>),
 ) -> Result<Report> {
+    match run_inner(remote, root, temporary_root, cancel, progress, capturing) {
+        Err(error) if crate::directory_identity::is_retry(&error) => {
+            capturing(None);
+            let dirs = drive_snapshot::scan(root, cancel)?;
+            Ok(Report { projects: dirs.len(), skipped: dirs.into_iter().map(|name| root.join(name)).collect(),
+                warnings: vec![error.to_string()], follow_up: true, ..Default::default() })
+        }
+        result => result,
+    }
+}
+fn run_inner(
+    remote: &Remote,
+    root: &Path,
+    temporary_root: &Path,
+    cancel: &impl Fn() -> bool,
+    progress: &impl Fn(String, f32),
+    capturing: &impl Fn(Option<PathBuf>),
+) -> Result<Report> {
     let remote = remote.for_run();
     let remote = &remote;
     let generation = remote.auth.store.generation();
@@ -283,7 +301,7 @@ pub fn run(
             Ok(capture) => capture,
             Err(error) => {
                 capturing(None);
-                if cancel() {
+                if cancel() || crate::directory_identity::is_retry(&error) {
                     return Err(error);
                 }
                 report.warnings.push(format!(
@@ -310,7 +328,7 @@ pub fn run(
         let prepared = capture.spool_uploads(&mut plan, cancel);
         capturing(None);
         if let Err(error) = prepared {
-            if cancel() {
+            if cancel() || crate::directory_identity::is_retry(&error) {
                 return Err(error);
             }
             report.skipped.push(root.join(name));
@@ -347,7 +365,7 @@ pub fn run(
         };
         ensure!(!cancel(), "Drive sync cancelled");
         let quiet = cache_healthy.then(|| crate::drive_publication::quiet(&publication_index,
-            &retirement_root, &binding, &capture, &plan, &admission, &remote_top, &listed_catalog)).flatten();
+            &retirement_root, &binding, &capture, &plan, &admission, &remote_top, &listed_catalog)).transpose()?.flatten();
         let is_quiet = quiet.is_some();
         let outcome = if let Some(outcome) = quiet { outcome } else {
             let handle = crate::drive_publication::prepare(remote, &retirement_root,

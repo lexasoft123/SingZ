@@ -331,7 +331,7 @@ fn catalog(
 }
 fn binding_current(remote: &Remote, binding: &Binding, cancel: &impl Fn() -> bool) -> Result<()> {
     ensure!(
-        directory_identity::read(&binding.local_root)? == binding.root_identity,
+        binding.root_identity.matches_path(&binding.local_root)?,
         "Retirement library root replaced"
     );
     let key = digest(&(
@@ -432,7 +432,7 @@ fn load(storage: &Path, binding: &Binding) -> Result<Vec<Journal>> {
             ensure!(
                 w.operation.binding.as_deref() == Some(j.binding.key.as_str())
                     && w.operation.local_root == j.binding.local_root
-                    && w.operation.root_identity == j.binding.root_identity,
+                    && w.operation.root_identity.compatible_record(&j.binding.root_identity),
                 "Retirement witness binding changed"
             );
         }
@@ -443,8 +443,8 @@ fn load(storage: &Path, binding: &Binding) -> Result<Vec<Journal>> {
         if let Some(s) = &j.source {
             validate_pruned_shape(s, &j.pruned)?;
             ensure!(
-                s.binding == j.binding
-                    && s.capture.local_identity == j.witnesses[0].operation.local_identity
+                s.binding.compatible_record(&j.binding)
+                    && s.capture.local_identity.compatible_record(&j.witnesses[0].operation.local_identity)
                     && s.project == name(&j.witnesses[0].operation.old_path)?,
                 "Retirement source changed"
             );
@@ -454,7 +454,7 @@ fn load(storage: &Path, binding: &Binding) -> Result<Vec<Journal>> {
         if j.phase == Phase::Retired {
             validate_terminal(&j)?;
         }
-        if j.binding == *binding {
+        if j.binding.matches_live(binding)? {
             journals.push(j);
         }
     }
@@ -535,7 +535,7 @@ fn resolve(
     cancel: &impl Fn() -> bool,
 ) -> Result<Option<PublicationLineage>> {
     let present = root_named(remote, binding, project, cancel)?;
-    let candidates = drive_retirement::publication_candidates(
+    let candidates = drive_retirement::publication_candidates_for_operation(
         storage,
         &binding.key,
         &binding.root_identity,
@@ -555,6 +555,7 @@ fn resolve(
         for (_, candidate) in matching {
             match verify_live(remote, storage, &candidate, cancel) {
                 Ok(s) => return Ok(Some(s)),
+                Err(e) if directory_identity::is_retry(&e) => return Err(e),
                 Err(e) => errors.push(e.to_string()),
             }
         }
@@ -856,7 +857,7 @@ pub fn run_authorized(
     let _lease = lock(storage)?;
     binding_current(remote, binding, cancel)?;
     ensure!(
-        guard.root == binding.local_root && guard.root_identity == binding.root_identity,
+        guard.root == binding.local_root && binding.root_identity.matches_live(&guard.root_identity)?,
         "Local operation guard has a different root"
     );
     local_ops.assert_unchanged(guard)?;
@@ -889,6 +890,7 @@ pub fn run_authorized(
             complete(local_ops, j)
         })();
         if let Err(e) = result {
+            if directory_identity::is_retry(&e) { return Err(e); }
             report.blocked.push(format!("{}: {e:#}", j.operation));
         }
         if j.phase == Phase::Retired || j.phase == Phase::LocalSuperseded {
@@ -935,8 +937,8 @@ pub fn run_authorized(
             prior_sequence < sequence
                 && p.kind == Kind::Rename
                 && p.destination == operation.old_path
-                && p.local_identity == operation.local_identity
-                && p.root_identity == operation.root_identity
+                && p.local_identity.compatible_record(&operation.local_identity)
+                && p.root_identity.compatible_record(&operation.root_identity)
                 && p.local_root == operation.local_root
                 && p.binding == operation.binding
                 && !completed.contains(&p.id)
@@ -946,7 +948,7 @@ pub fn run_authorized(
         }
         if operation.binding.as_deref() != Some(binding.key.as_str())
             || operation.local_root != binding.local_root
-            || operation.root_identity != binding.root_identity
+            || !operation.root_identity.matches_live(&binding.root_identity)?
         {
             report
                 .blocked
@@ -965,9 +967,9 @@ pub fn run_authorized(
                 {
                     let n = &next.operation;
                     if n.id == operation.id
-                        || n.local_identity != operation.local_identity
+                        || !operation.local_identity.compatible_record(&n.local_identity)
                         || n.binding != operation.binding
-                        || n.root_identity != operation.root_identity
+                        || !operation.root_identity.compatible_record(&n.root_identity)
                         || n.local_root != operation.local_root
                     {
                         continue;
@@ -990,7 +992,7 @@ pub fn run_authorized(
                     // endpoint witness; absence alone never creates authority.
                     match fs::symlink_metadata(&final_path) {
                         Ok(_) => ensure!(
-                            directory_identity::read(&final_path)? == operation.local_identity,
+                            operation.local_identity.matches_path(&final_path)?,
                             "Delete chain hidden payload was replaced"
                         ),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -998,7 +1000,7 @@ pub fn run_authorized(
                     }
                 } else {
                     ensure!(
-                        directory_identity::read(&final_path)? == operation.local_identity,
+                        operation.local_identity.matches_path(&final_path)?,
                         "Rename chain destination is not the captured directory"
                     );
                 }
@@ -1007,7 +1009,7 @@ pub fn run_authorized(
                 for index in 0..chain.len().saturating_sub(1) {
                     let intermediate = name(&chain[index].operation.destination)?;
                     report.protected_names.insert(intermediate.clone());
-                    let candidates = drive_retirement::publication_candidates(
+                    let candidates = drive_retirement::publication_candidates_for_operation(
                         storage,
                         &binding.key,
                         &binding.root_identity,
@@ -1128,6 +1130,7 @@ pub fn run_authorized(
                     complete(local_ops, &j)
                 })();
                 if let Err(e) = result {
+                    if directory_identity::is_retry(&e) { return Err(e); }
                     report.blocked.push(format!("{old}: {e:#}"));
                 }
                 if j.phase == Phase::Retired || j.phase == Phase::LocalSuperseded {
@@ -1139,6 +1142,7 @@ pub fn run_authorized(
                 journals.push(j);
             }
             Ok(None) => {}
+            Err(e) if directory_identity::is_retry(&e) => return Err(e),
             Err(e) => report.blocked.push(format!("{old}: {e:#}")),
         }
     }
@@ -1164,7 +1168,7 @@ pub fn run_authorized(
 
 fn admission_local(storage: &Path, binding: &Binding, project: &str,
     capture: &LocalCapture) -> Result<Vec<Journal>> {
-    ensure!(drive_plan::plain_name(project) && capture.root_identity == binding.root_identity,
+    ensure!(drive_plan::plain_name(project) && capture.root_identity.matches_live(&binding.root_identity)?,
         "Invalid destination capture");
     let journals = load(storage, binding)?;
     let config = storage
@@ -1214,7 +1218,7 @@ pub fn admit_destination(
     cancel: &impl Fn() -> bool,
 ) -> Result<()> {
     ensure!(
-        drive_plan::plain_name(project) && capture.root_identity == binding.root_identity,
+        drive_plan::plain_name(project) && capture.root_identity.matches_live(&binding.root_identity)?,
         "Invalid destination capture"
     );
     let _lease = lock(storage)?;
@@ -1259,9 +1263,12 @@ pub fn admit_destination(
     for (id, candidate) in candidates {
         if candidate.folder.entry.id == folder.id
             && relevant.iter().all(|j| !j.known_publications.contains(&id))
-            && verify_live(remote, storage, &candidate, cancel).is_ok()
         {
-            return Ok(());
+            match verify_live(remote, storage, &candidate, cancel) {
+                Ok(_) => return Ok(()),
+                Err(error) if directory_identity::is_retry(&error) => return Err(error),
+                Err(_) => {},
+            }
         }
     }
     bail!(
@@ -1505,6 +1512,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn c11b_legacy_committed_rename_finishes_and_clears_ledger() {
+        crate::directory_identity::with_test_generation(None, || {
+            let mut f = Fixture::new();
+            let old = f.publish("Song");
+            f.operation("Song", "Renamed", Kind::Rename);
+            let ledger = crate::sync_dirty::Store::new(f.base.join("preferences"));
+            assert_eq!(ledger.snapshot().unwrap().retire_ops.len(), 1);
+            crate::directory_identity::with_test_generation(Some(7), || {
+                f.binding = drive_retirement::bind(&f.remote, &f.storage, &f.root,
+                    &f.binding.singz_root, &|| false).unwrap();
+                f.publish("Renamed");
+                let done = f.run();
+                assert!(done.blocked.is_empty(), "{:?}", done.blocked);
+                assert_eq!(done.retired.len(), 1);
+                assert!(f.remote.metadata(&old.folder.entry.id, &|| false).unwrap().trashed);
+                assert!(ledger.snapshot().unwrap().retire_ops.is_empty());
+                let sequence = ledger.snapshot().unwrap().seq;
+                ledger.clear(sequence).unwrap();
+                assert!(!ledger.snapshot().unwrap().is_dirty());
+            });
+        });
+    }
+    #[test]
+    fn c11b_legacy_folder_retired_keeps_name_guard_and_finishes() {
+        crate::directory_identity::with_test_generation(None, || {
+            let mut f = Fixture::new();
+            let old = f.publish("Song");
+            f.operation("Song", ".deleted-song", Kind::Delete);
+            f.control(json!({"failNext":[{"method":"PUT","path":"/upload-session","status":503}]}));
+            let first = f.run();
+            assert!(!first.blocked.is_empty());
+            assert_eq!(load(&f.storage, &f.binding).unwrap()[0].phase, Phase::FolderRetired);
+            crate::directory_identity::with_test_generation(Some(7), || {
+                f.binding = drive_retirement::bind(&f.remote, &f.storage, &f.root,
+                    &f.binding.singz_root, &|| false).unwrap();
+                fs::create_dir(f.root.join("Song")).unwrap();
+                fs::write(f.root.join("Song/project.json"), br#"{"name":"Song","settings":{}}"#).unwrap();
+                let capture = LocalCapture { root_identity: directory_identity::read(&f.root).unwrap(),
+                    local_identity: directory_identity::read(&f.root.join("Song")).unwrap(),
+                    local_document: crate::project_store::read(&f.root.join("Song"), "project.json").unwrap().1 };
+                let history = load(&f.storage, &f.binding).unwrap();
+                assert_eq!(history.len(), 1);
+                assert!(history[0].guarded_names.contains("Song"));
+                let guarded = quiet_destination(&f.storage, &f.binding, "Song", &capture,
+                    &old.folder.entry, std::slice::from_ref(&old.folder.entry)).unwrap_err();
+                assert!(guarded.to_string().contains("unfinished local retirement intent"));
+                assert!(admit_destination(&f.remote, &f.storage, &f.binding, "Song", &capture,
+                    None, &|| false).is_err());
+                let done = f.run();
+                assert!(done.blocked.is_empty(), "{:?}", done.blocked);
+                assert_eq!(done.retired.len(), 1);
+                assert!(f.root.join("Song/project.json").exists());
+                assert!(crate::sync_dirty::Store::new(f.base.join("preferences"))
+                    .snapshot().unwrap().retire_ops.is_empty());
+            });
+        });
+    }
+    #[test]
+    fn c11b_live_generation_loss_defers_sync_without_losing_intent() {
+        crate::directory_identity::with_test_generation(Some(7), || {
+            let f = Fixture::new();
+            f.publish("Song");
+            f.operation("Song", "Renamed", Kind::Rename);
+            let ledger = crate::sync_dirty::Store::new(f.base.join("preferences"));
+            let before = ledger.snapshot().unwrap();
+            let requests = f.remote.request_count();
+            crate::directory_identity::with_test_generation(None, || {
+                let result = crate::drive_sync::run(&f.remote, &f.root,
+                    &f.base.join("preferences/gdrive/spool"), &|| false, &|_, _| {}, &|_| {}).unwrap();
+                assert!(result.follow_up);
+                assert!(result.synced.is_empty());
+                assert!(!result.warnings.is_empty());
+                assert!(result.warnings.iter().all(|message| !message.contains("replaced")));
+                assert_eq!(ledger.snapshot().unwrap().retire_ops, before.retire_ops);
+                assert_eq!(f.remote.request_count(), requests);
+            });
+            assert_eq!(f.ops.snapshot(&f.root).unwrap().entries.len(), 1);
+        });
+    }
     #[test]
     fn delete_last_project_retires_known_id_and_catalog_last_preserving_unknowns() {
         let f = Fixture::new();

@@ -94,6 +94,22 @@ fn storage_lease(storage: &Path) -> Result<crate::file_lease::Lease> {
     #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
     crate::file_lease::Lease::acquire(options.open(path)?).context("Publication lineage is being changed")
 }
+impl Binding {
+    pub(crate) fn compatible_record(&self, other: &Self) -> bool {
+        self.key == other.key && self.local_root == other.local_root && self.singz_root == other.singz_root
+            && self.root_identity.compatible_record(&other.root_identity)
+    }
+    pub(crate) fn matches_live(&self, live: &Self) -> Result<bool> {
+        Ok(self.key == live.key && self.local_root == live.local_root && self.singz_root == live.singz_root
+            && self.root_identity.matches_live(&live.root_identity)?)
+    }
+}
+impl LocalCapture {
+    pub(crate) fn matches_live(&self, live: &Self) -> Result<bool> {
+        Ok(self.local_document == live.local_document && self.root_identity.matches_live(&live.root_identity)?
+            && self.local_identity.matches_live(&live.local_identity)?)
+    }
+}
 fn remote_binding(remote: &Remote, root: &Path, singz: &str, cancel: &impl Fn()->bool) -> Result<String> {
     Ok(fingerprint(&serde_json::to_vec(&(remote.account_key(cancel)?,&remote.auth.config.api_base,&remote.auth.config.client_id,singz,root))?))
 }
@@ -107,6 +123,22 @@ pub fn bind(remote: &Remote, storage: &Path, root: &Path, singz: &str, cancel: &
     let binding=Binding{key,local_root:root,singz_root:singz.into(),root_identity};
     let _lease=storage_lease(storage)?;let directory=storage.join("bindings");private_dir(&directory)?;
     let path=directory.join(format!("{}.json",fingerprint(&serde_json::to_vec(&binding.local_root)?)));
+    if path.exists() {
+        if let Ok(previous) = serde_json::from_slice::<Binding>(&bounded(&path)?) {
+            if let Err(error) = previous.matches_live(&binding) {
+                if !directory_identity::is_retry(&error) { return Err(error); }
+                // None does not distinguish an unsupported ioctl from denial.
+                // Bound fresh binding to three consecutive stable None readings
+                // (the captured binding plus two confirmations). Persistent None
+                // falls back to the released birth-time rule; inode-reuse
+                // protection is unavailable. Existing intents still retry.
+                for _ in 0..2 {
+                    let current = directory_identity::read(&binding.local_root)?;
+                    if current != binding.root_identity { return Err(error); }
+                }
+            }
+        }
+    }
     write_record(&path,&serde_json::to_vec(&binding)?,false)?;Ok(binding)
 }
 /// Missing/stale context grants no authority. Unsafe existing state is an error.
@@ -117,7 +149,7 @@ pub fn active_binding(storage: &Path, root: &Path) -> Result<Option<String>> {
     let binding:Binding=serde_json::from_slice(&bounded(&path)?)?;
     ensure!(binding.local_root==root&&binding.key.len()==64&&!binding.singz_root.is_empty(),"Invalid cached lineage binding");
     let current=directory_identity::read(&root)?;
-    Ok((current.persistent_eligible()&&binding.root_identity.persistent_eligible()&&current==binding.root_identity).then_some(binding.key))
+    Ok((current.persistent_eligible()&&binding.root_identity.persistent_eligible()&&binding.root_identity.matches_live(&current)?).then_some(binding.key))
 }
 fn actual(remote: &Remote, expected: &RemoteEntry, cancel: &impl Fn()->bool) -> Result<Metadata> {
     let value=remote.metadata(&expected.id,cancel)?;
@@ -160,7 +192,7 @@ fn verify_roster(remote:&Remote,folder:&Metadata,members:&[Metadata],cancel:&imp
 /// Only caller-supplied planned identities/fingerprints confer ownership. Actual
 /// listings are compared to that complete roster, never promoted into the plan.
 pub fn capture_verify_publication(remote: &Remote, binding: &Binding, capture: &LocalCapture, expected: &ExpectedPublication, cancel: &impl Fn()->bool) -> Result<PublicationLineage> {
-    ensure!(capture.root_identity==binding.root_identity,"Publication captured a different library root");
+    ensure!(capture.root_identity.matches_live(&binding.root_identity)?,"Publication captured a different library root");
     ensure!(capture.local_document.len()==64&&drive_plan::plain_name(&expected.folder.name)&&expected.members.len()<=4096,"Invalid captured publication");
     ensure!(expected.folder.mime_type.as_deref()==Some(FOLDER)&&expected.folder.parents==vec![binding.singz_root.clone()],"Publication folder is outside its bound namespace");
     let generation=remote.auth.store.generation();let stop=||cancel()||remote.auth.store.generation()!=generation;
@@ -203,7 +235,7 @@ pub fn capture_verify_publication(remote: &Remote, binding: &Binding, capture: &
     Ok(PublicationLineage{version:1,binding:binding.clone(),project:folder.entry.name.clone(),capture:capture.clone(),folder,members,catalog_row:row})
 }
 pub fn record_publication(storage: &Path, lineage: &PublicationLineage) -> Result<String> {
-    ensure!(lineage.version==1&&lineage.capture.root_identity==lineage.binding.root_identity&&drive_plan::plain_name(&lineage.project)&&lineage.members.len()<=4096,"Invalid publication lineage");
+    ensure!(lineage.version==1&&lineage.capture.root_identity.compatible_record(&lineage.binding.root_identity)&&drive_plan::plain_name(&lineage.project)&&lineage.members.len()<=4096,"Invalid publication lineage");
     lineage.capture.root_identity.require_persistent()?;lineage.capture.local_identity.require_persistent()?;
     let bytes=serde_json::to_vec(lineage)?;let id=fingerprint(&bytes);let _lease=storage_lease(storage)?;let directory=storage.join("publications");private_dir(&directory)?;
     write_record(&directory.join(format!("{id}.json")),&bytes,true)?;
@@ -213,20 +245,29 @@ pub fn record_publication(storage: &Path, lineage: &PublicationLineage) -> Resul
 }
 fn identity_key(binding: &str, root: &DirectoryIdentity, project: &str, local: &DirectoryIdentity) -> Result<String> {
     ensure!(drive_plan::plain_name(project),"Unsafe lineage project identity");
-    Ok(fingerprint(&serde_json::to_vec(&(binding,root,project,local))?))
+    Ok(fingerprint(&serde_json::to_vec(&(binding,root.legacy_key(),project,local.legacy_key()))?))
 }
 /// A durable payload can precede its latest-pointer update after interruption.
 /// Callers resolving retirement must verify candidates against the exact current
 /// remote generation; neither pointer order nor a filename grants deletion.
 pub fn publication_candidates(storage:&Path,binding:&str,root:&DirectoryIdentity,project:&str,local:&DirectoryIdentity)->Result<Vec<(String,PublicationLineage)>> {
+    publication_candidates_matching(storage,binding,root,project,local,|saved|saved.matches_live(local))
+}
+/// Retirement resolves saved operation witnesses, including deleted payloads
+/// with no remaining live directory. Neither missing saved field is an ioctl
+/// failure; live admission must use publication_candidates instead.
+pub(crate) fn publication_candidates_for_operation(storage:&Path,binding:&str,root:&DirectoryIdentity,project:&str,saved_local:&DirectoryIdentity)->Result<Vec<(String,PublicationLineage)>> {
+    publication_candidates_matching(storage,binding,root,project,saved_local,|saved|Ok(saved.compatible_record(saved_local)))
+}
+fn publication_candidates_matching(storage:&Path,binding:&str,root:&DirectoryIdentity,project:&str,local:&DirectoryIdentity,matches_local:impl Fn(&DirectoryIdentity)->Result<bool>)->Result<Vec<(String,PublicationLineage)>> {
     root.require_persistent()?;local.require_persistent()?;
     if !storage.exists(){return Ok(vec![]);}ordinary_dir(storage)?;
     let directory=storage.join("publications");if !directory.exists(){return Ok(vec![]);}ordinary_dir(&directory)?;
     let mut out=vec![];for entry in fs::read_dir(&directory)? {let path=entry?.path();if path.extension().and_then(|v|v.to_str())!=Some("json"){continue;}
         let bytes=bounded(&path)?;let id=fingerprint(&bytes);ensure!(path.file_stem().and_then(|v|v.to_str())==Some(id.as_str()),"Publication lineage filename/content mismatch");let value:PublicationLineage=serde_json::from_slice(&bytes)?;
-        ensure!(value.version==1&&value.members.len()<=4096&&value.capture.root_identity==value.binding.root_identity,"Invalid publication lineage record");
+        ensure!(value.version==1&&value.members.len()<=4096&&value.capture.root_identity.compatible_record(&value.binding.root_identity),"Invalid publication lineage record");
         if !value.capture.root_identity.persistent_eligible()||!value.capture.local_identity.persistent_eligible(){continue;}
-        if value.binding.key==binding&&value.capture.root_identity==*root&&value.project==project&&value.capture.local_identity==*local {out.push((id,value));}
+        if value.binding.key==binding&&value.capture.root_identity.matches_live(root)?&&value.project==project&&matches_local(&value.capture.local_identity)? {out.push((id,value));}
     }
     let latest=storage.join("latest");if latest.exists(){ordinary_dir(&latest)?;let path=latest.join(format!("{}.json",identity_key(binding,root,project,local)?));
         if path.exists(){let id:String=serde_json::from_slice(&bounded(&path)?)?;ensure!(out.iter().any(|row|row.0==id),"Latest publication points at a missing or foreign lineage");out.sort_by_key(|row|row.0!=id);}}
@@ -259,8 +300,8 @@ pub fn recorded_publication(storage: &Path, binding: &Binding, project: &str,
     ensure!(fingerprint(&bytes) == id, "Publication lineage filename/content mismatch");
     let lineage: PublicationLineage = serde_json::from_slice(&bytes)?;
     ensure!(lineage.version == 1 && lineage.members.len() <= 4096
-        && lineage.capture.root_identity == lineage.binding.root_identity, "Invalid publication lineage record");
-    Ok((lineage.binding == *binding && lineage.project == project && lineage.capture == *capture)
+        && lineage.capture.root_identity.compatible_record(&lineage.binding.root_identity), "Invalid publication lineage record");
+    Ok((lineage.binding.matches_live(binding)? && lineage.project == project && lineage.capture.matches_live(capture)?)
         .then_some((id, lineage)))
 }
 
@@ -268,9 +309,9 @@ pub fn publications(storage: &Path, binding: &Binding) -> Result<Vec<Publication
     if !storage.exists(){return Ok(vec![]);}ordinary_dir(storage)?;let directory=storage.join("publications");if !directory.exists(){return Ok(vec![]);}ordinary_dir(&directory)?;
     let mut out=vec![];for entry in fs::read_dir(&directory)? {let path=entry?.path();if path.extension().and_then(|v|v.to_str())!=Some("json"){continue;}
         let bytes=bounded(&path)?;ensure!(path.file_stem().and_then(|v|v.to_str())==Some(fingerprint(&bytes).as_str()),"Publication lineage filename/content mismatch");let value:PublicationLineage=serde_json::from_slice(&bytes)?;
-        ensure!(value.version==1&&value.members.len()<=4096&&value.capture.root_identity==value.binding.root_identity,"Invalid publication lineage record");
+        ensure!(value.version==1&&value.members.len()<=4096&&value.capture.root_identity.compatible_record(&value.binding.root_identity),"Invalid publication lineage record");
         if !value.capture.root_identity.persistent_eligible()||!value.capture.local_identity.persistent_eligible(){continue;}
-        if value.binding==*binding {out.push(value);}
+        if value.binding.matches_live(binding)? {out.push(value);}
     }Ok(out)
 }
 
@@ -283,7 +324,7 @@ mod tests {
     struct Fixture {base:PathBuf,root:PathBuf,storage:PathBuf,remote:Remote,server:Child}
     impl Fixture {
         fn new()->Self {
-            let base=std::env::temp_dir().join(format!("singz-lineage-http-{}",crate::drive_http::random_id().unwrap()));
+            let base=Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("singz-lineage-http-{}",crate::drive_http::random_id().unwrap()));
             fs::create_dir_all(base.join("library/Song")).unwrap();let base=base.canonicalize().unwrap();let root=base.join("library");let storage=base.join("preferences/gdrive/retirements");
             let mut server=Command::new("python3").arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/drive_fixture.py")).arg(base.join("remote")).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
             let mut line=String::new();BufReader::new(server.stdout.take().unwrap()).read_line(&mut line).unwrap();let url=serde_json::from_str::<Value>(&line).unwrap()["base"].as_str().unwrap().to_owned();
@@ -319,6 +360,49 @@ mod tests {
         assert!(latest_publication(&f.storage,&binding.key,&capture.root_identity,"Renamed",&capture.local_identity).unwrap().is_none());
         assert_eq!(active_binding(&f.storage,&f.root).unwrap(),Some(binding.key.clone()));
         let old_root=f.base.join("retired-library");fs::rename(&f.root,old_root).unwrap();fs::create_dir(&f.root).unwrap();assert_eq!(active_binding(&f.storage,&f.root).unwrap(),None);
+    }
+    #[test]
+    fn stale_generation_record_does_not_defer_a_different_live_root_without_generation() {
+        directory_identity::with_test_generation(Some(7), || {
+            let f=Fixture::new();let(binding,capture,expected)=f.publish();
+            let mut receipt=capture_verify_publication(&f.remote,&binding,&capture,&expected,&||false).unwrap();
+            let mut stale=serde_json::to_value(&capture.root_identity).unwrap();
+            stale["file"]=json!(stale["file"].as_u64().unwrap()+1);
+            receipt.binding.root_identity=serde_json::from_value(stale).unwrap();
+            receipt.capture.root_identity=receipt.binding.root_identity.clone();
+            record_publication(&f.storage,&receipt).unwrap();
+            directory_identity::with_test_generation(None, || {
+                let root=directory_identity::read(&f.root).unwrap();
+                let local=directory_identity::read(&f.root.join("Song")).unwrap();
+                assert!(publication_candidates(&f.storage,&binding.key,&root,"Song",&local).unwrap().is_empty());
+                let mut live=binding.clone();live.root_identity=root;
+                assert!(publications(&f.storage,&live).unwrap().is_empty());
+            });
+        });
+    }
+    #[test]
+    fn publication_candidates_require_a_live_generation_for_a_generation_bearing_local_claim() {
+        directory_identity::with_test_generation(Some(7), || {
+            let f=Fixture::new();let(binding,capture,expected)=f.publish();
+            let receipt=capture_verify_publication(&f.remote,&binding,&capture,&expected,&||false).unwrap();
+            record_publication(&f.storage,&receipt).unwrap();
+            directory_identity::with_test_generation(None, || {
+                let local=directory_identity::read(&f.root.join("Song")).unwrap();
+                let error=publication_candidates(&f.storage,&binding.key,&capture.root_identity,"Song",&local).unwrap_err();
+                assert!(directory_identity::is_retry(&error));
+            });
+        });
+    }
+    #[test]
+    fn bind_recovers_when_generation_remains_unavailable() {
+        directory_identity::with_test_generation(Some(7), || {
+            let f=Fixture::new();let(binding,_,_)=f.publish();
+            directory_identity::with_test_generation(None, || {
+                let current=bind(&f.remote,&f.storage,&f.root,&binding.singz_root,&||false).unwrap();
+                assert_eq!(current.root_identity,directory_identity::read(&f.root).unwrap());
+                assert_eq!(active_binding(&f.storage,&f.root).unwrap(),Some(binding.key));
+            });
+        });
     }
     #[test]
     fn foreign_retained_files_and_changed_planned_bytes_cannot_gain_retirement_authority() {

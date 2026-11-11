@@ -137,10 +137,10 @@ fn warn(error: anyhow::Error) {
     WARNINGS.with(|warnings| warnings.set(warnings.get() + 1));
 }
 impl Cache {
-    pub(crate) fn load(config: &Path, project: &Path, identity: DirectoryIdentity) -> Self {
+    pub(crate) fn load(config: &Path, project: &Path, identity: DirectoryIdentity) -> Result<Self> {
         let key = if identity.persistent_eligible() {
             crate::project_store::fingerprint(
-                &serde_json::to_vec(&identity)
+                &serde_json::to_vec(&identity.legacy_key())
                     .expect("Directory identity contains only serializable scalar fields"),
             )
         } else {
@@ -173,7 +173,7 @@ impl Cache {
                 Ok(_) => {
                     let old = read(&path)?;
                     ensure!(
-                        old.identity == record.identity,
+                        old.identity.matches_live(&record.identity)?,
                         "Hash cache directory identity changed"
                     );
                     // Identity keys survive a rename; path keys must match exactly.
@@ -188,20 +188,22 @@ impl Cache {
         let mut moved = false;
         match loaded {
             Ok(Some(old)) => {
-                moved = old.project != project;
+                moved = old.project != project || old.identity != record.identity;
                 record.entries = old.entries;
             }
             Ok(None) => {}
+            // Advisory hints never defer sync, including an unverifiable generation.
+            Err(error) if crate::directory_identity::is_retry(&error) => {},
             Err(error) => warn(error),
         }
         let original = record.entries.clone();
-        Self {
+        Ok(Self {
             path,
             record,
             original,
             seen: BTreeSet::new(),
             moved,
-        }
+        })
     }
     pub(crate) fn get(&self, key: &str) -> &Value {
         self.record.entries.get(key).unwrap_or(&Value::Null)

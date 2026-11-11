@@ -27,7 +27,7 @@ fn read_remote(remote:&Remote,store:&Store,entry:&Metadata,cancel:&impl Fn()->bo
 }
 fn assert_binding(j:&Journal,r:&Request,root:&Path)->Result<()> {ensure!(j.binding==r.binding&&j.local_root==root&&j.singz_root==r.singz_root&&j.project==r.project,"Empty transaction belongs to a different account/root/project");Ok(())}
 fn local_current(j:&Journal)->Result<()> {let bytes=journal::bounded(&j.local_root.join(&j.project).join("project.json"),LIMIT)?;ensure!(crate::project_store::fingerprint(&bytes)==j.local_document,"Local Save changed; empty transaction requires recovery before publishing newer state");
-    if let Some(capture)=&j.capture {ensure!(crate::directory_identity::read(&j.local_root)?==capture.root_identity&&crate::directory_identity::read(&j.local_root.join(&j.project))?==capture.local_identity,"Local directory changed; empty transaction requires recovery before publishing a replacement");}Ok(())}
+    if let Some(capture)=&j.capture {ensure!(capture.root_identity.matches_path(&j.local_root)?&&capture.local_identity.matches_path(&j.local_root.join(&j.project))?,"Local directory changed; empty transaction requires recovery before publishing a replacement");}Ok(())}
 fn account_binding(remote:&Remote,root:&Path,singz:&str,cancel:&impl Fn()->bool)->Result<String> {
     let account=remote.account_key(cancel)?;
     Ok(crate::project_store::fingerprint(&serde_json::to_vec(&(account,&remote.auth.config.api_base,&remote.auth.config.client_id,singz,root))?))
@@ -483,7 +483,7 @@ pub fn prepare_ordinary_publication(remote:&Remote,root:&Path,journal_root:&Path
     let store=Store::open(journal_root,&binding,&root,singz,project)?;let mut j=store.read()?.context("Missing prior empty journal")?;let store=store.for_journal(&j)?;
     ensure!(captured.local_document==local_document,"Ordinary publication capture fingerprint differs from planned source");
     if let Some(prior)=&j.capture {
-        ensure!(prior.root_identity==captured.root_identity&&prior.local_identity==captured.local_identity,
+        ensure!(prior.root_identity.matches_live(&captured.root_identity)?&&prior.local_identity.matches_live(&captured.local_identity)?,
             "Committed empty publication belongs to another local directory; retire its lineage before name reuse");
     }else{
         // The caller captured these identities under the publication lease before
@@ -589,7 +589,12 @@ pub fn run(remote:&Remote,library_root:&Path,journal_root:&Path,singz_id:&str,ro
     for j in matching {
         let request=Request{binding:binding.clone(),library_root:root.clone(),journal_root:journal_root.into(),singz_root:singz_id.into(),project:j.project.clone()};
         let terminal={let base=Store::open(journal_root,&binding,&root,singz_id,&j.project)?;let store=base.for_journal(j)?;complete_proof(remote,&store,j,cancel)?.is_some()};
-        if !j.repair&&!terminal&&(j.phase==Phase::RollingBack||local_current(j).is_err()){rollback(remote,&request,cancel)?;report.changed=true;report.deferred.push(root.join(&j.project));return Ok(report);}
+        let changed = if !j.repair && !terminal && j.phase != Phase::RollingBack {
+            match local_current(j) { Ok(()) => false,
+                Err(error) if crate::directory_identity::is_retry(&error) => return Err(error),
+                Err(_) => true }
+        } else { false };
+        if !j.repair&&!terminal&&(j.phase==Phase::RollingBack||changed){rollback(remote,&request,cancel)?;report.changed=true;report.deferred.push(root.join(&j.project));return Ok(report);}
         candidates.insert(j.project.clone());
     }
     // Caller already observed the root. Refuse duplicate candidate folder names
@@ -603,8 +608,11 @@ pub fn run(remote:&Remote,library_root:&Path,journal_root:&Path,singz_id:&str,ro
         let row=receipt.catalog["projects"].as_array().and_then(|rows|rows.iter().find(|r|r["dir"]==name)).context("Verified catalog omitted empty project")?.clone();
         let local_path=root.join(&name);
         let matches=journal::bounded(&local_path.join("project.json"),LIMIT).ok().is_some_and(|bytes|crate::project_store::fingerprint(&bytes)==receipt.local_document)
-            &&receipt.publication.as_ref().is_some_and(|p|crate::directory_identity::read(&local_path).ok().as_ref()==Some(&p.capture.local_identity)
-                &&crate::directory_identity::read(&root).ok().as_ref()==Some(&p.capture.root_identity));
+            &&match &receipt.publication { Some(p) => {
+                let same = (|| -> Result<bool> { Ok(p.capture.local_identity.matches_path(&local_path)?
+                    && p.capture.root_identity.matches_path(&root)?) })();
+                match same { Ok(value) => value, Err(e) if crate::directory_identity::is_retry(&e) => return Err(e), Err(_) => false }
+            }, None => false };
         if matches&&!(receipt.repair&&changed) {report.synced.insert(local_path,receipt.local_document);}else{report.deferred.push(local_path);}
         report.rows.insert(name,row);report.changed|=changed;
         if changed {return Ok(report);}

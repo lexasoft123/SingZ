@@ -8,7 +8,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let base = std::env::temp_dir().join(format!(
+        // Use the checkout mount: container /tmp may be overlayfs without
+        // FS_IOC_GETVERSION even when the checkout is an ext4 bind mount.
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!(
             "singz-drive-snapshot-{}",
             crate::drive_http::random_id().unwrap()
         ));
@@ -491,7 +493,30 @@ fn c11_recreated_directory_does_not_inherit_old_hash() {
     )
     .unwrap();
     fixed_mtime(&project.join("stems/vocals.wav"), stamp);
-    assert_ne!(crate::directory_identity::read(&project).unwrap(), identity);
+    let current = crate::directory_identity::read(&project).unwrap();
+    #[cfg(target_os = "linux")]
+    if current == current.legacy_key() {
+        // Write directly so libtest does not hide this warning on success.
+        std::io::Write::write_all(&mut std::io::stderr().lock(), b"generation unavailable on this filesystem: inode-reuse protection not provable here\n").unwrap();
+        // Unsupported generation retains the released dev+ino+birth rule.
+        // With every released field reused, even this stale hash is reusable;
+        // asserting a rehash here would promise protection the FS cannot give.
+        assert_eq!(identity, identity.legacy_key());
+        assert_eq!(identity.matches_live(&current).unwrap(), identity == current);
+        if identity == current {
+            assert!(identity.persistent_eligible());
+            reset_digest_bytes();
+            let fallback = f.capture().unwrap();
+            assert_eq!(digest_bytes(), 0, "released identity must retain its cache behavior");
+            assert_eq!(fallback.snapshot.stems[0].md5, old_md5);
+            drop(fallback);
+            fs::remove_dir_all(&project).unwrap();
+            crate::drive_hash_cache::prune(&f.base.join("preferences"), &f.root.canonicalize().unwrap());
+            assert!(!old_cache.exists());
+            return;
+        }
+    }
+    assert_ne!(current, identity);
     reset_digest_bytes();
     let recreated = f.capture().unwrap();
     assert!(digest_bytes() > 0);
@@ -514,6 +539,72 @@ fn c11_recreated_directory_does_not_inherit_old_hash() {
     fs::remove_dir_all(&project).unwrap();
     crate::drive_hash_cache::prune(&f.base.join("preferences"), &f.root.canonicalize().unwrap());
     assert!(!new_cache.exists());
+}
+#[test]
+fn c11_legacy_linux_identity_reuses_released_hash_cache() {
+    let f = Fixture::new();
+    let project = f.root.join("Song").canonicalize().unwrap();
+    let config = f.base.join("preferences");
+    let directory = config.join("gdrive/hash-cache");
+    fs::create_dir_all(&directory).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [&config, &config.join("gdrive"), &directory] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let old: Value = serde_json::from_str(r#"{"platform":"linux","volume":168,"file":3447087,"created":{"before_epoch":false,"seconds":1794378511,"nanos":327800163}}"#).unwrap();
+    let mut current = old.clone();
+    current["generation"] = 7.into();
+    let identity: crate::directory_identity::DirectoryIdentity =
+        serde_json::from_value(current).unwrap();
+    let legacy_identity: crate::directory_identity::DirectoryIdentity = serde_json::from_value(old.clone()).unwrap();
+    let key = crate::project_store::fingerprint(&serde_json::to_vec(&legacy_identity).unwrap());
+    let path = directory.join(format!("{key}.json"));
+    // The released filename and identity remain usable after upgrading.
+    let bytes = serde_json::to_vec(&serde_json::json!({"version":1,"project":project,
+        "identity":old,"entries":{"stems/vocals.wav":{"md5":"00000000000000000000000000000000",
+        "size":21,"mtimeMs":1700000000000u64}}}))
+    .unwrap();
+    use std::io::Write;
+    crate::drive_http::private_file(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+    let cache = crate::drive_hash_cache::Cache::load(&config, &project, identity.clone()).unwrap();
+    assert!(
+        cache.get("stems/vocals.wav")["md5"] == "00000000000000000000000000000000",
+        "legacy identity must retain released cache behavior"
+    );
+    let mut strong_record: Value = serde_json::from_slice(&bytes).unwrap();
+    strong_record["identity"]["generation"] = 8.into();
+    fs::write(&path, serde_json::to_vec(&strong_record).unwrap()).unwrap();
+    let changed = crate::drive_hash_cache::Cache::load(&config, &project, identity.clone()).unwrap();
+    assert!(changed.get("stems/vocals.wav").is_null(), "Two differing generations must force a digest");
+    strong_record["identity"]["generation"] = 7.into();
+    let strong_bytes = serde_json::to_vec(&strong_record).unwrap();
+    fs::write(&path, &strong_bytes).unwrap();
+    let weak = serde_json::from_value(old).unwrap();
+    let unavailable = crate::drive_hash_cache::Cache::load(&config, &project, weak).unwrap();
+    assert!(unavailable.get("stems/vocals.wav").is_null(),
+        "An unverifiable advisory cache must miss without deferring sync");
+    assert_eq!(fs::read(&path).unwrap(), strong_bytes);
+}
+#[test]
+fn c11_cache_generation_loss_rehashes_instead_of_deferring_capture() {
+    crate::directory_identity::with_test_generation(Some(7), || {
+        let f = Fixture::new();
+        let first = f.capture().unwrap();
+        let md5 = first.snapshot.stems[0].md5.clone();
+        drop(first);
+        crate::directory_identity::with_test_generation(None, || {
+            reset_digest_bytes();
+            let current = f.capture().unwrap();
+            assert!(digest_bytes() > 0);
+            assert_eq!(current.snapshot.stems[0].md5, md5);
+        });
+    });
 }
 #[test]
 fn c11_disagreeing_fresh_electron_and_sidecar_entries_force_digest() {
@@ -656,7 +747,7 @@ fn c11_review_birthless_recreated_directory_with_reused_inode_is_digested() {
     assert!(!identity.persistent_eligible());
     let config = f.base.join("preferences");
     let hash = hash_value(&stem, &Value::Null, &Value::Null, &|| false).unwrap();
-    let mut cache = crate::drive_hash_cache::Cache::load(&config, &project, identity.clone());
+    let mut cache = crate::drive_hash_cache::Cache::load(&config, &project, identity.clone()).unwrap();
     cache.remember("stems/vocals.wav".into(), hash.clone());
     cache.save();
     let directory = config.join("gdrive/hash-cache");
@@ -686,7 +777,7 @@ fn c11_review_birthless_recreated_directory_with_reused_inode_is_digested() {
     let changed = vec![b'x'; b"immutable source audio".len()];
     fs::write(&stem, &changed).unwrap();
     fixed_mtime(&stem, 1_700_000_000_000.);
-    let cache = crate::drive_hash_cache::Cache::load(&config, &project, identity);
+    let cache = crate::drive_hash_cache::Cache::load(&config, &project, identity).unwrap();
     reset_digest_bytes();
     let current = hash_value(&stem, &Value::Null, cache.get("stems/vocals.wav"), &|| {
         false

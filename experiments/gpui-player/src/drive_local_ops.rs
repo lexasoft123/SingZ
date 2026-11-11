@@ -371,7 +371,7 @@ impl Store {
                     continue;
                 }
                 ensure!(
-                    op.root_identity == root_identity,
+                    op.root_identity.matches_live(&root_identity)?,
                     "Local operation belongs to a replaced library root"
                 );
                 let marker = |suffix: &str| -> Result<Option<u64>> {
@@ -454,7 +454,7 @@ impl Store {
             .collect::<Vec<_>>();
         let epoch = crate::project_store::fingerprint(&serde_json::to_vec(&(
             &root,
-            &root_identity,
+            &root_identity.legacy_key(),
             states,
         ))?);
         Ok(Guard {
@@ -465,8 +465,10 @@ impl Store {
         })
     }
     pub fn assert_unchanged(&self, guard: &Guard) -> Result<()> {
+        let current = self.snapshot(&guard.root)?;
+        ensure!(guard.root_identity.matches_live(&current.root_identity)?, "Local operations changed during Drive reconciliation");
         ensure!(
-            self.snapshot(&guard.root)?.epoch == guard.epoch,
+            current.epoch == guard.epoch,
             "Local operations changed during Drive reconciliation"
         );
         Ok(())
@@ -561,7 +563,7 @@ impl Store {
                         report.warnings.push(warning);
                     }
                 }
-                Err(error) if is_commit_unknown(&error) => return Err(error),
+                Err(error) if is_commit_unknown(&error) || directory_identity::is_retry(&error) => return Err(error),
                 Err(error) if busy(&error) => report.busy.push(id),
                 Err(error) => {
                     report.warnings.push(format!(
@@ -627,13 +629,13 @@ impl Prepared {
         operation.root_identity.require_persistent()?;
         operation.local_identity.require_persistent()?;
         ensure!(
-            directory_identity::read(&operation.local_root)? == operation.root_identity,
+            operation.root_identity.matches_path(&operation.local_root)?,
             "Recovery library identity changed"
         );
         let old = identity_if_present(&operation.old_path)?;
         let destination = identity_if_present(&operation.destination)?;
-        let at_old = old.as_ref() == Some(&operation.local_identity);
-        let at_destination = destination.as_ref() == Some(&operation.local_identity);
+        let at_old = old.as_ref().map(|live| operation.local_identity.matches_live(live)).transpose()?.unwrap_or(false);
+        let at_destination = destination.as_ref().map(|live| operation.local_identity.matches_live(live)).transpose()?.unwrap_or(false);
         ensure!(
             !(at_old && at_destination),
             "Project identity is visible at both operation paths"
@@ -642,11 +644,11 @@ impl Prepared {
             let _project = project_lease(&operation.old_path)?;
             crate::project_publish::recover_locked(&operation.old_path)?;
             ensure!(
-                directory_identity::read(&operation.old_path)? == operation.local_identity,
+                operation.local_identity.matches_path(&operation.old_path)?,
                 "Restored project changed during recovery"
             );
             ensure!(
-                directory_identity::read(&operation.local_root)? == operation.root_identity,
+                operation.root_identity.matches_path(&operation.local_root)?,
                 "Recovery library identity changed"
             );
             sync(&operation.local_root)?;
@@ -714,16 +716,15 @@ impl Prepared {
                 );
                 restore_exclusive(&operation.destination, &operation.old_path)?;
                 ensure!(
-                    directory_identity::read(&operation.old_path)? == operation.local_identity,
+                    operation.local_identity.matches_path(&operation.old_path)?,
                     "Restored delete project identity changed"
                 );
                 ensure!(
-                    identity_if_present(&operation.destination)?.as_ref()
-                        != Some(&operation.local_identity),
+                    !identity_if_present(&operation.destination)?.as_ref().map(|live| operation.local_identity.matches_live(live)).transpose()?.unwrap_or(false),
                     "Delete recovery left duplicate project identity"
                 );
                 ensure!(
-                    directory_identity::read(&operation.local_root)? == operation.root_identity,
+                    operation.root_identity.matches_path(&operation.local_root)?,
                     "Recovery library identity changed"
                 );
                 sync(&operation.local_root)?;
@@ -736,16 +737,15 @@ impl Prepared {
         self.operation.root_identity.require_persistent()?;
         self.operation.local_identity.require_persistent()?;
         ensure!(
-            directory_identity::read(&self.operation.local_root)? == self.operation.root_identity,
+            self.operation.root_identity.matches_path(&self.operation.local_root)?,
             "Library changed during local operation"
         );
         ensure!(
-            identity_if_present(&self.operation.old_path)?.as_ref()
-                != Some(&self.operation.local_identity),
+            !identity_if_present(&self.operation.old_path)?.as_ref().map(|live| self.operation.local_identity.matches_live(live)).transpose()?.unwrap_or(false),
             "Original project has not moved"
         );
         ensure!(
-            directory_identity::read(&self.operation.destination)? == self.operation.local_identity,
+            self.operation.local_identity.matches_path(&self.operation.destination)?,
             "Local operation destination changed"
         );
         Ok(())
@@ -792,7 +792,7 @@ impl Prepared {
     /// Abort only after the exact original directory is restored or never moved.
     pub fn abort(&self) -> Result<()> {
         ensure!(
-            directory_identity::read(&self.operation.old_path)? == self.operation.local_identity,
+            self.operation.local_identity.matches_path(&self.operation.old_path)?,
             "Cannot abort a moved local operation"
         );
         ensure!(
@@ -863,6 +863,42 @@ mod tests {
     fn restore(from: &Path, to: &Path) -> Result<()> {
         crate::project_delete::exclusive_move(from, to)?;
         Ok(())
+    }
+    #[test]
+    fn c11b_legacy_prepared_delete_rolls_back_after_upgrade() {
+        crate::directory_identity::with_test_generation(None, || {
+            let f = Fixture::new();
+            let prepared = f.prepare(Kind::Delete, ".deleted-A");
+            let id = prepared.operation.id.clone();
+            let bytes = fs::read(f.store.path().join(format!("{id}.json"))).unwrap();
+            assert!(!String::from_utf8(bytes).unwrap().contains("generation"));
+            fs::rename(&prepared.operation.old_path, &prepared.operation.destination).unwrap();
+            drop(prepared);
+            crate::directory_identity::with_test_generation(Some(7), || {
+                let ledger = sync_dirty::Store::new(f.config.clone());
+                let report = f.store.recover_prepared(&f.root, &ledger, restore).unwrap();
+                assert_eq!(report.resolved, vec![id]);
+                assert!(report.blocked.is_empty());
+                assert!(f.root.join("A/project.json").exists());
+                assert!(!f.root.join(".deleted-A").exists());
+                assert_eq!(f.store.snapshot(&f.root).unwrap().entries[0].state, State::Aborted);
+                assert!(!ledger.snapshot().unwrap().is_dirty());
+            });
+        });
+    }
+    #[test]
+    fn c11b_unsupported_generation_keeps_rename_and_delete_working() {
+        crate::directory_identity::with_test_generation(None, || {
+            for (kind, next) in [(Kind::Rename, "B"), (Kind::Delete, ".deleted-A")] {
+                let f = Fixture::new();
+                let prepared = f.prepare(kind, next);
+                fs::rename(&prepared.operation.old_path, &prepared.operation.destination).unwrap();
+                let ledger = sync_dirty::Store::new(f.config.clone());
+                let committed = prepared.commit(&ledger).unwrap();
+                assert!(ledger.snapshot().unwrap().retire_ops.contains_key(&committed.operation.id));
+                assert!(f.root.join(next).join("project.json").exists());
+            }
+        });
     }
     #[test]
     fn completed_history_beyond_the_old_lifetime_limit_keeps_pending_authority_visible() {

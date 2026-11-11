@@ -44,7 +44,7 @@ fn write(path:&Path,bytes:&[u8])->Result<()> {ensure!(bytes.len()as u64<=LIMIT,"
 fn lease(path:&Path)->Result<crate::file_lease::Lease> {ordinary_dir(path)?;let file=path.join(".lock");if file.exists(){bounded(&file)?;}let mut options=OpenOptions::new();options.create(true).truncate(false).read(true).write(true);#[cfg(unix)]{use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}crate::file_lease::Lease::acquire(options.open(file)?).context("Publication transaction is busy")}
 fn save(handle:&PublicationHandle,j:&Journal)->Result<()> {write(&handle.path.join("journal.json"),&serde_json::to_vec(j)?)}
 fn read(handle:&PublicationHandle)->Result<Journal> {let j:Journal=serde_json::from_slice(&bounded(&handle.path.join("journal.json"))?)?;
-    ensure!(j.version==1&&drive_plan::plain_name(&j.project)&&j.members.len()<=4096&&j.uploads.len()<=4096&&j.trash.len()<=4096&&j.capture.root_identity==j.binding.root_identity,"Invalid publication journal");Ok(j)}
+    ensure!(j.version==1&&drive_plan::plain_name(&j.project)&&j.members.len()<=4096&&j.uploads.len()<=4096&&j.trash.len()<=4096&&j.capture.root_identity.compatible_record(&j.binding.root_identity),"Invalid publication journal");Ok(j)}
 fn handles(storage:&Path)->Result<Vec<PublicationHandle>> {let directory=storage.join("publication-transactions");if !directory.exists(){return Ok(vec![]);}ordinary_dir(&directory)?;let mut out=vec![];
     for entry in fs::read_dir(&directory)? {let entry=entry?;if entry.file_name()==".lock"{continue;}ordinary_dir(&entry.path())?;if entry.path().join("journal.json").exists(){out.push(PublicationHandle{storage:storage.into(),path:entry.path()});}}Ok(out)}
 /// One bounded read of each journal for quiet admission and pending resume.
@@ -67,17 +67,22 @@ impl JournalIndex {
 /// authority. Any uncertainty returns to the existing live protocol.
 pub(crate) fn quiet(index: &JournalIndex, storage: &Path, binding: &Binding, capture: &Capture,
     plan: &ProjectPlan, admission: &DestinationAdmission, root: &[RemoteEntry],
-    catalog: &CatalogView) -> Option<PublicationOutcome> {
+    catalog: &CatalogView) -> Result<Option<PublicationOutcome>> {
     if !plan.upload.is_empty() || !plan.trash.is_empty() || !capture.snapshot.doc_readable
-        || !capture.snapshot.stems_readable { return None; }
+        || !capture.snapshot.stems_readable { return Ok(None); }
     let origin = capture.publication_capture();
-    let folder = admission.folder.as_ref()?;
-    if !crate::drive_retire_transaction::quiet_destination(storage, binding, &plan.dir,
-        &origin, folder, root).ok()? { return None; }
-    let catalog_meta = catalog.metadata.as_ref()?;
-    let catalog_row = catalog_project_row(&catalog.document, &plan.dir).ok()??;
-    for (_, journal) in index.projects.get(&plan.dir)? {
-        if journal.binding != *binding || journal.phase != Phase::Complete || journal.capture != origin
+    let Some(folder) = admission.folder.as_ref() else { return Ok(None); };
+    match crate::drive_retire_transaction::quiet_destination(storage, binding, &plan.dir,
+        &origin, folder, root) {
+        Ok(true) => {},
+        Err(e) if crate::directory_identity::is_retry(&e) => return Err(e),
+        _ => return Ok(None),
+    }
+    let Some(catalog_meta) = catalog.metadata.as_ref() else { return Ok(None); };
+    let Some(catalog_row) = catalog_project_row(&catalog.document, &plan.dir).ok().flatten() else { return Ok(None); };
+    let Some(journals) = index.projects.get(&plan.dir) else { return Ok(None); };
+    for (_, journal) in journals {
+        if !journal.binding.matches_live(binding)? || journal.phase != Phase::Complete || !journal.capture.matches_live(&origin)?
             || journal.folder.trashed || journal.folder.entry != *folder || journal.row != catalog_row
             || journal.catalog_reserved != catalog_meta.entry.id { continue; }
         let members = journal.members.iter().map(|m| m.entry.clone()).collect::<Vec<_>>();
@@ -97,7 +102,11 @@ pub(crate) fn quiet(index: &JournalIndex, storage: &Path, binding: &Binding, cap
                 != capture.snapshot.top.len() + capture.snapshot.stems.len() { continue; }
         let persistent = origin.root_identity.persistent_eligible() && origin.local_identity.persistent_eligible();
         let (lineage_id, lineage, eligibility_warning) = if persistent {
-            let (id, recorded) = drive_retirement::recorded_publication(storage, binding, &plan.dir, &origin).ok()??;
+            let (id, recorded) = match drive_retirement::recorded_publication(storage, binding, &plan.dir, &origin) {
+                Ok(Some(value)) => value,
+                Err(e) if crate::directory_identity::is_retry(&e) => return Err(e),
+                _ => return Ok(None),
+            };
             let recorded_members = recorded.members.iter().map(|m| m.entry.clone()).collect::<Vec<_>>();
             if recorded.folder != journal.folder || recorded.catalog_row != catalog_row
                 || !drive_plan::quiet_members(&recorded_members, &admission.top, &admission.stem_files) { continue; }
@@ -107,14 +116,14 @@ pub(crate) fn quiet(index: &JournalIndex, storage: &Path, binding: &Binding, cap
                 .and_then(|_| origin.local_identity.require_persistent()).unwrap_err().to_string();
             (None, None, Some(warning))
         };
-        return Some(PublicationOutcome {
+        return Ok(Some(PublicationOutcome {
             publication: PublicationPlan { capture: origin, expected: ExpectedPublication {
                 folder: folder.clone(), members, catalog_row, catalog: catalog_meta.entry.clone() } },
             lineage, lineage_id, eligibility_warning, changed: false, uploaded: 0,
             unchanged: journal.unchanged, trashed: 0,
-        });
+        }));
     }
-    None
+    Ok(None)
 }
 
 fn observed(remote:&Remote,expected:&Metadata,cancel:&impl Fn()->bool)->Result<()> {ensure!(remote.metadata(&expected.entry.id,cancel)?==*expected,"Publication identity/content/parent changed remotely");Ok(())}
@@ -226,7 +235,7 @@ pub fn prepare(remote:&Remote,storage:&Path,binding:&Binding,capture:&mut Captur
     let base=storage.join("publication-transactions");private_dir(&base)?;let _guard=lease(&base)?;
     for handle in handles(storage)? {let j=read(&handle)?;if j.binding.key==binding.key&&j.project==plan.dir {
         ensure!(j.phase==Phase::Complete,"Finish the accepted publication before preparing another generation");
-        if plan.upload.is_empty()&&plan.trash.is_empty()&&j.capture==origin&&destination.folder.as_ref().is_some_and(|m|m.id==j.folder.entry.id) {
+        if plan.upload.is_empty()&&plan.trash.is_empty()&&j.capture.matches_live(&origin)?&&destination.folder.as_ref().is_some_and(|m|m.id==j.folder.entry.id) {
             let same=capture.snapshot.top.iter().chain(&capture.snapshot.stems).all(|local|j.members.iter().any(|m|m.entry.name==local.name&&m.entry.md5_checksum.as_deref()==Some(local.md5.as_str())&&m.entry.size.as_deref().and_then(|s|s.parse::<u64>().ok())==Some(local.size)));
             if same{return Ok(handle);}
         }
@@ -253,7 +262,7 @@ pub fn prepare(remote:&Remote,storage:&Path,binding:&Binding,capture:&mut Captur
     crate::drive_retire_transaction::admit_destination(remote,storage,binding,&j.project,&j.capture,destination.folder.as_ref().map(|m|m.id.as_str()),cancel)?;
     let source=binding.local_root.join(&j.project);let _publication_lease=crate::project_publish::lock(&source)?;
     ensure!(!cancel()&&!crate::project_publish::write_pending(&source),"Publication yielded to a local operation");
-    ensure!(crate::directory_identity::read(&binding.local_root)?==j.capture.root_identity&&crate::directory_identity::read(&source)?==j.capture.local_identity&&crate::project_store::fingerprint(&bounded(&source.join("project.json"))?)==j.capture.local_document,"Captured source changed before publication acceptance");
+    ensure!(j.capture.root_identity.matches_path(&binding.local_root)?&&j.capture.local_identity.matches_path(&source)?&&crate::project_store::fingerprint(&bounded(&source.join("project.json"))?)==j.capture.local_document,"Captured source changed before publication acceptance");
     ensure!(local_operations.snapshot(&binding.local_root)?.epoch==epoch,"Local operation changed before publication acceptance");
     save(&handle,&j)?;Ok(handle)
 }
@@ -295,7 +304,7 @@ pub fn finish(remote:&Remote,handle:&PublicationHandle,cancel:&impl Fn()->bool,p
     let _lease=lease(&handle.path)?;let mut j=read(handle)?;
     let generation=remote.auth.store.generation();let cancel=&||cancel()||remote.auth.store.generation()!=generation;
     ensure!(!cancel(),"Drive sync cancelled");
-    let binding=drive_retirement::bind(remote,&handle.storage,&j.binding.local_root,&j.binding.singz_root,cancel)?;ensure!(binding==j.binding,"Publication account or root binding changed");
+    let binding=drive_retirement::bind(remote,&handle.storage,&j.binding.local_root,&j.binding.singz_root,cancel)?;ensure!(j.binding.matches_live(&binding)?,"Publication account or root binding changed");
     let already_complete=j.phase==Phase::Complete;
     if !already_complete {
         namespace(remote,&j,true,cancel)?;accepted_roster(remote,&j,cancel)?;j.phase=Phase::Writing;save(handle,&j)?;
@@ -319,14 +328,14 @@ pub fn resume_pending(remote:&Remote,storage:&Path,binding:&Binding,cancel:&impl
     let index=JournalIndex::load(storage)?;resume_indexed(remote,&index,binding,cancel,progress)
 }
 pub fn resume_indexed(remote:&Remote,index:&JournalIndex,binding:&Binding,cancel:&impl Fn()->bool,progress:&impl Fn(String,f32))->Result<Vec<PublicationOutcome>>{
-    let mut outcomes=vec![];for (handle,j) in index.projects.values().flatten(){if j.binding==*binding&&j.phase!=Phase::Complete{outcomes.push(finish(remote,handle,cancel,progress)?);}}Ok(outcomes)
+    let mut outcomes=vec![];for (handle,j) in index.projects.values().flatten(){if j.phase!=Phase::Complete&&j.binding.matches_live(binding)?{outcomes.push(finish(remote,handle,cancel,progress)?);}}Ok(outcomes)
 }
 
 /// Positive prune history belongs to one captured local directory generation.
 /// The caller still verifies these exact metadata remotely before retirement.
 pub fn owned_pruned_members(storage:&Path,source:&PublicationLineage)->Result<Vec<Metadata>> {
     let mut out:BTreeMap<String,Metadata>=BTreeMap::new();
-    for handle in handles(storage)? {let j=read(&handle)?;if j.phase==Phase::Complete&&j.binding==source.binding&&j.project==source.project&&j.folder==source.folder&&j.capture.root_identity==source.capture.root_identity&&j.capture.local_identity==source.capture.local_identity {
+    for handle in handles(storage)? {let j=read(&handle)?;if j.phase==Phase::Complete&&j.binding.compatible_record(&source.binding)&&j.project==source.project&&j.folder==source.folder&&j.capture.root_identity.compatible_record(&source.capture.root_identity)&&j.capture.local_identity.compatible_record(&source.capture.local_identity) {
         for positive in j.pruned {ensure!(positive.trashed&&j.trash.iter().any(|old|old.entry==positive.entry&&!old.trashed),"Invalid positive prune history");if let Some(prior)=out.insert(positive.entry.id.clone(),positive.clone()){ensure!(prior==positive,"Conflicting prune history");}}
     }}Ok(out.into_values().collect())
 }
@@ -339,7 +348,7 @@ use std::{io::{BufRead,BufReader},process::{Child,Command,Stdio}};
     struct Fixture {base:PathBuf,root:PathBuf,storage:PathBuf,remote:Remote,server:Child}
     impl Fixture {
         fn new()->Self {
-            let base=std::env::temp_dir().join(format!("singz-publication-http-{}",crate::drive_http::random_id().unwrap()));
+            let base=Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("singz-publication-http-{}",crate::drive_http::random_id().unwrap()));
             fs::create_dir_all(base.join("library/Song")).unwrap();let base=base.canonicalize().unwrap();let root=base.join("library");let storage=base.join("preferences/gdrive/retirements");
             let mut server=Command::new("python3").arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/drive_fixture.py")).arg(base.join("remote")).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
             let mut line=String::new();BufReader::new(server.stdout.take().unwrap()).read_line(&mut line).unwrap();let url=serde_json::from_str::<Value>(&line).unwrap()["base"].as_str().unwrap().to_owned();
