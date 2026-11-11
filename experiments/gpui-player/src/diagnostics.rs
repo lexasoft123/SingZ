@@ -854,3 +854,97 @@ fn test_gate(name: &str, cancel: &impl Fn() -> bool) -> Result<()> {
 #[cfg(test)]
 #[path = "diagnostics_tests.rs"]
 mod tests;
+
+// The panic hook deliberately bypasses the diagnostic worker and its mutexes.
+// It can run while either is being unwound or while the queue is full.
+static BACKGROUND_PANIC: AtomicBool = AtomicBool::new(false);
+thread_local! { static IN_CRASH_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+pub fn install_panic_hook(directory: PathBuf, version: &'static str) -> async_channel::Receiver<()> {
+    let (sender, receiver) = async_channel::bounded(1);
+    #[cfg(any(test, feature = "ui-tests"))]
+    if std::env::var_os("SINGZ_C22_NEGATIVE_CONTROL").is_some() { return receiver; }
+    let main_thread = thread::current().id();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        IN_CRASH_HOOK.with(|active| {
+            if active.replace(true) { return; }
+            let thread = thread::current();
+            let message = info.payload().downcast_ref::<&str>().copied().map(str::to_owned)
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".into());
+            let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+            let record = serde_json::json!({
+                "version": version, "platform": std::env::consts::OS,
+                "thread": thread.name().unwrap_or("unnamed"), "message": message,
+                "location": location, "backtrace": std::backtrace::Backtrace::force_capture().to_string(),
+            });
+            let _ = write_crash(&directory, &record);
+            let fatal = thread.id() == main_thread;
+            if fatal { super::process_registry::kill_all(); }
+            else {
+                BACKGROUND_PANIC.store(true, Ordering::Release);
+                let _ = sender.try_send(());
+            }
+            previous(info);
+            if fatal { std::process::exit(101); }
+            active.set(false);
+        });
+    }));
+    receiver
+}
+fn write_crash(directory: &Path, record: &serde_json::Value) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    let now = Utc::now().timestamp_millis();
+    for n in 0..1000 {
+        let path = directory.join(format!("crash-{:013}-{}.json", now + n, std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                serde_json::to_writer(&mut file, record).map_err(std::io::Error::other)?;
+                file.write_all(b"\n")?;
+                file.sync_all()?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "crash record names exhausted"))
+}
+pub fn background_panic_pending() -> bool { BACKGROUND_PANIC.load(Ordering::Acquire) }
+pub fn take_background_panic() -> bool { BACKGROUND_PANIC.swap(false, Ordering::AcqRel) }
+
+/// Logs unreported records and marks only accepted log entries as reported.
+/// Crash records (reported or not) are retained newest-first, up to five.
+pub fn pending_crashes(directory: &Path) -> Vec<PathBuf> {
+    let Ok(items) = fs::read_dir(directory) else { return Vec::new() };
+    let mut paths: Vec<_> = items.filter_map(|entry| entry.ok()).filter_map(|e| {
+        let name = e.file_name().into_string().ok()?;
+        if !name.starts_with("crash-") || !(name.ends_with(".json") || name.ends_with(".reported")) { return None; }
+        let metadata = fs::symlink_metadata(e.path()).ok()?;
+        (metadata.file_type().is_file() && metadata.len() <= 1024 * 1024).then(|| e.path())
+    }).collect();
+    paths.sort_by(|a,b| b.file_name().cmp(&a.file_name()));
+    paths
+}
+pub fn report_crashes(paths: &[PathBuf], sink: &Sink) -> bool {
+    #[cfg(any(test, feature = "ui-tests"))]
+    if std::env::var_os("SINGZ_C22_NEGATIVE_CONTROL").is_some() { return false; }
+    let mut found = false;
+    for path in paths.iter() {
+        if path.extension().is_some_and(|s| s == "reported") { continue; }
+        let Ok(bytes) = fs::read(path) else { continue };
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        let message = record.get("message").and_then(|v| v.as_str()).unwrap_or("unknown panic");
+        let thread = record.get("thread").and_then(|v| v.as_str()).unwrap_or("unknown thread");
+        let line = format!("Previous crash on {thread}: {message}").replace(['\r', '\n'], " ");
+        if sink.log("crash", &line, Level::Error) {
+            if fs::rename(path, path.with_extension("reported")).is_ok() { found = true; }
+        }
+    }
+    for path in paths.iter().skip(5) {
+        let _ = fs::remove_file(path);
+        if path.extension().is_some_and(|s| s == "json") { let _ = fs::remove_file(path.with_extension("reported")); }
+    }
+    found
+}

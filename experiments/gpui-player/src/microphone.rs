@@ -722,6 +722,7 @@ fn bundled_pitch_model(executable: &Path) -> PathBuf {
 struct Session {
     ready: bool,
     child: Child,
+    registration: super::process_registry::Registration,
     input: ChildStdin,
     replies: Receiver<Result<Value>>,
     generation: u64,
@@ -741,7 +742,7 @@ impl Drop for Session {
             let _ = self.input.flush();
             let deadline = Instant::now() + Duration::from_millis(750);
             while Instant::now() < deadline {
-                match self.child.try_wait() {
+                match self.registration.try_wait(&mut self.child) {
                     Ok(Some(_)) => return,
                     Err(_) => break,
                     _ => {}
@@ -750,7 +751,7 @@ impl Drop for Session {
             }
         }
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.registration.wait(&mut self.child);
     }
 }
 impl Session {
@@ -817,8 +818,18 @@ impl Session {
             .stderr(Stdio::null())
             .spawn()
             .context("Cannot start native microphone service")?;
-        let input = child.stdin.take().context("Missing microphone stdin")?;
-        let stdout = child.stdout.take().context("Missing microphone stdout")?;
+        let mut registration = match super::process_registry::Registration::new(&child) {
+            Ok(registration) => registration,
+            Err(error) => { let _ = child.kill(); let _ = child.wait(); return Err(error.into()); }
+        };
+        let (input, stdout) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(input), Some(stdout)) => (input, stdout),
+            _ => {
+                let _ = child.kill();
+                let _ = registration.wait(&mut child);
+                anyhow::bail!("Missing microphone pipes");
+            }
+        };
         let (tx, rx) = mpsc::sync_channel(1);
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -842,6 +853,7 @@ impl Session {
         let mut session = Self {
             ready: false,
             child,
+            registration,
             input,
             replies: rx,
             generation,
@@ -989,7 +1001,7 @@ impl Session {
             },
             Err(error) => {
                 take.retain_if_audio();
-                let child_exited = self.child.try_wait().is_ok_and(|status| status.is_some());
+                let child_exited = self.registration.try_wait(&mut self.child).is_ok_and(|status| status.is_some());
                 let writer_finished = self
                     .recording_finish
                     .can_recover(take.publication_ready, child_exited);
@@ -1096,7 +1108,7 @@ fn worker(
                         })
                         .context("No owned training capture")?;
                     ensure!(
-                        child.child.try_wait()?.is_none(),
+                        child.registration.try_wait(&mut child.child)?.is_none(),
                         "Owned capture already exited"
                     );
                     let take = child
@@ -1130,7 +1142,7 @@ fn worker(
                         .context("No owned training capture")?;
                     let pid = child.child.id();
                     ensure!(
-                        child.child.try_wait()?.is_none(),
+                        child.registration.try_wait(&mut child.child)?.is_none(),
                         "Owned capture already exited"
                     );
                     if fail {

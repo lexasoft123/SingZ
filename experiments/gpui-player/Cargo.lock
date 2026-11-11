@@ -6276,6 +6276,7 @@ name = "singz-gpui-player"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "base64 0.22.1",
  "chrono",
  "core-foundation-sys",

@@ -3,6 +3,8 @@ import type { app as en } from '../en/app'
 import type { Translation } from '../types'
 
 export const app: Translation<typeof en> = {
+  'app.crash.previous': "SingZ son seferinde beklenmedik şekilde kapandı. Ayrıntılar günlüğe kaydedildi.",
+  'app.crash.internal': "Bir iç hata oluştu. Kayıt işlemleri tamamlandıktan sonra SingZ’yi yeniden başlatın.",
   "app.whatsNew.title": "Yenilikler",
   "app.whatsNew.fullNotes": "Tüm sürüm notları",
   "app.whatsNew.done": "Anladım",

@@ -3,6 +3,8 @@ import type { app as en } from '../en/app'
 import type { Translation } from '../types'
 
 export const app: Translation<typeof en> = {
+  'app.crash.previous': "SingZ tertutup secara tak terduga terakhir kali. Detail disimpan di log.",
+  'app.crash.internal': "Terjadi kesalahan internal. Mulai ulang SingZ setelah penyimpanan selesai.",
   "app.whatsNew.title": "Yang baru",
   "app.whatsNew.fullNotes": "Catatan rilis penuh",
   "app.whatsNew.done": "Mengerti",

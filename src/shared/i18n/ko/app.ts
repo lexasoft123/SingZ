@@ -3,6 +3,8 @@ import type { app as en } from '../en/app'
 import type { Translation } from '../types'
 
 export const app: Translation<typeof en> = {
+  'app.crash.previous': "지난번에 SingZ가 예기치 않게 종료되었습니다. 자세한 내용은 로그에 저장되었습니다.",
+  'app.crash.internal': "내부 오류가 발생했습니다. 저장이 완료되면 SingZ를 다시 시작하세요.",
   "app.whatsNew.title": "새로운 기능",
   "app.whatsNew.fullNotes": "전체 공개 메모",
   "app.whatsNew.done": "확인",

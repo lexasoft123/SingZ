@@ -499,3 +499,91 @@ fn chunk_whitespace_uses_javascript_bom_and_not_unicode_next_line_trimming() {
     assert_eq!(parsed.total, 1);
     assert_eq!(parsed.entries[0].timestamp_ms, Some(1_699_920_000_000));
 }
+
+#[test]
+fn crash_record_survives_restart_and_is_reported_once() {
+    let f = Fixture::new();
+    let config = f.config();
+    let record = serde_json::json!({"message":"test crash", "thread":"worker"});
+    let path = write_crash(&config.directory, &record).unwrap();
+    assert!(path.exists());
+    {
+        let service = Service::new(config.clone());
+        assert!(report_crashes(&pending_crashes(&config.directory), &service.sink()));
+        assert!(!report_crashes(&pending_crashes(&config.directory), &service.sink()));
+    }
+    {
+        let service = Service::new(config.clone());
+        assert!(!report_crashes(&pending_crashes(&config.directory), &service.sink()));
+    }
+    let logs: String = fs::read_dir(&config.directory).unwrap().filter_map(|entry| entry.ok())
+        .filter(|e| e.path().extension().is_some_and(|s| s == "log"))
+        .map(|e| fs::read_to_string(e.path()).unwrap()).collect();
+    assert_eq!(logs.matches("Previous crash on worker: test crash").count(), 1);
+}
+
+#[test]
+fn injected_worker_panic_records_and_keeps_process_alive() {
+    if let Some(directory) = std::env::var_os("SINGZ_TEST_CRASH_WORKER") {
+        let wake = install_panic_hook(directory.into(), "test");
+        thread::sleep(Duration::from_secs(1));
+        assert!(wake.try_recv().is_err(), "idle crash dispatcher woke without a panic");
+        assert!(thread::spawn(|| std::panic::panic_any(String::from("injected worker panic"))).join().is_err());
+        assert!(take_background_panic());
+        assert!(wake.try_recv().is_ok(), "worker panic did not wake the UI");
+        assert!(wake.try_recv().is_err(), "one panic must produce only one wake");
+        return;
+    }
+    let f = Fixture::new();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "diagnostics::tests::injected_worker_panic_records_and_keeps_process_alive", "--nocapture"])
+        .env("SINGZ_TEST_CRASH_WORKER", &f.0).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let record = fs::read_dir(&f.0).unwrap().next().unwrap().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(record.path()).unwrap()).unwrap();
+    assert_eq!(json["message"], "injected worker panic");
+    assert!(json["location"].as_str().unwrap().contains("diagnostics_tests.rs"));
+}
+
+#[cfg(unix)]
+#[test]
+fn injected_main_panic_retires_registered_child_and_closes_pipe() {
+    use std::process::{Command, Stdio};
+    if let Some(directory) = std::env::var_os("SINGZ_TEST_CRASH_MAIN") {
+        let directory = PathBuf::from(directory);
+        let _wake = install_panic_hook(directory.clone(), "test");
+        let registered = Command::new("sleep").arg("60").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let registration = super::super::process_registry::Registration::new(&registered).unwrap();
+        fs::write(directory.join("registered.pid"), registered.id().to_string()).unwrap();
+        let eof = Command::new("cat").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        fs::write(directory.join("eof.pid"), eof.id().to_string()).unwrap();
+        std::hint::black_box((&registered, &registration, &eof));
+        panic!("injected main panic");
+    }
+    let f = Fixture::new();
+    let result = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "diagnostics::tests::injected_main_panic_retires_registered_child_and_closes_pipe", "--nocapture"])
+        .env("SINGZ_TEST_CRASH_MAIN", &f.0).output().unwrap();
+    assert!(!result.status.success());
+    let pids: Vec<i32> = ["registered.pid", "eof.pid"].into_iter()
+        .map(|name| fs::read_to_string(f.0.join(name)).unwrap().parse().unwrap()).collect();
+    let started = Instant::now();
+    while pids.iter().any(|pid| unsafe { libc::kill(*pid, 0) == 0 }) && started.elapsed() < Duration::from_secs(2) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let alive: Vec<_> = pids.into_iter().filter(|pid| unsafe { libc::kill(*pid, 0) == 0 }).collect();
+    for pid in &alive { unsafe { libc::kill(*pid, libc::SIGKILL); } }
+    assert!(alive.is_empty(), "children survived: {alive:?}");
+    let crash = fs::read_dir(&f.0).unwrap().filter_map(|entry| entry.ok())
+        .find(|e| e.file_name().to_string_lossy().starts_with("crash-")).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(crash.path()).unwrap()).unwrap();
+    assert_eq!(json["message"], "injected main panic");
+}
+
+#[test]
+fn crash_notice_dispatch_has_no_periodic_timer() {
+    let source = include_str!("main.rs");
+    let start = source.find("let crash_view = view.").expect("crash dispatch start");
+    let end = source[start..].find("ui_crash::run(").expect("crash driver boundary") + start;
+    assert!(!source[start..end].contains(".timer("), "crash notice dispatch must not add a periodic timer");
+}

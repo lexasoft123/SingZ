@@ -47,6 +47,9 @@ mod audio_devices;
 mod audio_provider_host;
 mod audio_tags;
 mod diagnostics;
+mod process_registry;
+#[cfg(feature="ui-tests")]
+mod ui_crash;
 mod diagnostics_host;
 mod engine_status;
 mod engine_setup;
@@ -6162,6 +6165,10 @@ impl AssetSource for Assets {
 }
 
 fn main() {
+    let crash_events = diagnostics::install_panic_hook(audio_devices::directory().join("logs"), release_highlights::CURRENT_VERSION);
+    let previous_crashes = diagnostics::pending_crashes(&audio_devices::directory().join("logs"));
+    #[cfg(feature="ui-tests")]
+    ui_crash::before_start();
     // Keep the ui-tests marker referenced so ELF/MSVC linkers cannot discard it.
     #[cfg(feature = "ui-tests")]
     std::hint::black_box(SINGZ_GPUI_UI_TESTS_BUILD_MARKER);
@@ -6191,6 +6198,37 @@ fn main() {
         let background = std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some();
         desktop_lifecycle::install_actions(cx);
         let (window_handle, view) = desktop_lifecycle::open_player_window(cx).expect("open player");
+        let crash_view = view.clone();
+        let startup_pending = std::cell::Cell::new(!previous_crashes.is_empty());
+        let deliver_crash = std::rc::Rc::new(move |view: &Entity<Player>, cx: &mut App| {
+            if !startup_pending.get() && !diagnostics::background_panic_pending() { return; }
+            let player = view.read(cx);
+            if player.language_state.is_none() || player.notice.is_some() { return; }
+            let sink = player.diagnostics.as_ref().map(|service| service.sink());
+            if startup_pending.get() {
+                if let Some(sink) = sink {
+                    startup_pending.set(false);
+                    if diagnostics::report_crashes(&previous_crashes, &sink) {
+                        view.update(cx, |player, cx| { player.notice = Some(i18n::t("app.crash.previous")); cx.notify(); });
+                        return;
+                    }
+                }
+            }
+            if diagnostics::take_background_panic() {
+                view.update(cx, |player, cx| { player.notice = Some(i18n::t("app.crash.internal")); cx.notify(); });
+            }
+        });
+        let on_player_change = deliver_crash.clone();
+        cx.observe(&view, move |view, cx| on_player_change(&view, cx)).detach();
+        deliver_crash(&view, cx);
+        cx.spawn(async move |cx| {
+            while crash_events.recv().await.is_ok() {
+                cx.update(|cx| deliver_crash(&crash_view, cx));
+            }
+        }).detach();
+        #[cfg(feature="ui-tests")]
+        ui_crash::run(window_handle, view.clone(), cx);
+
         #[cfg(all(feature="ui-tests",target_os="macos"))]
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_DESKTOP_LIFECYCLE_TEST") {
             assert!(background&&std::env::var_os("SINGZ_MUTE").is_some());
