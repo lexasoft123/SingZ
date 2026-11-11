@@ -89,7 +89,10 @@ class ProfileTests(unittest.TestCase):
         operator = {'SINGZ_DEMUCS', 'SINGZ_GPUI_', 'SINGZ_GPUI_BACKGROUND',
                     'SINGZ_GPUI_CONFIG_DIR', 'SINGZ_GPUI_PROJECTS_ROOT', 'SINGZ_LANG',
                     'SINGZ_MODELS_DIR', 'SINGZ_MUTE', 'SINGZ_NO_SYNC',
-                    'SINGZ_NO_SYSTEM_ENGINES', 'SINGZ_PACK_DIR'}
+                    'SINGZ_NO_SYSTEM_ENGINES', 'SINGZ_PACK_DIR',
+                    # Electron's userData override; native reads it to find
+                    # Electron's stem cache, as Electron's bootstrap honours it.
+                    'SINGZ_USERDATA_DIR'}
         names = json.loads((ROOT / 'tests/shared/gpui-gated-env-names.json').read_text())
         found = {match for path in (ROOT / 'experiments/gpui-player/src').rglob('*.rs')
                  for match in re.findall(r'"(SINGZ_[A-Z0-9_]+)"', path.read_text())}

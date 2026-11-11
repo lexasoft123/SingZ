@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
+use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
@@ -399,6 +400,8 @@ fn publish_discovery(
 #[cfg(test)]
 thread_local! {
     static TEST_CACHE_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TEST_ELECTRON_STEMS_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TEST_SPLIT_ENGINE_LAUNCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_OPEN_RENDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_CACHE_EVENTS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
@@ -974,6 +977,56 @@ fn gpu_expired(
         total >= Duration::from_secs(600)
     }
 }
+fn electron_stems_root(config: &Config) -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = TEST_ELECTRON_STEMS_ROOT.with(|path| path.borrow().clone()) { return root; }
+    if let Some(root) = std::env::var_os("SINGZ_USERDATA_DIR") { return PathBuf::from(root).join("stems"); }
+    config.pack.parent().unwrap_or(&config.pack).join("stems")
+}
+fn electron_split_hash(input: &Path) -> Result<String> {
+    let mut file = File::open(input)?;
+    let mut digest = Sha1::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 { break; }
+        Sha1Digest::update(&mut digest, &buffer[..count]);
+    }
+    Ok(Sha1Digest::finalize(digest)[..8].iter().map(|byte| format!("{byte:02x}")).collect())
+}
+fn reuse_electron_split(config: &Config, dir: &Path) -> Result<bool> {
+    let raw: Value = match fs::read(dir.join("project.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(raw) => raw,
+        None => return Ok(false),
+    };
+    let Some(song) = raw["songFile"].as_str() else { return Ok(false); };
+    let source = dir.join(song);
+    let Ok(hash) = electron_split_hash(&source) else { return Ok(false); };
+    let cached = electron_stems_root(config).join(hash).join("htdemucs_6s");
+    for stem in &STEMS[..6] {
+        let path = cached.join(format!("{stem}.wav"));
+        if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+            || validate_wav(&path).is_err()
+        {
+            return Ok(false);
+        }
+    }
+    let target = dir.join("stems");
+    fs::create_dir_all(&target)?;
+    for stem in &STEMS[..6] {
+        fs::copy(cached.join(format!("{stem}.wav")), target.join(format!("{stem}.wav")))?;
+        // As the real split does: a compacted stem from an earlier split would
+        // otherwise be preferred over the fresh wav.
+        let old = target.join(format!("{stem}.flac"));
+        if old.exists() {
+            fs::remove_file(old)?;
+        }
+    }
+    Ok(true)
+}
 fn stems(
     config: &Config,
     engine: &crate::engine_status::ResolvedEngine,
@@ -984,6 +1037,10 @@ fn stems(
     progress: &mut impl FnMut(&str, f32),
     combined: bool,
 ) -> Result<()> {
+    if reuse_electron_split(config, dir)? {
+        progress("Loading stems…", 98.);
+        return Ok(());
+    }
     let onnx = matches!(
         engine,
         crate::engine_status::ResolvedEngine::Pack { onnx: true }
@@ -1044,6 +1101,8 @@ fn stems(
         let started = Instant::now();
         let mut last_chunk = Instant::now();
         let mut previous = 0.;
+        #[cfg(test)]
+        TEST_SPLIT_ENGINE_LAUNCHES.with(|count| count.set(count.get() + 1));
         let result = command_observe(
             cmd,
             serial,
@@ -2029,6 +2088,37 @@ pub(crate) fn safe_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reuses_electron_sha1_split_cache_without_relaunching_splitter() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("shared-profile");
+        fs::create_dir_all(&root).unwrap();
+        let input = fixture.0.join("song.wav");
+        let mut wav = vec![0; 45];
+        wav[..4].copy_from_slice(b"RIFF");
+        wav[8..12].copy_from_slice(b"WAVE");
+        fs::write(&input, &wav).unwrap();
+        let hash = electron_split_hash(&input).unwrap();
+        let cached = root.join(&hash).join("htdemucs_6s");
+        fs::create_dir_all(&cached).unwrap();
+        for stem in &STEMS[..6] { fs::write(cached.join(format!("{stem}.wav")), &wav).unwrap(); }
+        TEST_ELECTRON_STEMS_ROOT.with(|path| *path.borrow_mut() = Some(root));
+        TEST_SPLIT_ENGINE_LAUNCHES.with(|count| count.set(0));
+        let dir = fixture.0.join("working");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("project.json"), serde_json::to_vec(&json!({"songFile":"song.wav"})).unwrap()).unwrap();
+        fs::copy(&input, dir.join("song.wav")).unwrap();
+        // A compacted stem left by an earlier split must not outlive the reuse.
+        fs::create_dir_all(dir.join("stems")).unwrap();
+        fs::write(dir.join("stems/vocals.flac"), b"stale compacted stem").unwrap();
+        let config = Config { models: fixture.0.join("models"), pack: fixture.0.join("profile/gpu-splitter"), flavor: Flavor::AppleSilicon, entries: vec![], fixture: true };
+        let split = stems(&config, &crate::engine_status::ResolvedEngine::Pack { onnx: true }, &dir, &input, &AtomicU64::new(1), 1, &mut |_, _| {}, false);
+        assert_eq!(TEST_SPLIT_ENGINE_LAUNCHES.with(std::cell::Cell::get), 0, "cached split triggered a splitter launch");
+        split.unwrap();
+        assert!(!dir.join("stems/vocals.flac").exists(), "stale compacted stem survived the cached split");
+        assert!(validate_stem(&dir, "vocals").is_ok());
+        TEST_ELECTRON_STEMS_ROOT.with(|path| *path.borrow_mut() = None);
+    }
     #[test]
     fn c21_prunes_abandoned_copies_but_preserves_live_owners_and_bounds_admission() {
         let fixture = Fixture::new();

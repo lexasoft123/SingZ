@@ -82,6 +82,13 @@ pub fn pack_format_compatible(config: &Config, root: &Path) -> bool {
         .ok()
         .filter(|b| b.len() <= 65536)
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    if config.flavor == Flavor::Linux {
+        let arch = if cfg!(target_arch = "aarch64") { "arm64" } else if cfg!(target_arch = "x86_64") { "x64" } else { return false; };
+        let expected = format!("linux-{arch}");
+        if raw.as_ref().and_then(|value| value["target"].as_str()) != Some(expected.as_str()) {
+            return false;
+        }
+    }
     raw.as_ref()
         .and_then(|v| v["formatVersion"].as_u64())
         .unwrap_or(0)
@@ -943,6 +950,53 @@ pub fn recover_entry(config: &Config, entry: &Entry) -> Result<()> {
     let _lock = cache_lock(config, entry)?;
     recover(config, entry)
 }
+fn publish_pack(config: &Config, staging: &Path) -> Result<()> {
+    if pack_complete(config, &config.pack) {
+        remove(staging)?;
+        return Ok(());
+    }
+    ensure!(
+        !fs::symlink_metadata(&config.pack)
+            .is_ok_and(|meta| meta.is_dir() || meta.file_type().is_symlink()),
+        "An incomplete splitter pack already exists; it was left untouched"
+    );
+    ensure!(pack_complete(config, staging), "Downloaded splitter pack is incompatible with this build");
+    fs::rename(staging, &config.pack).context("Could not publish the verified splitter pack")?;
+    sync_dir(config.pack.parent().unwrap())
+}
+
+fn install_pack(
+    config: &Config,
+    part: &Part,
+    serial: &AtomicU64,
+    generation: u64,
+    progress: &mut impl FnMut(f32),
+) -> Result<()> {
+    if pack_complete(config, &config.pack) { return Ok(()); }
+    ensure!(
+        !fs::symlink_metadata(&config.pack)
+            .is_ok_and(|meta| meta.is_dir() || meta.file_type().is_symlink()),
+        "An incomplete splitter pack already exists; it was left untouched"
+    );
+    let id = token();
+    let archive = sibling(&config.pack, &id, "tar.gz");
+    let staging = sibling(&config.pack, &id, "incoming");
+    // Reserve this exact unique sibling before any cleanup can own it.
+    fs::create_dir(&staging)?;
+    let result = (|| {
+        fetch(part, &archive, config.fixture, serial, generation, |p| progress(p * 0.9))?;
+        progress(92.);
+        extract(&archive, &staging, serial, generation, progress)?;
+        ensure!(pack_complete(config, &staging), "Downloaded splitter pack is incompatible with this build");
+        cancelled(serial, generation)?;
+        publish_pack(config, &staging)?;
+        Ok(())
+    })();
+    let _ = remove(&archive);
+    if result.is_err() { let _ = remove(&staging); }
+    result
+}
+
 pub fn install(
     config: &Config,
     entry: &Entry,
@@ -953,6 +1007,12 @@ pub fn install(
     let _lock = cache_lock(config, entry)?;
     recover(config, entry)?;
     cancelled(serial, generation)?;
+    if entry.archive {
+        let part = entry.parts.first().context("Splitter pack has no archive")?;
+        install_pack(config, part, serial, generation, &mut progress)?;
+        progress(100.);
+        return Ok(());
+    }
     let id = token();
     let was_present = present(config, entry);
     let wanted: Vec<_> = entry
@@ -1166,12 +1226,97 @@ mod tests {
         assert_eq!(missing_mb(&f.0, &f.1), 3);
     }
     #[test]
+    fn linux_pack_manifest_must_match_electron_target() {
+        let f = Fixture::new();
+        let mut config = f.0.clone();
+        config.flavor = Flavor::Linux;
+        fs::create_dir_all(config.pack.join("python")).unwrap();
+        fs::write(config.pack.join("python/pack.json"), br#"{"formatVersion":10,"target":"linux-wrong"}"#).unwrap();
+        assert!(!pack_format_compatible(&config, &config.pack));
+        let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+        fs::write(config.pack.join("python/pack.json"), format!(r#"{{"formatVersion":10,"target":"linux-{arch}"}}"#)).unwrap();
+        assert!(pack_format_compatible(&config, &config.pack));
+    }
+    #[test]
+    fn foreign_incomplete_pack_is_never_used_or_removed() {
+        let f = Fixture::new();
+        let foreign = f.0.pack.join("python/partial");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("marker"), b"foreign partial install").unwrap();
+        let staging = sibling(&f.0.pack, "2-3-4", "incoming");
+        fs::create_dir_all(&staging).unwrap();
+        assert!(publish_pack(&f.0, &staging).is_err());
+        assert_eq!(fs::read(foreign.join("marker")).unwrap(), b"foreign partial install");
+        assert!(staging.exists());
+    }
+    #[test]
     fn cache_lock_is_live_os_ownership_and_is_released_on_drop() {
         let f = Fixture::new();
         let lock = cache_lock(&f.0, &f.1).unwrap();
         assert!(cache_lock(&f.0, &f.1).is_err());
         drop(lock);
         assert!(cache_lock(&f.0, &f.1).is_ok());
+    }
+    #[test]
+    fn native_install_lock_child() {
+        let Some(root) = std::env::var_os("SINGZ_TEST_NATIVE_MODEL_LOCK_ROOT") else { return; };
+        let root = PathBuf::from(root);
+        let config = Config {
+            models: root.join("models"),
+            pack: root.join("pack"),
+            flavor: Flavor::AppleSilicon,
+            entries: vec![],
+            fixture: true,
+        };
+        let entry = Entry {
+            id: "shared-pack".into(),
+            label: "Shared pack".into(),
+            description: "Fixture".into(),
+            optional: false,
+            parts: vec![],
+            archive: true,
+        };
+        let _lock = cache_lock(&config, &entry).unwrap();
+        fs::write(root.join("lock-ready"), b"held").unwrap();
+        thread::sleep(Duration::from_secs(1));
+    }
+    #[test]
+    fn concurrent_installers_serialize_on_the_shared_native_lock() {
+        use std::process::{Command, Stdio};
+        let f = Fixture::new();
+        let root = f.0.models.parent().unwrap();
+        let config = Config {
+            models: root.join("models"),
+            pack: root.join("pack"),
+            flavor: Flavor::AppleSilicon,
+            entries: vec![],
+            fixture: true,
+        };
+        let entry = Entry {
+            id: "shared-pack".into(),
+            label: "Shared pack".into(),
+            description: "Fixture".into(),
+            optional: false,
+            parts: vec![],
+            archive: true,
+        };
+        let ready = root.join("lock-ready");
+        let _ = fs::remove_file(&ready);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "model_install::tests::native_install_lock_child"])
+            .env("SINGZ_TEST_NATIVE_MODEL_LOCK_ROOT", root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(child.try_wait().unwrap().is_none(), "lock owner child exited before holding the lock");
+            assert!(Instant::now() < deadline, "lock owner child did not acquire the shared pack lock");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(cache_lock(&config, &entry).is_err(), "second installer entered while the child owned the pack lock");
+        child.wait().unwrap();
+        cache_lock(&config, &entry).expect("installer lock did not recover after owner exit");
     }
     #[test]
     fn native_child_cancellation_is_bounded_and_drains_readers() {
