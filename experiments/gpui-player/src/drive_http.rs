@@ -144,6 +144,39 @@ impl Drop for Scratch {
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 #[cfg(test)]
 thread_local! {
+    static TEST_IO_TIMINGS: Cell<[u64; 6]> = const { Cell::new([0; 6]) };
+}
+#[cfg(test)]
+pub(crate) fn test_io_timings() -> [u64; 6] {
+    TEST_IO_TIMINGS.with(Cell::get)
+}
+#[cfg(test)]
+pub(crate) fn test_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SINGZ_TEST_DRIVE_PROFILE").is_some())
+}
+#[cfg(test)]
+struct TestIoTiming(usize, Option<Instant>);
+#[cfg(test)]
+impl TestIoTiming {
+    fn new(kind: usize) -> Self {
+        Self(kind, test_profile_enabled().then(Instant::now))
+    }
+}
+#[cfg(test)]
+impl Drop for TestIoTiming {
+    fn drop(&mut self) {
+        if let Some(start) = self.1 {
+            TEST_IO_TIMINGS.with(|counts| {
+                let mut next = counts.get();
+                next[self.0] += start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                counts.set(next);
+            });
+        }
+    }
+}
+#[cfg(test)]
+thread_local! {
     static TEST_CALLER_POLL_INTERVAL: Cell<Option<Duration>> = const { Cell::new(None) };
     static TEST_WAITING: RefCell<Option<Arc<std::sync::atomic::AtomicBool>>> = const { RefCell::new(None) };
 }
@@ -394,6 +427,8 @@ impl<C: Connector> Connector for RequestConnector<C> {
         details: &ConnectionDetails<'_>,
         chained: Option<()>,
     ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
+        #[cfg(test)]
+        let _tls_timing = (details.uri.scheme_str() == Some("https")).then(|| TestIoTiming::new(2));
         let outer = TICK.with(|io| {
             let depth = io.connector_depth.get();
             io.connector_depth.set(depth + 1);
@@ -470,6 +505,8 @@ fn wait_io<T>(
     operation: impl Future<Output = std::io::Result<T>>,
     timeout: NextTimeout,
 ) -> std::result::Result<T, ureq::Error> {
+    #[cfg(test)]
+    let _timing = TestIoTiming::new(3);
     TICK.with(|io| (io.tick)())?;
     let mut timeout = timeout;
     if matches!(
@@ -508,6 +545,12 @@ fn wait_io<T>(
                         },
                         async {
                             async_io::Timer::after(poll_interval.min(left)).await;
+                            #[cfg(test)]
+                            TEST_IO_TIMINGS.with(|counts| {
+                                let mut next = counts.get();
+                                next[5] += 1;
+                                counts.set(next);
+                            });
                         },
                     )
                     .await;
@@ -528,6 +571,8 @@ impl Resolver for DriveResolver {
         config: &ureq::config::Config,
         timeout: NextTimeout,
     ) -> std::result::Result<ResolvedSocketAddrs, ureq::Error> {
+        #[cfg(test)]
+        let _timing = TestIoTiming::new(0);
         let host = DefaultResolver::host_and_port(
             uri.scheme().ok_or(ureq::Error::HostNotFound)?,
             uri.authority().ok_or(ureq::Error::HostNotFound)?,
@@ -560,6 +605,8 @@ impl<In: Transport> Connector<In> for DriveConnector {
         details: &ConnectionDetails<'_>,
         chained: Option<In>,
     ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
+        #[cfg(test)]
+        let _timing = TestIoTiming::new(1);
         if let Some(transport) = chained {
             return Ok(Some(transport.boxed()));
         }
@@ -851,6 +898,8 @@ fn request_using_agents(
     let cancelled = Cell::new(false);
     let observer_panic = ObserverPanic::default();
     let tick = || {
+        #[cfg(test)]
+        let _timing = TestIoTiming::new(4);
         if observer_panic.call(cancel)? {
             cancelled.set(true);
             return Err(ureq::Error::Io(std::io::Error::other(

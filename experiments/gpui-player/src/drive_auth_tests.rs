@@ -809,39 +809,438 @@ fn token_write_guard_reads_disk_inside_observation_debounce() {
     store.0.observer.core.pause.store(false, Ordering::Release);
 }
 
-#[test]
-fn stale_observer_fails_closed_and_does_not_resume_the_old_epoch() {
+// Pause background sampling without changing the persisted session. The HTTP
+// callback still runs, exactly as when a slow observer misses its deadline.
+fn stalled_store() -> (Directory, TokenStore, GenerationObservation) {
     let directory = Directory::new();
-    let store = TokenStore::new(&directory.0).unwrap();
-    let _observation = store.observe().unwrap();
+    let mut store = TokenStore::new(&directory.0).unwrap();
+    Arc::get_mut(&mut store.0).unwrap().lock_timeout = Duration::from_millis(80);
+    store.adopt(0, fixture_tokens("fixture-refresh")).unwrap();
     store.0.observer.core.pause.store(true, Ordering::Release);
-    let expected = store.generation();
-    let start = Instant::now();
-    while store.generation() == expected
-        && start.elapsed() <= (OBSERVATION_MAX_AGE + Duration::from_millis(500))
-    {
-        // The two-second age plus 50 ms covers one Windows 15.6 ms tick
-        // and scheduling/teardown; no timer-resolution request is required.
-        thread::sleep(Duration::from_millis(1));
-    }
-    let changed = store.generation();
-    let elapsed = start.elapsed();
-    store.0.observer.core.pause.store(false, Ordering::Release);
+    let observation = store.observe().unwrap();
+    (directory, store, observation)
+}
+fn held_request(
+    store: &TokenStore,
+    generation: u64,
+) -> (
+    mpsc::Sender<()>,
+    mpsc::Receiver<Result<Response>>,
+    thread::JoinHandle<()>,
+    thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/held", listener.local_addr().unwrap());
+    let (ready, waiting) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_request(&socket);
+        ready.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(10));
+        let _ = write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+    });
+    let store = store.clone();
+    let (done, finished) = mpsc::channel();
+    let transfer = thread::spawn(move || {
+        let result = drive_http::request(
+            Request {
+                method: "GET",
+                url: &url,
+                headers: &[],
+                body: Body::Empty,
+                destination: Destination::Bytes(512),
+                upload: false,
+                allow_loopback_http: true,
+            },
+            &|| store.generation() != generation,
+        );
+        let _ = done.send(result);
+    });
+    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+    (release, finished, server, transfer)
+}
+
+#[test]
+fn slow_verified_read_does_not_reenter_before_a_busy_receipt_read() {
+    let (_directory, store, _observation) = stalled_store();
+    let generation = store.generation();
+    store
+        .0
+        .observer
+        .core
+        .reverifying
+        .store(true, Ordering::Release);
+    SLOW_SESSION_READ.with(|delay| delay.set(OBSERVATION_MAX_AGE + Duration::from_millis(300)));
+    store.check_generation(generation).unwrap();
+    let before = AUTH_IO_COUNTS.with(|v| v.get());
+    let observed = store.generation();
+    let after = AUTH_IO_COUNTS.with(|v| v.get());
+    let held = session_lease(&store.0.path, Instant::now() + Duration::from_secs(1)).unwrap();
+    let receipt = store.persisted_generation();
+    let busy_epoch = store.generation();
+    drop(held);
+    assert_eq!(observed, generation);
     assert_eq!(
-        changed,
-        u64::MAX,
-        "an overdue observation kept authorizing the old session"
+        after, before,
+        "a completed slow read immediately reentered verification"
     );
     assert!(
-        elapsed <= (OBSERVATION_MAX_AGE + Duration::from_millis(500)),
-        "freshness fence took {elapsed:?}"
+        receipt.unwrap_err().is::<SessionBusy>(),
+        "receipt contention was not transient busy"
     );
-    wait_for(|| store.generation() != u64::MAX);
+    assert_eq!(
+        busy_epoch, generation,
+        "receipt contention retired the account"
+    );
+    assert_eq!(store.persisted_generation().unwrap(), 0);
+}
+
+#[test]
+fn request_uses_two_authoritative_reads_and_busy_preflight_sends_nothing() {
+    let (_directory, store, _observation) = stalled_store();
+    let generation = store.generation();
+    let before = AUTH_IO_COUNTS.with(|v| v.get());
+    store.check_generation(generation).unwrap();
+    let one_read = AUTH_IO_COUNTS.with(|v| v.get().0) - before.0;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request(&stream);
+        response(&mut stream, 200, "{}");
+    });
+    let client = AuthClient::new(config(&url), store.clone());
+    let request = Request {
+        method: "POST",
+        url: &url,
+        headers: &[],
+        body: Body::Bytes(b"{}"),
+        destination: Destination::Bytes(512),
+        upload: false,
+        allow_loopback_http: true,
+    };
+    let before = AUTH_IO_COUNTS.with(|v| v.get());
+    let reply = client.request(request, &|| false).unwrap();
+    let reads = AUTH_IO_COUNTS.with(|v| v.get().0) - before.0;
+    server.join().unwrap();
+    // An independent raw lease models the run-finish receipt fault. No network
+    // request may begin while the initial authoritative read is unverified.
+    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+    unused.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", unused.local_addr().unwrap());
+    let held = session_lease(&store.0.path, Instant::now() + Duration::from_secs(1)).unwrap();
+    let error = AuthClient::new(config(&url), store.clone())
+        .request(
+            Request {
+                url: &url,
+                ..request
+            },
+            &|| false,
+        )
+        .err()
+        .unwrap();
+    let no_request =
+        matches!(unused.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+    let observed = store.generation();
+    drop(held);
+    assert_eq!(reply.status, 200);
+    assert!(
+        reads <= 2 * one_read,
+        "request repeated authoritative I/O: {reads}, one read {one_read}"
+    );
+    assert!(error.is::<SessionBusy>());
+    assert!(no_request, "unverified request reached the server");
+    assert_eq!(observed, generation);
+}
+
+#[test]
+fn transient_probe_mismatch_sampler_retries_without_cancelling_request() {
+    let (_directory, store, _observation) = stalled_store();
+    let generation = store.generation();
+    let (release, finished, server, transfer) = held_request(&store, generation);
+    let core = &store.0.observer.core;
+    let before = core.checked_at.load(Ordering::Acquire);
+    PROBE_MISMATCHES.with(|remaining| remaining.set(1));
+    core.pause.store(false, Ordering::Release);
+    core.refresh();
+    core.pause.store(true, Ordering::Release);
+    let observed = store.generation();
+    let checked_at = core.checked_at.load(Ordering::Acquire);
+    PROBE_MISMATCHES.with(|remaining| remaining.set(0));
+    release.send(()).ok();
+    server.join().unwrap();
+    transfer.join().unwrap();
+    let reply = finished.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        observed, generation,
+        "transient sampler probe retired the session"
+    );
+    assert!(
+        checked_at > before,
+        "sampler did not complete its leased retry"
+    );
+    assert_eq!(reply.unwrap().status, 200);
+}
+
+#[test]
+fn transient_probe_mismatch_leased_retry_preserves_request_and_write_guard() {
+    let (_directory, store, _observation) = stalled_store();
+    let generation = store.generation();
+    let (release, finished, server, transfer) = held_request(&store, generation);
+    let original = fs::read(&store.0.path).unwrap();
+    PROBE_MISMATCHES.with(|remaining| remaining.set(1));
+    let verified = store.check_generation(generation);
+    // Two mismatches exhaust the one permitted retry. They must leave the
+    // epoch pending while preventing an unverified token write.
+    PROBE_MISMATCHES.with(|remaining| remaining.set(2));
+    let pending_write = store.adopt(generation, fixture_tokens("unverified-refresh"));
+    let observed = store.generation();
+    let unchanged = fs::read(&store.0.path).unwrap() == original;
+    PROBE_MISMATCHES.with(|remaining| remaining.set(0));
+    let recovered = store.check_generation(generation);
+    release.send(()).ok();
+    server.join().unwrap();
+    transfer.join().unwrap();
+    let reply = finished.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(
+        verified.is_ok(),
+        "one transient probe must retry under the lease: {verified:?}"
+    );
+    assert!(pending_write.is_err(), "unverified write was permitted");
+    assert_eq!(observed, generation, "unverified probe retired the session");
+    assert!(unchanged, "unverified write changed the persisted tokens");
+    assert!(
+        recovered.is_ok(),
+        "verification did not recover: {recovered:?}"
+    );
+    assert_eq!(reply.unwrap().status, 200);
+
+    // A transient probe must not hide an actual persisted account change.
+    let lease = session_lease(&store.0.path, Instant::now() + Duration::from_secs(1)).unwrap();
+    let replacement = serde_json::to_vec(&State {
+        generation: 0,
+        tokens: Some(fixture_tokens("replacement-refresh")),
+    })
+    .unwrap();
+    fs::write(&store.0.path, &replacement).unwrap();
+    drop(lease);
+    PROBE_MISMATCHES.with(|remaining| remaining.set(1));
+    assert!(store.check_generation(generation).is_err());
     assert_ne!(
         store.generation(),
-        expected,
-        "freshness recovery resurrected the cancelled epoch"
+        generation,
+        "verified account change did not fence"
     );
+    assert!(
+        store
+            .adopt_observed(0, generation, fixture_tokens("late-refresh"))
+            .is_err()
+    );
+    assert_eq!(fs::read(&store.0.path).unwrap(), replacement);
+}
+
+#[test]
+fn stalled_observer_3s_preserves_inflight_and_sync_sequence() {
+    let (_directory, store, _observation) = stalled_store();
+    let generation = store.generation();
+    let (release, finished, server, transfer) = held_request(&store, generation);
+    thread::sleep(Duration::from_secs(3));
+    let observed = store.generation();
+    release.send(()).ok();
+    server.join().unwrap();
+    transfer.join().unwrap();
+    assert_eq!(
+        observed, generation,
+        "staleness retired an unchanged session"
+    );
+    assert_eq!(
+        finished
+            .recv()
+            .unwrap()
+            .expect("stalled observer cancelled in-flight HTTP")
+            .status,
+        200
+    );
+    // A sync retains an outer epoch across multiple separately observed requests.
+    // Include a gap past the freshness ceiling with that outer observation alive.
+    thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        store.generation(),
+        generation,
+        "sync gap retired an unchanged session"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_request(&socket);
+            response(&mut socket, 200, "{}");
+        }
+    });
+    let client = AuthClient::new(config(&base), store.clone());
+    for _ in 0..3 {
+        assert_eq!(
+            client
+                .request(
+                    Request {
+                        method: "GET",
+                        url: &base,
+                        headers: &[],
+                        body: Body::Empty,
+                        destination: Destination::Bytes(512),
+                        upload: false,
+                        allow_loopback_http: true,
+                    },
+                    &|| store.generation() != generation
+                )
+                .unwrap()
+                .status,
+            200
+        );
+    }
+    server.join().unwrap();
+}
+
+#[test]
+fn stalled_observer_reverification_fences_real_change_and_rejects_writes() {
+    let (_directory, store, _observation) = stalled_store();
+    let generation = store.generation();
+    let (release, finished, server, transfer) = held_request(&store, generation);
+    thread::sleep(Duration::from_secs(3));
+    let before = store.generation();
+    // Account replacement without a generation bump must also retire the epoch.
+    let bytes = serde_json::to_vec(&State {
+        generation: 0,
+        tokens: Some(fixture_tokens("replacement-refresh")),
+    })
+    .unwrap();
+    // Model a cooperating external writer: the verifier must never sample an
+    // intermediate truncate/write while the replacement JSON is being saved.
+    let writer = TokenStore::new(&_directory.0).unwrap();
+    let held = writer.lock().unwrap();
+    fs::write(&store.0.path, &bytes).unwrap();
+    drop(held);
+    let started = Instant::now();
+    let result = finished.recv_timeout(OBSERVATION_INTERVAL + Duration::from_millis(500));
+    let elapsed = started.elapsed();
+    release.send(()).ok();
+    server.join().unwrap();
+    transfer.join().unwrap();
+    assert_eq!(
+        before, generation,
+        "unchanged stall was cancelled before the actual change"
+    );
+    assert!(
+        result
+            .expect("real session change did not cancel HTTP within the sampling bound")
+            .is_err()
+    );
+    assert!(elapsed <= OBSERVATION_INTERVAL + Duration::from_millis(500));
+    assert_ne!(store.generation(), generation);
+    assert_ne!(store.generation(), u64::MAX, "real change was not verified");
+    assert!(store.check_generation(generation).is_err());
+    assert!(
+        store
+            .adopt_observed(0, generation, fixture_tokens("late-refresh"))
+            .is_err()
+    );
+    assert_eq!(fs::read(&store.0.path).unwrap(), bytes);
+}
+
+#[test]
+fn stalled_observer_busy_reverification_waits_without_authorizing_writes() {
+    let (_directory, store, _observation) = stalled_store();
+    let generation = store.generation();
+    let (release, finished, server, transfer) = held_request(&store, generation);
+    let held = crate::file_lease::Lease::acquire(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.0.path.with_extension("lock"))
+            .unwrap(),
+    )
+    .unwrap();
+    let original = fs::read(&store.0.path).unwrap();
+    let checked_at = store.0.observer.core.checked_at.load(Ordering::Acquire);
+    thread::sleep(Duration::from_secs(3));
+    let observed = store.generation();
+    let early = finished.try_recv();
+    // Hammer the fallback through two separately constructed stores sharing one
+    // observer. Without the shared rate limit, each call waits on the busy lease.
+    let other = TokenStore::new(&_directory.0).unwrap();
+    let counts = AUTH_IO_COUNTS.with(|count| count.get());
+    let began = Instant::now();
+    for _ in 0..32 {
+        let _ = store.generation();
+        let _ = other.generation();
+    }
+    let attempts = 1 + began.elapsed().as_nanos() / OBSERVATION_INTERVAL.as_nanos();
+    let after = AUTH_IO_COUNTS.with(|count| count.get());
+    let rate_limited = (after.0 - counts.0) as u128 <= attempts * 16
+        && (after.1 - counts.1) as u128 <= attempts * 16;
+    // The observer itself resumes while verification is still blocked. It must
+    // not refresh checked_at from an unleased metadata-only sample.
+    store.0.observer.core.pause.store(false, Ordering::Release);
+    store.0.observer.core.unpark();
+    thread::sleep(OBSERVATION_INTERVAL + Duration::from_millis(500));
+    let still_unverified = store.0.observer.core.checked_at.load(Ordering::Acquire) == checked_at;
+    let write = store.adopt_observed(0, generation, fixture_tokens("unverified-refresh"));
+    let unchanged = fs::read(&store.0.path).unwrap() == original;
+    drop(held);
+    #[cfg(unix)]
+    let io_pending = if unsafe { libc::geteuid() } == 0 {
+        None // Root bypasses the permission failure used by this fixture.
+    } else {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = store.0.path.parent().unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0)).unwrap();
+        let result = store.check_generation(generation);
+        let observed = store.generation();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+        Some((result, observed))
+    };
+    // Retry after the lease frees; neither the request nor its outer run was retired.
+    let guard = store.check_generation(generation);
+    release.send(()).ok();
+    server.join().unwrap();
+    transfer.join().unwrap();
+    assert_eq!(
+        observed, generation,
+        "busy re-verification cancelled the session"
+    );
+    assert!(
+        matches!(early, Err(mpsc::TryRecvError::Empty)),
+        "unverified request did not keep waiting"
+    );
+    assert!(
+        write.unwrap_err().is::<SessionBusy>(),
+        "unverified write was not lease-gated"
+    );
+    assert!(unchanged, "unverified write changed the session file");
+    assert!(
+        still_unverified,
+        "resumed observer refreshed a stale sample without the lease"
+    );
+    assert!(
+        rate_limited,
+        "busy verification polled the lease in a hot loop"
+    );
+    #[cfg(unix)]
+    if let Some((result, observed)) = io_pending {
+        assert!(result.unwrap_err().is::<std::io::Error>());
+        assert_eq!(
+            observed, generation,
+            "transient I/O failure retired the epoch"
+        );
+    }
+    guard.unwrap();
+    assert_eq!(finished.recv().unwrap().unwrap().status, 200);
+    assert_eq!(store.generation(), generation);
 }
 
 #[test]

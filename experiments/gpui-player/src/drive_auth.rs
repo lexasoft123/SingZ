@@ -206,6 +206,21 @@ struct State {
 #[cfg(test)]
 thread_local! {
     static AUTH_IO_COUNTS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+    static SLOW_SESSION_READ: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+    static AUTH_LEASE_WAIT: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+    static AUTH_PHASE_TIME: std::cell::Cell<[Duration; 2]> = const { std::cell::Cell::new([Duration::ZERO; 2]) };
+}
+#[cfg(test)]
+struct AuthPhaseTiming(usize, Instant);
+#[cfg(test)]
+impl Drop for AuthPhaseTiming {
+    fn drop(&mut self) {
+        AUTH_PHASE_TIME.with(|time| {
+            let mut next = time.get();
+            next[self.0] += self.1.elapsed();
+            time.set(next);
+        });
+    }
 }
 #[inline]
 fn note_auth_fs() {
@@ -213,6 +228,18 @@ fn note_auth_fs() {
     AUTH_IO_COUNTS.with(|count| {
         let (fs, locks) = count.get();
         count.set((fs + 1, locks));
+        static DELAY: OnceLock<Duration> = OnceLock::new();
+        let delay = DELAY.get_or_init(|| {
+            Duration::from_millis(
+                std::env::var("SINGZ_TEST_DRIVE_IO_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            )
+        });
+        if !delay.is_zero() {
+            thread::sleep(*delay);
+        }
     });
 }
 #[inline]
@@ -224,18 +251,13 @@ fn note_auth_lock() {
     });
 }
 
-// The observation epoch is an in-process cancellation fence. Persisted State's
-// generation remains the authoritative compare-and-write version. They normally
-// agree, but a failed sign-out or fail-closed observation must also retire work.
-// A short metadata stall (AV scanning or wake from sleep) must not retire an
-// unchanged session. Real changes still fence immediately when observed; two
-// seconds is the conservative fail-closed ceiling if observation cannot run.
-// This trades leased re-verification for an atomic-only cancellation check:
-// even an unchanged file cancels transfers if the observer stalls over 2 s.
-// A real change retires active work within that same 2 s ceiling (normally
-// the 200 ms sample interval), plus thread scheduling and the caller check.
+// The observation epoch is only a cancellation fence, never write permission.
+// A stale sample requests leased verification; age alone cannot retire work.
+// Normal sampling stays unleased so a real change is observed even while its
+// writer still owns the lease. Writes always re-read under that lease.
 const OBSERVATION_MAX_AGE: Duration = Duration::from_secs(2);
 const OBSERVATION_INTERVAL: Duration = Duration::from_millis(200);
+const REVERIFICATION_LEASE_WAIT: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionIdentity {
@@ -342,6 +364,19 @@ fn session_identity(meta: &fs::Metadata, _file: Option<&fs::File>) -> Result<Ses
         },
     })
 }
+#[cfg(test)]
+thread_local! {
+    // Only the exercising thread injects the Windows metadata race. Parallel
+    // fixtures and the background observer continue probing real metadata.
+    static PROBE_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(any(windows, test))]
+fn check_probe_metadata(matches: bool) -> Result<()> {
+    if !matches {
+        return Err(SessionProbeMismatch.into());
+    }
+    Ok(())
+}
 fn probe_session(path: &Path) -> Result<Option<SessionIdentity>> {
     note_auth_fs();
     let metadata = match fs::symlink_metadata(path) {
@@ -350,15 +385,22 @@ fn probe_session(path: &Path) -> Result<Option<SessionIdentity>> {
         Err(error) => return Err(error.into()),
     };
     session_metadata(&metadata)?;
+    #[cfg(test)]
+    PROBE_MISMATCHES.with(|remaining| {
+        if remaining.get() != 0 {
+            remaining.set(remaining.get() - 1);
+            check_probe_metadata(false)?;
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
     #[cfg(windows)]
     {
         let file = session_open(path)?;
         note_auth_fs();
         let opened = file.metadata()?;
-        ensure!(
+        check_probe_metadata(
             metadata.len() == opened.len() && metadata.modified().ok() == opened.modified().ok(),
-            "Drive session changed on disk"
-        );
+        )?;
         session_identity(&opened, Some(&file)).map(Some)
     }
     #[cfg(not(windows))]
@@ -367,6 +409,13 @@ fn probe_session(path: &Path) -> Result<Option<SessionIdentity>> {
     }
 }
 fn read_session(path: &Path, identity: Option<SessionIdentity>) -> Result<State> {
+    #[cfg(test)]
+    SLOW_SESSION_READ.with(|delay| {
+        let delay = delay.replace(Duration::ZERO);
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+    });
     let Some(identity) = identity else {
         return Ok(State {
             generation: 0,
@@ -423,6 +472,10 @@ struct ObservationCore {
     epoch: AtomicU64,
     invalid: AtomicBool,
     checked_at: AtomicU64,
+    // Once sampling has stalled, keep checking at the normal cadence until a
+    // successful background sample proves the observer is running again.
+    reverifying: AtomicBool,
+    next_verification_at: AtomicU64,
     active: AtomicUsize,
     signing_out: AtomicUsize,
     revision: AtomicU64,
@@ -452,6 +505,14 @@ impl ObservationCore {
                     u64::MAX
                 }
             };
+        #[cfg(test)]
+        if drive_http::test_profile_enabled() {
+            eprintln!(
+                "DRIVE_EPOCH generation={generation} invalid={} signing_out={}",
+                self.invalid.load(Ordering::Acquire),
+                self.signing_out.load(Ordering::Acquire)
+            );
+        }
         drive_http::wake_cancelled_requests();
         generation
     }
@@ -464,19 +525,43 @@ impl ObservationCore {
         if self.signing_out.load(Ordering::Acquire) != 0 {
             return u64::MAX;
         }
-        if self.active.load(Ordering::Acquire) != 0
-            && self
-                .now()
-                .saturating_sub(self.checked_at.load(Ordering::Acquire))
-                >= OBSERVATION_MAX_AGE.as_nanos() as u64
-        {
-            self.invalidate();
-            return u64::MAX;
-        }
         if self.invalid.load(Ordering::Acquire) {
             return u64::MAX;
         }
         self.epoch.load(Ordering::Acquire)
+    }
+    fn claim_verification(&self) -> bool {
+        if self.active.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+        let now = self.now();
+        if now.saturating_sub(self.checked_at.load(Ordering::Acquire))
+            >= OBSERVATION_MAX_AGE.as_nanos() as u64
+        {
+            self.reverifying.store(true, Ordering::Release);
+        }
+        // Never recursively acquire a lease from an authoritative operation.
+        if !self.reverifying.load(Ordering::Acquire)
+            || self.revision.load(Ordering::Acquire) & 1 != 0
+            // A normal authoritative read also verified the persisted stamp.
+            // Do not immediately repeat that I/O from a cancellation callback,
+            // even if the observer has not yet cleared fallback mode.
+            || now.saturating_sub(self.checked_at.load(Ordering::Acquire))
+                < OBSERVATION_INTERVAL.as_nanos() as u64
+        {
+            return false;
+        }
+        let next = self.next_verification_at.load(Ordering::Acquire);
+        now >= next
+            && self
+                .next_verification_at
+                .compare_exchange(
+                    next,
+                    now.saturating_add(OBSERVATION_INTERVAL.as_nanos() as u64),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
     }
     fn publish(
         &self,
@@ -486,6 +571,9 @@ impl ObservationCore {
         checked_at: u64,
         fenced: bool,
     ) -> Result<()> {
+        if state.generation < file.session.generation {
+            self.invalidate(); // A verified rollback is a real change.
+        }
         ensure!(
             state.generation >= file.session.generation,
             "Drive session changed on disk"
@@ -528,8 +616,24 @@ impl ObservationCore {
         if self.pause.load(Ordering::Acquire) {
             return;
         }
-        let checked_at = self.now();
+        // A resumed observer must also verify a stale snapshot under the lease;
+        // a metadata-only sample must not hide a missed verification deadline.
+        let verify = self
+            .now()
+            .saturating_sub(self.checked_at.load(Ordering::Acquire))
+            >= OBSERVATION_MAX_AGE.as_nanos() as u64;
+        if verify && !self.claim_verification() {
+            return;
+        }
         let result = (|| -> Result<()> {
+            let _lease = if verify {
+                Some(session_lease(
+                    &self.path,
+                    Instant::now() + REVERIFICATION_LEASE_WAIT,
+                )?)
+            } else {
+                None
+            };
             note_auth_lock();
             let previous = self
                 .file
@@ -539,11 +643,33 @@ impl ObservationCore {
                 .clone();
             #[cfg(test)]
             self.probes.fetch_add(1, Ordering::Relaxed);
-            let identity = probe_session(&self.path)?;
-            let state = if identity == previous {
-                None
-            } else {
-                Some(read_session(&self.path, identity.clone())?)
+            let sample = (|| -> Result<_> {
+                let identity = probe_session(&self.path)?;
+                let state = if verify || identity != previous {
+                    Some(read_session(&self.path, identity.clone())?)
+                } else {
+                    None
+                };
+                Ok((identity, state))
+            })();
+            let (identity, state) = match sample {
+                Err(error) if error.is::<SessionProbeMismatch>() => {
+                    // A racing path/handle metadata pair is inconclusive. On
+                    // this observer thread, retry once with the lease, and
+                    // compare the persisted stamp even if metadata now agrees.
+                    let _retry_lease = if verify {
+                        None // The stale observation already holds the lease.
+                    } else {
+                        Some(session_lease(
+                            &self.path,
+                            Instant::now() + REVERIFICATION_LEASE_WAIT,
+                        )?)
+                    };
+                    let identity = probe_session(&self.path)?;
+                    let state = read_session(&self.path, identity.clone())?;
+                    (identity, Some(state))
+                }
+                result => result?,
             };
             note_auth_lock();
             let mut file = self
@@ -555,6 +681,7 @@ impl ObservationCore {
             if self.revision.load(Ordering::Acquire) != revision {
                 return Ok(());
             }
+            let checked_at = self.now();
             if let Some(state) = state {
                 self.publish(&mut file, &state, identity, checked_at, false)?;
             } else {
@@ -563,9 +690,15 @@ impl ObservationCore {
             }
             Ok(())
         })();
-        if result.is_err() && self.revision.load(Ordering::Acquire) == revision {
-            self.invalidate();
+        if self.revision.load(Ordering::Acquire) == revision {
+            match result {
+                Ok(()) => self.reverifying.store(false, Ordering::Release),
+                Err(error) if !verification_pending(&error) => self.invalidate(),
+                Err(_) => {}
+            }
         }
+        // An I/O failure or inconclusive metadata pair is not evidence of a
+        // changed session. Leave checked_at alone until verification succeeds.
     }
     fn run(&self) {
         let mut attempted_at = 0;
@@ -579,7 +712,13 @@ impl ObservationCore {
                 continue;
             }
             self.parked.store(false, Ordering::Release);
-            let latest = self.checked_at.load(Ordering::Acquire).max(attempted_at);
+            // A caller's successful fallback must not keep pushing sampling's
+            // wakeup forward. Let the resumed worker clear the fallback mode.
+            let latest = if self.reverifying.load(Ordering::Acquire) {
+                attempted_at
+            } else {
+                self.checked_at.load(Ordering::Acquire).max(attempted_at)
+            };
             let due = latest.saturating_add(OBSERVATION_INTERVAL.as_nanos() as u64);
             let now = self.now();
             if due > now {
@@ -615,6 +754,8 @@ impl SessionObserver {
                 epoch: AtomicU64::new(state.generation),
                 invalid: AtomicBool::new(false),
                 checked_at: AtomicU64::new(0),
+                reverifying: AtomicBool::new(false),
+                next_verification_at: AtomicU64::new(0),
                 active: AtomicUsize::new(0),
                 signing_out: AtomicUsize::new(0),
                 revision: AtomicU64::new(0),
@@ -637,6 +778,9 @@ impl SessionObserver {
         Ok(observer)
     }
     fn start(self: &Arc<Self>) -> Result<GenerationObservation> {
+        #[cfg(test)]
+        let _timing =
+            drive_http::test_profile_enabled().then(|| AuthPhaseTiming(1, Instant::now()));
         note_auth_lock();
         let mut worker = self
             .worker
@@ -701,6 +845,99 @@ impl std::fmt::Display for SessionBusy {
     }
 }
 impl std::error::Error for SessionBusy {}
+
+// Only the Windows path/handle size/mtime comparison uses this pending error;
+// the other session identity, safety and rollback checks remain hard fences.
+#[derive(Debug)]
+struct SessionProbeMismatch;
+impl std::fmt::Display for SessionProbeMismatch {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("Drive session changed on disk")
+    }
+}
+impl std::error::Error for SessionProbeMismatch {}
+
+fn verification_pending(error: &anyhow::Error) -> bool {
+    error.is::<SessionBusy>() || error.is::<SessionProbeMismatch>() || error.is::<std::io::Error>()
+}
+
+// The caller must hold the session lease throughout both attempts. In
+// particular, retry a mismatch in read_session's final probe as a whole read,
+// rather than authorizing a write using bytes from an inconclusive snapshot.
+fn retry_probe_under_lease<T>(mut read: impl FnMut() -> Result<T>) -> Result<T> {
+    match read() {
+        Err(error) if error.is::<SessionProbeMismatch>() => read(),
+        result => result,
+    }
+}
+
+fn session_mutex<T>(mutex: &Mutex<T>, deadline: Instant) -> Result<std::sync::MutexGuard<'_, T>> {
+    loop {
+        note_auth_lock();
+        match mutex.try_lock() {
+            Ok(state) => return Ok(state),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(SessionBusy.into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                bail!("Drive session state unavailable")
+            }
+        }
+    }
+}
+
+fn session_lease(path: &Path, deadline: Instant) -> Result<crate::file_lease::Lease> {
+    #[cfg(test)]
+    let began = Instant::now();
+    let lock_path = path.with_extension("lock");
+    note_auth_fs();
+    if let Ok(meta) = fs::symlink_metadata(&lock_path) {
+        ensure!(
+            meta.is_file() && !meta.file_type().is_symlink(),
+            "Unsafe Drive session lock"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            ensure!(
+                meta.permissions().mode() & 0o077 == 0,
+                "Drive session lock is not private"
+            );
+        }
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    note_auth_fs();
+    let file = options
+        .open(lock_path)
+        .context("Could not open Drive session lock")?;
+    loop {
+        note_auth_lock();
+        note_auth_fs();
+        match crate::file_lease::Lease::acquire(file.try_clone()?) {
+            Ok(lease) => {
+                #[cfg(test)]
+                AUTH_LEASE_WAIT.with(|time| time.set(time.get() + began.elapsed()));
+                return Ok(lease);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(SessionBusy.into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error).context("Could not lock Drive session"),
+        }
+    }
+}
 
 struct Store {
     path: PathBuf,
@@ -795,92 +1032,41 @@ impl TokenStore {
         })))
     }
     fn lock(&self) -> Result<Locked<'_>> {
-        let result = self.lock_inner();
+        #[cfg(not(test))]
+        let timeout = Duration::from_secs(2);
+        #[cfg(test)]
+        let timeout = self.0.lock_timeout;
+        let result = self.lock_inner(timeout);
         if result
             .as_ref()
-            .is_err_and(|error| !error.is::<SessionBusy>())
+            .is_err_and(|error| !verification_pending(error))
         {
             self.0.observer.core.invalidate();
         }
         result
     }
-    fn lock_inner(&self) -> Result<Locked<'_>> {
-        #[cfg(not(test))]
-        let timeout = Duration::from_secs(2);
+    fn lock_inner(&self, timeout: Duration) -> Result<Locked<'_>> {
         #[cfg(test)]
-        let timeout = self.0.lock_timeout;
+        let _timing =
+            drive_http::test_profile_enabled().then(|| AuthPhaseTiming(0, Instant::now()));
         let deadline = Instant::now() + timeout;
-        let mut state = loop {
-            note_auth_lock();
-            match self.0.state.try_lock() {
-                Ok(state) => break state,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    if Instant::now() >= deadline {
-                        return Err(SessionBusy.into());
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    bail!("Drive session state unavailable")
-                }
-            }
-        };
-        let lock_path = self.0.path.with_extension("lock");
-        note_auth_fs();
-        if let Ok(meta) = fs::symlink_metadata(&lock_path) {
-            ensure!(
-                meta.is_file() && !meta.file_type().is_symlink(),
-                "Unsafe Drive session lock"
-            );
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                ensure!(
-                    meta.permissions().mode() & 0o077 == 0,
-                    "Drive session lock is not private"
-                );
-            }
-        }
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        note_auth_fs();
-        let file = options
-            .open(lock_path)
-            .context("Could not open Drive session lock")?;
-        let lease = loop {
-            note_auth_lock();
-            note_auth_fs();
-            match crate::file_lease::Lease::acquire(file.try_clone()?) {
-                Ok(lease) => break lease,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err(SessionBusy.into());
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => return Err(error).context("Could not lock Drive session"),
-            }
-        };
+        let mut state = session_mutex(&self.0.state, deadline)?;
+        let lease = session_lease(&self.0.path, deadline)?;
         // Serialize authoritative readers/writers in this process through the
         // shared observer as well as the file lease (separate TokenStore values
-        // may name the same file). The worker never holds this gate during I/O.
-        note_auth_lock();
-        let authoritative = self
-            .0
-            .observer
-            .authoritative
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Drive session state unavailable"))?;
+        // may name the same file). The sampling thread never holds this gate
+        // during I/O.
+        let authoritative = session_mutex(&self.0.observer.authoritative, deadline)?;
         self.0.observer.core.revision.fetch_add(1, Ordering::AcqRel);
         let revision = AuthoritativeRevision(&self.0.observer.core);
-        let checked_at = self.0.observer.core.now();
-        let identity = probe_session(&self.0.path)?;
-        let disk = read_session(&self.0.path, identity.clone())?;
+        let (identity, disk) = retry_probe_under_lease(|| {
+            let identity = probe_session(&self.0.path)?;
+            let disk = read_session(&self.0.path, identity.clone())?;
+            Ok((identity, disk))
+        })?;
+        if disk.generation < state.generation {
+            self.0.observer.core.invalidate();
+        }
         ensure!(
             disk.generation >= state.generation,
             "Drive session changed on disk"
@@ -889,10 +1075,13 @@ impl TokenStore {
             check_secret(&tokens.access)?;
             check_secret(&tokens.refresh)?;
         }
+        let mut observed = session_mutex(&self.0.observer.core.file, deadline)?;
+        let checked_at = self.0.observer.core.now();
         self.0
             .observer
             .core
-            .publish_authoritative(&disk, identity, checked_at, false)?;
+            .publish(&mut observed, &disk, identity, checked_at, false)?;
+        drop(observed);
         *state = disk;
         Ok(Locked {
             state,
@@ -929,12 +1118,24 @@ impl TokenStore {
         }
         result
     }
-    /// Cheap cancellation epoch; this is not permission to commit a write.
-    /// Active observers fail closed after two seconds without a verified snapshot.
-    /// Between requests this is a cached epoch: cross-process changes are
-    /// refreshed by the next observe(), before work can use the session.
+    /// Cancellation epoch, not permission to commit a write. Call on a Drive
+    /// request/service worker: after a stalled sample, one caller per 200 ms
+    /// re-reads the bounded session file with at most a 50 ms mutex/lease wait.
+    /// Steady checks remain atomic-only. An unavailable verification returns the last
+    /// epoch (not verified yet); check_generation still requires a leased read.
+    /// Between requests this is cached until observe() refreshes the session.
     pub fn generation(&self) -> u64 {
-        self.0.observer.core.generation()
+        let core = &self.0.observer.core;
+        if core.generation() != u64::MAX && core.claim_verification() {
+            // Busy leases and I/O failures leave verification pending. A
+            // completed read still publishes/fences a real or unsafe change.
+            if let Err(error) = self.lock_inner(REVERIFICATION_LEASE_WAIT) {
+                if !verification_pending(&error) {
+                    core.invalidate();
+                }
+            }
+        }
+        core.generation()
     }
     /// Persistent compare-and-write version, for receipts and durable records.
     /// This authoritative leased read is deliberately separate from cancellation.
@@ -954,8 +1155,8 @@ impl TokenStore {
         Ok(())
     }
     fn publish_write(&self, state: &State, fenced: bool) -> Result<()> {
-        let checked_at = self.0.observer.core.now();
         let identity = probe_session(&self.0.path)?;
+        let checked_at = self.0.observer.core.now();
         self.0
             .observer
             .core
@@ -1457,10 +1658,8 @@ impl AuthClient {
         cancel: &impl Fn() -> bool,
         progress: &impl Fn(u64),
     ) -> Result<Response> {
-        let _observation = self.store.observe()?;
-        let generation = self.store.generation();
-        ensure!(generation != u64::MAX, "Drive session changed");
-        let cancelled = || cancel() || self.store.generation() != generation;
+        #[cfg(test)]
+        let _timing = AuthRequestTiming::new();
         // A caller cannot redirect credentials to an arbitrary endpoint.
         let url = drive_http::validate_url(req.url, self.config.allow_loopback_http)?;
         let allowed = [&self.config.api_base, &self.config.upload_base]
@@ -1478,11 +1677,38 @@ impl AuthClient {
                 })
             });
         ensure!(allowed, "Drive request is outside configured endpoints");
+        let _observation = self.store.0.observer.start()?;
+        let mut expected = None;
         for retry in 0..2 {
-            ensure!(!cancelled(), "Drive session changed");
-            let token = self
-                .store
-                .access_token(&self.config, retry == 1, &cancelled)?;
+            // Run caller callbacks before the authoritative preflight; never
+            // hold the session mutex/lease while invoking arbitrary code.
+            ensure!(!cancel(), "Drive session changed");
+            let (generation, token) = {
+                // Supply the token and its epoch in the same leased snapshot,
+                // instead of the old observe/access_token/preflight triple read.
+                let state = self.store.lock()?;
+                let generation = self.store.generation();
+                ensure!(
+                    generation != u64::MAX && expected.is_none_or(|old| old == generation),
+                    "Drive session changed"
+                );
+                let tokens = state
+                    .tokens
+                    .as_ref()
+                    .context("Not signed in to Google Drive")?;
+                let token =
+                    (retry == 0 && now_ms() < tokens.expires_at).then(|| tokens.access.clone());
+                (generation, token)
+            };
+            expected = Some(generation);
+            let cancelled = || cancel() || self.store.generation() != generation;
+            let renewed = token.is_none();
+            let token = match token {
+                Some(token) => token,
+                None => self
+                    .store
+                    .access_token(&self.config, retry == 1, &cancelled)?,
+            };
             let authorization = format!("Bearer {token}");
             let mut headers = req
                 .headers
@@ -1491,7 +1717,12 @@ impl AuthClient {
                 .filter(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
                 .collect::<Vec<_>>();
             headers.push(("Authorization", &authorization));
-            self.store.check_generation(generation)?;
+            // Fresh tokens were just verified under the lease, with no caller
+            // callbacks since that read. Renewal involved network I/O/callbacks,
+            // so it still needs the separate leased preflight before sending.
+            if renewed {
+                self.store.check_generation(generation)?;
+            }
             let response = drive_http::request_with_progress(
                 Request {
                     method: req.method,
@@ -1515,6 +1746,52 @@ impl AuthClient {
             }
         }
         unreachable!()
+    }
+}
+
+#[cfg(test)]
+struct AuthRequestTiming {
+    start: Instant,
+    counts: (u64, u64),
+    lease: Duration,
+    network: [u64; 6],
+    phases: [Duration; 2],
+}
+#[cfg(test)]
+impl AuthRequestTiming {
+    fn new() -> Option<Self> {
+        drive_http::test_profile_enabled().then(|| Self {
+            start: Instant::now(),
+            counts: AUTH_IO_COUNTS.with(|v| v.get()),
+            lease: AUTH_LEASE_WAIT.with(|v| v.get()),
+            network: drive_http::test_io_timings(),
+            phases: AUTH_PHASE_TIME.with(|v| v.get()),
+        })
+    }
+}
+#[cfg(test)]
+impl Drop for AuthRequestTiming {
+    fn drop(&mut self) {
+        let counts = AUTH_IO_COUNTS.with(|v| v.get());
+        let lease = AUTH_LEASE_WAIT.with(|v| v.get()) - self.lease;
+        let network = drive_http::test_io_timings();
+        let delta: [u64; 6] = std::array::from_fn(|i| network[i] - self.network[i]);
+        let phases = AUTH_PHASE_TIME.with(|v| v.get());
+        eprintln!(
+            "DRIVE_TIMING total_us={} fs={} locks={} auth_us={} observer_us={} lease_us={} dns_us={} tcp_us={} tls_us={} io_wait_us={} cancel_us={} poll_wakes={}",
+            self.start.elapsed().as_micros(),
+            counts.0 - self.counts.0,
+            counts.1 - self.counts.1,
+            (phases[0] - self.phases[0]).as_micros(),
+            (phases[1] - self.phases[1]).as_micros(),
+            lease.as_micros(),
+            delta[0] / 1000,
+            delta[1] / 1000,
+            delta[2].saturating_sub(delta[1]) / 1000,
+            delta[3] / 1000,
+            delta[4] / 1000,
+            delta[5]
+        );
     }
 }
 

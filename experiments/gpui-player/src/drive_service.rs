@@ -390,6 +390,7 @@ enum ReceiptRead {
 #[cfg(test)]
 struct ReceiptReadFault {
     point: ReceiptRead,
+    started: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
 }
 #[cfg(test)]
@@ -424,6 +425,10 @@ fn receipt_generation(store: &TokenStore, _config_dir: &Path, _point: ReceiptRea
         )
         .unwrap()
     });
+    #[cfg(test)]
+    if let Some(fault) = &fault {
+        fault.started.store(true, Ordering::Release);
+    }
     let result = store.persisted_generation();
     #[cfg(test)]
     {
@@ -967,20 +972,26 @@ fn worker(
 mod tests {
     include!("drive_service_tests.rs");
 
-    fn hold_next_receipt_read(f: &Fixture, point: ReceiptRead) -> Arc<AtomicBool> {
+    struct ReceiptReadProbe {
+        started: Arc<AtomicBool>,
+        finished: Arc<AtomicBool>,
+    }
+    fn hold_next_receipt_read(f: &Fixture, point: ReceiptRead) -> ReceiptReadProbe {
+        let started = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         receipt_read_faults().lock().unwrap().insert(
             f.config.clone(),
             ReceiptReadFault {
                 point,
+                started: started.clone(),
                 finished: finished.clone(),
             },
         );
-        finished
+        ReceiptReadProbe { started, finished }
     }
-    fn wait_for_receipt_read(finished: &AtomicBool) {
+    fn wait_for_receipt_read(probe: &ReceiptReadProbe) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !finished.load(Ordering::Acquire) {
+        while !probe.finished.load(Ordering::Acquire) {
             assert!(
                 Instant::now() < deadline,
                 "receipt read never timed out under the held lease"
@@ -1038,10 +1049,20 @@ mod tests {
         let service = f.service();
         f.login(&service);
         let previous = service.snapshot().scheduler.last_sync;
+        let session = TokenStore::new(&f.config).unwrap();
+        let epoch = session.generation();
         let finished = hold_next_receipt_read(&f, ReceiptRead::RunFinish);
         f.edit(43);
         service.action(Action::SyncNow).unwrap();
+        // Sync work has its existing 12-second progress bound. The separate
+        // five-second receipt deadline measures the actual held-lease read.
+        wait(&service, |_| finished.started.load(Ordering::Acquire));
         wait_for_receipt_read(&finished);
+        assert_eq!(
+            session.generation(),
+            epoch,
+            "receipt lease contention fenced the account"
+        );
         wait(&service, |s| {
             assert_ne!(
                 s.scheduler.phase,
