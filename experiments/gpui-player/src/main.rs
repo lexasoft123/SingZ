@@ -514,11 +514,6 @@ struct Player {
     audio_provider_pending: Option<u64>,
     native_epoch: u64,
     native_rate: f32,
-    native_seek_count: u64,
-    native_loop_count: u64,
-    native_loop: Option<(f64, f64)>,
-    pending_seek: Option<(u64, f64)>,
-    native_floor: Option<(f64, u64)>,
     edit_seq: u64,
     saved_seq: u64,
     saving: bool,
@@ -609,7 +604,6 @@ struct Player {
     project: Option<integration::Project>,
     loading: bool,
     duration: f64,
-    native_anchor: Option<(f64, Instant)>,
     screen: Screen,
     #[cfg(feature = "ui-tests")]
     text_phase_check: bool,
@@ -744,7 +738,7 @@ struct Player {
     lyric_scroll_active: Rc<Cell<bool>>,
     lyric_hits: Rc<RefCell<Vec<(usize, Bounds<Pixels>)>>>,
     playing: bool,
-    position: f64,
+    playhead: transport_timing::Playhead,
     track_name_input: Entity<gpui_kit::component::input::InputState>,
     track_rename: Option<(u64,String)>,
     tracks_pending: Option<(u64,u64)>,
@@ -940,7 +934,7 @@ impl Player {
                 lyrics_editor::Event::Play=>{if !this.loading&&this.lyrics_editor_epoch==this.native_epoch{this.native_command(if this.playing{"pause"}else{"play-flat"}.into(),cx);}},
                 lyrics_editor::Event::Seek{position,play}=>{
                     if this.loading||this.lyrics_editor_epoch!=this.native_epoch{return;}
-                    this.position=*position;this.seek_native(cx);if *play&&!this.playing{this.native_command("play-flat".into(),cx);}
+                    this.playhead.seek(*position);this.seek_native(cx);if *play&&!this.playing{this.native_command("play-flat".into(),cx);}
                 }
                 lyrics_editor::Event::Align(precise,download)=>this.start_lyrics_alignment(*precise,*download,cx),
                 lyrics_editor::Event::CancelAlign=>this.cancel_lyrics_alignment(cx),
@@ -1125,7 +1119,7 @@ impl Player {
                 this.library.update(cx, |library,cx| library.set_open_song(Some(title.clone()),cx));
                 this.song_title = title.clone();
                 this.song_artist = artist.clone();
-                this.position = 0.;
+                this.playhead.seek(0.);
                 this.view_start=0.;this.view_end=1.;this.timeline.reset();
                 this.started = Instant::now();
                 this.playing = false;
@@ -1283,7 +1277,7 @@ impl Player {
             }
             match *event {
                 Play => this.toggle(cx),
-                Restart => this.position = 0.,
+                Restart => this.playhead.seek(0.),
                 Loop => this.looping = !this.looping,
                 Transpose(value) => this.transpose = value,
                 Karaoke => {
@@ -1456,11 +1450,6 @@ impl Player {
             saving: false,
             focus_player: false,
             native_rate: 1.,
-            native_seek_count: 0,
-            native_loop_count: 0,
-            native_loop: None,
-            pending_seek: None,
-            native_floor: None,
             backend,
             audio_provider: None,
             audio_provider_serial: 0,
@@ -1475,7 +1464,6 @@ impl Player {
             project: None,
             loading: false,
             duration: DURATION,
-            native_anchor: None,
             screen: if gated_env!("SINGZ_GPUI_PROFILE").is_some() {
                 Screen::Player
             } else {
@@ -1628,7 +1616,7 @@ impl Player {
             lyric_scroll_active: Rc::new(Cell::new(false)),
             lyric_hits: Rc::new(RefCell::new(vec![])),
             playing: gated_env!("SINGZ_GPUI_PROFILE").is_some(),
-            position: 64.,
+            playhead: transport_timing::Playhead::new(64.),
             track_name_input,
             track_rename: None,
             tracks_pending: None,
@@ -2104,7 +2092,7 @@ impl Player {
                 self.project.as_ref().map(|project| SourceResume {
                     restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),
                     play_serial:self.native_play_serial,
-                    position: self.position,
+                    position: self.playhead.position(),
                     playing: self.playing,
                     mode: Some(mode),
                     title: None,
@@ -2169,7 +2157,7 @@ impl Player {
                 let rollback_resume = SourceResume {
                     restart_cycle: self.restart_cycle.snapshot(self.region_target().selection, self.playing),
                     play_serial: self.native_play_serial,
-                    position: self.position,
+                    position: self.playhead.position(),
                     playing: self.playing,
                     mode: None,
                     title: None,
@@ -2214,11 +2202,11 @@ impl Player {
         }
     }
     fn resume_project_audio(&mut self, resume: SourceResume, cx: &mut Context<Self>) {
-        self.position = resume.position.clamp(0., self.duration);
+        self.playhead.seek(resume.position.clamp(0., self.duration));
         #[cfg(feature="ui-tests")]
         { self.source_seek_receipt=None; self.source_resume_probe=Some(ui_source::ResumeProbe {
-            epoch:self.native_epoch, position:self.position, at:Instant::now(),
-            initial_loop_count:self.native_loop_count, expected_seek_count:self.native_seek_count+1,
+            epoch:self.native_epoch, position:self.playhead.position(), at:Instant::now(),
+            initial_loop_count:self.playhead.loop_count(), expected_seek_count:self.playhead.seek_count()+1,
         }); }
         self.master_volume = resume.mix.master;
         self.transpose = resume.mix.transpose;
@@ -2263,12 +2251,13 @@ impl Player {
         let mut seek_queued=false;
         if self.audio_available() {
             if let Some(backend)=&self.backend {
-                match backend.restore_seek(self.native_epoch,self.position) {
-                    Ok(())=>{seek_queued=true;self.pending_seek=Some((self.native_seek_count+1,self.position));self.native_floor=Some((self.position,self.native_loop_count));},
+                match backend.restore_seek(self.native_epoch,self.playhead.position()) {
+                    Ok(())=>{seek_queued=true;self.playhead.seek_queued(Instant::now());},
                     Err(error)=>self.notice=Some(error.to_string()),
                 }
             }
         }
+        if !seek_queued { self.playhead.seek_refused(); }
         // A newer explicit Pause (for example opening Catalog during Rename)
         // supersedes the playing intent captured before this native handoff.
         if resume.playing && seek_queued && resume.play_serial==self.native_play_serial {
@@ -2352,7 +2341,7 @@ impl Player {
         let resume = SourceResume {
             restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),
             play_serial:self.native_play_serial,
-            position: self.position,
+            position: self.playhead.position(),
             playing: self.playing,
             mode: None,
             title: None,
@@ -2405,12 +2394,12 @@ impl Player {
         self.cancel_sidebar_lyrics(cx);self.lyrics_search_pending=None;
         if let Some(backend)=&self.backend{backend.cancel_lyrics_search();}
         let (Some(backend),Some(project),Some(root))=(&self.backend,&self.project,self.library_import_root.clone())else{return;};
-        let resume=SourceResume{restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),play_serial:self.native_play_serial,position:self.position,playing:self.playing,mode:None,title:None,dirty:self.edit_seq!=self.saved_seq,mix:self.current_mix(project)};
+        let resume=SourceResume{restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),play_serial:self.native_play_serial,position:self.playhead.position(),playing:self.playing,mode:None,title:None,dirty:self.edit_seq!=self.saved_seq,mix:self.current_mix(project)};
         match backend.import_library(project,root,mode){
             Ok(epoch)=>{self.native_epoch=epoch;self.import_pending=Some(ImportPending{epoch,resume,mode});
                 self.beat_job=None;self.beat_result=None;
                 self.library_import.update(cx,|s,cx|s.set_busy(true,cx));
-                if mode==project_import::Mode::Move{self.playing=false;self.native_anchor=None;}
+                if mode==project_import::Mode::Move{self.playing=false;self.playhead.stop_projection();}
             },
             Err(error)=>{self.library_import_open=false;self.library_import.update(cx,|s,cx|s.set_busy(false,cx));self.notice=Some(error.to_string());},
         }
@@ -2663,7 +2652,7 @@ impl Player {
                     self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
                     self.loading = true;
                     self.playing = false;
-                    self.native_anchor = None;
+                    self.playhead.stop_projection();
                     self.notice = None;
                     source_jobs::OpenAttempt::Issued
                 }
@@ -2712,7 +2701,7 @@ impl Player {
                                 run.fail(error.clone());
                             }
                             self.playing = false;
-                            self.native_anchor = None;
+                            self.playhead.stop_projection();
                             self.training
                                 .update(cx, |s, cx| s.test_state(false, Some(error), cx));
                         }
@@ -2738,14 +2727,10 @@ impl Player {
                                 self.native_lane_revision=status.lane_revision;
                                 #[cfg(feature="ui-tests")]
                                 {self.last_playback_status=Some(status.clone());}
-                                self.pending_seek = None;
-                                self.native_floor = None;
-                                self.native_seek_count = status.seek_count;
-                                self.native_loop_count = status.loop_count;
-                                self.native_loop = status.loop_range;
-                                self.position = status.position;
+
                                 self.playing = false;
-                                self.native_anchor = Some((status.position, status.sampled_at));
+                                self.playhead.reset(status.position);
+                                self.playhead.admit((&status).into(), Instant::now());
                             }
                             if !parked {
                                 self.restore_monitor_publication(cx);
@@ -2824,14 +2809,11 @@ impl Player {
                         .update(cx, |settings, cx| settings.set_route(uid, label, error, cx));
                     if epoch == self.native_epoch {
                         if let Some(status) = status {
-                            self.pending_seek = None;
-                            self.native_floor = None;
-                            self.native_seek_count = status.seek_count;
-                            self.native_loop_count = status.loop_count;
-                            self.native_loop = status.loop_range;
+
                             self.playing = status.playing;
-                            self.position = status.position;
-                            self.native_anchor = Some((status.position, status.sampled_at));
+
+                            self.playhead.reset(status.position);
+                            self.playhead.admit((&status).into(), Instant::now());
                             self.header.update(cx, |header, cx| {
                                 header.set_output_label(status.output_label, cx)
                             });
@@ -2898,8 +2880,8 @@ impl Player {
                     self.settings.update(cx, |settings, cx| {
                         settings.confirm_route(status.output_label.clone(), cx)
                     });
-                    self.position = 0.;
-                    self.native_anchor = Some((0., status.sampled_at));
+                    self.playhead.reset(0.);
+                    self.playhead.admit((&status).into(), Instant::now());
                     self.duration = status.duration;
                     self.playing = false;
                     self.song_title = project.name.clone().into();
@@ -2983,11 +2965,7 @@ impl Player {
                         header.set_output_label(status.output_label.clone(), cx)
                     });
                     self.native_rate = status.rate;
-                    self.native_seek_count = status.seek_count;
-                    self.pending_seek = None;
-                    self.native_floor = None;
-                    self.native_loop = None;
-                    self.native_loop_count = 0;
+
                     let (s, e) = project.view.unwrap_or((0., status.duration));
                     if status.duration>0.{self.view_start=(s/status.duration).clamp(0.,0.999);self.view_end=(e/status.duration).clamp(self.view_start+0.001,1.);}else{self.view_start=0.;self.view_end=1.;}
                     self.karaoke = false;
@@ -3098,11 +3076,12 @@ impl Player {
                         self.library_import.update(cx,|s,cx|s.set_busy(false,cx));
                         if let Some(status)=&status{pending.resume.position=status.position;pending.resume.playing=status.playing;}
                         if !outcome.imported&&pending.mode==project_import::Mode::Copy&&status.is_some(){
-                            let status=status.unwrap();self.position=status.position;self.playing=status.playing;
-                            self.native_anchor=Some((status.position,status.sampled_at));
+                            let status=status.unwrap();self.playing=status.playing;
+                            self.playhead.reset(status.position);
+                            self.playhead.admit((&status).into(), Instant::now());
                             self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
                             self.native_graph=status.graph_generation;
-                            self.pending_seek=None;self.native_floor=None;
+
                         }else{
                             // Source handleImport reanchors song.path; its keyed
                             // SongOutput remounts before adopting the new mix.
@@ -3348,7 +3327,7 @@ impl Player {
                     self.loading = false;
                     self.saving = false;
                     self.playing = false;
-                    self.native_anchor = None;
+                    self.playhead.stop_projection();
                     self.reset_carry(cx);
                     self.loaded_song = false;
                     self.stop_training(cx);
@@ -3701,7 +3680,7 @@ impl Player {
                     }
                     DeferredAudio::Command(command) => self.native_command(command, cx),
                     DeferredAudio::Seek(position) => {
-                        self.position = position;
+                        self.playhead.seek(position);
                         self.seek_native(cx);
                     }
                     DeferredAudio::Output(uid) => self.select_output(uid, cx),
@@ -3712,7 +3691,7 @@ impl Player {
                                 // Cleanup can take long enough for accepted mix
                                 // edits to supersede the source-job snapshot.
                                 resume.mix = self.current_mix(project);
-                                resume.position = self.position;
+                                resume.position = self.playhead.position();
                                 resume.dirty |= self.edit_seq != self.saved_seq;
                             }
                         }
@@ -3738,7 +3717,7 @@ impl Player {
                 Default::default()
             };
             self.pitch_strip.update(cx, |pitch, cx| {
-                pitch.set_microphone(pitch_view, self.position, self.playing, cx)
+                pitch.set_microphone(pitch_view, self.playhead.position(), self.playing, cx)
             });
             cx.notify();
         }
@@ -3754,10 +3733,10 @@ impl Player {
             // semantic intent rather than sending it to an unavailable graph.
             self.native_play_serial=serial;self.native_play_intent=None;
             if self.playing {self.restart_cycle.reset();}
-            self.playing=false;self.native_anchor=None;cx.notify();return;
+            self.playing=false;self.playhead.stop_projection();cx.notify();return;
         }
         if self.defer_monitor(DeferredAudio::Command(command.clone()), cx) {
-            if self.notice.is_none() {if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));if self.playing!=target {self.restart_cycle.reset();}self.playing=target;}}
+            if self.notice.is_none() {if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));if self.playing!=target {self.restart_cycle.reset();}if target {self.playhead.play_intent(Instant::now());} else {self.playhead.pause_intent(Instant::now());}self.playing=target;}}
             return;
         }
         if !self.audio_available()&&!command.starts_with("master ")&&!command.starts_with("rate "){return;}
@@ -3773,7 +3752,7 @@ impl Player {
             let result=if play_intent.is_some(){backend.playback(self.native_epoch,serial,command)}else{backend.control(self.native_epoch,command)};
             match result {
                 Ok(()) => {
-                    if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));if self.playing!=target {self.restart_cycle.reset();}self.playing=target;}
+                    if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));if self.playing!=target {self.restart_cycle.reset();}if target {self.playhead.play_intent(Instant::now());} else {self.playhead.pause_intent(Instant::now());}self.playing=target;}
                     if edited {
                         self.edit_seq += 1;
                     }
@@ -4092,7 +4071,7 @@ impl Player {
         };
         let skipped=project.lyrics_raw.as_ref().and_then(|r|r["lines"].as_array()).map_or(0,|rows|rows.len().saturating_sub(lines.len()));
         let notice=(skipped>0).then(||i18n::tv("lyrics.editor.skippedRows",&[("n",skipped.to_string())]));
-        self.lyrics_editor.update(cx,|s,cx|{s.open(project.name.clone(),lines,self.duration as f64,self.lyrics_precise_cap,cx);s.set_notice(notice,cx);s.context_playback(self.position as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.counting_in&&self.pending_seek.is_none()&&self.capture_file.is_none(){self.native_anchor.map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.native_loop.map(|(s,e)|(s as f64,e as f64)),cx);});
+        self.lyrics_editor.update(cx,|s,cx|{s.open(project.name.clone(),lines,self.duration as f64,self.lyrics_precise_cap,cx);s.set_notice(notice,cx);s.context_playback(self.playhead.position() as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.counting_in&&self.playhead.pending_seek().is_none()&&self.capture_file.is_none(){self.playhead.anchor().map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.playhead.loop_range().map(|(s,e)|(s as f64,e as f64)),cx);});
         self.lyrics_editor_open=true;self.metronome_open=false;self.transport.update(cx,|t,cx|{t.dismiss_popovers(cx);});
         if let Some((_,source))=project.lanes.iter().find(|(i,_)|*i==0){
             if let Some(cache)=self.lyrics_envelope_cache.as_ref().filter(|c|c.source==*source&&Some(c.stamp)==project.vocal_stamp) {
@@ -4371,28 +4350,35 @@ impl Player {
         }
     }
     fn seek_native(&mut self, cx: &mut Context<Self>) {
-        if !self.audio_available(){return;}
-        if self.defer_monitor(DeferredAudio::Seek(self.position), cx) {
+        if !self.audio_available() { self.playhead.seek_refused(); return; }
+        let requested = self.playhead.position();
+        if self.defer_monitor(DeferredAudio::Seek(requested), cx) {
+            // The deferred action retains the target. Draw the real clock until
+            // the transport can actually queue it, including a full handoff queue.
+            self.playhead.seek_refused();
             return;
         }
         if self.loading || self.source_blocks_except_rate() || self.project.is_none() {
+            self.playhead.seek_refused();
             return;
         }
         self.count_in_anchor = None;
-        self.position = self.position.clamp(0., self.duration);
+        let target = requested.clamp(0., self.duration);
         if let Some(backend) = &self.backend {
-            match backend.control(self.native_epoch, format!("seek {}", self.position)) {
+            match backend.control(self.native_epoch, format!("seek {target}")) {
                 Ok(()) => {
-                    let expected = self
-                        .pending_seek
-                        .map_or(self.native_seek_count + 1, |(count, _)| count + 1);
-                    self.pending_seek = Some((expected, self.position));
-                    self.native_floor = Some((self.position, self.native_loop_count));
+                    self.playhead.seek(target);
+                    self.playhead.seek_queued(Instant::now());
                 }
-                Err(error) => self.notice = Some(error.to_string()),
+                Err(error) => {
+                    self.playhead.seek_refused();
+                    self.notice = Some(error.to_string());
+                }
             }
-            cx.notify();
+        } else {
+            self.playhead.seek_refused();
         }
+        cx.notify();
     }
     fn sync_lane(&mut self, i: usize, cx: &mut Context<Self>) {
         if (self.tracks_pending.is_some()||self.carry_pending.is_some())||self.tracks_audio_failed{return;}
@@ -4471,19 +4457,18 @@ impl Player {
                 if !playing {
                     if self.region_busy() {self.region.play_requested=!self.region.play_requested;return;}
                     if let Some((start,end))=self.region_target().selection {
-                        if self.position<start-0.05 || self.position>=end-0.05 {
-                            self.position=start;self.seek_native(cx);
+                        if self.playhead.position()<start-0.05 || self.playhead.position()>=end-0.05 {
+                            self.playhead.seek(start);self.seek_native(cx);
                         }
                     }
                     if self.metronome.count_in_bars > 0 {
-                        self.count_in_anchor = Some(self.position);
+                        self.count_in_anchor = Some(self.playhead.position());
                     }
-                    self.native_floor = Some((self.position, self.native_loop_count));
                 }
                 self.native_command(if playing { "pause" } else { "play" }.into(), cx);
             }
             Restart => {
-                self.position = self.restart_cycle.next(self.region_target().selection,self.playing);
+                self.playhead.seek(self.restart_cycle.next(self.region_target().selection,self.playing));
                 self.seek_native(cx);
             }
             Loop => {
@@ -4516,8 +4501,8 @@ impl Player {
     }
 
     fn toggle(&mut self, cx: &mut Context<Self>) {
-        if self.position >= self.duration {
-            self.position = 0.;
+        if self.playhead.position() >= self.duration {
+            self.playhead.seek(0.);
         }
         if self.backend.is_some() {
             self.native_transport(transport::TransportEvent::Play, cx);
@@ -4553,7 +4538,7 @@ impl Player {
             "count":match cue.kind{lyrics_countdown::Kind::Seconds(n)=>n,lyrics_countdown::Kind::Dots(n)=>n as u32},
             "text":cue.kind.text(),"pulseLevel":if cfg!(target_os="windows"){0}else{level}}));
         serde_json::json!({"cue":cue,"bounds":clock.bounds,"spriteReady":clock.sprite_ready,
-            "position":self.position,"anticipatedPosition":self.position+0.15,"playing":self.playing,"karaoke":self.karaoke,
+            "position":self.playhead.position(),"anticipatedPosition":self.playhead.position()+0.15,"playing":self.playing,"karaoke":self.karaoke,
             "windowsFrozenPulse":cfg!(target_os="windows")})
     }
     fn lyrics(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4647,8 +4632,7 @@ impl Player {
                 cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                     for (index, bounds) in hits.borrow().iter() {
                         if bounds.contains(&e.position) {
-                            this.position =
-                                (this.lyric_document.start(*index) as f64).clamp(0., this.duration);
+                            this.playhead.seek((this.lyric_document.start(*index) as f64).clamp(0., this.duration));
                             this.seek_native(cx);
                             cx.notify();
                             break;
@@ -5366,7 +5350,7 @@ impl Player {
             || self.engine_setup.read(cx).is_open() || self.whats_new.read(cx).is_open()
     }
     fn display_position(&self) -> f64 {
-        self.backdrop_clock.position(self.native_epoch, self.position)
+        self.backdrop_clock.position(self.native_epoch, self.playhead.position())
     }
     fn backdrop_content_revision(&self, cx: &App) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -5474,7 +5458,7 @@ impl Render for Player {
             self.language_menu.update(cx, |menu, cx| menu.close(window, cx));
             self.training.update(cx, |training, cx| { training.dismiss_popup(cx); });
         }
-        self.backdrop_clock.observe(backdrop_open, self.native_epoch, self.position);
+        self.backdrop_clock.observe(backdrop_open, self.native_epoch, self.playhead.position());
         if modal_open != self.modal_was_open {
             // Resume from now, excluding time spent behind a modal.
             self.last = Instant::now();
@@ -5624,35 +5608,22 @@ impl Render for Player {
                 animating = true;
             }
         }
-        if self.playing && self.backend.is_some() && !self.counting_in {
-            if let Some((position, anchor)) = self.native_anchor {
-                self.position =
-                    position + anchor.elapsed().as_secs_f64().min(0.1) * self.native_rate as f64;
-                if let Some((s, e)) = self.native_loop {
-                    if self.position >= e {
-                        self.position = s + (self.position - e) % (e - s);
-                    }
-                }
-                self.position = self.position.min(self.duration);
-            }
-            animating = true;
+        if self.backend.is_some() {
+            self.playhead.shown(now);
+            // A pending receipt gets at most one second on the existing frame
+            // clock, even while paused; ordinary idle schedules no extra frames.
+            if (self.playing && !self.counting_in) || self.playhead.pending_seek().is_some() { animating = true; }
         }
         if self.playing && self.backend.is_none() && self.screen == Screen::Player && !modal_open {
-            self.position += dt as f64 * self.tempo as f64;
-            if self.looping && self.position >= self.duration {
-                self.position %= self.duration;
-            }
-            if self.position >= self.duration {
-                self.position = self.duration;
-                self.playing = false;
-            }
+            self.playhead.advance_demo(dt as f64 * self.tempo as f64, self.duration, self.looping);
+            if self.playhead.position() >= self.duration { self.playing = false; }
             animating = true;
         }
         // Deterministic capture only: external runner advances song time one display-frame at a time.
         if let Some(path) = self.capture_file.clone() {
             if let Ok(value) = std::fs::read_to_string(&path) {
                 if let Ok(position) = value.trim().parse::<f64>() {
-                    self.position = position.clamp(0., self.duration);
+                    self.playhead.seek(position.clamp(0., self.duration));
                     self.playing = false;
                     window.on_next_frame(move |_, _| {
                         let _ = std::fs::write(path.with_extension("ack"), value);
@@ -5781,11 +5752,11 @@ impl Render for Player {
             self.metronome_open = false;
         }
         self.metronome_ui.update(cx, |s, cx| {
-            s.context(self.position, self.duration);
+            s.context(self.playhead.position(), self.duration);
             s.set_can_detect(self.project.as_ref().is_some_and(|p|p.lanes.iter().any(|(i,_)|*i == 1)),cx);
         });
         if self.lyrics_editor_open {
-            self.lyrics_editor.update(cx,|s,cx|s.context_playback(self.position as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.counting_in&&self.pending_seek.is_none()&&self.capture_file.is_none(){self.native_anchor.map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.native_loop.map(|(s,e)|(s as f64,e as f64)),cx));
+            self.lyrics_editor.update(cx,|s,cx|s.context_playback(self.playhead.position() as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.counting_in&&self.playhead.pending_seek().is_none()&&self.capture_file.is_none(){self.playhead.anchor().map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.playhead.loop_range().map(|(s,e)|(s as f64,e as f64)),cx));
         }
         self.pitch_strip.update(cx, |s, cx| {
             s.set_beat_tempo(self.beats.as_ref().map(|g| g.bpm), cx)
@@ -5822,7 +5793,7 @@ impl Render for Player {
                 self.track_probe("zoom-in".into(),singz_uikit::zoom_button("zoom-in","+",false)).on_click(cx.listener(|this,_,_,cx|this.zoom_by(0.65,cx))),
                 self.track_probe("zoom-fit".into(),singz_uikit::zoom_button("zoom-fit",i18n::t("player.stack.full"),self.view_start==0.&&self.view_end==1.)).on_click(cx.listener(|this,_,_,cx|this.timeline_input(timeline_viewport::Input::Fit,cx))),
             ])));
-        self.backdrop_clock.painted(self.native_epoch, self.position);
+        self.backdrop_clock.painted(self.native_epoch, self.playhead.position());
         let backdrop_key = singz_uikit::ModalBackdropKey::new(
             window.viewport_size(), window.scale_factor(), self.backdrop_content_revision(cx));
         let backdrop = self.backdrop.clone();
@@ -6058,8 +6029,7 @@ impl Render for Player {
                             } else {
                                 1.
                             };
-                            this.position =
-                                (this.position + direction * 5.).clamp(0., this.duration);
+                            this.playhead.seek((this.playhead.position() + direction * 5.).clamp(0., this.duration));
                             this.seek_native(cx);
                             cx.stop_propagation();
                             return;

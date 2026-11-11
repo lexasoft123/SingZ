@@ -189,7 +189,7 @@ fn shot(
     image.save(out.join(format!("{name}.png")))?;
     let p = view.read(cx);
     let value = serde_json::json!({"viewport":[f32::from(viewport.width),f32::from(viewport.height)],"expectedViewport":expected,"scale":scale,"raster":[image.width(),image.height()],
-        "sidebar":state(p,w,cx),"project":p.project.as_ref().map(|p|p.dir.clone()),"epoch":p.native_epoch,"playing":p.playing,"position":p.position,"nativeSeekCount":p.native_seek_count,
+        "sidebar":state(p,w,cx),"project":p.project.as_ref().map(|p|p.dir.clone()),"epoch":p.native_epoch,"playing":p.playing,"position":p.playhead.position(),"nativeSeekCount":p.playhead.seek_count(),
         "pending":p.lyrics_sidebar_pending,"searchPending":p.lyrics_search_pending,"settled":p.lyrics_sidebar_settled,
         "windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
         "scope":if std::env::var("SINGZ_GPUI_LYRICS_QWEN_AUTO_UI").as_deref()==Ok("1") {
@@ -255,10 +255,10 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     anyhow::ensure!(list.iter().any(|c|c["id"]==101&&c["synced"]==true&&c["duration"].as_f64()==Some(12.))&&list.iter().any(|c|c["id"]==102&&c["synced"]==false)&&list.iter().any(|c|c["id"]==103&&c["duration"].as_f64()==Some(20.)),"Candidate match/synced facts lost: {s}");Ok(())})??;
                 shot!(format!("variants-{}",width as i32),Some((width,height)));
                 handle.update(cx,|_,w,cx|query(&view,w,cx,"artist"))??;
-                let transport=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.position,p.native_epoch,p.native_seek_count,p.muted,p.solo,p.transpose,p.tempo)})?;
+                let transport=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.playhead.position(),p.native_epoch,p.playhead.seek_count(),p.muted,p.solo,p.transpose,p.tempo)})?;
                 for character in ["space","s","o","n","g"] {handle.update(cx,|_,w,cx|{draw(w,cx);key(w,cx,character);})?;}
                 wait!(p,w,app=>state(p,w,app)["query"]=="artist song");
-                anyhow::ensure!(handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.position,p.native_epoch,p.native_seek_count,p.muted,p.solo,p.transpose,p.tempo)})?==transport,"Query typing/Space leaked into transport/mix");
+                anyhow::ensure!(handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.playhead.position(),p.native_epoch,p.playhead.seek_count(),p.muted,p.solo,p.transpose,p.tempo)})?==transport,"Query typing/Space leaked into transport/mix");
                 hold(&root)?;handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
                 wait!(p,w,app=>root.join("http-ready.json").is_file()&&state(p,w,app)["busy"]==true&&state(p,w,app)["results"].is_null());
                 shot!(format!("search-busy-{}",width as i32),Some((width,height)));
@@ -408,7 +408,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             wait!(p,w,app=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==folder&&p.lyrics_error.is_some())&&state(p,w,app)["status"]=="error"&&p.duration>0.);
             both!("oversized-lyrics-playable");
             handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").ok_or_else(||anyhow::anyhow!("Playable song lost transport"))?;click(w,cx,b.center());Ok(())})??;
-            wait!(p,w,app=>p.playing&&p.position>0.05);
+            wait!(p,w,app=>p.playing&&p.playhead.position()>0.05);
             handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").unwrap();click(w,cx,b.center());Ok(())})??;
             wait!(p,w,app=>!p.playing&&!p.counting_in);
             anyhow::ensure!(std::fs::read(folder.join("lyrics.json"))?==original,"Opening/playing malformed oversized lyrics changed the file");

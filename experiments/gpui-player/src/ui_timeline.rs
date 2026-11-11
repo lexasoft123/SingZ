@@ -44,10 +44,10 @@ fn assert_ruler(p:&Player)->anyhow::Result<()> {
 fn state(p:&Player,w:&Window)->serde_json::Value {
     serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],
         "scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),
-        "view":[p.view_start,p.view_end],"position":p.position,"playing":p.playing,
-        "duration":p.duration,"epoch":p.native_epoch,"seekCount":p.native_seek_count,
+        "view":[p.view_start,p.view_end],"position":p.playhead.position(),"playing":p.playing,
+        "duration":p.duration,"epoch":p.native_epoch,"seekCount":p.playhead.seek_count(),
         "timeline":p.timeline_review_state(),
-        "pendingSeek":p.pending_seek,"selection":p.region_target().selection,
+        "pendingSeek":p.playhead.pending_seek(),"selection":p.region_target().selection,
         "native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"position":s.position,"playing":s.playing})),
         "liveFps":"unmeasured","productionParity":"source behavior; matched reference capture pending"})
 }
@@ -121,7 +121,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 }
                 zoom!(0.);
                 handle.update(cx,|_,w,cx|seek_visible(&view,w,cx,0.94))??;
-                wait!(p,w,app => !p.playing&&p.pending_seek.is_none()&&near(p.position/p.duration,0.343*0.94));
+                wait!(p,w,app => !p.playing&&p.playhead.pending_seek().is_none()&&near(p.playhead.position()/p.duration,0.343*0.94));
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{
                     super::ui_training_run::draw(w,cx);assert_ruler(view.read(cx))?;let value=state(view.read(cx),w);
                     let name=format!("timeline-zoom-controls-{}",width as u32);
@@ -133,7 +133,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"zoom-out"))??;
                 wait!(p,w,app => near(p.view_end-p.view_start,0.343*0.65*1.4));
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-restart"))??;
-                wait!(p,w,app => p.pending_seek.is_none()&&p.position.abs()<0.03);
+                wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03);
                 fit!();zoom!(0.3);
                 wait!(p,w,app => near(p.view_start,0.1971)&&near(p.view_end,0.5401));
                 let (before,span,pan_width)=handle.update(cx,|_,w,cx|->anyhow::Result<(f64,f64,f32)>{
@@ -172,11 +172,11 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             fit!();zoom!(0.);
             let span=handle.update(cx,|_,_,cx|{let p=view.read(cx);p.view_end-p.view_start})?;
             handle.update(cx,|_,w,cx|key(&view,w,cx,"right"))?;
-            wait!(p,w,app => p.pending_seek.is_none()&&(p.position-5.).abs()<0.03
+            wait!(p,w,app => p.playhead.pending_seek().is_none()&&(p.playhead.position()-5.).abs()<0.03
                 &&near(p.view_start,(5./p.duration-span*0.25).clamp(0.,1.-span)));
             let seek_cut=handle.update(cx,|_,w,cx|state(view.read(cx),w))?;
             handle.update(cx,|_,w,cx|key(&view,w,cx,"left"))?;
-            wait!(p,w,app => p.pending_seek.is_none()&&p.position.abs()<0.03&&near(p.view_start,0.));
+            wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03&&near(p.view_start,0.));
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-play"))??;
             wait!(p,w,app => p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
             wait!(p,w,app => p.view_start>0.0001);
@@ -204,18 +204,18 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             anyhow::ensure!(follow.iter().any(|v|v["state"]["timeline"]["followActive"]==true)
                 &&follow.last().unwrap()["state"]["timeline"]["followActive"]==false,"Page turn did not settle its real animation");
             handle.update(cx,|_,w,cx|->anyhow::Result<()>{super::ui_training_run::draw(w,cx);wheel(&view,w,cx,false,0.5,10000.,0.,false)?;Ok(())})??;
-            wait!(p,w,app => near(p.view_end,1.)&&p.position/p.duration<p.view_start-0.05);
+            wait!(p,w,app => near(p.view_end,1.)&&p.playhead.position()/p.duration<p.view_start-0.05);
             let away=handle.update(cx,|_,_,cx|view.read(cx).view_start)?;
             for _ in 0..20 {cx.background_executor().timer(Duration::from_millis(25)).await;
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{super::ui_training_run::draw(w,cx);let p=view.read(cx);
                     anyhow::ensure!(p.playing&&near(p.view_start,away),"Manual pan away snapped back during playback");Ok(())})??;
             }
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-restart"))??;
-            wait!(p,w,app => p.pending_seek.is_none()&&p.position<1.&&near(p.view_start,0.));
+            wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position()<1.&&near(p.view_start,0.));
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-play"))??;
             wait!(p,w,app => !p.playing&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-restart"))??;
-            wait!(p,w,app => p.pending_seek.is_none()&&p.position.abs()<0.03);
+            wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03);
             fit!();save!();reopen!();
             if !initial_karaoke {handle.update(cx,|_,w,cx|press(&view,w,cx,"karaoke"))??;}
             wait!(p,w,app => p.karaoke==initial_karaoke&&!p.playing&&near(p.view_start,0.)&&near(p.view_end,1.));

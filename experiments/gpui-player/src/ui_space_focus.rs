@@ -21,7 +21,7 @@ fn key(w: &mut Window, cx: &mut App, name: &'static str) {
 }
 fn state(p: &Player, w: &Window, cx: &App) -> serde_json::Value {
     serde_json::json!({
-        "playing": p.playing, "position": p.position, "seekCount": p.native_seek_count, "epoch": p.native_epoch,
+        "playing": p.playing, "position": p.playhead.position(), "seekCount": p.playhead.seek_count(), "epoch": p.native_epoch,
         "muted": p.muted[0], "solo": p.solo[0], "gain": p.gain[0],
         "muteFocused": p.track_mix_focus[0][0].is_focused(w), "soloFocused": p.track_mix_focus[0][1].is_focused(w),
         "gainFocused": p.track_gain_focus[0].is_focused(w), "bpmFocused": p.transport.read(cx).bpm_focused(w, cx),

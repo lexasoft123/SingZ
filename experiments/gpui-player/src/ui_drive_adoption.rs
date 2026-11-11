@@ -164,9 +164,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    })??;
    both!(if offline {"offline-loaded"}else{"adopted-loaded"},false);
    handle.update(cx,|_,w,cx|play(&view,w,cx))??;
-   wait!(p,w,app=>p.playing&&p.position>0.2&&p.last_playback_status.as_ref().is_some_and(|status|status.playing));
-   let start=handle.update(cx,|_,_,cx|view.read(cx).position)?;
-   wait!(p,w,app=>p.position>start+0.3&&native_mix(p,offline));
+   wait!(p,w,app=>p.playing&&p.playhead.position()>0.2&&p.last_playback_status.as_ref().is_some_and(|status|status.playing));
+   let start=handle.update(cx,|_,_,cx|view.read(cx).playhead.position())?;
+   wait!(p,w,app=>p.playhead.position()>start+0.3&&native_mix(p,offline));
    both!(if offline {"offline-playing"}else{"adopted-playing"},false);
    if !offline {
     handle.update(cx,|_,w,cx|mute(&view,w,cx))??;

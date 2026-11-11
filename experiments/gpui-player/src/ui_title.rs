@@ -74,12 +74,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   handle.update(cx,|_,w,cx|{edit(&view,w,cx,"   ")?;key(w,cx,"enter");Ok::<_,anyhow::Error>(())})??;
   cx.background_executor().timer(Duration::from_millis(100)).await;
   handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).song_title.as_str()=="Original","Blank title changed song");Ok(())})??;
-  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.gain[5]=42;p.sync_lane(5,cx);p.native_transport(transport::TransportEvent::Volume(0.6),cx);p.position=0.75;p.seek_native(cx);}))?;
-  wait!(|p:&Player|p.pending_seek.is_none()&&p.native_anchor.is_some_and(|(position,_)|(position-0.75).abs()<0.001));
+  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.gain[5]=42;p.sync_lane(5,cx);p.native_transport(transport::TransportEvent::Volume(0.6),cx);p.playhead.seek(0.75);p.seek_native(cx);}))?;
+  wait!(|p:&Player|p.playhead.pending_seek().is_none()&&p.playhead.anchor().is_some_and(|(position,_)|(position-0.75).abs()<0.001));
   handle.update(cx,|_,w,cx|{edit(&view,w,cx,"  Ż renamed / song.wav  ")?;key(w,cx,"enter");view.update(cx,|p,cx|{p.screen=Screen::Library;p.library.update(cx,|l,cx|l.focus_search(w,cx));});Ok::<_,anyhow::Error>(())})??;
   wait!(|p:&Player|!p.loading&&p.rename_pending.is_none()&&p.song_title.as_str()=="Ż renamed song");
-  wait!(|p:&Player|p.pending_seek.is_none()&&p.native_anchor.is_some_and(|(position,_)|(position-0.75).abs()<0.001));
-  let renamed=handle.update(cx,|_,_,cx|->anyhow::Result<PathBuf>{let p=view.read(cx);let dir=p.project.as_ref().unwrap().dir.clone();anyhow::ensure!(p.notice.is_none()&&dir.parent()==initial.parent()&&!initial.exists()&&p.gain[5]==42&&p.master_volume==0.6&&p.edit_seq!=p.saved_seq&&(p.position-0.75).abs()<0.001,"Rename lost identity/mix/position: {:?} {}",p.notice,p.position);Ok(dir)})??;
+  wait!(|p:&Player|p.playhead.pending_seek().is_none()&&p.playhead.anchor().is_some_and(|(position,_)|(position-0.75).abs()<0.001));
+  let renamed=handle.update(cx,|_,_,cx|->anyhow::Result<PathBuf>{let p=view.read(cx);let dir=p.project.as_ref().unwrap().dir.clone();anyhow::ensure!(p.notice.is_none()&&dir.parent()==initial.parent()&&!initial.exists()&&p.gain[5]==42&&p.master_volume==0.6&&p.edit_seq!=p.saved_seq&&(p.playhead.position()-0.75).abs()<0.001,"Rename lost identity/mix/position: {:?} {}",p.notice,p.playhead.position());Ok(dir)})??;
   handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Library&&p.library.read(cx).search_focused(w,cx),"Rename changed route or stole search focus");Ok(())})??;
   capture!("rename-kept-library-1280.png");
   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.screen=Screen::Player;p.focus_player=true;cx.notify();}))?;

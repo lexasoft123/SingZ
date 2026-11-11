@@ -120,7 +120,7 @@ fn state(p: &Player, w: &Window, cx: &App, phase: &str) -> serde_json::Value {
     serde_json::json!({"phase":phase,"hidden":!w.is_visible()&&!w.is_window_active(),"active":w.is_window_active(),"scale":w.scale_factor(),
         "viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"provider":p.settings.read(cx).provider_ui_state(w),
         "snapshot":p.audio_provider,"providerSerial":p.audio_provider_serial,"nativeEpoch":p.native_epoch,"project":p.project.as_ref().map(|s|&s.dir),
-        "loadedSong":p.loaded_song,"loading":p.loading,"playing":p.playing,"position":p.position,"native":p.last_playback_status.as_ref().map(native),
+        "loadedSong":p.loaded_song,"loading":p.loading,"playing":p.playing,"position":p.playhead.position(),"native":p.last_playback_status.as_ref().map(native),
         "notice":p.notice,"capture":{"phase":format!("{:?}",p.mic_view.phase),"owner":p.mic_view.owner,"fixture":p.mic_view.fixture},
         "preferences":prefs().ok().and_then(|v|serde_json::from_slice::<serde_json::Value>(&v).ok()),"liveFps":"unmeasured"})
 }
@@ -245,10 +245,10 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 wait!(20,p,w,app => !p.loading&&p.loaded_song&&p.project.as_ref().is_some_and(|s|s.dir==dir)&&p.last_playback_status.is_some());
                 action!(w,app => {anyhow::ensure!(view.read(app).notice.is_none(),"Normal Open failed");assert_native(view.read(app).last_playback_status.as_ref().unwrap())});
                 action!(w,app => transport(&view,w,app));
-                wait!(8,p,w,app => p.playing&&p.position>0.2&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+                wait!(8,p,w,app => p.playing&&p.playhead.position()>0.2&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                 action!(w,app => header(&view,w,app,"header-settings"));
                 wait!(8,p,w,app => p.screen==Screen::Settings&&p.settings.read(app).provider_ui_state(w)["enabled"]==false);
-                let (epoch,generation,start_position)=handle.update(cx,|_,_,app|{let p=view.read(app);(p.native_epoch,p.last_playback_status.as_ref().unwrap().graph_generation,p.position)})?;
+                let (epoch,generation,start_position)=handle.update(cx,|_,_,app|{let p=view.read(app);(p.native_epoch,p.last_playback_status.as_ref().unwrap().graph_generation,p.playhead.position())})?;
                 action!(w,app => {provider_click(&view,w,app,None)?;let v=view.read(app).settings.read(app).provider_ui_state(w);anyhow::ensure!(v["openField"]!="settings-provider"&&v["rendererBusy"]==true&&!view.read(app).audio_provider.as_ref().unwrap().can_change,"Loaded provider control accepted input");Ok(())});
                 shot!(format!("playing-disabled-{width:.0}"));
                 let receiver=handle.update(cx,|_,_,app|view.read(app).backend.as_ref().unwrap().probe_owned_audio(epoch))??;

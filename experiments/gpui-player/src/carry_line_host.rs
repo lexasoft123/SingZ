@@ -298,8 +298,8 @@ impl Player {
         self.carry_attempt_stamp = None;
         self.tracks_audio_failed = true;
         self.playing = false;
-        self.native_anchor = None;
-        self.pending_seek = None;
+        self.playhead.stop_projection();
+
         if let Some(desired) = desired {
             if !self.carry.enabled && desired.enabled && pending.plan.on {
                 for lane in self
@@ -364,10 +364,10 @@ impl Player {
             p.on && !p.lane_ids.is_empty()
                 && !self.counting_in
                 && if p.mode == 0 {
-                    (self.position as f64 / p.period_sec).floor() as u64 % 2 == 1
+                    (self.playhead.position() as f64 / p.period_sec).floor() as u64 % 2 == 1
                 } else {
-                    let i = p.windows.partition_point(|w| w.s <= self.position as f64);
-                    i > 0 && (self.position as f64) < p.windows[i - 1].e
+                    let i = p.windows.partition_point(|w| w.s <= self.playhead.position() as f64);
+                    i > 0 && (self.playhead.position() as f64) < p.windows[i - 1].e
                 }
         });
         self.transport.update(cx, |t, cx| {

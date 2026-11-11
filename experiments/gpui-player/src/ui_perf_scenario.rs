@@ -80,7 +80,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                         }
                         "play" => {
                             handle.update(cx, |_, _, app| view.update(app, |p, app| p.toggle(app)))?;
-                            wait_for!(|p: &Player| p.playing && p.position > 0.05 && p.last_playback_status.as_ref().is_some_and(|s| s.playing));
+                            wait_for!(|p: &Player| p.playing && p.playhead.position() > 0.05 && p.last_playback_status.as_ref().is_some_and(|s| s.playing));
                             Ok(serde_json::json!({"playing": true}))
                         }
                         "burst" => {

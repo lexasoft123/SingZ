@@ -35,8 +35,8 @@ fn restart(view:&Entity<Player>,w:&mut Window,cx:&mut App)->anyhow::Result<()> {
     super::ui_training_run::click(w,cx,b.center());Ok(())
 }
 fn playing_restart(view:&Entity<Player>,w:&mut Window,cx:&mut App,target:f64)->anyhow::Result<mpsc::Receiver<Result<(u64,serde_json::Value),String>>> {
-    anyhow::ensure!(view.read(cx).pending_seek.is_none(),"Playing Restart began before the previous seek settled");
-    let before=view.read(cx).native_seek_count;
+    anyhow::ensure!(view.read(cx).playhead.pending_seek().is_none(),"Playing Restart began before the previous seek settled");
+    let before=view.read(cx).playhead.seek_count();
     restart(view,w,cx)?;
     let (send,receive)=mpsc::channel();let view=view.clone();
     // The real button queues TransportEvent::Restart. Observe its admitted
@@ -44,11 +44,11 @@ fn playing_restart(view:&Entity<Player>,w:&mut Window,cx:&mut App,target:f64)->a
     // before a later status/clock update can replace the requested position.
     cx.defer(move|cx|{
         let p=view.read(cx);
-        let evidence=serde_json::json!({"expectedTarget":target,"pendingSeek":p.pending_seek,
-            "nativeSeekCountBefore":before,"nativeSeekCount":p.native_seek_count,"position":p.position,"playing":p.playing,
+        let evidence=serde_json::json!({"expectedTarget":target,"pendingSeek":p.playhead.pending_seek(),
+            "nativeSeekCountBefore":before,"nativeSeekCount":p.playhead.seek_count(),"position":p.playhead.position(),"playing":p.playing,
             "selection":p.region_target().selection,"restartCycle":format!("{:?}",p.restart_cycle),"playSerial":p.native_play_serial});
         let result=(||->anyhow::Result<(u64,serde_json::Value)>{
-            let (count,actual)=p.pending_seek.ok_or_else(||anyhow::anyhow!("Restart button did not admit a seek: {evidence}"))?;
+            let (count,actual)=p.playhead.pending_seek().ok_or_else(||anyhow::anyhow!("Restart button did not admit a seek: {evidence}"))?;
             anyhow::ensure!(p.playing&&count>before&&if target==0. {actual==0.}else{(actual-target).abs()<0.002},"Playing Restart admitted the wrong target: {evidence}");
             Ok((count,evidence))
         })().map_err(|error|format!("{error:#}"));
@@ -61,7 +61,7 @@ fn close(a:Option<(f64,f64)>,b:Option<(f64,f64)>)->bool {
 }
 fn state(p:&Player,w:&Window)->serde_json::Value {
     serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),
-        "hidden":!w.is_visible()&&!w.is_window_active(),"epoch":p.native_epoch,"playing":p.playing,"position":p.position,
+        "hidden":!w.is_visible()&&!w.is_window_active(),"epoch":p.native_epoch,"playing":p.playing,"position":p.playhead.position(),
         "selection":p.project.as_ref().and_then(|p|p.selection),"looping":p.looping,"regionBusy":p.region_busy(),"gesture":p.region.gesture.is_some(),
         "native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"region":s.region_range,"loop":s.loop_range,"loopCount":s.loop_count,"playing":s.playing,"position":s.position})),
         "scope":"app-local waveform/ruler gestures and native boundary receipts; cadence and production visual parity unmeasured"})
@@ -88,10 +88,10 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 handle.update(cx,|_,w,cx|drag(&view,w,cx,$from,$to,$ruler))??;
             };}
             macro_rules! restart_at {($target:expr)=>{{
-                let expected_count=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count+1)?;
+                let expected_count=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count()+1)?;
                 handle.update(cx,|_,w,cx|restart(&view,w,cx))??;
-                wait!(p,w,app => !p.playing&&p.pending_seek.is_none()&&p.native_seek_count>=expected_count
-                    &&(p.position-$target).abs()<0.03&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&(s.position-$target).abs()<0.03));
+                wait!(p,w,app => !p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.seek_count()>=expected_count
+                    &&(p.playhead.position()-$target).abs()<0.03&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&(s.position-$target).abs()<0.03));
             }};}
             macro_rules! playing_restart_at {($target:expr,$name:expr)=>{{
                 let receipt=handle.update(cx,|_,w,cx|playing_restart(&view,w,cx,$target))??;
@@ -136,7 +136,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                     std::fs::write(out.join(format!("{name}.json")),serde_json::to_vec_pretty(&value)?)?;Ok(())
                 })??;
                 gesture!(0.6,0.6,true);accepted!(None,false);
-                wait!(p,w,app => p.pending_seek.is_none()&&(p.position-duration*0.6).abs()<0.03);
+                wait!(p,w,app => p.playhead.pending_seek().is_none()&&(p.playhead.position()-duration*0.6).abs()<0.03);
                 gesture!(0.25,0.45,true);accepted!(Some((duration*0.25,duration*0.45)),false);
                 handle.update(cx,|_,w,cx|escape(&view,w,cx))?;accepted!(None,false);
             }
@@ -149,7 +149,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             handle.update(cx,|_,w,cx|play(&view,w,cx))??;
             wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
             let restart_count=playing_restart_at!(duration*0.15,"restart-playing-selection-admitted.json");
-            wait!(p,w,app => p.playing&&p.pending_seek.is_none()&&p.native_seek_count>=restart_count);
+            wait!(p,w,app => p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.seek_count()>=restart_count);
             let original_path=project.canonicalize()?;
             let original_name=handle.update(cx,|_,_,cx|view.read(cx).project.as_ref().unwrap().name.clone())?;
             anyhow::ensure!(original_path.file_name().and_then(|s|s.to_str())==Some(source_jobs::safe_name(&original_name).as_str()),"Rename proof requires matching private fixture folder/name");
@@ -164,7 +164,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 &&p.native_play_intent.is_none()&&p.project.as_ref().is_some_and(|p|p.dir==temporary_path)
                 &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
             let restart_count=playing_restart_at!(0.,"restart-playing-renamed-song-admitted.json");
-            wait!(p,w,app => p.playing&&p.pending_seek.is_none()&&p.native_seek_count>=restart_count
+            wait!(p,w,app => p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.seek_count()>=restart_count
                 &&p.last_playback_status.as_ref().is_some_and(|s|s.playing&&s.position<duration*0.15));
             handle.update(cx,|_,_,cx|{
                 let header=view.read(cx).header.clone();
@@ -214,7 +214,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             reopen!();accepted!(None,false);
             restart_at!(0.);restart_at!(0.);
             handle.update(cx,|_,w,_|w.resize(size(px(1280.),px(800.))))?;
-            wait!(p,w,app => w.viewport_size()==size(px(1280.),px(800.))&&p.position==0.);
+            wait!(p,w,app => w.viewport_size()==size(px(1280.),px(800.))&&p.playhead.position()==0.);
             std::fs::write(out.join("region.json"),serde_json::to_vec_pretty(&serde_json::json!({
                 "actualWaveDrag":true,"actualRulerDrag":true,"bothEdgeResize":true,"actualClickClear":true,"actualEscapeClear":true,
                 "sizes":[[1280,800],[1060,640]],"nativeNonloopEndStop":true,"nativeLoopWrap":true,

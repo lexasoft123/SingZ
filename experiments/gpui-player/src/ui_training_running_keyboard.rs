@@ -52,7 +52,7 @@ fn state(p: &Player, w: &Window, cx: &App, phase: &str) -> serde_json::Value {
         "scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),"active":w.is_window_active(),
         "keyboard":p.training.read(cx).keyboard_state(w,cx),"headerFocused":p.header.read(cx).focused_control(w),
         "screenTraining":p.screen==Screen::Training,"projectLoaded":p.project.is_some(),"playing":p.playing,
-        "seekCount":p.native_seek_count,"micIntent":p.mic_intent.is_some(),
+        "seekCount":p.playhead.seek_count(),"micIntent":p.mic_intent.is_some(),
         "trainingStore":p.training_store.as_ref().map(|store|{let s=store.snapshot();serde_json::json!({
             "revision":s.revision,"loaded":s.loaded,"pending":s.pending,"preferenceError":s.preference_error,
             "completionError":s.completion_error,"loadError":s.load_error,

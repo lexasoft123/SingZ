@@ -86,7 +86,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 let player = view.read(cx);
                 anyhow::ensure!(player.screen == Screen::Player,"Catalog card did not open player");
                 anyhow::ensure!(player.song_title.as_ref()=="Room to breathe","Wrong fixture selected: {}",player.song_title);
-                anyhow::ensure!(player.position==0.,"Song preview did not reset position");
+                anyhow::ensure!(player.playhead.position()==0.,"Song preview did not reset position");
                 let _ = window.draw(cx);
                 window.render_to_image()?.save(directory.join("player.png"))?;
                 let original_gain = view.read(cx).gain[0];
@@ -96,13 +96,13 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {position:point(px(121.),px(133.)),button:MouseButton::Left,click_count:1,..Default::default()}),cx);
                 view.update(cx,|this,cx|{this.playing=true;this.notice=Some("Modal pause check".into());cx.notify();});
                 let _=window.draw(cx);
-                let paused=view.read(cx).position;
+                let paused=view.read(cx).playhead.position();
                 view.update(cx,|this,cx|{this.last=Instant::now()-Duration::from_secs(10);cx.notify();});
                 let _=window.draw(cx);
-                anyhow::ensure!(view.read(cx).position==paused,"Player clock advanced behind notice modal");
+                anyhow::ensure!(view.read(cx).playhead.position()==paused,"Player clock advanced behind notice modal");
                 view.update(cx,|this,cx|{this.notice=None;cx.notify();});let _=window.draw(cx);
-                anyhow::ensure!((view.read(cx).position-paused).abs()<0.1,"Player clock included time behind modal");
-                view.update(cx,|this,cx|{this.playing=false;this.position=0.;cx.notify();});let _=window.draw(cx);
+                anyhow::ensure!((view.read(cx).playhead.position()-paused).abs()<0.1,"Player clock included time behind modal");
+                view.update(cx,|this,cx|{this.playing=false;this.playhead.seek(0.);cx.notify();});let _=window.draw(cx);
                 eprintln!("UI_SMOKE external slider drag rejected; notice clock pauses and resumes without catch-up");
                 click(window,cx,96.,718.); // Production first-row Play.
                 Ok(())
@@ -142,7 +142,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             })??;
             cx.background_executor().timer(Duration::from_millis(30)).await;
             handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
-                anyhow::ensure!((view.read(cx).position-64.).abs()<1.,"Waveform click did not seek near64s: {}",view.read(cx).position);
+                anyhow::ensure!((view.read(cx).playhead.position()-64.).abs()<1.,"Waveform click did not seek near64s: {}",view.read(cx).playhead.position());
                 for _ in 0..90 { window.simulate_next_frame(cx);window.refresh();let _=window.draw(cx); }
                 anyhow::ensure!(!view.read(cx).lyric_scroll_active.get(),"Initial lyric follow did not settle");
                 let before=view.read(cx).lyric_scroll.get();
@@ -167,7 +167,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                     (*index as f64*8.,point(bounds.left()+bounds.size.width*0.5,bounds.top()+bounds.size.height*0.5))
                 };
                 click(window,cx,f32::from(point.x),f32::from(point.y));
-                anyhow::ensure!((view.read(cx).position-expected).abs()<0.01,"Lyric tap did not seek its line: expected{expected},actual{}",view.read(cx).position);
+                anyhow::ensure!((view.read(cx).playhead.position()-expected).abs()<0.01,"Lyric tap did not seek its line: expected{expected},actual{}",view.read(cx).playhead.position());
                 click(window,cx,828.,70.); // Source Zoom + control.
                 Ok(())
             })??;
@@ -180,7 +180,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 anyhow::ensure!((pitch_view.0-start).abs()<0.001 && (pitch_view.1-end).abs()<0.001,"Pitch strip did not follow zoom: {pitch_view:?},waveform{start}..{end}");
                 click(window,cx,568.,180.); // Halfway through the actual waveform viewport.
                 let expected=(start+(end-start)*0.5)*192.;
-                anyhow::ensure!((view.read(cx).position-expected).abs()<0.1,"Zoomed waveform seek did not use visible interval: expected{expected},actual{}",view.read(cx).position);
+                anyhow::ensure!((view.read(cx).playhead.position()-expected).abs()<0.1,"Zoomed waveform seek did not use visible interval: expected{expected},actual{}",view.read(cx).playhead.position());
                 click(window,cx,866.,70.); // Full view.
                 click(window,cx,134.,70.); // Unmute all (not toggle all).
                 click(window,cx,164.,70.); // Unsolo all.

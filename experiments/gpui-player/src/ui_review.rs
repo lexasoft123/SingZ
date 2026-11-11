@@ -21,7 +21,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                         this.settings.update(cx, |settings,cx| { settings.set_review_fixture(true); if screen==Screen::Settings {settings.on_open(cx);} });
                         this.previous_screen = Screen::Library;
                         this.playing = false;
-                        this.position = position;
+                        this.playhead.seek(position);
                         this.muted = std::array::from_fn(|i|i==0);
                         this.fade = std::array::from_fn(|i|if i==0{0.14}else{1.});
                         this.started = Instant::now() - Duration::from_secs(2);

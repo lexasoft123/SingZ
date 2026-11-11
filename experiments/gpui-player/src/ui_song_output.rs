@@ -31,7 +31,7 @@ fn drag_outer_thumb(view:&Entity<Player>,w:&mut Window,cx:&mut App)->anyhow::Res
 fn state(p:&Player,w:&Window,cx:&App)->serde_json::Value {
     serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),
         "hidden":!w.is_visible()&&!w.is_window_active(),"output":p.transport.read(cx).output_state(),"acceptedMaster":p.master_volume,
-        "position":p.position,"selection":p.project.as_ref().and_then(|project|project.selection),"regionBusy":p.region_busy(),
+        "position":p.playhead.position(),"selection":p.project.as_ref().and_then(|project|project.selection),"regionBusy":p.region_busy(),
         "native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"outputPeak":s.output_peak,"outputClippedBlocks":s.output_clipped_blocks})),
         "liveFps":"unmeasured","productionParity":"candidate; source visual comparison pending"})
 }
@@ -45,7 +45,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 loop{cx.background_executor().timer(Duration::from_millis(20)).await;
                     let ready=handle.update(cx,|_,$w,$app|->anyhow::Result<bool>{super::ui_training_run::draw($w,$app);let $p=view.read($app);
                         anyhow::ensure!(!$w.is_visible()&&!$w.is_window_active()&&$p.notice.is_none(),"Output flow activated window or raised notice: {:?}",$p.notice);
-                        anyhow::ensure!(!$p.playing&&$p.position.abs()<0.03&&!$p.region_busy()&&$p.region.gesture.is_none()
+                        anyhow::ensure!(!$p.playing&&$p.playhead.position().abs()<0.03&&!$p.region_busy()&&$p.region.gesture.is_none()
                             &&$p.project.as_ref().is_none_or(|project|project.selection.is_none()),"Output controls changed the underlying playhead or region");
                         Ok($condition)})??;
                     if ready{break;}anyhow::ensure!(Instant::now()<deadline,"Song output timeout: {}",stringify!($condition));

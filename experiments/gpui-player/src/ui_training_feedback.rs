@@ -124,7 +124,7 @@ fn state(p:&Player,w:&Window,cx:&App,phase:&str)->serde_json::Value {
         "dockBounds":active_vocal.then(||bounds("training-run-dock")).flatten(),
         "recordingBarBounds":recording_visible.then(||bounds("training-recording-bar")).flatten(),
         "keyboard":p.training.read(cx).keyboard_state(w,cx),"screenTraining":p.screen==Screen::Training,
-        "projectLoaded":p.project.is_some(),"playing":p.playing,"seekCount":p.native_seek_count,"micIntent":p.mic_intent.is_some(),
+        "projectLoaded":p.project.is_some(),"playing":p.playing,"seekCount":p.playhead.seek_count(),"micIntent":p.mic_intent.is_some(),
         "practice":practice,"history":history,
         "capture":capture,
         "cue":cue,

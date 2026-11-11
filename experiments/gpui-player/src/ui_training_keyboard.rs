@@ -63,7 +63,7 @@ fn state(p:&Player,w:&Window,cx:&App,phase:&str)->serde_json::Value {
     serde_json::json!({"phase":phase,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],
         "scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),"active":w.is_window_active(),
         "keyboard":p.training.read(cx).keyboard_state(w,cx),"screenTraining":p.screen==Screen::Training,"projectLoaded":p.project.is_some(),
-        "playing":p.playing,"seekCount":p.native_seek_count,"micIntent":p.mic_intent.is_some(),"practice":practice,
+        "playing":p.playing,"seekCount":p.playhead.seek_count(),"micIntent":p.mic_intent.is_some(),"practice":practice,
         "capture":{"owner":p.mic_view.owner,"phase":format!("{:?}",p.mic_view.phase),"fixture":p.mic_view.fixture,
             "generation":p.mic_view.generation,"sequence":p.mic_view.sequence,"frequency":p.mic_view.frequency,"clarity":p.mic_view.clarity},
         "cue":p.training_last.as_ref().map(|s|serde_json::json!({"generation":s.generation,"active":s.active,

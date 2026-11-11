@@ -72,7 +72,7 @@ fn snapshot(
     std::fs::write(
         out.join(format!("{name}.json")),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"lanes":p.project.as_ref().map(|s|&s.lane_specs),"duration":p.duration,"playing":p.playing,"position":p.position,"gain":p.gain.as_slice(),"epoch":p.native_epoch,"pending":p.tracks_pending,"saving":p.saving,"editSeq":p.edit_seq,"savedSeq":p.saved_seq,"focusedRoot":p.focus_handle.is_focused(w),"error":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"entrancesSettled":settled,"hidden":true,"liveFps":"unmeasured","visualReference":"candidate only; production matched references absent"}),
+            &serde_json::json!({"lanes":p.project.as_ref().map(|s|&s.lane_specs),"duration":p.duration,"playing":p.playing,"position":p.playhead.position(),"gain":p.gain.as_slice(),"epoch":p.native_epoch,"pending":p.tracks_pending,"saving":p.saving,"editSeq":p.edit_seq,"savedSeq":p.saved_seq,"focusedRoot":p.focus_handle.is_focused(w),"error":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"entrancesSettled":settled,"hidden":true,"liveFps":"unmeasured","visualReference":"candidate only; production matched references absent"}),
         )?,
     )?;
     Ok(())
@@ -107,7 +107,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             for (width,height) in [(1280.,800.),(1060.,640.)]{
                 handle.update(cx,|_,w,cx|{w.resize(size(px(width),px(height)));view.update(cx,|p,cx|{p.notice=None;p.open_project(project.clone(),cx);});})?;
                 wait!(p,cx=>!p.loading&&p.project.is_some()&&p.screen==Screen::Player);
-                handle.update(cx,|_,w,cx|key(w,cx,"space"))?;wait!(p,cx=>p.playing&&p.position>0.05);
+                handle.update(cx,|_,w,cx|key(w,cx,"space"))?;wait!(p,cx=>p.playing&&p.playhead.position()>0.05);
                 let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"add"))??;
                 wait!(p,cx=>p.tracks_pending.is_none()&&p.project.as_ref().is_some_and(|s|s.custom_tracks().len()==2));
@@ -139,7 +139,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 cx.background_executor().timer(Duration::from_millis(900)).await;
                 handle.update(cx,|_,w,cx|snapshot(&view,w,cx,&out,&format!("reopened-{}",width as u32)))??;
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{if !p.looping{p.native_transport(transport::TransportEvent::Loop,cx);}}))?;
-                wait!(p,cx=>p.native_loop.is_some());
+                wait!(p,cx=>p.playhead.loop_range().is_some());
                 for lane in specs{
                     handle.update(cx,|_,w,cx|press(&view,w,cx,&format!("remove-{}",lane.slot)))??;
                     wait!(p,cx=>p.tracks_pending.is_none()&&p.project.as_ref().is_some_and(|s|!s.lane_specs.iter().any(|l|l.id==lane.id)));
@@ -151,7 +151,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){ "cmd-s" }else{"ctrl-s"}))?;
                 wait!(p,cx=>!p.saving&&p.saved_seq==p.edit_seq);
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
-                wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|s|s.custom_tracks().is_empty())&&p.duration<4.&&p.native_loop.is_some_and(|(_,end)|end<=p.duration+0.001));
+                wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|s|s.custom_tracks().is_empty())&&p.duration<4.&&p.playhead.loop_range().is_some_and(|(_,end)|end<=p.duration+0.001));
                 cx.background_executor().timer(Duration::from_millis(900)).await;
                 handle.update(cx,|_,w,cx|snapshot(&view,w,cx,&out,&format!("removed-{}",width as u32)))??;
             }

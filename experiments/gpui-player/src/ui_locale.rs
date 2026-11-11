@@ -14,7 +14,7 @@ fn state(view:&Entity<Player>,w:&Window,cx:&App)->serde_json::Value {
   "carry":p.carry_popover.read(cx).state(w,cx),"metronomeCaption":p.metronome_ui.read(cx).caption(),
   "log":p.log_panel.read(cx).state(w,cx),
   "quickStart":p.quick_start.read(cx).snapshot(),"release":p.whats_new.read(cx).state(w,cx),
-  "screen":p.screen as u8,"project":p.project.as_ref().map(|p|&p.dir),"epoch":p.native_epoch,"playing":p.playing,"position":p.position,
+  "screen":p.screen as u8,"project":p.project.as_ref().map(|p|&p.dir),"epoch":p.native_epoch,"playing":p.playing,"position":p.playhead.position(),
   "gain":p.gain.as_slice(),"muted":p.muted.as_slice(),"solo":p.solo.as_slice(),"tempo":p.tempo,"transpose":p.transpose,"master":p.master_volume,
   "native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"graph":s.graph_generation,"playing":s.playing,"position":s.position,"rate":s.rate,"lanes":s.observed_lanes})),
   "notice":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),
@@ -65,20 +65,20 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){l
   fn copy_tree(from:&Path,to:&Path)->std::io::Result<()>{std::fs::create_dir_all(to)?;for entry in std::fs::read_dir(from)?{let entry=entry?;let target=to.join(entry.file_name());if entry.file_type()?.is_dir(){copy_tree(&entry.path(),&target)?;}else{std::fs::copy(entry.path(),&target)?;}}Ok(())}
   let settled=out.join("settled-project");let _=std::fs::remove_dir_all(&settled);copy_tree(&project,&settled)?;
   handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").ok_or_else(||anyhow::anyhow!("Actual native Play missing"))?;click(w,cx,b.center());Ok(())})??;
-  wait!(p,w,app=>p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing)&&p.position>0.1);
-  let baseline=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.native_loop,p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)})?;
+  wait!(p,w,app=>p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing)&&p.playhead.position()>0.1);
+  let baseline=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.playhead.loop_range(),p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)})?;
   macro_rules! audio_unchanged {()=>{handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing),"Language change paused real native playback");
-   anyhow::ensure!((p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.native_loop,p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)==baseline,"Locale selection rebuilt native graph or changed mix/transport");Ok(())})??;};}
+   anyhow::ensure!((p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.playhead.loop_range(),p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)==baseline,"Locale selection rebuilt native graph or changed mix/transport");Ok(())})??;};}
   // Native transport as the singer would observe it: running or paused, and where.
-  macro_rules! audio_snapshot {()=>{handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.last_playback_status.as_ref().is_some_and(|s|s.playing),p.position)})?};}
+  macro_rules! audio_snapshot {()=>{handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.last_playback_status.as_ref().is_some_and(|s|s.playing),p.playhead.position())})?};}
   // A language change must leave the transport exactly as it was: playing stays
   // playing and paused stays paused at the same position; graph and mix are untouched.
   macro_rules! audio_state_same {($before:expr)=>{{let before=$before;handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);
-   let now=(p.playing,p.last_playback_status.as_ref().is_some_and(|s|s.playing),p.position);
+   let now=(p.playing,p.last_playback_status.as_ref().is_some_and(|s|s.playing),p.playhead.position());
    anyhow::ensure!(now.0==before.0&&now.1==before.1,"Language change altered native transport state: before {before:?} after {now:?}");
    if before.1 {anyhow::ensure!(now.2>=before.2-0.05,"Playing position moved backwards across a language change: {before:?} {now:?}");}
    else {anyhow::ensure!((now.2-before.2).abs()<0.05,"Paused position moved across a language change: {before:?} {now:?}");}
-   anyhow::ensure!((p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.native_loop,p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)==baseline,"Locale selection rebuilt native graph or changed mix/transport");Ok(())})??;}};}
+   anyhow::ensure!((p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.playhead.loop_range(),p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)==baseline,"Locale selection rebuilt native graph or changed mix/transport");Ok(())})??;}};}
   for (width,height) in [(1280.,800.),(1060.,640.)] {
    handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;wait!(p,w,app=>w.viewport_size()==size(px(width),px(height)));
    let suffix=width as u32;
@@ -150,7 +150,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){l
    let running=audio_snapshot!();
    choose!(Language::Locale(Locale::Ko),"enter");
    audio_state_same!(running);
-   wait!(p,w,app=>p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing)&&p.position>running.2+0.3);
+   wait!(p,w,app=>p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing)&&p.playhead.position()>running.2+0.3);
    audio_unchanged!();
    // Reposition an OPEN popup across actual native resizing, not a captured
    // screenshot transform. Restore size before the next normal case.

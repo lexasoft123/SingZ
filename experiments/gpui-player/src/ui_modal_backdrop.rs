@@ -133,7 +133,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             // Exercise the real host's frozen display position and structural key.
             handle.update(cx, |_, w, cx| {
                 view.update(cx, |p, cx| {
-                    p.screen=Screen::Player; p.loaded_song=true; p.position=10.; p.playing=false;
+                    p.screen=Screen::Player; p.loaded_song=true; p.playhead.seek(10.); p.playing=false;
                     p.previous_screen=Screen::Player;
                     p.backdrop.borrow_mut().clear(w,cx);
                     cx.notify();
@@ -154,10 +154,10 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 Ok((p.display_position(), captures, image))
             })??;
             handle.update(cx, |_, w, cx| {
-                view.update(cx, |p,cx| { p.position=25.;cx.notify(); });
+                view.update(cx, |p,cx| { p.playhead.seek(25.);cx.notify(); });
                 draw(w,cx);
                 let p=view.read(cx);
-                assert_eq!(p.position,25.,"Backdrop rewound actual playback position");
+                assert_eq!(p.playhead.position(),25.,"Backdrop rewound actual playback position");
                 assert_eq!(p.display_position(),host.0,"Modal-open display clock advanced");
                 assert_eq!(p.backdrop.borrow().captures(),host.1,"Clock tick refreshed the backdrop");
                 view.update(cx, |p,cx| {
@@ -198,7 +198,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 assert!(view.read(cx).previous_screen==Screen::Training);
                 assert_eq!(view.read(cx).backdrop.borrow().captures(),count+1,
                     "Late Training history/error update did not refresh exactly once");
-                view.update(cx, |p,cx| { p.position=30.;cx.notify(); });
+                view.update(cx, |p,cx| { p.playhead.seek(30.);cx.notify(); });
                 draw(w,cx);
                 assert_eq!(view.read(cx).backdrop.borrow().captures(),count+1,
                     "Training modal clock recaptured unchanged underlay");

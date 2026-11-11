@@ -48,7 +48,7 @@ fn set_view(view: &Entity<Player>, cx: &mut App, start: f64, end: f64) {
     });
 }
 fn paint_at(view: &Entity<Player>, w: &mut Window, cx: &mut App, seconds: f64) -> anyhow::Result<Frame> {
-    view.update(cx, |p, cx| { p.position = seconds; cx.notify(); });
+    view.update(cx, |p, cx| { p.playhead.seek(seconds); cx.notify(); });
     draw(w, cx);
     anyhow::ensure!(!w.is_visible() && !w.is_window_active(), "Played-edge test activated its window");
     grab(w)
@@ -58,7 +58,7 @@ fn geometry(view: &Entity<Player>, w: &Window, cx: &App) -> anyhow::Result<(f64,
     let p = view.read(cx);
     let bounds = p.region.bounds.get().ok_or_else(|| anyhow::anyhow!("Lane stack bounds not measured"))?;
     let scale = w.scale_factor() as f64;
-    let fraction = (p.position / p.duration - p.view_start) / (p.view_end - p.view_start);
+    let fraction = (p.playhead.position() / p.duration - p.view_start) / (p.view_end - p.view_start);
     let head = (f32::from(bounds.left()) as f64 + fraction * f32::from(bounds.size.width) as f64) * scale;
     Ok((head, (f32::from(bounds.top()) as f64 * scale) as u32, (f32::from(bounds.bottom()) as f64 * scale) as u32, scale))
 }
@@ -153,8 +153,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx, |_, w, cx| { let _ = w.render_to_image().map(|i| i.save(out.join("paused-last.png"))); draw(w, cx); })?;
 
             // Playing: real playback inside the same view, frames judged as they come.
-            handle.update(cx, |_, _, cx| view.update(cx, |p, cx| { p.position = start + 3.0; p.seek_native(cx); }))?;
-            wait!("seek", |p: &Player| p.pending_seek.is_none());
+            handle.update(cx, |_, _, cx| view.update(cx, |p, cx| { p.playhead.seek(start + 3.0); p.seek_native(cx); }))?;
+            wait!("seek", |p: &Player| p.playhead.pending_seek().is_none());
             handle.update(cx, |_, _, cx| view.update(cx, |p, cx| p.native_transport(transport::TransportEvent::Play, cx)))?;
             wait!("playing", |p: &Player| p.playing && p.native_play_intent.is_none() && p.last_playback_status.as_ref().is_some_and(|s| s.playing));
             let mut playing = Vec::new();
@@ -169,7 +169,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     // While playing the painters take the position from the playback clock, so no
                     // reference can be rendered now; the paused references of this same view are
                     // used, and a frame whose view has moved is skipped, not judged.
-                    let (view_start, view_end, position) = { let p = view.read(cx); (p.view_start * p.duration, p.view_end * p.duration, p.position) };
+                    let (view_start, view_end, position) = { let p = view.read(cx); (p.view_start * p.duration, p.view_end * p.duration, p.playhead.position()) };
                     if (view_start - start).abs() > 1e-6 || (view_end - (start + span)).abs() > 1e-6 {
                         return Ok(serde_json::json!({"frame": index, "skipped": "view moved", "position": position, "viewSeconds": [view_start, view_end]}));
                     }

@@ -128,7 +128,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     // Last selected lane is guarded by the real button, not only validation.
     let serial=handle.update(cx,|_,_,cx|view.read(cx).carry_serial)?;action!("carry-lane-0");anyhow::ensure!(handle.update(cx,|_,_,cx|{let p=view.read(cx);p.carry_serial==serial&&p.carry.config.stems==["vocals"]})?,"Last selected stem was removed");
     action!("carry-on");wait!(p,cx=>p.carry.enabled&&p.native_carry_revision>old_status.carry_revision);
-    handle.update(cx,|_,_,cx|->anyhow::Result<()>{view.update(cx,|p,cx|{let revision=p.native_carry_revision;let position=p.position;let playing=p.playing;p.playback_status(epoch,old_status.clone(),cx);anyhow::ensure!(p.native_carry_revision==revision&&p.position==position&&p.playing==playing,"Actual delayed old-revision status overwrote new Carry receipt");Ok(())})})??;
+    handle.update(cx,|_,_,cx|->anyhow::Result<()>{view.update(cx,|p,cx|{let revision=p.native_carry_revision;let position=p.playhead.position();let playing=p.playing;p.playback_status(epoch,old_status.clone(),cx);anyhow::ensure!(p.native_carry_revision==revision&&p.playhead.position()==position&&p.playing==playing,"Actual delayed old-revision status overwrote new Carry receipt");Ok(())})})??;
     for _ in 0..3{action!("carry-period-minus");}anyhow::ensure!(handle.update(cx,|_,_,cx|view.read(cx).carry.config.period_sec==5)?,"Period lower clamp failed");
     for _ in 0..12{action!("carry-period-plus");}anyhow::ensure!(handle.update(cx,|_,_,cx|view.read(cx).carry.config.period_sec==60)?,"Period upper clamp failed");
     handle.update(cx,|_,w,cx|snapshot(&view,w,cx,&out,&format!("time60-{}",width as u32)))??;
@@ -151,8 +151,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     // Use production transport requests with real native receipts. These are
     // not a second DSP implementation or a synthetic playback clock.
     handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Tempo(1.25),cx)))?;wait!(p,cx=>p.last_playback_status.as_ref().is_some_and(|s|(s.rate-1.25).abs()<0.001));
-    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Loop,cx)))?;wait!(p,cx=>p.native_loop.is_some());
-    handle.update(cx,|_,w,cx|key(w,cx,"space"))?;wait!(p,cx=>p.playing&&p.position>0.1);
+    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Loop,cx)))?;wait!(p,cx=>p.playhead.loop_range().is_some());
+    handle.update(cx,|_,w,cx|key(w,cx,"space"))?;wait!(p,cx=>p.playing&&p.playhead.position()>0.1);
     handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_epoch==epoch&&p.native_carry_revision>old_status.carry_revision&&p.carry_plan.as_ref().is_some_and(|p|p.windows.len()==2),"Native tempo/loop replaced Carry ownership");snapshot(&view,w,cx,&out,&format!("playing-{}",width as u32))?;key(w,cx,"space");Ok(())})??;wait!(p,cx=>!p.playing);
    }
    // A genuinely native-applied receipt is held on the worker, not a fake

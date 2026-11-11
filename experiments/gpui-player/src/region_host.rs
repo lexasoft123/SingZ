@@ -64,7 +64,7 @@ impl Player {
         if let Some(position)=gesture.clicked() {
             if self.region_target().selection.is_none() {self.edit_seq+=1;}
             self.request_region(Target{selection:None,..self.region_target()},cx);
-            self.position=position;self.seek_native(cx);
+            self.playhead.seek(position);self.seek_native(cx);
         }
         cx.notify();
     }

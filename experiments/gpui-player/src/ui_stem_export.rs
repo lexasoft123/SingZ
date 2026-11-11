@@ -85,7 +85,7 @@ fn snapshot(
     std::fs::write(
         out.join(format!("{name}.json")),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"dialog":state,"open":p.stem_export_open,"job":p.stem_export_job,"closePending":p.stem_export_close_pending,"finishedIds":p.stem_export_finished_ids,"project":p.project.as_ref().map(|p|&p.dir),"playing":p.playing,"position":p.position,"epoch":p.native_epoch,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":true,"liveFps":"unmeasured","productionParity":"unqualified; candidate only"}),
+            &serde_json::json!({"dialog":state,"open":p.stem_export_open,"job":p.stem_export_job,"closePending":p.stem_export_close_pending,"finishedIds":p.stem_export_finished_ids,"project":p.project.as_ref().map(|p|&p.dir),"playing":p.playing,"position":p.playhead.position(),"epoch":p.native_epoch,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":true,"liveFps":"unmeasured","productionParity":"unqualified; candidate only"}),
         )?,
     )?;
     Ok(())

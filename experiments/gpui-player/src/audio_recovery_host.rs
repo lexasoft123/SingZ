@@ -39,9 +39,8 @@ impl Player {
         self.analysis_progress = analysis.1;
         self.tracks_audio_failed = self.project.is_some();
         self.playing = false;
-        self.native_anchor = None;
-        self.pending_seek = None;
-        self.native_floor = None;
+        self.playhead.stop_projection();
+
         self.counting_in = false;
         self.count_in_anchor = None;
         self.metronome_pending = None;
@@ -126,7 +125,7 @@ impl Player {
             replace: self.tracks_audio_failed,
             project: project.clone(),
             mix: self.current_mix(project),
-            position: self.position,
+            position: self.playhead.position(),
         };
         match backend.recover_output(self.native_epoch, serial, request, uid) {
             Ok(()) => {
@@ -182,13 +181,9 @@ impl Player {
                 self.native_carry_revision = status.carry_revision;
                 self.native_rate_generation_floor = 0;
                 self.native_rate = status.rate;
-                self.native_seek_count = status.seek_count;
-                self.native_loop_count = status.loop_count;
-                self.native_loop = status.loop_range;
-                self.pending_seek = None;
-                self.native_floor = None;
+
                 self.native_play_intent = None;
-                self.position = status.position;
+
                 self.duration = status.duration;
                 self.playing = false;
                 if let Some(media) = recovered.media {
@@ -206,7 +201,8 @@ impl Player {
                     self.pitch_strip
                         .update(cx, |p, cx| p.set_native(project.pitch.clone(), cx));
                 }
-                self.native_anchor = Some((status.position, status.sampled_at));
+                self.playhead.reset(status.position);
+                self.playhead.admit((&status).into(), Instant::now());
                 self.timing_status = Some(status.clone());
                 self.counting_in = false;
                 self.count_in_anchor = None;
@@ -286,7 +282,7 @@ impl Player {
         });
         self.tracks_audio_failed = true;
         self.playing = false;
-        self.native_anchor = None;
+        self.playhead.stop_projection();
         #[cfg(feature = "ui-tests")]
         if let Some(receipt) = self.source_publication_fault.take() {
             ui_audio_recovery::quarantine_publication(output, &receipt)

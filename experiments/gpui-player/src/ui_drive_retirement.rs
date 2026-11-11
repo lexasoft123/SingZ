@@ -95,7 +95,7 @@ fn empty(p: &Player) -> bool {
             s.empty_tracks && !s.has_audio() && s.lanes.is_empty() && s.lane_specs.is_empty()
         })
         && p.duration == 0.
-        && p.position == 0.
+        && p.playhead.position() == 0.
         && !p.playing
         && p.native_graph == 0
         && p.last_playback_status.as_ref().is_some_and(|s| {
@@ -114,7 +114,7 @@ fn state(p: &Player, w: &Window, cx: &App, phase: &str) -> serde_json::Value {
         "catalogRoot":p.catalog_root,"catalogRows":p.library.read(cx).project_snapshot(),
         "libraryDrive":p.library.read(cx).drive_state(w),"picker":p.project_picker.read(cx).state(w,cx),"deleteDialog":p.project_delete.read(cx).state(w,cx),
         "project":p.project.as_ref().map(|s|&s.dir),"raw":p.project.as_ref().map(|s|&s.raw),"empty":empty(p),"hasAudio":p.project.as_ref().map(|s|s.has_audio()),
-        "laneCount":p.project.as_ref().map(|s|s.lane_specs.len()),"duration":p.duration,"position":p.position,"playing":p.playing,"nativeEpoch":p.native_epoch,
+        "laneCount":p.project.as_ref().map(|s|s.lane_specs.len()),"duration":p.duration,"position":p.playhead.position(),"playing":p.playing,"nativeEpoch":p.native_epoch,
         "native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"empty":s.empty_project,"generation":s.graph_generation,"physicalReleased":s.physical_output_released,
             "laneRevision":s.lane_revision,"provider":s.observed_provider,"backendProvider":s.observed_backend_provider,"fixture":s.observed_fixture})),
         "editSeq":p.edit_seq,"savedSeq":p.saved_seq,"saving":p.saving,"notice":p.notice,"micOwner":p.mic_view.owner,"physicalInput":false,"liveFps":"unmeasured"})

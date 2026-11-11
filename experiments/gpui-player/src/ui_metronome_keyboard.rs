@@ -33,9 +33,9 @@ fn volume(view:&Entity<Player>,w:&mut Window,cx:&mut App,value:f64)->anyhow::Res
 fn state(p:&Player,w:&Window,cx:&App)->serde_json::Value {
     serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],
         "scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),"metronome":p.metronome,
-        "pending":p.metronome_pending,"open":p.metronome_open,"playing":p.playing,"position":p.position,
+        "pending":p.metronome_pending,"open":p.metronome_open,"playing":p.playing,"position":p.playhead.position(),
         "masterVolume":p.master_volume,"output":p.transport.read(cx).output_state(),
-        "focused":p.metronome_ui.read(cx).focused_control(w,cx),"seekCount":p.native_seek_count,
+        "focused":p.metronome_ui.read(cx).focused_control(w,cx),"seekCount":p.playhead.seek_count(),
         "scope":"real popup keyboard and accepted native transactions; no nonzero audio measurement","liveFps":"unmeasured"})
 }
 pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBuf,cx:&mut App)->mpsc::Receiver<Result<(),String>> {
@@ -45,7 +45,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             anyhow::ensure!(std::env::var("SINGZ_MUTE").as_deref()==Ok("1")&&std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"Metronome journey requires hidden/muted execution");
             let project=project.canonicalize()?;
             let original=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);
-                anyhow::ensure!(p.screen==Screen::Player&&!p.playing&&p.position.abs()<0.03&&!p.metronome_open
+                anyhow::ensure!(p.screen==Screen::Player&&!p.playing&&p.playhead.position().abs()<0.03&&!p.metronome_open
                     &&p.project.as_ref().is_some_and(|s|s.dir==project),"Metronome keyboard baseline changed");Ok(p.metronome.clone())})??;
             let mut cases=vec![];
             macro_rules! wait {($p:ident,$w:ident,$app:ident => $condition:expr)=>{{
@@ -113,15 +113,15 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
                 wait!(p,w,app => !p.loading&&p.native_epoch>epoch&&p.project.as_ref().is_some_and(|s|s.dir==project)
-                    &&!p.playing&&p.position.abs()<0.03&&p.metronome==original&&p.beats==grid_before);
+                    &&!p.playing&&p.playhead.position().abs()<0.03&&p.metronome==original&&p.beats==grid_before);
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"metronome"))??;
                 wait!(p,w,app => p.metronome_open&&p.metronome_ui.read(app).tap_count()==0);
-                let seek_before=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count)?;
+                let seek_before=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count())?;
                 handle.update(cx,|_,w,cx|tab_to(&view,w,cx,"met-bpm"))??;
                 handle.update(cx,|_,w,cx|{key(w,cx,if cfg!(target_os="macos"){"cmd-a"}else{"ctrl-a"});for text in ["1","2","3"]{key(w,cx,text);}})?;
-                wait!(p,w,app => p.metronome_ui.read(app).input().read(app).value().as_str()=="123"&&!p.playing&&p.native_seek_count==seek_before);
+                wait!(p,w,app => p.metronome_ui.read(app).input().read(app).value().as_str()=="123"&&!p.playing&&p.playhead.seek_count()==seek_before);
                 handle.update(cx,|_,w,cx|{key(w,cx,"space");key(w,cx,"left");key(w,cx,"right");})?;
-                wait!(p,w,app => p.metronome_ui.read(app).input().read(app).value().as_str()=="123"&&!p.playing&&p.native_seek_count==seek_before&&p.beats==grid_before);
+                wait!(p,w,app => p.metronome_ui.read(app).input().read(app).value().as_str()=="123"&&!p.playing&&p.playhead.seek_count()==seek_before&&p.beats==grid_before);
                 handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
                 wait!(p,w,app => !p.metronome_open&&p.beats==grid_before);
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"metronome"))??;
@@ -131,9 +131,9 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 wait!(p,w,app => !p.metronome_ui.read(app).volume_focused(w));
                 handle.update(cx,|_,w,cx|volume(&view,w,cx,0.5))??;
                 wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==0.5&&p.metronome_ui.read(app).volume_focused(w));
-                let count=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count)?;
+                let count=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count())?;
                 handle.update(cx,|_,w,cx|{for _ in 0..3{key(w,cx,"right");}})?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==0.53&&p.native_seek_count==count);
+                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==0.53&&p.playhead.seek_count()==count);
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
                 wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.metronome_open&&p.metronome_ui.read(app).volume_focused(w)
                     &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
@@ -141,9 +141,9 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.metronome_open&&p.metronome_ui.read(app).volume_focused(w)
                     &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                 handle.update(cx,|_,w,cx|{key(w,cx,"home");key(w,cx,"left");})?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==0.&&p.native_seek_count==count);
+                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==0.&&p.playhead.seek_count()==count);
                 handle.update(cx,|_,w,cx|{key(w,cx,"end");key(w,cx,"right");})?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==1.&&p.native_seek_count==count);
+                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==1.&&p.playhead.seek_count()==count);
                 handle.update(cx,|_,w,cx|volume(&view,w,cx,original.volume))??;
                 wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==original.volume);
                 handle.update(cx,|_,w,cx|tab_to(&view,w,cx,"met-accent-1"))??;
@@ -154,11 +154,11 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
                 wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                 handle.update(cx,|_,w,cx|tab_to(&view,w,cx,"met-accent-0"))??;
-                let position=handle.update(cx,|_,_,cx|view.read(cx).position)?;
+                let position=handle.update(cx,|_,_,cx|view.read(cx).playhead.position())?;
                 handle.update(cx,|_,w,cx|key(w,cx,"right"))?;
-                wait!(p,w,app => p.pending_seek.is_none()&&(p.position-(position+5.).min(p.duration)).abs()<0.03);
+                wait!(p,w,app => p.playhead.pending_seek().is_none()&&(p.playhead.position()-(position+5.).min(p.duration)).abs()<0.03);
                 handle.update(cx,|_,w,cx|key(w,cx,"left"))?;
-                wait!(p,w,app => p.pending_seek.is_none()&&(p.position-position).abs()<0.03);
+                wait!(p,w,app => p.playhead.pending_seek().is_none()&&(p.playhead.position()-position).abs()<0.03);
                 handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
                 wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.accent);
                 if !original.accent {handle.update(cx,|_,w,cx|press(&view,w,cx,"met-accent-1"))??;}
@@ -185,7 +185,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
                 wait!(p,w,app => !p.loading&&p.native_epoch>epoch&&p.project.as_ref().is_some_and(|s|s.dir==project)
-                    &&!p.playing&&p.position.abs()<0.03&&p.metronome==original&&p.beats==grid_before);
+                    &&!p.playing&&p.playhead.position().abs()<0.03&&p.metronome==original&&p.beats==grid_before);
             }
             handle.update(cx,|_,w,cx|{let focus=view.read(cx).focus_handle.clone();focus.focus(w,cx);key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"});})?;
             wait!(p,w,app => !p.saving&&p.saved_seq==p.edit_seq&&p.metronome_pending.is_none()&&p.metronome==original);

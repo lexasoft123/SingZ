@@ -172,7 +172,7 @@ impl Player {
                 resume: SourceResume {
                     restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,false),
                     play_serial:self.native_play_serial,
-                    position: self.position,
+                    position: self.playhead.position(),
                     playing: false,
                     mode: None,
                     title: Some(self.song_title.to_string()),
@@ -200,9 +200,8 @@ impl Player {
                     self.native_epoch = epoch;
                     self.loading = true;
                     self.playing = false;
-                    self.native_anchor = None;
-                    self.pending_seek = None;
-                    self.native_floor = None;
+                    self.playhead.stop_projection();
+
                     self.counting_in = false;
                     self.count_in_anchor = None;
                     self.cancel_sidebar_lyrics(cx);
@@ -320,7 +319,7 @@ impl Player {
         self.loading = false;
         self.saving = false;
         self.playing = false;
-        self.native_anchor = None;
+        self.playhead.stop_projection();
         self.loaded_song = false;
         self.project = None;
         self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
@@ -333,12 +332,10 @@ impl Player {
         self.rename_pending = None;
         self.edit_seq = 0;
         self.saved_seq = 0;
-        self.position = 0.;
+        self.playhead.reset(0.);
         self.karaoke = false;
         self.looping = false;
-        self.pending_seek = None;
-        self.native_floor = None;
-        self.native_loop = None;
+
         self.counting_in = false;
         self.count_in_anchor = None;
         self.beats = None;

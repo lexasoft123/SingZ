@@ -37,7 +37,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                     let requested_position = start + index as f64 / 120.;
                     let frame = handle.update(cx, |_, window, cx| -> anyhow::Result<_> {
                         view.update(cx, |this, cx| {
-                            this.position = requested_position;
+                            this.playhead.seek(requested_position);
                             this.last = Instant::now();
                             cx.notify();
                         });
@@ -54,7 +54,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                         window.refresh(); let _ = window.draw(cx);
                         let draws = stats.borrow().advancing_glow_draws;
                         let player = view.read(cx);
-                        let position = player.position;
+                        let position = player.playhead.position();
                         let effective = position + 0.15;
                         let line = ((effective / 8.).floor() as usize).min(23);
                         let total: usize = LYRICS[line % 6].split_whitespace().map(str::len).sum();

@@ -84,10 +84,10 @@ fn snapshot(view: &Entity<Player>, window: &Window, cx: &App) -> Value {
         "loadedSong": player.loaded_song,
         "loading": player.loading,
         "playing": player.playing,
-        "position": player.position,
+        "position": player.playhead.position(),
         "duration": player.duration,
         "countingIn": player.counting_in,
-        "pendingSeek": player.pending_seek,
+        "pendingSeek": player.playhead.pending_seek(),
         "editSeq": player.edit_seq,
         "savedSeq": player.saved_seq,
         "saving": player.saving,
@@ -110,7 +110,7 @@ fn snapshot(view: &Entity<Player>, window: &Window, cx: &App) -> Value {
             "transpose": player.transpose,
             "looping": player.looping,
             "nativeRate": player.native_rate,
-            "nativeLoop": player.native_loop,
+            "nativeLoop": player.playhead.loop_range(),
             "view": [player.view_start, player.view_end],
         },
         "settings": {"outputUid": output_uid, "routeBusy": route_busy, "routeError": route_error},
@@ -232,7 +232,7 @@ fn retained(view: &Entity<Player>, cx: &App) -> Retained {
         lyric_scroll: (player.lyric_scroll.get(), player.lyric_scroll_target.get()),
         lyric_handle: (f32::from(lyric_offset.x), f32::from(lyric_offset.y)),
         lyric_active: player.lyric_active.get(),
-        position: player.position,
+        position: player.playhead.position(),
         duration: player.duration,
         screen: player.screen as u8,
         karaoke: player.karaoke,
@@ -683,14 +683,14 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         player.native_transport(transport::TransportEvent::Loop, cx);
                         player.native_transport(transport::TransportEvent::Tempo(0.8), cx);
                         player.native_transport(transport::TransportEvent::Transpose(2), cx);
-                        player.position = 2.5;
+                        player.playhead.seek(2.5);
                         player.seek_native(cx);
                     }))?;
                     wait!(15, player, window, app => player.native_rate_pending.is_none()
                         && player.native_rate_queued.is_none()
-                        && player.pending_seek.is_none()
+                        && player.playhead.pending_seek().is_none()
                         && player.edit_seq > player.saved_seq
-                        && (player.position - 2.5).abs() < 0.03
+                        && (player.playhead.position() - 2.5).abs() < 0.03
                         && player.last_playback_status.as_ref().is_some_and(|status| !status.playing
                             && (status.rate - 0.8).abs() < 0.0001
                             && status.transpose == 2
@@ -748,7 +748,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
 
                     handle.update(cx, |_, _, cx| view.update(cx, |player, cx| player.select_output(target_uid.clone(), cx)))?;
                     wait!(20, player, window, app => native_paused(player, &target_uid, 2.5, 0.8, 2, true)
-                        && player.native_loop == Some((1., 10.))
+                        && player.playhead.loop_range() == Some((1., 10.))
                         && lane_accepted(player, 0.47, true)
                         && player.notice.is_none()
                         && player.settings.read(app).native_snapshot().1 == target_uid
@@ -809,9 +809,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         click(window, cx, option);
                         Ok(())
                     })??;
-                    let settings_position = handle.update(cx, |_, _, cx| view.read(cx).position)?;
+                    let settings_position = handle.update(cx, |_, _, cx| view.read(cx).playhead.position())?;
                     wait!(20, player, window, app => native_paused(player, &target_uid, settings_position, 0.8, 2, true)
-                        && player.native_loop == Some((1., 10.))
+                        && player.playhead.loop_range() == Some((1., 10.))
                         && player.settings.read(app).native_snapshot().1 == target_uid
                         && player.settings.read(app).native_snapshot().3.is_none());
                     let route_preferences = std::fs::read(&preferences_path)?;
@@ -825,7 +825,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     shot!("retained-settings-route-error-1280");
                     settings!("settings-retry");
                     wait!(20, player, window, app => native_paused(player, &target_uid, settings_position, 0.8, 2, true)
-                        && player.native_loop == Some((1., 10.))
+                        && player.playhead.loop_range() == Some((1., 10.))
                         && player.settings.read(app).native_snapshot().3.is_none()
                         && player.saved_seq == player.edit_seq);
                     shot!("retained-settings-retried-1280");
@@ -959,13 +959,13 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         player.native_transport(transport::TransportEvent::Tempo(0.9), cx);
                         player.native_transport(transport::TransportEvent::Transpose(-2), cx);
                         player.native_transport(transport::TransportEvent::Loop, cx);
-                        player.position = 2.;
+                        player.playhead.seek(2.);
                         player.seek_native(cx);
                     }))?;
                     wait!(15, player, window, app => player.native_rate_pending.is_none()
                         && player.native_rate_queued.is_none()
-                        && player.pending_seek.is_none()
-                        && (player.position - 2.).abs() < 0.03
+                        && player.playhead.pending_seek().is_none()
+                        && (player.playhead.position() - 2.).abs() < 0.03
                         && player.last_playback_status.as_ref().is_some_and(|status| !status.playing
                             && (status.rate - 0.9).abs() < 0.0001
                             && status.transpose == -2
@@ -1048,7 +1048,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                             probes.push(probe_value(&sample,"failed-publication-paused",index));
                             handle.update(cx,|_,w,app|->anyhow::Result<()>{draw(w,app);let p=view.read(app);
                                 anyhow::ensure!(p.native_epoch==epoch&&p.source_publication.is_some()&&p.source_working&&p.tracks_audio_failed&&!p.playing
-                                    &&(p.position-failed.position).abs()<0.0001,"Publication failure lost receipt or moved local stopped clock");Ok(())})??;
+                                    &&(p.playhead.position()-failed.position).abs()<0.0001,"Publication failure lost receipt or moved local stopped clock");Ok(())})??;
                         }
                         let paused_observation_seconds=paused_started.elapsed().as_secs_f64();
                         anyhow::ensure!(paused_observation_seconds>=0.7,"Native stopped-state observation was too short");
@@ -1273,7 +1273,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         settings!("settings-retry");
                     }
                     wait!(20, player, window, app => native_paused(player, &target_uid, 2., 0.9, -2, true)
-                        && player.native_loop == adopted.selection
+                        && player.playhead.loop_range() == adopted.selection
                         && original_lane_accepted(player, 1.)
                         && player.notice.is_none()
                         && !player.source_working

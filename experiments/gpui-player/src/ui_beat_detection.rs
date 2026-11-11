@@ -64,7 +64,7 @@ fn snapshot(view: &Entity<Player>, w: &mut Window, cx: &mut App, out: &Path, nam
     let state=serde_json::json!({"project":p.project.as_ref().map(|p|p.name.clone()),"beat":p.beats,"metronome":p.metronome,
         "popover":p.metronome_open,"popoverControls":controls,"popoverMetronome":popover.met,"popoverBeat":popover.grid,
         "job":p.beat_job,"pending":p.metronome_pending,"autoSavePending":p.beat_auto_save,"editSequence":p.edit_seq,
-        "savedSequence":p.saved_seq,"position":p.position,"playing":p.playing,"nativeSeekCount":p.native_seek_count,
+        "savedSequence":p.saved_seq,"position":p.playhead.position(),"playing":p.playing,"nativeSeekCount":p.playhead.seek_count(),
         "notice":p.notice,"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),
         "hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
         "reference":"deterministic analyzer stub; app-state evidence, not detector quality or production visual parity"});

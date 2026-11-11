@@ -75,8 +75,8 @@ fn capture(
         serde_json::to_vec_pretty(&serde_json::json!({
         "locale":i18n::current().as_str(),"editorTitle":lyrics_editor::copy("title"),
         "viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),
-        "noteBars":p.pitch_strip.read(cx).note_bars(),"position":p.position,
-        "nativeSeekCount":p.native_seek_count,"nativePosition":p.last_playback_status.as_ref().map(|s|s.position),
+        "noteBars":p.pitch_strip.read(cx).note_bars(),"position":p.playhead.position(),
+        "nativeSeekCount":p.playhead.seek_count(),"nativePosition":p.last_playback_status.as_ref().map(|s|s.position),
         "editor":state(p,w,cx),"editorOpen":p.lyrics_editor_open,"epoch":p.native_epoch,
         "windowPresented":w.is_visible(),"windowActive":w.is_window_active(),
         "reference":"candidate only; production reference absent; cadence unmeasured",
@@ -501,12 +501,12 @@ fn run_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mu
             let pitch_label_review = std::env::var("SINGZ_GPUI_PITCH_LABEL_TEST").as_deref()==Ok("1");
             if pitch_label_review {
                 let expected_seek = handle.update(cx,|_,_,cx| {
-                    let expected = view.read(cx).native_seek_count + 1;
-                    view.update(cx,|p,cx| {p.position=0.;p.seek_native(cx);});
+                    let expected = view.read(cx).playhead.seek_count() + 1;
+                    view.update(cx,|p,cx| {p.playhead.seek(0.);p.seek_native(cx);});
                     expected
                 })?;
-                wait!(30,p,w,app => !p.playing && p.pending_seek.is_none() && p.native_seek_count>=expected_seek
-                    && p.position.abs()<0.001 && p.last_playback_status.as_ref().is_some_and(|s|
+                wait!(30,p,w,app => !p.playing && p.playhead.pending_seek().is_none() && p.playhead.seek_count()>=expected_seek
+                    && p.playhead.position().abs()<0.001 && p.last_playback_status.as_ref().is_some_and(|s|
                         !s.playing && s.seek_count>=expected_seek && s.position.abs()<0.001));
                 wait!(60,p,w,app => p.beat_job.is_none());
                 for (bars, mode) in [(true,"bars"),(false,"frames")] {

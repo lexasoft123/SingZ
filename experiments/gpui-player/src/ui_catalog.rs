@@ -195,7 +195,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, project: PathBuf,
                         "viewport":[f32::from(viewport.width),f32::from(viewport.height)],"scale":scale,
                         "hidden":!w.is_visible()&&!w.is_window_active(),"muted":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
                         "sourceProject":project,"library":library,"fixture":renamed,"fixtureExists":renamed.is_dir(),
-                        "openedProject":p.project.as_ref().map(|s|&s.dir),"playing":p.playing,"position":p.position,
+                        "openedProject":p.project.as_ref().map(|s|&s.dir),"playing":p.playing,"position":p.playhead.position(),
                         "searchFocused":p.library.read(cx).search_focused(w,cx),
                         "focusedProject":p.library.read(cx).focused_project(w),
                         "catalog":p.library.read(cx).project_snapshot(),"search":p.library.read(cx).review_snapshot()["query"],
@@ -227,7 +227,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, project: PathBuf,
             query!("");
             handle.update(cx,|_,_,cx|catalog(&view,cx))?;
             handle.update(cx,|_,w,_|w.resize(size(px(1280.),px(800.))))?;
-            wait!(p,w,app => p.screen==Screen::Player && !p.playing && !p.loading && p.position.abs()<0.03
+            wait!(p,w,app => p.screen==Screen::Player && !p.playing && !p.loading && p.playhead.position().abs()<0.03
                 && p.project.as_ref().is_some_and(|s|s.dir==project) && w.viewport_size()==size(px(1280.),px(800.)));
             anyhow::ensure!(!external.try_exists()? && !renamed.try_exists()?,"Catalog fixture was not cleaned up");
             std::fs::write(out.join("catalog.json"),serde_json::to_vec_pretty(&serde_json::json!({

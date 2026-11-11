@@ -17,17 +17,12 @@ impl Player {
         self.analysis_progress=None;
         self.analysis_job=None;
         self.duration = 0.;
-        self.position = 0.;
+        self.playhead.reset(0.);
         self.playing = false;
         self.looping = false;
         self.view_start = 0.;
         self.view_end = 1.;
-        self.native_anchor = None;
-        self.pending_seek = None;
-        self.native_floor = None;
-        self.native_loop = None;
-        self.native_seek_count = 0;
-        self.native_loop_count = 0;
+
         self.counting_in = false;
         self.count_in_anchor = None;
         self.carry_open=false;self.carry.enabled=false;self.carry_plan=None;self.carry_document=None;self.carry_mask=None;self.carry_stamp=None;self.carry_attempt_stamp=None;
@@ -62,12 +57,7 @@ impl Player {
         if status.empty_project != self.project.as_ref().is_some_and(|p| p.empty_tracks) {
             return;
         }
-        if self
-            .native_anchor
-            .is_some_and(|(_, at)| status.sampled_at < at)
-        {
-            return;
-        }
+        if !self.playhead.admit((&status).into(), Instant::now()) { return; }
         self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
         self.timing_status=Some(status.clone());
         #[cfg(feature = "ui-tests")]
@@ -80,53 +70,19 @@ impl Player {
             self.empty_timeline(cx);
             return;
         }
-        if self.native_graph != status.graph_generation {
-            self.native_graph = status.graph_generation;
-            // A seek queued behind a rate is still outstanding. Its own native
-            // counter, rather than graph preparation, acknowledges the intent.
-            if !self.pending_seek.is_some_and(|(expected,_)| status.seek_count < expected) {
-                self.pending_seek = None;
-                self.native_floor = None;
-            }
-        }
+        self.native_graph = status.graph_generation;
         self.counting_in = status.counting_in;
-        let mut position = if status.counting_in || status.rendered_frame < 0 {
-            self.count_in_anchor.unwrap_or(self.position)
-        } else {
-            status.position
-        };
         if status.playing && !status.counting_in && status.rendered_frame >= 0 {
             self.count_in_anchor = None;
         }
-        if let Some((expected, target)) = self.pending_seek {
-            if status.seek_count < expected {
-                position = target;
-            } else {
-                self.pending_seek = None;
-            }
-        }
-        if status.playing && !status.audible_current {
-            if let Some((floor, lap)) = self.native_floor {
-                if lap == status.loop_count {
-                    position = position.max(floor);
-                }
-            }
-        }
-        if status.playing && status.audible_current && self.pending_seek.is_none() {
-            self.native_floor = None;
-        }
-        self.position = position;
         self.duration = status.duration;
         let playing=self.native_play_intent.map_or(status.playing,|(target,_)|target);
         if self.playing!=playing {self.restart_cycle.reset();}
         self.playing = playing;
         self.native_rate = status.rate;
-        self.native_seek_count = status.seek_count;
-        self.native_loop_count = status.loop_count;
-        self.native_loop = status.loop_range;
+
         self.pitch_strip.update(cx, |pitch, cx| {
             pitch.set_effects(status.rate, status.transpose, cx)
         });
-        self.native_anchor = Some((position, status.sampled_at));
     }
 }

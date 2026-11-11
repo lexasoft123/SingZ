@@ -171,8 +171,8 @@ fn capture(
         "scale":window.scale_factor(),"project":p.project.as_ref().map(|p|p.name.clone()),"epoch":p.native_epoch,
         "editorOpen":p.lyrics_editor_open,"karaoke":p.karaoke,"editor":editor_state(p,window,cx),"sidebar":p.lyrics_sidebar.read(cx).state(window,cx),
         "replacementValue":p.lyrics_editor.read(cx).replacement_input().read(cx).value().to_string(),
-        "focusedInputHandles":focused_inputs(p,window,cx),"position":p.position,
-        "playing":p.playing,"countingIn":p.counting_in,"nativeSeekCount":p.native_seek_count,
+        "focusedInputHandles":focused_inputs(p,window,cx),"position":p.playhead.position(),
+        "playing":p.playing,"countingIn":p.counting_in,"nativeSeekCount":p.playhead.seek_count(),
         "windowPresented":window.is_visible(),"windowActive":window.is_window_active(),
         "mousePosition":[f32::from(pointer.x),f32::from(pointer.y)],
         "hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),
@@ -188,9 +188,9 @@ fn raw(path: &Path) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 fn paused_transport(player: &Player, position: f64, seeks: u64, stage: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(!player.playing&&!player.counting_in&&player.pending_seek.is_none()
-        && (player.position-position).abs()<=2./44100.&&player.native_seek_count==seeks,
-        "Editor {stage} leaked into paused transport: position {position} -> {}, seeks {seeks} -> {}",player.position,player.native_seek_count);
+    anyhow::ensure!(!player.playing&&!player.counting_in&&player.playhead.pending_seek().is_none()
+        && (player.playhead.position()-position).abs()<=2./44100.&&player.playhead.seek_count()==seeks,
+        "Editor {stage} leaked into paused transport: position {position} -> {}, seeks {seeks} -> {}",player.playhead.position(),player.playhead.seek_count());
     Ok(())
 }
 fn word_drag(
@@ -323,12 +323,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 // replace_all fixture edits cannot detect a consumed KeyDown.
                 handle.update(cx,|_,w,cx|focus_row(&view,w,cx,0,None))??;
                 handle.update(cx,|_,w,cx|{draw(w,cx);key(w,cx,if cfg!(target_os="macos"){ "cmd-a" }else{"ctrl-a"});})?;
-                let transport=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.position,p.native_epoch,p.native_seek_count,p.muted,p.solo)})?;
+                let transport=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.playhead.position(),p.native_epoch,p.playhead.seek_count(),p.muted,p.solo)})?;
                 for character in ["shift-h","e","l","l","o","space","n","a","t","i","v","e","space","w","o","r","l","d"] {
                     handle.update(cx,|_,w,cx|{draw(w,cx);key(w,cx,character);})?;
                 }
                 wait!(p,w,app => p.lyrics_editor.read(app).rows()[0].text=="Hello native world"&&editor_state(p,w,app)["dirty"]==true);
-                anyhow::ensure!(handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.position,p.native_epoch,p.native_seek_count,p.muted,p.solo)})?==transport,"Editor printable/Space keys leaked into playback or mix");
+                anyhow::ensure!(handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.playhead.position(),p.native_epoch,p.playhead.seek_count(),p.muted,p.solo)})?==transport,"Editor printable/Space keys leaked into playback or mix");
                 handle.update(cx,|_,w,cx|{focus_row(&view,w,cx,0,Some(12))?;key(w,cx,"enter");Ok::<_,anyhow::Error>(())})??;
                 wait!(p,w,app => p.lyrics_editor.read(app).rows().len()==4);
                 let split=handle.update(cx,|_,_,cx|rows(&view,cx))?;
@@ -338,8 +338,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let id=handle.update(cx,|_,_,cx|rows(&view,cx)[0].id)?;
                 press!(format!("lyed-add-{id}"));wait!(p,w,app => p.lyrics_editor.read(app).rows().len()==4);
                 let added=handle.update(cx,|_,_,cx|rows(&view,cx)[1].id)?;
-                handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.position=2.25;p.seek_native(cx);}))?;
-                wait!(p,w,app => p.pending_seek.is_none()&&(p.position-2.25).abs()<2./44100.);
+                handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.playhead.seek(2.25);p.seek_native(cx);}))?;
+                wait!(p,w,app => p.playhead.pending_seek().is_none()&&(p.playhead.position()-2.25).abs()<2./44100.);
                 press!(format!("lyed-stamp-{added}"));
                 wait!(p,w,app => p.lyrics_editor.read(app).rows().iter().find(|r|r.id==added).is_some_and(|r|r.start==Some(2.25)));
                 press!(format!("lyed-remove-{added}"));wait!(p,w,app => p.lyrics_editor.read(app).rows().len()==3);
@@ -431,7 +431,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let baseline=handle.update(cx,|_,_,cx|rows(&view,cx))?;
                 anyhow::ensure!(baseline.len()==4&&baseline[0].text=="Hello native world","Reopen lost edited rows");
                 let id=baseline[0].id;
-                let (paused,seeks)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_seek_count)})?;
+                let (paused,seeks)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.playhead.seek_count())})?;
                 press!(format!("lyed-print-{id}"));wait!(p,w,app => editor_state(p,w,app)["strip"]["id"].as_u64()==Some(id));
                 handle.update(cx,|_,w,cx|word_drag(&view,w,cx,id,1,0.))??;
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{anyhow::ensure!(rows(&view,cx)==baseline&&editor_state(view.read(cx),w,cx)["dirty"]==false,"Stationary word click dirtied or moved lyrics");paused_transport(view.read(cx),paused,seeks,"stationary word click")})??;
@@ -451,24 +451,24 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 // The editor's audition deliberately bypasses the project's
                 // one-bar count-in. The actual play control is used here.
                 edit!();
-                let from=handle.update(cx,|_,_,cx|view.read(cx).position)?;
+                let from=handle.update(cx,|_,_,cx|view.read(cx).playhead.position())?;
                 press!("lyed-play".to_owned());
                 let deadline=Instant::now()+Duration::from_millis(1200);
                 loop {
                     cx.background_executor().timer(Duration::from_millis(20)).await;
-                    let advanced=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(!p.counting_in,"Editor audition started a count-in");Ok(p.playing&&p.position>from+0.05)})??;
+                    let advanced=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(!p.counting_in,"Editor audition started a count-in");Ok(p.playing&&p.playhead.position()>from+0.05)})??;
                     if advanced {break;}
                     anyhow::ensure!(Instant::now()<deadline,"Editor play failed to advance before the gridless count-in would finish");
                 }
                 press!("lyed-play".to_owned());wait!(p,w,app => !p.playing);
                 let row_start=handle.update(cx,|_,_,cx|rows(&view,cx)[0].start.unwrap())?;
                 let row_id=handle.update(cx,|_,_,cx|rows(&view,cx)[0].id)?;
-                let seeks=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count)?;
+                let seeks=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count())?;
                 press!(format!("lyed-stamp-{row_id}"));
                 let deadline=Instant::now()+Duration::from_millis(1200);
                 loop {
                     cx.background_executor().timer(Duration::from_millis(20)).await;
-                    let advanced=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(!p.counting_in,"Timed-row audition started a count-in");Ok(p.playing&&p.native_seek_count>seeks&&p.position>(row_start-0.3).max(0.)+0.05)})??;
+                    let advanced=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(!p.counting_in,"Timed-row audition started a count-in");Ok(p.playing&&p.playhead.seek_count()>seeks&&p.playhead.position()>(row_start-0.3).max(0.)+0.05)})??;
                     if advanced {break;}
                     anyhow::ensure!(Instant::now()<deadline,"Timed-row audition did not seek and play without count-in");
                 }
@@ -556,7 +556,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             wait!(p,w,app => p.native_epoch!=old_epoch);
             std::fs::remove_file(&gate)?;
             wait!(p,w,app => !p.loading&&p.project.as_ref().is_some_and(|p|p.name=="other")&&!p.lyrics_editor_open);
-            handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.lyric_document.source=="other-source"&&p.lyric_document.credit=="other-credit","Old lyric Save receipt entered the new song");Ok(())})??;
+            handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.lyric_document.source=="whisper"&&p.lyric_document.credit=="other-credit","Old lyric Save receipt entered the new song");Ok(())})??;
             shot!("stale-receipt-ignored");
 
             // Replay a prepared private source output. The publication worker,
@@ -569,7 +569,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             wait!(p,w,app => !p.loading&&p.source_working&&p.project.as_ref().is_some_and(|p|p.dir==working));
             edit!();handle.update(cx,|_,w,cx|type_row(&view,w,cx,0,"Earlier private correction"))??;
             press!("lyed-save".to_owned());wait!(p,w,app => !p.lyrics_editor_open);
-            anyhow::ensure!(raw(&working.join("lyrics.json"))?["source"]=="edited"&&raw(&root.join("working-target/lyrics.json"))?["source"]=="fixture-source","Private editor Save published to the saved target");
+            anyhow::ensure!(raw(&working.join("lyrics.json"))?["source"]=="edited"&&raw(&root.join("working-target/lyrics.json"))?["source"]=="lrclib","Private editor Save published to the saved target");
             // A Save accepted before opening the editor must remain queued:
             // publishing the working copy here would race its independent
             // lyric Save and could permanently publish the earlier draft.

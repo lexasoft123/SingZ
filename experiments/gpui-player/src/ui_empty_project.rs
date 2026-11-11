@@ -86,14 +86,14 @@ fn empty(p: &Player) -> bool {
         s.empty_tracks && !s.has_audio() && s.lanes.is_empty() && s.lane_specs.is_empty()
     }) && p.loaded_song
         && p.duration == 0.
-        && p.position == 0.
+        && p.playhead.position() == 0.
         && !p.playing
         && !p.looping
         && p.native_graph == 0
         && p.view_start == 0.
         && p.view_end == 1.
-        && p.pending_seek.is_none()
-        && p.native_loop.is_none()
+        && p.playhead.pending_seek().is_none()
+        && p.playhead.loop_range().is_none()
         && p.last_playback_status.as_ref().is_some_and(|s| {
             s.empty_project
                 && s.graph_generation == 0
@@ -119,7 +119,7 @@ fn shot(
         anyhow::ensure!(p.transport.read(cx).bounds("transport-stem-files").is_none(), "Stem files remained mounted without a vocal stem to reveal");
     }
     anyhow::ensure!(
-        [p.duration, p.position, p.view_start, p.view_end]
+        [p.duration, p.playhead.position(), p.view_start, p.view_end]
             .iter()
             .all(|n| n.is_finite()),
         "Nonfinite empty timeline"
@@ -128,7 +128,7 @@ fn shot(
     std::fs::write(
         out.join(format!("{name}.json")),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"project":p.project.as_ref().map(|s|s.dir.clone()),"emptyDocument":p.project.as_ref().map(|s|s.empty_tracks),"hasAudio":p.project.as_ref().map(|s|s.has_audio()),"lanes":p.project.as_ref().map(|s|&s.lane_specs),"duration":p.duration,"position":p.position,"playing":p.playing,"view":[p.view_start,p.view_end],"nativeGraph":p.native_graph,"laneRevision":p.native_lane_revision,"status":p.last_playback_status.as_ref().map(|s|serde_json::json!({"empty":s.empty_project,"revision":s.lane_revision,"physicalReleased":s.physical_output_released,"graph":s.graph_generation,"trainingOnly":s.training_only,"cueActive":s.cue.active})),"dirty":p.edit_seq!=p.saved_seq,"saving":p.saving,"editSeq":p.edit_seq,"savedSeq":p.saved_seq,"rootFocused":p.focus_handle.is_focused(w),"focusInsideRoot":p.focus_handle.contains_focused(w,cx),"headerFocused":p.header.read(cx).focused_control(w),"headerEditing":p.header.read(cx).is_editing(),"importState":p.library_import.read(cx).state(w,cx),"trackRename":p.track_rename.as_ref().map(|(epoch,id)|serde_json::json!([epoch,id])),"sourceJob":p.source_job,"rateBusy":p.rate_busy(),"metronomePending":p.metronome_pending.is_some(),"metronomeSaveRequested":p.metronome_save_requested,"metronomeSaveWaiting":p.metronome_save_waiting,"notice":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":true,"reference":"new candidate; production-matched reference absent","liveFps":"unmeasured"}),
+            &serde_json::json!({"project":p.project.as_ref().map(|s|s.dir.clone()),"emptyDocument":p.project.as_ref().map(|s|s.empty_tracks),"hasAudio":p.project.as_ref().map(|s|s.has_audio()),"lanes":p.project.as_ref().map(|s|&s.lane_specs),"duration":p.duration,"position":p.playhead.position(),"playing":p.playing,"view":[p.view_start,p.view_end],"nativeGraph":p.native_graph,"laneRevision":p.native_lane_revision,"status":p.last_playback_status.as_ref().map(|s|serde_json::json!({"empty":s.empty_project,"revision":s.lane_revision,"physicalReleased":s.physical_output_released,"graph":s.graph_generation,"trainingOnly":s.training_only,"cueActive":s.cue.active})),"dirty":p.edit_seq!=p.saved_seq,"saving":p.saving,"editSeq":p.edit_seq,"savedSeq":p.saved_seq,"rootFocused":p.focus_handle.is_focused(w),"focusInsideRoot":p.focus_handle.contains_focused(w,cx),"headerFocused":p.header.read(cx).focused_control(w),"headerEditing":p.header.read(cx).is_editing(),"importState":p.library_import.read(cx).state(w,cx),"trackRename":p.track_rename.as_ref().map(|(epoch,id)|serde_json::json!([epoch,id])),"sourceJob":p.source_job,"rateBusy":p.rate_busy(),"metronomePending":p.metronome_pending.is_some(),"metronomeSaveRequested":p.metronome_save_requested,"metronomeSaveWaiting":p.metronome_save_waiting,"notice":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":true,"reference":"new candidate; production-matched reference absent","liveFps":"unmeasured"}),
         )?,
     )?;
     Ok(())
@@ -151,7 +151,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    handle.update(cx,|_,w,cx|{w.resize(size(px(width),px(height)));view.update(cx,|p,cx|p.open_project(project.clone(),cx));})?;
    wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|s|s.dir==project));
    if phase=="remove"{
-    handle.update(cx,|_,w,cx|play(&view,w,cx))??;wait!(p,cx=>p.playing&&p.position>0.05);
+    handle.update(cx,|_,w,cx|play(&view,w,cx))??;wait!(p,cx=>p.playing&&p.playhead.position()>0.05);
     let (old_epoch,old_status)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.native_epoch,p.last_playback_status.clone().unwrap())})?;
     remove!();
     handle.update(cx,|_,w,cx|->anyhow::Result<()>{play(&view,w,cx)?;key(w,cx,"right");key(w,cx,"home");view.update(cx,|p,cx|{p.zoom_by(0.5,cx);let mut delayed=old_status.clone();delayed.sampled_at=Instant::now();p.playback_status(old_epoch,delayed,cx);});anyhow::ensure!(empty(view.read(cx)),"Disabled controls or delayed old status resurrected audio");Ok(())})??;

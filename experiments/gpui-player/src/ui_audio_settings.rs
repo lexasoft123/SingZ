@@ -68,26 +68,26 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   };
   handle.update(cx,|_,window,cx|click(window,cx,96.,718.))?;
   let deadline=Instant::now()+Duration::from_secs(5);
-  loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|{let p=view.read(cx);p.playing&&p.position>0.1})?{break;}anyhow::ensure!(Instant::now()<deadline,"Play failed");}
+  loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|{let p=view.read(cx);p.playing&&p.playhead.position()>0.1})?{break;}anyhow::ensure!(Instant::now()<deadline,"Play failed");}
   // Deliberately hold the UI while the independent native process keeps running.
-  handle.update(cx,|_,_,cx|->anyhow::Result<()>{let before=view.read(cx).position;std::thread::sleep(Duration::from_millis(350));view.update(cx,|p,cx|p.poll_backend(cx));let p=view.read(cx);anyhow::ensure!(p.position>before+0.2,"Telemetry retained the oldest reading during a UI stall");anyhow::ensure!(p.native_anchor.is_some_and(|(_,at)|at.elapsed()<Duration::from_millis(150)),"Telemetry lost its sample timestamp");Ok(())})??;
-  let (before,inventory_revision,active_uid)=handle.update(cx,|_,window,cx|{let p=view.read(cx);let position=p.position;let revision=p.settings.read(cx).inventory_revision();let active_uid=p.last_playback_status.as_ref().unwrap().output_uid.clone();click(window,cx,if cfg!(any(target_os="windows",target_os="linux")){1114.}else{1248.},26.);(position,revision,active_uid)})?;
+  handle.update(cx,|_,_,cx|->anyhow::Result<()>{let before=view.read(cx).playhead.position();std::thread::sleep(Duration::from_millis(350));view.update(cx,|p,cx|p.poll_backend(cx));let p=view.read(cx);anyhow::ensure!(p.playhead.position()>before+0.2,"Telemetry retained the oldest reading during a UI stall");anyhow::ensure!(p.playhead.anchor().is_some_and(|(_,at)|at.elapsed()<Duration::from_millis(150)),"Telemetry lost its sample timestamp");Ok(())})??;
+  let (before,inventory_revision,active_uid)=handle.update(cx,|_,window,cx|{let p=view.read(cx);let position=p.playhead.position();let revision=p.settings.read(cx).inventory_revision();let active_uid=p.last_playback_status.as_ref().unwrap().output_uid.clone();click(window,cx,if cfg!(any(target_os="windows",target_os="linux")){1114.}else{1248.},26.);(position,revision,active_uid)})?;
   let deadline=Instant::now()+Duration::from_secs(10);
   loop{cx.background_executor().timer(Duration::from_millis(20)).await;
     let fresh=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);let settings=p.settings.read(cx);
       if settings.inventory_revision()<=inventory_revision{return Ok(false);}
       let (inventory,uid,_,error)=settings.native_snapshot();anyhow::ensure!(error.is_none(),"Active output disappeared from fresh inventory: {error:?}");
       let inventory=inventory.ok_or_else(||anyhow::anyhow!("Missing refreshed inventory"))?;
-      let output=inventory.output(&uid)?;anyhow::ensure!(output.uid==active_uid&&p.playing&&p.position>before,"Settings refresh changed the active output or stopped playback");Ok(true)})??;
+      let output=inventory.output(&uid)?;anyhow::ensure!(output.uid==active_uid&&p.playing&&p.playhead.position()>before,"Settings refresh changed the active output or stopped playback");Ok(true)})??;
     if fresh{break;}anyhow::ensure!(Instant::now()<deadline,"Settings inventory refresh did not finish");
   }
   cx.background_executor().timer(Duration::from_millis(150)).await;
-  handle.update(cx,|_,window,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Settings&&p.playing&&p.position>before+0.05,"Browsing Settings paused playback");let _=window.draw(cx);window.render_to_image()?.save(out.join("native-settings.png"))?;click(window,cx,600.,168.);Ok(())})??;
+  handle.update(cx,|_,window,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Settings&&p.playing&&p.playhead.position()>before+0.05,"Browsing Settings paused playback");let _=window.draw(cx);window.render_to_image()?.save(out.join("native-settings.png"))?;click(window,cx,600.,168.);Ok(())})??;
   cx.background_executor().timer(Duration::from_millis(30)).await;
-  let position=handle.update(cx,|_,window,cx|->anyhow::Result<_>{let p=view.read(cx);anyhow::ensure!(p.settings.read(cx).smoke_snapshot().4==Some("settings-output"),"Native output selector did not open");let _=window.draw(cx);window.render_to_image()?.save(out.join("native-output-selector.png"))?;let p=view.read(cx);let position=p.native_anchor.map_or(p.position,|(position,anchor)|position+anchor.elapsed().as_secs_f64()*p.native_rate as f64);click(window,cx,600.,230.);Ok(position)})??;
+  let position=handle.update(cx,|_,window,cx|->anyhow::Result<_>{let p=view.read(cx);anyhow::ensure!(p.settings.read(cx).smoke_snapshot().4==Some("settings-output"),"Native output selector did not open");let _=window.draw(cx);window.render_to_image()?.save(out.join("native-output-selector.png"))?;let p=view.read(cx);let position=p.playhead.anchor().map_or(p.playhead.position(),|(position,anchor)|position+anchor.elapsed().as_secs_f64()*p.native_rate as f64);click(window,cx,600.,230.);Ok(position)})??;
   let deadline=Instant::now()+Duration::from_secs(15);
   loop{cx.background_executor().timer(Duration::from_millis(20)).await;let done=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(p.notice.is_none(),"{:?}",p.notice);let (_,uid,busy,error)=p.settings.read(cx).native_snapshot();anyhow::ensure!(error.is_none(),"{error:?}");Ok(uid==target.uid&&!busy&&!p.playing)})??;if done{break;}anyhow::ensure!(Instant::now()<deadline,"Native output route did not settle");}
-  handle.update(cx,|_,window,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!((p.position-position).abs()<0.2,"Route changed song position: {} vs {position}",p.position);let _=window.draw(cx);window.render_to_image()?.save(out.join("native-output-applied.png"))?;Ok(())})??;
+  handle.update(cx,|_,window,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!((p.playhead.position()-position).abs()<0.2,"Route changed song position: {} vs {position}",p.playhead.position());let _=window.draw(cx);window.render_to_image()?.save(out.join("native-output-applied.png"))?;Ok(())})??;
   let prefs:serde_json::Value=serde_json::from_slice(&std::fs::read(config.join("audio.json"))?)?;anyhow::ensure!(prefs["outputUid"]==target.uid,"Output preference was not persisted");
   let channel_count=handle.update(cx,|_,window,cx|->anyhow::Result<usize>{let p=view.read(cx);let inventory=p.settings.read(cx).native_snapshot().0.unwrap();let uid=if p.mic_prefs.input.is_empty(){&inventory.default_input}else{&p.mic_prefs.input};let count=inventory.devices.iter().find(|d|&d.uid==uid).map_or(0,|d|d.inputs);if count>8{let bounds=p.settings.read(cx).field_bounds("settings-channel").ok_or_else(||anyhow::anyhow!("Channel selector bounds missing"))?;click(window,cx,f32::from(bounds.center().x),f32::from(bounds.center().y));}Ok(count)})??;
   if channel_count>8{
@@ -104,7 +104,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|{let p=view.read(cx);p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing&&s.position>position+0.05)})?{break;}anyhow::ensure!(Instant::now()<deadline,"Explicit Play after route did not reach native playback");}
   handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).playing,"Explicit Play after route did not resume");view.read(cx).backend.as_ref().unwrap().output("missing-native-device".into())?;Ok(())})??;
   let deadline=Instant::now()+Duration::from_secs(5);
-  loop{cx.background_executor().timer(Duration::from_millis(20)).await;let done=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(p.playing&&p.notice.is_none(),"Invalid output destroyed playback: playing={}, position={}, duration={}, notice={:?}, status={:?}",p.playing,p.position,p.duration,p.notice,p.last_playback_status);let (_,uid,_,error)=p.settings.read(cx).native_snapshot();Ok(uid==target.uid&&error.is_some_and(|e|e.contains("unavailable")))})??;if done{break;}anyhow::ensure!(Instant::now()<deadline,"Missing output was not reported");}
+  loop{cx.background_executor().timer(Duration::from_millis(20)).await;let done=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(p.playing&&p.notice.is_none(),"Invalid output destroyed playback: playing={}, position={}, duration={}, notice={:?}, status={:?}",p.playing,p.playhead.position(),p.duration,p.notice,p.last_playback_status);let (_,uid,_,error)=p.settings.read(cx).native_snapshot();Ok(uid==target.uid&&error.is_some_and(|e|e.contains("unavailable")))})??;if done{break;}anyhow::ensure!(Instant::now()<deadline,"Missing output was not reported");}
   let _=handle.update(cx,|_,window,cx|{click(window,cx,if cfg!(any(target_os="windows",target_os="linux")){1114.}else{1248.},26.);let _=window.draw(cx);window.render_to_image().unwrap().save(out.join("native-output-missing.png")).unwrap();});
   std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"nativeInventory":true,"freshInventoryPreservesActiveOutput":true,"nativeResumeConfirmedBeforeFault":true,"browsePreservesPlayback":true,"selectedUid":target.uid,"appliedRoutePauses":true,"explicitPlayRequired":true,"invalidRouteRetainsPlayback":true,"persisted":true,"channelInventoryCount":channel_count,"lastChannelMenuSelected":channel_count>8}))?)?;
   Ok(())
@@ -112,7 +112,6 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
  match result{Ok(())=>{eprintln!("NATIVE_SETTINGS passed: actual inventory, selector click, browse keeps playing, route pauses/persists, explicit resume, missing route retains playback");let _=cx.update(|cx|cx.quit());},Err(error)=>{let _=handle.update(cx,|_,window,cx|{let _=window.draw(cx);if let Ok(image)=window.render_to_image(){let _=image.save(out.join("native-settings-failure.png"));}});eprintln!("NATIVE_SETTINGS failed: {error:#}");let _=view.update(cx,|p,_|{p.backend.take();});std::process::exit(1);}}
 }).detach();
 }
-
 
 // Synthetic inventory, real Settings controls/subscription/persistence. No capture
 // or monitoring is started; the normal native inventory journey stays separate.
@@ -173,7 +172,7 @@ fn preferences_keyboard_state(view:&Entity<Player>,window:&mut Window,cx:&mut Ap
             }
         } else if !matches!(step,"fixture-disabled-focus-recovery"|"fixture-unmounted-focus-recovery")||!state["focusedControl"].is_null() {anyhow::bail!("Focused Settings control has no measured bounds at {step}: {state}");}
     }
-    Ok(serde_json::json!({"step":step,"fixtureOnlyTransition":matches!(step,"fixture-disabled-focus-recovery"|"fixture-unmounted-focus-recovery"),"keyboard":state,"preferences":p.mic_prefs.patch(),"playing":p.playing,"position":p.position,"monitorRequested":p.monitor_requested,"micRequested":p.mic_requested}))
+    Ok(serde_json::json!({"step":step,"fixtureOnlyTransition":matches!(step,"fixture-disabled-focus-recovery"|"fixture-unmounted-focus-recovery"),"keyboard":state,"preferences":p.mic_prefs.patch(),"playing":p.playing,"position":p.playhead.position(),"monitorRequested":p.monitor_requested,"micRequested":p.mic_requested}))
 }
 fn run_preferences(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut App) {
     cx.spawn(async move|cx|{
@@ -246,7 +245,7 @@ fn run_preferences(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, 
                         cx.background_executor().timer(Duration::from_millis(30)).await;
                     }};}
                     open_settings!();
-                    let position=handle.update(cx,|_,_,cx|view.read(cx).position)?;
+                    let position=handle.update(cx,|_,_,cx|view.read(cx).playhead.position())?;
                     let mut steps=Vec::new();
                     macro_rules! key {($name:expr)=>{{handle.update(cx,|_,window,cx|preferences_key(window,cx,$name))?;cx.background_executor().timer(Duration::from_millis(20)).await;steps.push(handle.update(cx,|_,window,cx|preferences_keyboard_state(&view,window,cx,$name))??);}};}
                     macro_rules! tab {($id:expr)=>{{handle.update(cx,|_,window,cx|preferences_tab_to(&view,window,cx,$id))??;steps.push(handle.update(cx,|_,window,cx|preferences_keyboard_state(&view,window,cx,$id))??);}};}
@@ -271,7 +270,7 @@ fn run_preferences(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, 
                     let (unexpected_browse,metadata)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);anyhow::ensure!(!p.saving,"Initial project Save is still pending");Ok((p.release_unexpected_browse,std::fs::read(project.join("project.json"))?))})??;
                     for command in if cfg!(target_os="macos") {["cmd-o","cmd-f","cmd-s"]}else{["ctrl-o","ctrl-f","ctrl-s"]} {
                         key!(command);
-                        handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Settings&&p.release_unexpected_browse==unexpected_browse&&!p.saving&&!p.playing&&(p.position-position).abs()<0.001,"Settings leaked {command} into app/song action");anyhow::ensure!(std::fs::read(project.join("project.json"))?==metadata,"Settings {command} changed project metadata");Ok(())})??;
+                        handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Settings&&p.release_unexpected_browse==unexpected_browse&&!p.saving&&!p.playing&&(p.playhead.position()-position).abs()<0.001,"Settings leaked {command} into app/song action");anyhow::ensure!(std::fs::read(project.join("project.json"))?==metadata,"Settings {command} changed project metadata");Ok(())})??;
                     }
                     key!("tab");
                     handle.update(cx,|_,window,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).settings.read(cx).focused_control(window,cx)==Some("settings-output-left"),"Tab did not follow monitor output");Ok(())})??;
@@ -303,7 +302,7 @@ fn run_preferences(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, 
                     let deadline=Instant::now()+Duration::from_secs(5);
                     loop {cx.background_executor().timer(Duration::from_millis(20)).await;let saved=std::fs::read(config.join("audio.json")).ok().and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok());if saved.as_ref().is_some_and(|v|v["inputChannel"]==0&&v["monitorOutputChannels"]==serde_json::json!([0,1])&&v["monitorGainDb"].as_f64()==Some(0.)){break;}anyhow::ensure!(Instant::now()<deadline,"Keyboard preferences were not persisted");}
                     tab!("settings-close");key!("space");
-                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Player&&!p.playing&&(p.position-position).abs()<0.001,"Close keys leaked into song or did not return to Player");Ok(())})??;
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Player&&!p.playing&&(p.playhead.position()-position).abs()<0.001,"Close keys leaked into song or did not return to Player");Ok(())})??;
                     open_settings!();tab!("settings-quick-start");key!("enter");
                     handle.update(cx,|_,window,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).quick_start.read(cx).is_open(),"Enter did not open Quick start");draw_preferences(window,cx);window.render_to_image()?.save(out.join(format!("keyboard-quick-start-{}.png",width as u32)))?;Ok(())})??;
                     key!("escape");

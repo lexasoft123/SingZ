@@ -12,7 +12,7 @@ fn state(view:&Entity<Player>,w:&Window,cx:&App)->serde_json::Value {
         "headerFocused":p.header.read(cx).focused_control(w),"searchFocused":p.library.read(cx).search_focused(w,cx),
         "picker":p.project_picker.read(cx).state(w,cx),"pickerOpen":p.project_picker_open,
         "project":p.project.as_ref().map(|p|&p.dir),"projectFingerprint":p.project.as_ref().map(|p|&p.metadata_hash),
-        "screen":p.screen as u8,"playing":p.playing,"position":p.position,"epoch":p.native_epoch,
+        "screen":p.screen as u8,"playing":p.playing,"position":p.playhead.position(),"epoch":p.native_epoch,
         "saving":p.saving,"editSeq":p.edit_seq,"savedSeq":p.saved_seq,"notice":p.notice,
         "native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"playing":s.playing,"position":s.position,"graph":s.graph_generation,"lanes":s.observed_lanes})),
         "viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),
@@ -180,7 +180,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     // on Player after confirming that Catalog pause below.
     handle.update(cx,|_,w,cx|songs(&view,w,cx,false))??;wait!(p,w,app=>p.screen==Screen::Player);
     if !handle.update(cx,|_,_,cx|view.read(cx).playing)? {handle.update(cx,|_,w,cx|play(&view,w,cx))??;}
-    wait!(p,w,app=>p.playing&&p.position>0.1&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+    wait!(p,w,app=>p.playing&&p.playhead.position()>0.1&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
     if suffix==1060 {
      // The second size reuses real remote data. Two actual mix edits/Saves
      // preserve the baseline mix and advance savedAt, requiring a fresh upload.
@@ -218,10 +218,10 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing)&&p.library.read(app).drive_state(w)["validFocus"]==true);
     handle.update(cx,|_,w,cx|marker(&out.join(format!("catalog-paused-held-{suffix}.json")),&state(&view,w,cx)))??;
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("uploading-{suffix}")))??;
-    let (position,epoch)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_epoch)})?;
+    let (position,epoch)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.native_epoch)})?;
     handle.update(cx,|_,w,cx|songs(&view,w,cx,false))??;wait!(p,w,app=>p.screen==Screen::Player);
     handle.update(cx,|_,w,cx|play(&view,w,cx))??;
-    wait!(p,w,app=>p.screen==Screen::Player&&p.playing&&p.position>position+0.25&&p.native_epoch==epoch
+    wait!(p,w,app=>p.screen==Screen::Player&&p.playing&&p.playhead.position()>position+0.25&&p.native_epoch==epoch
         &&p.drive_snapshot.busy&&p.drive_snapshot.capture_project.is_none()
         &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
     handle.update(cx,|_,w,cx|marker(&out.join(format!("playing-held-upload-{suffix}.json")),&state(&view,w,cx)))??;
@@ -266,10 +266,10 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
         &&p.library.read(app).drive_state(w)["validFocus"]==true&&p.library.read(app).drive_state(w)["focusedControl"]=="library-drive-sync");
     handle.update(cx,|_,w,cx|marker(&out.join(format!("cancel-focus-recovered-{suffix}.json")),&state(&view,w,cx)))??;
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("cancelled-{suffix}")))??;
-    let cancel_position=handle.update(cx,|_,_,cx|view.read(cx).position)?;
+    let cancel_position=handle.update(cx,|_,_,cx|view.read(cx).playhead.position())?;
     handle.update(cx,|_,w,cx|songs(&view,w,cx,false))??;wait!(p,w,app=>p.screen==Screen::Player);
     handle.update(cx,|_,w,cx|play(&view,w,cx))??;
-    wait!(p,w,app=>p.screen==Screen::Player&&p.playing&&p.position>cancel_position+0.25&&p.native_epoch==cancel_epoch
+    wait!(p,w,app=>p.screen==Screen::Player&&p.playing&&p.playhead.position()>cancel_position+0.25&&p.native_epoch==cancel_epoch
         &&!p.drive_snapshot.busy&&p.drive_snapshot.scheduler.dirty!=0
         &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
     handle.update(cx,|_,w,cx|marker(&out.join(format!("playing-after-cancel-{suffix}.json")),&state(&view,w,cx)))??;

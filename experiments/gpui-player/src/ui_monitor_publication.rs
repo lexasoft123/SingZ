@@ -34,12 +34,12 @@ fn snapshot(view: &Entity<Player>, window: &Window, cx: &App) -> Value {
     let mut value = json!({"viewport":[f32::from(window.viewport_size().width),f32::from(window.viewport_size().height)],"scale":window.scale_factor(),
         "windowPresented":window.is_visible(),"windowActive":window.is_window_active(),"hidden":!window.is_visible()&&!window.is_window_active(),
         "hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
-        "epoch":p.native_epoch,"publicationEpoch":p.monitor_publication_epoch,"screen":p.screen as u8,"position":p.position,"duration":p.duration,"playing":p.playing,
+        "epoch":p.native_epoch,"publicationEpoch":p.monitor_publication_epoch,"screen":p.screen as u8,"position":p.playhead.position(),"duration":p.duration,"playing":p.playing,
         "sourceWorking":p.source_working,"sourceJob":p.source_job,"publicationPending":p.source_publication.is_some(),"loading":p.loading,"saving":p.saving,
         "tracksAudioFailed":p.tracks_audio_failed,"audioRecoveryPending":p.audio_recovery.is_some(),"notice":p.notice,"editSeq":p.edit_seq,"savedSeq":p.saved_seq});
     let monitor = json!({"requested":p.monitor_requested,"parked":p.monitor_parked,"pending":p.monitor_pending.is_some(),"monitorBusy":p.monitor_busy(),"micIntent":p.mic_intent.is_some(),
         "micPhase":format!("{:?}",p.mic_view.phase),"micOwner":p.mic_view.owner,"generation":p.mic_view.generation,"sequence":p.mic_view.sequence,"fixture":p.mic_view.fixture,"audibleMonitor":p.mic_view.monitor_enabled,
-        "header":p.header.read(cx).monitor_state(),"tempo":p.tempo,"transpose":p.transpose,"master":p.master_volume,"looping":p.looping,"nativeLoop":p.native_loop});
+        "header":p.header.read(cx).monitor_state(),"tempo":p.tempo,"transpose":p.transpose,"master":p.master_volume,"looping":p.looping,"nativeLoop":p.playhead.loop_range()});
     value
         .as_object_mut()
         .unwrap()
@@ -124,7 +124,7 @@ fn active(p: &Player, epoch: u64, generation: u64) -> bool {
         && p.mic_intent.as_ref().is_some_and(|i| i.monitor)
         && p.notice.is_none()
         && !p.playing
-        && (p.position - 2.).abs() < 0.03
+        && (p.playhead.position() - 2.).abs() < 0.03
 }
 fn probe_value(p: &integration::OwnedAudioProbe, stage: &str) -> Value {
     json!({"stage":stage,"epoch":p.epoch,"helperPid":p.helper_pid,"monitorLeased":p.monitor_leased,"activeTraining":p.active_training,"parked":p.status.parked,"physicalOutputReleased":p.status.physical_output_released,"playing":p.status.playing,"position":p.status.position,"rate":p.status.rate,"transpose":p.status.transpose,"loop":p.status.loop_range,"sampleAgeSeconds":p.status.sampled_at.elapsed().as_secs_f64(),"method":"fresh backend-owned native status command"})
@@ -159,8 +159,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             wait!(45,p,w,a=>!p.loading&&p.source_job.is_none()&&p.source_working&&p.source_target.is_none()&&p.project.as_ref().is_some_and(|v|v.original)&&p.mic_prefs_valid&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&s.duration>=10.));
             let working=handle.update(cx,|_,_,a|view.read(a).project.as_ref().unwrap().dir.clone())?;
             anyhow::ensure!(working.starts_with(config.join("source-work").canonicalize()?),"Source bypassed isolated working copy");
-            handle.update(cx,|_,_,a|view.update(a,|p,a|{p.native_transport(transport::TransportEvent::Volume(0.6),a);p.native_transport(transport::TransportEvent::Tempo(0.8),a);p.native_transport(transport::TransportEvent::Transpose(-2),a);p.native_transport(transport::TransportEvent::Loop,a);p.position=2.;p.seek_native(a);}))?;
-            wait!(20,p,w,a=>!p.rate_busy()&&p.pending_seek.is_none()&&(p.master_volume-0.6).abs()<0.0001&&p.looping&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&(s.position-2.).abs()<0.03&&(s.rate-0.8).abs()<0.0001&&s.transpose==-2&&s.loop_range.is_some_and(|(start,end)|start==0.&&(end-p.duration).abs()<0.03)));
+            handle.update(cx,|_,_,a|view.update(a,|p,a|{p.native_transport(transport::TransportEvent::Volume(0.6),a);p.native_transport(transport::TransportEvent::Tempo(0.8),a);p.native_transport(transport::TransportEvent::Transpose(-2),a);p.native_transport(transport::TransportEvent::Loop,a);p.playhead.seek(2.);p.seek_native(a);}))?;
+            wait!(20,p,w,a=>!p.rate_busy()&&p.playhead.pending_seek().is_none()&&(p.master_volume-0.6).abs()<0.0001&&p.looping&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&(s.position-2.).abs()<0.03&&(s.rate-0.8).abs()<0.0001&&s.transpose==-2&&s.loop_range.is_some_and(|(start,end)|start==0.&&(end-p.duration).abs()<0.03)));
             let epoch=handle.update(cx,|_,_,a|view.read(a).native_epoch)?;
             let working_metadata=std::fs::read(working.join("project.json"))?;
             let initial=probe!();let initial_value=probe_value(&initial,"initial");let pid=initial.helper_pid;

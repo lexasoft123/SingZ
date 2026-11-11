@@ -15,7 +15,7 @@ fn fixture(p: &mut Player, text: &str, position: f64, cx: &mut Context<Player>) 
     p.lyric_document = Arc::new(project_lyrics::from_value(&serde_json::json!({"source":"edited","credit":"Horizontal scrolling fixture","lines":lines}))?.ok_or_else(||anyhow::anyhow!("Empty fixture"))?);
     p.shape_cache.borrow_mut().clear();
     *p.layout_cache.borrow_mut() = None;
-    p.position = position;
+    p.playhead.seek(position);
     p.last = Instant::now();
     cx.notify();
     Ok(())
@@ -62,7 +62,7 @@ fn capture(view: &Entity<Player>, w: &mut Window, cx: &mut App, out: &Path, id: 
     let offset=p.lyric_scroll_handle.offset(); let max=p.lyric_scroll_handle.max_offset();
     let layout=p.layout_cache.borrow();
     let rows=layout.as_ref().map(|(_,lines)|lines.iter().map(|(top,height,words)|serde_json::json!({"top":top,"height":height,"words":words.iter().map(|(text,x,row,width)|serde_json::json!({"text":text,"x":x,"row":row,"width":width})).collect::<Vec<_>>()})).collect::<Vec<_>>());
-    let value=serde_json::json!({"id":id,"steps":steps,"viewport":[f32::from(viewport.width),f32::from(viewport.height)],"deviceScale":scale,"raster":[image.width(),image.height()],"png":file.file_name().unwrap().to_string_lossy(),"pngSha256":hash(&std::fs::read(file)?),"scrollBounds":[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)],"geometry":{"viewportWidth":g.viewport_width,"contentWidth":g.content_width,"maxOffset":g.max_offset(),"overflows":g.overflows()},"offset":[f32::from(offset.x),f32::from(offset.y)],"nativeMaxOffset":[f32::from(max.x),f32::from(max.y)],"horizontalGutter":p.lyric_horizontal.get(),"manualVerticalPosition":p.lyric_scroll.get(),"position":p.position,"lineCount":p.lyric_document.lines.len(),"activeScale":if p.position+0.15>=p.lyric_document.lines[0].start as f64{1.03}else{1.},"rows":rows,"hidden":!w.is_visible(),"active":w.is_window_active(),"scope":"synthetic fixture; actual app-local wheel and native ScrollHandle; candidate-only captures; live FPS unmeasured"});
+    let value=serde_json::json!({"id":id,"steps":steps,"viewport":[f32::from(viewport.width),f32::from(viewport.height)],"deviceScale":scale,"raster":[image.width(),image.height()],"png":file.file_name().unwrap().to_string_lossy(),"pngSha256":hash(&std::fs::read(file)?),"scrollBounds":[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)],"geometry":{"viewportWidth":g.viewport_width,"contentWidth":g.content_width,"maxOffset":g.max_offset(),"overflows":g.overflows()},"offset":[f32::from(offset.x),f32::from(offset.y)],"nativeMaxOffset":[f32::from(max.x),f32::from(max.y)],"horizontalGutter":p.lyric_horizontal.get(),"manualVerticalPosition":p.lyric_scroll.get(),"position":p.playhead.position(),"lineCount":p.lyric_document.lines.len(),"activeScale":if p.playhead.position()+0.15>=p.lyric_document.lines[0].start as f64{1.03}else{1.},"rows":rows,"hidden":!w.is_visible(),"active":w.is_window_active(),"scope":"synthetic fixture; actual app-local wheel and native ScrollHandle; candidate-only captures; live FPS unmeasured"});
     std::fs::write(out.join(format!("{id}.json")),serde_json::to_vec_pretty(&value)?)?;
     Ok(value)
 }
@@ -97,7 +97,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     macro_rules! shot {($name:expr,$steps:expr)=>{records.push(capture(&view,w,cx,&out,&format!("{}-{}",width as i32,$name),$steps)?);};}
                     settle(w,cx); fitting(view.read(cx))?;
                     shot!("short-future", &["Install 24 future short lines; position 0; settle native layout"]);
-                    view.update(cx,|p,cx|{p.position=61.;cx.notify();});settle(w,cx);
+                    view.update(cx,|p,cx|{p.playhead.seek(61.);cx.notify();});settle(w,cx);
                     let g=view.read(cx).lyric_scroll_geometry.get();
                     anyhow::ensure!((g.max_offset()-10.11).abs()<2.,"Canonical active paragraph scale overflow changed: {g:?}");
                     shot!("active-paragraph", &["Advance position into first paragraph; preserve canonical 1.03 scale"]);

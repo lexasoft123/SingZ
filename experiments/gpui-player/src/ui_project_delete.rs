@@ -7,7 +7,7 @@ use std::{
 };
 fn state(view: &Entity<Player>, w: &Window, cx: &App) -> serde_json::Value {
     let p = view.read(cx);
-    serde_json::json!({"dialog":p.project_delete.read(cx).state(w,cx),"target":p.delete_target.as_ref().map(|t|t.dir.clone()),"inspectPending":p.delete_inspect_pending.as_ref().map(|(serial,dir)|serde_json::json!({"serial":serial,"dir":dir})),"deletePending":p.delete_pending.as_ref().map(|d|serde_json::json!({"serial":d.serial,"epoch":d.epoch,"loaded":d.loaded})),"deleteSerial":p.delete_serial,"project":p.project.as_ref().map(|s|s.dir.clone()),"loadedSong":p.loaded_song,"playing":p.playing,"position":p.position,"nativeEpoch":p.native_epoch,"nativeAnchorAgeSeconds":p.native_anchor.map(|(_,at)|at.elapsed().as_secs_f64()),"screen":p.screen as u8,"notice":p.notice,"error":p.library.read(cx).delete_error(),"projects":p.library.read(cx).project_snapshot()})
+    serde_json::json!({"dialog":p.project_delete.read(cx).state(w,cx),"target":p.delete_target.as_ref().map(|t|t.dir.clone()),"inspectPending":p.delete_inspect_pending.as_ref().map(|(serial,dir)|serde_json::json!({"serial":serial,"dir":dir})),"deletePending":p.delete_pending.as_ref().map(|d|serde_json::json!({"serial":d.serial,"epoch":d.epoch,"loaded":d.loaded})),"deleteSerial":p.delete_serial,"project":p.project.as_ref().map(|s|s.dir.clone()),"loadedSong":p.loaded_song,"playing":p.playing,"position":p.playhead.position(),"nativeEpoch":p.native_epoch,"nativeAnchorAgeSeconds":p.playhead.anchor().map(|(_,at)|at.elapsed().as_secs_f64()),"screen":p.screen as u8,"notice":p.notice,"error":p.library.read(cx).delete_error(),"projects":p.library.read(cx).project_snapshot()})
 }
 fn key(w: &mut Window, cx: &mut App, value: &'static str) {
     w.dispatch_keystroke(Keystroke::parse(value).unwrap(), cx);
@@ -142,7 +142,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;wait!(p,w,app=>w.viewport_size()==size(px(width),px(height))&&p.library.read(app).project_snapshot().as_array().is_some_and(|rows|rows.iter().any(|row|row["dir"].as_str()==current.to_str())));
    handle.update(cx,|_,w,cx|library_target(&view,w,cx,&current,false))??;
    wait!(p,w,app=>!p.loading&&p.screen==Screen::Player&&p.project.as_ref().is_some_and(|s|s.dir==current)&&p.duration>100.);
-   handle.update(cx,|_,w,cx|play(&view,w,cx))??;wait!(p,w,app=>p.playing&&p.position>0.1);
+   handle.update(cx,|_,w,cx|play(&view,w,cx))??;wait!(p,w,app=>p.playing&&p.playhead.position()>0.1);
    handle.update(cx,|_,w,cx|songs(&view,w,cx))??;wait!(p,w,app=>p.screen==Screen::Library);
    let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
    ask!(&other);
@@ -153,10 +153,10 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    ask!(&other);handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;wait!(p,w,app=>!p.project_delete.read(app).is_open());
    ask!(&other);handle.update(cx,|_,w,cx|click(w,cx,point(px(5.),px(5.))))?;wait!(p,w,app=>!p.project_delete.read(app).is_open());anyhow::ensure!(other.is_dir(),"Dismissal deleted native project");
    ask!(&other);gate(&prepare)?;press!("project-delete-confirm");wait!(p,w,app=>p.delete_pending.is_some()&&prepare.with_extension("ready").exists());
-   let (serial,position,anchor)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.delete_serial,p.position,p.native_anchor.map(|(_,at)|at))})?;
+   let (serial,position,anchor)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.delete_serial,p.playhead.position(),p.playhead.anchor().map(|(_,at)|at))})?;
    for id in ["project-delete-keep","project-delete-confirm"]{press!(id);}
    handle.update(cx,|_,w,cx|{key(w,cx,"escape");click(w,cx,point(px(5.),px(5.)));})?;
-   wait!(p,w,app=>p.position>position+0.25&&p.native_anchor.map(|(_,at)|at)>anchor);
+   wait!(p,w,app=>p.playhead.position()>position+0.25&&p.playhead.anchor().map(|(_,at)|at)>anchor);
    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.delete_serial==serial&&p.delete_pending.is_some()&&p.project_delete.read(cx).is_open()&&p.playing&&p.native_epoch==epoch,"Busy delete dismissed or disturbed unrelated native playback");Ok(())})??;
    shot!(&format!("busy-other-{}",width as u32));std::fs::remove_file(&prepare)?;
    wait!(p,w,app=>p.delete_pending.is_none()&&!p.project_delete.read(app).is_open()&&!other.exists()&&p.playing&&p.project.as_ref().is_some_and(|s|s.dir==current));

@@ -62,8 +62,8 @@ impl Player {
         self.tracks_audio_failed = true;
         self.track_rename = None;
         self.playing = false;
-        self.native_anchor = None;
-        self.pending_seek = None;
+        self.playhead.stop_projection();
+
         self.notice = Some(format!(
             "{error} Your previous tracks are retained. Retry the output route in Settings to resume playback."
         ));
@@ -84,8 +84,8 @@ impl Player {
         self.tracks_audio_failed = true;
         self.track_rename = None;
         self.playing = false;
-        self.native_anchor = None;
-        self.pending_seek = None;
+        self.playhead.stop_projection();
+
         self.muted = project.muted;
         self.solo = project.solo;
         self.gain = project.gain.map(|v| (v * 100.).round() as u8);
@@ -394,22 +394,20 @@ impl Player {
                 {
                     self.last_playback_status = Some(status.clone());
                 }
-                self.position = status.position;
+
                 self.duration = status.duration;
                 self.playing = status.playing;
-                self.native_anchor = Some((status.position, status.sampled_at));
+                self.playhead.reset(status.position);
+                self.playhead.admit((&status).into(), Instant::now());
                 self.native_rate = status.rate;
-                self.native_seek_count = status.seek_count;
-                self.native_loop = status.loop_range;
-                self.native_loop_count = status.loop_count;
+
                 self.looping = status.loop_range.is_some();
                 project.looping = self.looping;
                 project.selection = project.selection.and_then(|(start, end)| {
                     let end = end.min(status.duration);
                     (start < end).then_some((start, end))
                 });
-                self.pending_seek = None;
-                self.native_floor = None;
+
                 self.muted = project.muted;
                 self.solo = project.solo;
                 self.gain = project.gain.map(|v| (v * 100.).round() as u8);

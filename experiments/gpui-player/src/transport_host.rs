@@ -197,8 +197,8 @@ impl Player {
         self.playing = false;
         self.counting_in = false;
         self.count_in_anchor = None;
-        self.native_anchor = None;
-        self.pending_seek = None;
+        self.playhead.stop_projection();
+
         self.tracks_audio_failed = true;
         self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
         self.notice = Some(format!(

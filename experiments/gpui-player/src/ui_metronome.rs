@@ -111,13 +111,13 @@ fn paused_unchanged(
     anyhow::ensure!(
         !p.playing
             && !p.counting_in
-            && p.pending_seek.is_none()
-            && (p.position - position).abs() <= tolerance
-            && p.native_seek_count == seeks,
+            && p.playhead.pending_seek().is_none()
+            && (p.playhead.position() - position).abs() <= tolerance
+            && p.playhead.seek_count() == seeks,
         "Paused metronome control {stage} leaked into transport: position {position} -> {}, seeks {seeks} -> {}, pending {:?}, playing {}, count-in {}",
-        p.position,
-        p.native_seek_count,
-        p.pending_seek,
+        p.playhead.position(),
+        p.playhead.seek_count(),
+        p.playhead.pending_seek(),
         p.playing,
         p.counting_in
     );
@@ -146,7 +146,7 @@ fn state(view: &Entity<Player>, w: &Window, cx: &App) -> serde_json::Value {
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"screen":if p.screen==Screen::Player{"player"}else{"other"},"project":p.project.as_ref().map(|p|p.name.clone()),"popover":p.metronome_open,"metronome":p.metronome,"beat":p.beats,"barGhostTime":p.beat_handles.read(cx).ghost(),"desiredMetronome":popover.met,"desiredBeat":popover.grid,"bpmInputValue":input.read(cx).value().as_str(),"bpmFocused":popover.focused(w,cx),"mousePosition":[f32::from(mouse.x),f32::from(mouse.y)],"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"position":p.position,"playing":p.playing,"countingIn":p.counting_in,"pending":p.metronome_pending,"notice":p.notice,"controls":controls,"hidden":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"muted":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),"reference":"candidate; production capture absent"})
+    serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"screen":if p.screen==Screen::Player{"player"}else{"other"},"project":p.project.as_ref().map(|p|p.name.clone()),"popover":p.metronome_open,"metronome":p.metronome,"beat":p.beats,"barGhostTime":p.beat_handles.read(cx).ghost(),"desiredMetronome":popover.met,"desiredBeat":popover.grid,"bpmInputValue":input.read(cx).value().as_str(),"bpmFocused":popover.focused(w,cx),"mousePosition":[f32::from(mouse.x),f32::from(mouse.y)],"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"position":p.playhead.position(),"playing":p.playing,"countingIn":p.counting_in,"pending":p.metronome_pending,"notice":p.notice,"controls":controls,"hidden":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"muted":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),"reference":"candidate; production capture absent"})
 }
 fn capture(
     view: &Entity<Player>,
@@ -205,7 +205,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 handle.update(cx,|_,w,cx|{w.resize(size(px(width),px(height)));view.update(cx,|p,cx|p.open_project(original.clone(),cx));})?;
                 wait!(|p:&Player|!p.loading&&p.project.is_some()&&p.song_title.as_str()=="Metronome fixture");
                 handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.metronome.click&&p.metronome.count_in_bars==1&&(p.metronome.volume-0.3).abs()<1e-8&&!p.metronome.accent&&p.beats.as_ref().is_some_and(|g|(g.bpm-300.).abs()<1e-6&&g.source=="auto"),"Saved metronome was not restored: {:?} {:?}",p.metronome,p.beats);Ok(())})??;
-                let (paused_position,paused_seeks,closed_graph,closed_edit_seq)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);anyhow::ensure!(!p.playing&&p.pending_seek.is_none()&&p.position.abs()<=2.0/44_100.0,"Paused source fixture did not open at zero");Ok((p.position,p.native_seek_count,p.native_graph,p.edit_seq))})??;
+                let (paused_position,paused_seeks,closed_graph,closed_edit_seq)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);anyhow::ensure!(!p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<=2.0/44_100.0,"Paused source fixture did not open at zero");Ok((p.playhead.position(),p.playhead.seek_count(),p.native_graph,p.edit_seq))})??;
                 macro_rules! paused_check {($stage:expr)=>{{handle.update(cx,|_,_,cx|paused_unchanged(&view,cx,paused_position,paused_seeks,$stage))??;}};}
                 macro_rules! paused_press {($id:expr)=>{{press!($id);paused_check!($id);}};}
                 handle.update(cx,|_,w,cx|toggle(&view,w,cx))??;settle!();paused_check!("open");
@@ -307,12 +307,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 Ok(())
             })??;
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.notice=None;cx.notify();p.native_transport(transport::TransportEvent::Play,cx);}))?;
-            wait!(|p:&Player|p.playing&&!p.counting_in&&p.position>0.2);
+            wait!(|p:&Player|p.playing&&!p.counting_in&&p.playhead.position()>0.2);
             // Exercise the actual same-song audio replacement path shared by
             // rename/split. This is handoff-state evidence, not a rename UI test.
             let handoff_position=handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{
                 let project=p.project.as_ref().unwrap();
-                let position=p.position;
+                let position=p.playhead.position();
                 let resume=SourceResume{restart_cycle:p.restart_cycle.snapshot(p.region_target().selection,true),play_serial:p.native_play_serial,position,playing:true,mode:None,title:None,dirty:p.edit_seq!=p.saved_seq,mix:p.current_mix(project)};
                 let output=source_jobs::Output{publication_hash:None,path:project.dir.clone(),working:false,target:None};
                 p.open_source_output(output,Some(resume),cx);
@@ -322,7 +322,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{
                 let p=view.read(cx);
                 anyhow::ensure!(!p.counting_in&&p.count_in_anchor.is_none(),"Same-song handoff replayed the user count-in");
-                anyhow::ensure!(p.position>=handoff_position-0.1&&p.position<handoff_position+1.,"Handoff lost playback position: {handoff_position} -> {}",p.position);
+                anyhow::ensure!(p.playhead.position()>=handoff_position-0.1&&p.playhead.position()<handoff_position+1.,"Handoff lost playback position: {handoff_position} -> {}",p.playhead.position());
                 anyhow::ensure!((p.metronome.volume-0.61).abs()<1e-9&&p.metronome.count_in_bars==1&&p.beats.as_ref().is_some_and(|g|(g.bpm-120.).abs()<1e-6),"Handoff lost unsaved beat/metronome settings");
                 Ok(())
             })??;
@@ -357,15 +357,15 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             wait!(|p:&Player|!p.loading&&p.project.is_some());
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);let beat=p.beats.as_ref().unwrap();anyhow::ensure!(p.metronome==expected.0&&beat.beats_per_bar==3&&beat.downbeat==1&&(beat.bpm-120.).abs()<1e-6,"Save/reopen lost accepted settings");Ok(())})??;
             // The native count-in must not move the UI to song time zero on pause.
-            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.position=3.;p.seek_native(cx);}))?;
-            wait!(|p:&Player|p.pending_seek.is_none()&&(p.position-3.).abs()<0.03);
+            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.playhead.seek(3.);p.seek_native(cx);}))?;
+            wait!(|p:&Player|p.playhead.pending_seek().is_none()&&(p.playhead.position()-3.).abs()<0.03);
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Play,cx)))?;
             wait!(|p:&Player|p.playing&&p.counting_in);
-            handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!((view.read(cx).position-3.).abs()<0.03,"Count-in jumped away from its mid-song anchor");Ok(())})??;
+            handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!((view.read(cx).playhead.position()-3.).abs()<0.03,"Count-in jumped away from its mid-song anchor");Ok(())})??;
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Play,cx)))?;wait!(|p:&Player|!p.playing);
-            handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!((view.read(cx).position-3.).abs()<0.03,"Pausing count-in lost its anchor");Ok(())})??;
+            handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!((view.read(cx).playhead.position()-3.).abs()<0.03,"Pausing count-in lost its anchor");Ok(())})??;
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Play,cx)))?;wait!(|p:&Player|p.counting_in);
-            wait!(|p:&Player|p.playing&&!p.counting_in&&p.position>=3.);
+            wait!(|p:&Player|p.playing&&!p.counting_in&&p.playhead.position()>=3.);
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Play,cx)))?;wait!(|p:&Player|!p.playing);
             // A stored click request with no grid is retained; native playback
             // uses gridless count-in and the popover's tempo-dependent choices disable.
@@ -377,7 +377,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).beats.is_none(),"Disabled grid control created a grid");Ok(())})??;
             shot!("gridless-1060".to_owned());
             handle.update(cx,|_,w,cx|toggle(&view,w,cx))??;
-            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.position=3.;p.seek_native(cx);}))?;wait!(|p:&Player|p.pending_seek.is_none()&&(p.position-3.).abs()<0.03);
+            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.playhead.seek(3.);p.seek_native(cx);}))?;wait!(|p:&Player|p.playhead.pending_seek().is_none()&&(p.playhead.position()-3.).abs()<0.03);
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Play,cx)))?;wait!(|p:&Player|p.counting_in);
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Play,cx)))?;wait!(|p:&Player|!p.playing);
             // Three real pointer taps establish a tempo through the same UI path.

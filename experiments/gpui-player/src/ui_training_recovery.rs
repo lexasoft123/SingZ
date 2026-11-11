@@ -29,12 +29,12 @@ fn session(p: &Player) -> Value {
 }
 fn snapshot(view: &Entity<Player>, w: &Window, a: &App) -> Value {
     let p = view.read(a);
-    let mut v = json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),"screen":p.screen as u8,"epoch":p.native_epoch,"position":p.position,"playing":p.playing,"notice":p.notice,"tracksAudioFailed":p.tracks_audio_failed,"audioRecoveryPending":p.audio_recovery.is_some(),"editSeq":p.edit_seq,"savedSeq":p.saved_seq});
+    let mut v = json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),"screen":p.screen as u8,"epoch":p.native_epoch,"position":p.playhead.position(),"playing":p.playing,"notice":p.notice,"tracksAudioFailed":p.tracks_audio_failed,"audioRecoveryPending":p.audio_recovery.is_some(),"editSeq":p.edit_seq,"savedSeq":p.saved_seq});
     v["session"] = session(p);
     v["trainingOutputAvailable"] = json!(p.training.read(a).audio_available_for_test());
     v["training"] = json!({"generation":p.training_test,"serial":p.training_serial,"stopped":p.training_stopped,"lastGeneration":p.training_last.as_ref().map(|s|s.generation)});
     v["microphone"] = json!({"phase":format!("{:?}",p.mic_view.phase),"owner":p.mic_view.owner,"intent":p.mic_intent.is_some()});
-    v["mix"] = json!({"tempo":p.tempo,"transpose":p.transpose,"master":p.master_volume,"looping":p.looping,"nativeLoop":p.native_loop});
+    v["mix"] = json!({"tempo":p.tempo,"transpose":p.transpose,"master":p.master_volume,"looping":p.looping,"nativeLoop":p.playhead.loop_range()});
     v["project"] = json!(p
         .project
         .as_ref()
@@ -123,8 +123,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 metadata_before=Some(std::fs::read(project.join("project.json"))?);
                 handle.update(cx,|_,_,a|view.update(a,|p,a|p.open_project(project.clone(),a)))?;
                 wait!(30,p,w,a=>!p.loading&&p.project.as_ref().is_some_and(|v|&v.dir==project)&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&s.duration>=10.));
-                handle.update(cx,|_,_,a|view.update(a,|p,a|{p.native_transport(transport::TransportEvent::Volume(0.6),a);p.native_transport(transport::TransportEvent::Tempo(0.8),a);p.native_transport(transport::TransportEvent::Transpose(-2),a);p.native_transport(transport::TransportEvent::Loop,a);p.position=2.;p.seek_native(a);}))?;
-                wait!(15,p,w,a=>!p.rate_busy()&&p.pending_seek.is_none()&&p.edit_seq>p.saved_seq&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&(s.rate-0.8).abs()<0.0001&&s.transpose==-2&&(s.position-2.).abs()<0.03&&s.loop_range.is_some()));
+                handle.update(cx,|_,_,a|view.update(a,|p,a|{p.native_transport(transport::TransportEvent::Volume(0.6),a);p.native_transport(transport::TransportEvent::Tempo(0.8),a);p.native_transport(transport::TransportEvent::Transpose(-2),a);p.native_transport(transport::TransportEvent::Loop,a);p.playhead.seek(2.);p.seek_native(a);}))?;
+                wait!(15,p,w,a=>!p.rate_busy()&&p.playhead.pending_seek().is_none()&&p.edit_seq>p.saved_seq&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&(s.rate-0.8).abs()<0.0001&&s.transpose==-2&&(s.position-2.).abs()<0.03&&s.loop_range.is_some()));
             }
             let (epoch,edit_seq,saved_seq,project_hash,accepted_loop)=handle.update(cx,|_,_,a|{let p=view.read(a);(p.native_epoch,p.edit_seq,p.saved_seq,p.project.as_ref().map(|v|v.metadata_hash.clone()),p.last_playback_status.as_ref().and_then(|s|s.loop_range))})?;
             header!("training");wait!(5,p,w,a=>p.screen==Screen::Training);

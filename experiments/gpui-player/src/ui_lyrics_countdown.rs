@@ -44,7 +44,7 @@ pub fn run(
             let project=project.canonicalize()?;
             let (original_karaoke,first_start,second_start,epoch)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{
                 let p=view.read(cx);let lines=&p.lyric_document.lines;
-                anyhow::ensure!(p.screen==Screen::Player&&!p.playing&&p.position.abs()<0.03&&p.project.as_ref().is_some_and(|s|s.dir==project)
+                anyhow::ensure!(p.screen==Screen::Player&&!p.playing&&p.playhead.position().abs()<0.03&&p.project.as_ref().is_some_and(|s|s.dir==project)
                     &&lines.len()==2&&lines[0].start>5.&&lines[0].end<lines[1].start
                     &&(3. ..=5.).contains(&(lines[1].start-lines[0].end)),"Countdown requires the private two-gap fixture");
                 Ok((p.karaoke,lines[0].start,lines[1].start,p.native_epoch))
@@ -96,7 +96,7 @@ pub fn run(
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-play"))??;
             wait!(p,w,app => !p.playing&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing)&&p.lyric_countdown_review_state()["cue"].is_null());
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-restart"))??;
-            wait!(p,w,app => p.pending_seek.is_none()&&p.position.abs()<0.03);
+            wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03);
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-play"))??;
             wait!(p,w,app => p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
             // Resize and GPU readback can span a complete one-second cue. Run
@@ -122,7 +122,7 @@ pub fn run(
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-play"))??;
             wait!(p,w,app => !p.playing&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing)&&p.lyric_countdown_review_state()["cue"].is_null());
             handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-restart"))??;
-            wait!(p,w,app => p.pending_seek.is_none()&&p.position.abs()<0.03);
+            wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03);
             if !original_karaoke {handle.update(cx,|_,w,cx|press(&view,w,cx,"karaoke"))??;}
             wait!(p,w,app => p.karaoke==original_karaoke&&p.lyric_countdown_review_state()["cue"].is_null());
             handle.update(cx,|_,w,_|w.resize(size(px(1280.),px(800.))))?;

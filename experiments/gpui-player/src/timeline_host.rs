@@ -27,7 +27,7 @@ impl Player {
         let view = self.timeline_view();
         if let Some((next, notify)) =
             self.timeline
-                .input(input, view, self.duration as f64, self.position as f64)
+                .input(input, view, self.duration as f64, self.playhead.position() as f64)
         {
             self.region.gesture = None;
             self.apply_timeline_view(next);
@@ -83,7 +83,7 @@ impl Player {
         let next = self.timeline.advance(
             self.timeline_view(),
             self.duration as f64,
-            self.position as f64,
+            self.playhead.position() as f64,
             self.playing && !self.counting_in,
             if self.backend.is_some() {
                 self.native_rate
@@ -101,7 +101,7 @@ impl Player {
     pub(super) fn timeline_review_state(&self) -> serde_json::Value {
         serde_json::json!({"view":[self.view_start*self.duration,self.view_end*self.duration],
             "ruler":self.ruler_frame.evidence(),"followActive":self.timeline.animating(),"manualInputs":self.timeline.applied_inputs(),
-            "position":self.position,"playing":self.playing,"epoch":self.native_epoch})
+            "position":self.playhead.position(),"playing":self.playing,"epoch":self.native_epoch})
     }
 }
 

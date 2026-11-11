@@ -83,7 +83,7 @@ pub(super) fn capture(
         }
         p.native_transport(transport::TransportEvent::Play, cx);
     } else if let Shortcut::Seek(delta) = action {
-        p.position = (p.position + delta as f64).clamp(0., p.duration);
+        p.playhead.seek((p.playhead.position() + delta as f64).clamp(0., p.duration));
         p.seek_native(cx);
     }
     cx.stop_propagation();

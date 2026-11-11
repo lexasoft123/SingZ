@@ -52,7 +52,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     cx.spawn(async move|cx|{
  let result:anyhow::Result<()>=async{
  std::fs::create_dir_all(&out)?;let source=PathBuf::from(std::env::var_os("SINGZ_GPUI_SOURCE_FILE").unwrap());let fake=std::env::var_os("SINGZ_GPUI_SOURCE_CONTROL").map(PathBuf::from);
- macro_rules! wait {($predicate:expr)=>{{eprintln!("SOURCE_WAIT {}",stringify!($predicate));let deadline=Instant::now()+Duration::from_secs(if fake.is_some(){25}else{240});loop{cx.background_executor().timer(Duration::from_millis(30)).await;let ready=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(p.notice.is_none(),"{:?}",p.notice);Ok(($predicate)(p))})??;if ready{eprintln!("SOURCE_READY {}",stringify!($predicate));break;}if Instant::now()>=deadline {let state=handle.update(cx,|_,_,cx|{let p=view.read(cx);format!("job={:?} loading={} working={} screen={:?} status={:?} native={:?} resume={:?} pendingSeek={:?} pausedSeek={:?}",p.source_job,p.loading,p.source_working,p.screen as u8,p.source_status,p.last_playback_status,p.source_resume_probe,p.pending_seek,p.source_seek_receipt)})?;std::fs::write(out.join("wait-timeout.txt"),&state)?;anyhow::bail!("Source state timeout: {}: {state}",stringify!($predicate));}}}};}
+ macro_rules! wait {($predicate:expr)=>{{eprintln!("SOURCE_WAIT {}",stringify!($predicate));let deadline=Instant::now()+Duration::from_secs(if fake.is_some(){25}else{240});loop{cx.background_executor().timer(Duration::from_millis(30)).await;let ready=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(p.notice.is_none(),"{:?}",p.notice);Ok(($predicate)(p))})??;if ready{eprintln!("SOURCE_READY {}",stringify!($predicate));break;}if Instant::now()>=deadline {let state=handle.update(cx,|_,_,cx|{let p=view.read(cx);format!("job={:?} loading={} working={} screen={:?} status={:?} native={:?} resume={:?} pendingSeek={:?} pausedSeek={:?}",p.source_job,p.loading,p.source_working,p.screen as u8,p.source_status,p.last_playback_status,p.source_resume_probe,p.playhead.pending_seek(),p.source_seek_receipt)})?;std::fs::write(out.join("wait-timeout.txt"),&state)?;anyhow::bail!("Source state timeout: {}: {state}",stringify!($predicate));}}}};}
  macro_rules! press {($id:expr)=>{{cx.background_executor().timer(Duration::from_millis(80)).await;handle.update(cx,|_,w,cx|button(&view,w,cx,$id))??;cx.background_executor().timer(Duration::from_millis(80)).await;}};}
  macro_rules! capture {($name:expr)=>{{cx.background_executor().timer(Duration::from_millis(1200)).await;handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);w.render_to_image()?.save(out.join($name))?;Ok(())})??}};}
  macro_rules! split {($id:expr)=>{{press!("transport-split");handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);w.render_to_image()?.save(out.join(format!("menu-{}.png",$id)))?;Ok(())})??;press!($id);}};}
@@ -97,8 +97,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.project.as_ref().unwrap().dir==accepted&&p.project.as_ref().unwrap().lanes.len()==6&&p.source_working&&p.edit_seq>p.saved_seq,"Vocal cancellation rolled back the accepted stem stage");Ok(())})??;
 
   std::fs::write(control,"good")?;
-  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.native_transport(transport::TransportEvent::Volume(0.63),cx);p.position=0.35;p.seek_native(cx);}))?;
-  wait!(|p:&Player|p.pending_seek.is_none());
+  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.native_transport(transport::TransportEvent::Volume(0.63),cx);p.playhead.seek(0.35);p.seek_native(cx);}))?;
+  wait!(|p:&Player|p.playhead.pending_seek().is_none());
   std::fs::write(&gate,b"hold")?;
   let _=std::fs::remove_file(gate.with_extension("ready"));
   split!("split-stems");
@@ -109,7 +109,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   handle.update(cx,|_,w,_|w.resize(size(px(1060.),px(640.))))?;
   capture!("loading-stems-inline-1060.png");
   press!("split-cancel");
-  wait!(|p:&Player|!p.loading&&!p.source_split_loading()&&p.pending_seek.is_none());
+  wait!(|p:&Player|!p.loading&&!p.source_split_loading()&&p.playhead.pending_seek().is_none());
   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_epoch!=rejected_epoch&&p.project.as_ref().unwrap().dir==accepted&&p.project.as_ref().unwrap().lanes.len()==6&&p.source_working&&p.edit_seq>p.saved_seq&&(p.master_volume-0.63).abs()<0.001,"Loading cancellation lost original identity/mix/dirty state");Ok(())})??;
   std::fs::remove_file(&gate)?;
   capture!("loading-cancel-restored-six-1060.png");
@@ -166,7 +166,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
  split!("split-combined");
  if let Some(control)=&fake {
   wait!(|p:&Player|p.source_job.is_some()&&p.source_status.percent>1.);
-  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.native_transport(transport::TransportEvent::Volume(0.65),cx);p.native_transport(transport::TransportEvent::Tempo(0.8),cx);p.native_transport(transport::TransportEvent::Transpose(2),cx);p.position=0.4;p.seek_native(cx);p.native_transport(transport::TransportEvent::Loop,cx);}))?;
+  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.native_transport(transport::TransportEvent::Volume(0.65),cx);p.native_transport(transport::TransportEvent::Tempo(0.8),cx);p.native_transport(transport::TransportEvent::Transpose(2),cx);p.playhead.seek(0.4);p.seek_native(cx);p.native_transport(transport::TransportEvent::Loop,cx);}))?;
   press!("transport-play");wait!(|p:&Player|p.playing);
   handle.update(cx,|_,_,cx|view.read(cx).header.clone().update(cx,|_,cx|cx.emit(header::HeaderEvent::Settings)))?;
   wait!(|p:&Player|p.screen==Screen::Settings);
@@ -176,7 +176,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
  if fake.is_some() {
   // Prove the paused seek and first actual Play before the 1.2-second capture
   // delay can put this short fixture on either side of a legitimate loop wrap.
-  wait!(|p:&Player|p.playing&&p.pending_seek.is_none()&&p.source_seek_receipt.is_some()&&p.last_playback_status.as_ref().is_some_and(|s|s.playing&&s.audible_current&&s.rate==0.8&&s.transpose==2&&p.source_resume_probe.as_ref().is_some_and(|probe|probe.epoch==p.native_epoch&&s.seek_count>=probe.expected_seek_count)));
+  wait!(|p:&Player|p.playing&&p.playhead.pending_seek().is_none()&&p.source_seek_receipt.is_some()&&p.last_playback_status.as_ref().is_some_and(|s|s.playing&&s.audible_current&&s.rate==0.8&&s.transpose==2&&p.source_resume_probe.as_ref().is_some_and(|probe|probe.epoch==p.native_epoch&&s.seek_count>=probe.expected_seek_count)));
   handle.update(cx,|_,_,cx|->anyhow::Result<()>{
     let p=view.read(cx);let probe=p.source_resume_probe.as_ref().context("Missing owned split resume intent")?;
     let paused=p.source_seek_receipt.as_ref().context("Missing paused native seek receipt")?;
@@ -192,7 +192,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
         "loopCountDiagnosticOnly":status.loop_count,"initialLoopCountDiagnosticOnly":probe.initial_loop_count,
         "seekCount":status.seek_count,"expectedSeekCount":probe.expected_seek_count,
         "rate":status.rate,"transpose":status.transpose,"loopRange":status.loop_range,"playing":status.playing,
-        "audibleCurrent":status.audible_current,"pendingSeek":p.pending_seek,"nativeGraph":status.graph_generation,
+        "audibleCurrent":status.audible_current,"pendingSeek":p.playhead.pending_seek(),"nativeGraph":status.graph_generation,
     }))?)?;
     anyhow::ensure!(!paused.playing&&!paused.counting_in&&paused.seek_count>=probe.expected_seek_count&&(paused.position-probe.position).abs()<=0.025,"Paused source seek did not retain requested position");
     anyhow::ensure!(paused.graph_generation==status.graph_generation&&paused.seek_count==status.seek_count,"Play used a different native graph or seek");
@@ -207,7 +207,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   let first=handle.update(cx,|_,_,cx|view.read(cx).last_playback_status.clone().context("Missing resumed status"))??;
   wait!(|p:&Player|p.last_playback_status.as_ref().is_some_and(|s|s.playing&&s.audible_current&&s.sampled_at>first.sampled_at&&bounded_progress(&first,s).is_ok_and(|delta|delta>0.05)));
   press!("transport-play");wait!(|p:&Player|!p.playing);
-  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.native_transport(transport::TransportEvent::Volume(1.),cx);p.native_transport(transport::TransportEvent::Tempo(1.),cx);p.native_transport(transport::TransportEvent::Transpose(0),cx);p.native_transport(transport::TransportEvent::Loop,cx);p.position=0.;p.seek_native(cx);}))?;
+  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.native_transport(transport::TransportEvent::Volume(1.),cx);p.native_transport(transport::TransportEvent::Tempo(1.),cx);p.native_transport(transport::TransportEvent::Transpose(0),cx);p.native_transport(transport::TransportEvent::Loop,cx);p.playhead.seek(0.);p.seek_native(cx);}))?;
  }
 
  handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.source_working&&p.source_target.is_none()&&p.project.as_ref().unwrap().raw["settings"]["leadVocalSeparated"]==true,"Seven-lane result lost its working-copy identity");Ok(())})??;

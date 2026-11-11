@@ -83,8 +83,13 @@ with tempfile.TemporaryDirectory(prefix='singz-native-lyrics-editor-') as temp, 
         folder = root / name
         folder.mkdir()
         shutil.copyfile(source, folder / 'song.wav')
+        # Karaoke is a split-project control, so every editor fixture needs a stem.
+        (folder / 'stems').mkdir()
+        shutil.copyfile(source, folder / 'stems/other.wav')
         project = {'version': 2, 'name': name, 'songFile': 'song.wav',
             'foreignProject': {'keep': name}, 'settings': {
+                # Keep unrelated harmonic analysis/autosave out of editor Save checks.
+                'key': {'pc': 9, 'minor': True, 'detVersion': 2},
                 'metronome': {'grid': False, 'click': False, 'countInBars': 1, 'volume': .7, 'accent': True}}}
         (folder / 'project.json').write_text(json.dumps(project, ensure_ascii=False))
         (folder / 'notes.txt').write_text('preserve unrelated notes\n')
@@ -100,18 +105,17 @@ with tempfile.TemporaryDirectory(prefix='singz-native-lyrics-editor-') as temp, 
                         {'w': 'line', 's': round(.3 + i * .5, 2), 'e': round(.4 + i * .5, 2)},
                         {'w': f'{i + 1:02d}', 's': round(.4 + i * .5, 2), 'e': round(.55 + i * .5, 2)}]}
                     for i in range(20)]
-            lyrics = {'source': 'other-source' if name == 'other' else 'fixture-source',
+            lyrics = {'source': 'whisper' if name == 'other' else 'lrclib',
                 'credit': 'other-credit' if name == 'other' else 'fixture-credit',
                 'foreignLyrics': {'keep': name}, 'lines': lyric_lines}
+            if name == 'other':
+                # Keep background lookup enrichment out of the stale-receipt check.
+                lyrics.update(lrclibPending=False, lookup=3)
             (folder / 'lyrics.json').write_text(json.dumps(lyrics, ensure_ascii=False))
         initial[name] = {'project': project,
             'projectSha256': sha(folder / 'project.json'),
             'lyricsSha256': sha(folder / 'lyrics.json') if (folder / 'lyrics.json').exists() else None}
-    # A prepared split output needs a real stem member so targeted Save also
-    # exercises the native compaction/publication path. No drums or vocals are
-    # needed for this publication fixture; unrelated analysis stays out of it.
-    (root / 'working-target/stems').mkdir()
-    shutil.copyfile(source, root / 'working-target/stems/other.wav')
+    # Keep a private prepared split copy for targeted Save/publication.
     shutil.copytree(root / 'working-target', root / 'working-copy')
     prefs = root / 'prefs'
     prefs.mkdir()
@@ -185,7 +189,7 @@ with tempfile.TemporaryDirectory(prefix='singz-native-lyrics-editor-') as temp, 
     assert absent['source'] == 'edited' and absent['lines'][0]['text'] == 'Create missing lyrics'
     assert sha(root / 'absent/project.json') == initial['absent']['projectSha256']
     conflict = json.loads((root / 'conflict/lyrics.json').read_text())
-    assert conflict['externalChange'] == 'keep' and conflict['source'] == 'fixture-source'
+    assert conflict['externalChange'] == 'keep' and conflict['source'] == 'lrclib'
     assert json.loads((root / 'absent-race/lyrics.json').read_text())['externalCreate'] == 'keep'
     assert sha(root / 'other/lyrics.json') == initial['other']['lyricsSha256']
     working = json.loads((root / 'working-target/lyrics.json').read_text())

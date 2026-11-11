@@ -21,7 +21,7 @@ fn snapshot(view:&Entity<Player>,window:&mut Window,cx:&mut App,directory:&std::
     if p.screen==Screen::Player && p.source_split.is_none() && p.project.as_ref().is_some_and(|s| !s.original && s.lane_id(0)==Some("vocals")) {
         anyhow::ensure!(p.transport.read(cx).bounds("transport-stem-files").is_some(), "Available vocal stem lost its mounted Stem files action");
     }
-    let state=serde_json::json!({"viewport":[f32::from(viewport.width),f32::from(viewport.height)],"scale":window.scale_factor(),"hidden":!window.is_visible()&&!window.is_window_active(),"epoch":p.native_epoch,"playing":p.playing,"position":p.position,"nativeGraph":p.last_playback_status.as_ref().map(|s|serde_json::json!({"explicit":s.explicit_graph,"nodes":s.graph_nodes,"connections":s.graph_connections})),"productionParity":"unqualified native candidate","liveFps":"unmeasured"});
+    let state=serde_json::json!({"viewport":[f32::from(viewport.width),f32::from(viewport.height)],"scale":window.scale_factor(),"hidden":!window.is_visible()&&!window.is_window_active(),"epoch":p.native_epoch,"playing":p.playing,"position":p.playhead.position(),"nativeGraph":p.last_playback_status.as_ref().map(|s|serde_json::json!({"explicit":s.explicit_graph,"nodes":s.graph_nodes,"connections":s.graph_connections})),"productionParity":"unqualified native candidate","liveFps":"unmeasured"});
     std::fs::write(directory.join(format!("{name}.json")),serde_json::to_vec_pretty(&state)?)?;Ok(())
 }
 fn click(window: &mut Window, cx: &mut App, x: f32, y: f32) {
@@ -111,14 +111,14 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             cx.background_executor().timer(Duration::from_millis(1100)).await;
             handle.update(cx,|_,window,cx|->anyhow::Result<()>{
                 let player=view.read(cx);anyhow::ensure!(player.backend.is_some()&&player.screen==Screen::Player,"Not the native playback screen");
-                anyhow::ensure!(!player.playing&&player.duration>0.&&player.position==0.,"Incorrect native prepare state");
+                anyhow::ensure!(!player.playing&&player.duration>0.&&player.playhead.position()==0.,"Incorrect native prepare state");
                 snapshot(&view,window,cx,&directory,"native-loaded")?;
                 click(window,cx,96.,718.);Ok(())
             })??;
             let deadline=Instant::now()+Duration::from_secs(5);
             loop {
                 cx.background_executor().timer(Duration::from_millis(25)).await;
-                let running=handle.update(cx,|_,_,cx|{let p=view.read(cx);p.playing&&p.position>0.05})?;
+                let running=handle.update(cx,|_,_,cx|{let p=view.read(cx);p.playing&&p.playhead.position()>0.05})?;
                 if running{break;}anyhow::ensure!(Instant::now()<deadline,"Play click did not reach native transport");
             }
             handle.update(cx,|_,window,cx|->anyhow::Result<()>{
@@ -174,12 +174,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             }
             handle.update(cx,|_,window,cx|->anyhow::Result<()>{
                 click_vocals_mute(&view,window,cx)?;
-                view.update(cx,|p,cx|{p.position=p.duration/2.;p.seek_native(cx);});
+                view.update(cx,|p,cx|{p.playhead.seek(p.duration/2.);p.seek_native(cx);});
                 Ok(())
             })??;
             cx.background_executor().timer(Duration::from_millis(250)).await;
             handle.update(cx,|_,window,cx|->anyhow::Result<()>{
-                let p=view.read(cx);anyhow::ensure!(p.muted[0]!=originally_muted&&!p.playing&&(p.position-p.duration/2.).abs()<0.03,"Seek/mute did not settle");
+                let p=view.read(cx);anyhow::ensure!(p.muted[0]!=originally_muted&&!p.playing&&(p.playhead.position()-p.duration/2.).abs()<0.03,"Seek/mute did not settle");
                 snapshot(&view,window,cx,&directory,"native-paused-seek")?;
                 Ok(())
             })??;
@@ -236,7 +236,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             }))?;
             let deadline=Instant::now()+Duration::from_secs(10);
             loop{cx.background_executor().timer(Duration::from_millis(20)).await;
-                let ready=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(p.notice.is_none(),"{:?}",p.notice);Ok((p.native_rate-0.8).abs()<0.001&&p.pitch_strip.read(cx).effects()==(0.8,2)&&!p.playing&&(p.position-p.duration/2.).abs()<0.03)})??;
+                let ready=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(p.notice.is_none(),"{:?}",p.notice);Ok((p.native_rate-0.8).abs()<0.001&&p.pitch_strip.read(cx).effects()==(0.8,2)&&!p.playing&&(p.playhead.position()-p.duration/2.).abs()<0.03)})??;
                 if ready{break;}anyhow::ensure!(Instant::now()<deadline,"Native tempo/transpose UI did not settle");
             }
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{
@@ -279,7 +279,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             let deadline=Instant::now()+Duration::from_secs(15);
             loop {
                 cx.background_executor().timer(Duration::from_millis(25)).await;
-                let done=handle.update(cx,|_,_,cx|{let p=view.read(cx);!p.loading&&p.project.is_some()&&p.position==0.})?;
+                let done=handle.update(cx,|_,_,cx|{let p=view.read(cx);!p.loading&&p.project.is_some()&&p.playhead.position()==0.})?;
                 if done{break;}anyhow::ensure!(Instant::now()<deadline,"Replacement generation did not load");
             }
             if karaoke_case {

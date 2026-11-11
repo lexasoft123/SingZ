@@ -65,7 +65,7 @@ fn shot(
     w.render_to_image()?.save(out.join(format!("{name}.png")))?;
     let p = view.read(cx);
     let toast=p.success_toast.read(cx).state();
-    let value = serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"importOpen":p.library_import_open,"import":state(view,w,cx),"pending":p.import_pending.is_some(),"project":p.project.as_ref().map(|p|p.dir.clone()),"position":p.position,"playing":p.playing,"epoch":p.native_epoch,"gain":p.gain,"master":p.master_volume,"notice":p.notice,"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),"hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"visualReference":"candidate only; matched production reference absent","liveFps":"unmeasured: hidden window","toast":{"visible":toast.visible,"text":toast.text,"sequence":toast.sequence,"ageSeconds":toast.age_seconds,"opacity":toast.opacity},"playerFocused":p.focus_handle.is_focused(w)});
+    let value = serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"importOpen":p.library_import_open,"import":state(view,w,cx),"pending":p.import_pending.is_some(),"project":p.project.as_ref().map(|p|p.dir.clone()),"position":p.playhead.position(),"playing":p.playing,"epoch":p.native_epoch,"gain":p.gain,"master":p.master_volume,"notice":p.notice,"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),"hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"visualReference":"candidate only; matched production reference absent","liveFps":"unmeasured: hidden window","toast":{"visible":toast.visible,"text":toast.text,"sequence":toast.sequence,"ageSeconds":toast.age_seconds,"opacity":toast.opacity},"playerFocused":p.focus_handle.is_focused(w)});
     std::fs::write(
         out.join(format!("{name}.state.json")),
         serde_json::to_vec_pretty(&value)?,
@@ -99,8 +99,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    }
    handle.update(cx,|_,w,_|w.resize(size(px(1280.),px(800.))))?;open_project!("Copy project");
    // Unsaved live mix is host-owned and must survive the identity handoff.
-   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.gain[5]=42;p.sync_lane(5,cx);p.native_transport(transport::TransportEvent::Volume(0.6),cx);p.position=0.75;p.seek_native(cx);}))?;
-   wait!(p,w,app=>p.pending_seek.is_none()&&p.native_anchor.is_some_and(|(t,_)|(t-0.75).abs()<0.001));
+   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.gain[5]=42;p.sync_lane(5,cx);p.native_transport(transport::TransportEvent::Volume(0.6),cx);p.playhead.seek(0.75);p.seek_native(cx);}))?;
+   wait!(p,w,app=>p.playhead.pending_seek().is_none()&&p.playhead.anchor().is_some_and(|(t,_)|(t-0.75).abs()<0.001));
    handle.update(cx,|_,w,cx|{draw(w,cx);key(w,cx,"space");})?;wait!(p,w,app=>p.playing);
    dialog!();hold!();
    let old_status=root.join("old-status.gate");let old_status_ready=old_status.with_extension("ready");
@@ -109,12 +109,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    let old_epoch=std::fs::read_to_string(&old_status_ready)?.trim().parse::<u64>()?;
    let before_position=handle.update(cx,|_,w,cx|->anyhow::Result<f64>{
        draw(w,cx);anyhow::ensure!(view.read(cx).native_epoch==old_epoch,"Status gate did not capture current old epoch");
-       let position=view.read(cx).position;press(&view,w,cx,"library-import-copy")?;Ok(position)})??;
+       let position=view.read(cx).playhead.position();press(&view,w,cx,"library-import-copy")?;Ok(position)})??;
    wait!(p,w,app=>p.import_pending.is_some()&&p.native_epoch!=old_epoch);
    let copy_epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
    std::fs::remove_file(&old_status)?;
    wait!(p,w,app=>p.import_pending.is_some()&&ready.is_file());
-   let prepare_position=handle.update(cx,|_,_,cx|view.read(cx).position)?;
+   let prepare_position=handle.update(cx,|_,_,cx|view.read(cx).playhead.position())?;
    let continuity_baseline=before_position.max(prepare_position);
    for id in ["library-import-close","library-import-copy","library-import-move"]{press!(id);}
    handle.update(cx,|_,w,cx|{key(w,cx,"escape");key(w,cx,"tab");click(w,cx,point(px(5.),px(5.)));})?;
@@ -129,8 +129,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    release!();let copied=root.join("library/Copy project");
    wait!(p,w,app=>p.import_pending.is_none()&&!p.loading&&!p.library_import_open&&p.project.as_ref().is_some_and(|p|p.dir==copied)&&p.playing);
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let p=view.read(cx);let toast=p.success_toast.read(cx).state();
-       std::fs::write(out.join("copy-continuity.json"),serde_json::to_vec_pretty(&serde_json::json!({"oldEpoch":old_epoch,"copyEpoch":copy_epoch,"beforeCopyPosition":before_position,"preparePosition":prepare_position,"baseline":continuity_baseline,"heldMilliseconds":350,"receiptPosition":p.position,"playing":p.playing,"gain":p.gain[5],"master":p.master_volume,"toastVisible":toast.visible,"playerFocused":p.focus_handle.is_focused(w)}))?)?;
-       anyhow::ensure!(p.gain[5]==42&&p.master_volume==0.6&&p.position>continuity_baseline+0.15&&p.position<continuity_baseline+8.,"Copy reset playing transport/mix/position or failed to advance during held transfer");
+       std::fs::write(out.join("copy-continuity.json"),serde_json::to_vec_pretty(&serde_json::json!({"oldEpoch":old_epoch,"copyEpoch":copy_epoch,"beforeCopyPosition":before_position,"preparePosition":prepare_position,"baseline":continuity_baseline,"heldMilliseconds":350,"receiptPosition":p.playhead.position(),"playing":p.playing,"gain":p.gain[5],"master":p.master_volume,"toastVisible":toast.visible,"playerFocused":p.focus_handle.is_focused(w)}))?)?;
+       anyhow::ensure!(p.gain[5]==42&&p.master_volume==0.6&&p.playhead.position()>continuity_baseline+0.15&&p.playhead.position()<continuity_baseline+8.,"Copy reset playing transport/mix/position or failed to advance during held transfer");
        anyhow::ensure!(p.notice.is_none()&&toast.visible&&p.focus_handle.is_focused(w),"Import success toast blocked the player or stole focus");Ok(())})??;
    handle.update(cx,|_,_,cx|view.read(cx).success_toast.clone().update(cx,|s,cx|s.set_animation_time(Some(0.25),cx)))?;
    shot!("copied-playing-1280");
@@ -146,11 +146,11 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    // Restore isolated selected root for independent subsequent cases.
    modify_json(&root.join("prefs/library.json"),"projectsRoot",serde_json::json!(root.join("library")))?;
    handle.update(cx,|_,w,_|w.resize(size(px(1060.),px(640.))))?;open_project!("Move project");
-   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.gain[5]=37;p.sync_lane(5,cx);p.native_transport(transport::TransportEvent::Volume(0.65),cx);p.position=1.25;p.seek_native(cx);}))?;
-   wait!(p,w,app=>p.pending_seek.is_none()&&p.native_anchor.is_some_and(|(t,_)|(t-1.25).abs()<0.001));
+   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.gain[5]=37;p.sync_lane(5,cx);p.native_transport(transport::TransportEvent::Volume(0.65),cx);p.playhead.seek(1.25);p.seek_native(cx);}))?;
+   wait!(p,w,app=>p.playhead.pending_seek().is_none()&&p.playhead.anchor().is_some_and(|(t,_)|(t-1.25).abs()<0.001));
    dialog!();hold!();press!("library-import-move");wait!(p,w,app=>p.import_pending.is_some()&&ready.is_file());shot!("busy-move-1060");release!();let moved=root.join("library/Move project");
    wait!(p,w,app=>p.import_pending.is_none()&&!p.loading&&!p.library_import_open&&p.project.as_ref().is_some_and(|p|p.dir==moved));
-   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(!p.playing&&(p.position-1.25).abs()<0.01&&p.gain[5]==37&&p.master_volume==0.65,"Move reset paused transport/mix/position");Ok(())})??;shot!("moved-paused-1060");
+   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(!p.playing&&(p.playhead.position()-1.25).abs()<0.01&&p.gain[5]==37&&p.master_volume==0.65,"Move reset paused transport/mix/position");Ok(())})??;shot!("moved-paused-1060");
    open_project!("Collision project");dialog!();press!("library-import-copy");wait!(p,w,app=>p.import_pending.is_none()&&p.notice.is_some());
    anyhow::ensure!(handle.update(cx,|_,_,cx|view.read(cx).project.as_ref().unwrap().dir==root.join("external/Collision project"))?,"Collision reanchored active project");shot!("collision-refused-1060");
    open_project!("Changed project");dialog!();hold!();press!("library-import-copy");wait!(p,w,app=>p.import_pending.is_some()&&ready.is_file());

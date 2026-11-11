@@ -48,8 +48,8 @@ fn tab_output_control(view:&Entity<Player>,w:&mut Window,cx:&mut App,index:usize
 fn footer_state(p:&Player,w:&Window,cx:&App,phase:&str)->serde_json::Value {
     serde_json::json!({"phase":phase,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],
         "scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),"active":w.is_window_active(),
-        "keyboard":p.transport.read(cx).keyboard_state(w,cx),"playing":p.playing,"position":p.position,
-        "epoch":p.native_epoch,"seekCount":p.native_seek_count,"tempo":p.tempo,"transpose":p.transpose,"masterVolume":p.master_volume,
+        "keyboard":p.transport.read(cx).keyboard_state(w,cx),"playing":p.playing,"position":p.playhead.position(),
+        "epoch":p.native_epoch,"seekCount":p.playhead.seek_count(),"tempo":p.tempo,"transpose":p.transpose,"masterVolume":p.master_volume,
         "karaoke":p.karaoke,"muted":p.muted[0],"looping":p.looping,"metronomeOpen":p.metronome_open,
         "carryOpen":p.carry_open,"sourceJob":p.source_job.is_some(),"engineSetupOpen":p.engine_setup.read(cx).is_open(),
         "modelsOpen":p.screen==Screen::Models,"native":p.last_playback_status.as_ref().map(|s|serde_json::json!({
@@ -215,7 +215,7 @@ fn click_stem_gain(
 }
 fn state(p: &Player, w: &Window, cx: &App) -> serde_json::Value {
     serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),
-        "hidden":!w.is_visible()&&!w.is_window_active(),"playerScreen":p.screen==Screen::Player,"position":p.position,"playing":p.playing,
+        "hidden":!w.is_visible()&&!w.is_window_active(),"playerScreen":p.screen==Screen::Player,"position":p.playhead.position(),"playing":p.playing,
         "rootFocused":p.focus_handle.is_focused(w),"headerFocused":p.header.read(cx).focused_control(w),"masterVolume":p.master_volume,
         "stemGain":p.gain[0],"stemFocused":p.track_gain_focus[0].is_focused(w),"nativeStemGain":native_gain(p),
         "stemMuted":p.muted[0],"stemSolo":p.solo[0],"nativeStemMix":native_mix(p),
@@ -223,7 +223,7 @@ fn state(p: &Player, w: &Window, cx: &App) -> serde_json::Value {
         "mixerResetFocused":[p.track_reset_focus[0].is_focused(w),p.track_reset_focus[1].is_focused(w)],
         "mixerResetEnabled":[p.muted.iter().any(|v|*v),p.solo.iter().any(|v|*v)],
         "trackHeaderFocused":[p.track_header_focus[0].is_focused(w),p.track_header_focus[1].is_focused(w)],
-        "epoch":p.native_epoch,"seekCount":p.native_seek_count,"native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"playing":s.playing,"position":s.position})),
+        "epoch":p.native_epoch,"seekCount":p.playhead.seek_count(),"native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"playing":s.playing,"position":s.position})),
         "spaceOrigin":"header-log reached through actual Tab","liveFps":"unmeasured","productionParity":"input behavior only; matched reference capture pending"})
 }
 pub fn run(
@@ -251,7 +251,7 @@ pub fn run(
             }};}
             let (original_gain,original_stem_gain,original_muted,original_solo,original_name,original_epoch)=handle.update(cx,|_,w,cx|->anyhow::Result<(f32,u8,bool,bool,String,u64)>{
                 let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Player&&!p.playing&&p.project.as_ref().is_some_and(|s|s.dir==project)
-                    &&p.region_target().selection.is_none()&&p.position.abs()<0.03
+                    &&p.region_target().selection.is_none()&&p.playhead.position().abs()<0.03
                     &&p.view_start==0.&&p.view_end==1.,"Keyboard baseline is not the private paused full-view song");
                 anyhow::ensure!(native_gain(p).is_some(),"Keyboard fixture requires the real vocals lane");
                 anyhow::ensure!(native_mix(p)==Some((p.muted[0],p.solo[0])),"Keyboard fixture native mute/solo must match the host baseline");
@@ -282,19 +282,19 @@ pub fn run(
                 wait!(p,w,app => p.screen==Screen::Player&&!p.playing&&p.native_play_intent.is_none()
                     &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                 handle.update(cx,|_,w,cx|tab_header(&view,w,cx,"header-log"))??;
-                let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_seek_count)})?;
+                let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.playhead.seek_count())})?;
                 handle.update(cx,|_,w,cx|key(w,cx,"right"))?;
-                wait!(p,w,app => !p.playing&&p.pending_seek.is_none()&&p.native_seek_count>count&&(p.position-(position+5.).min(p.duration)).abs()<0.03);
+                wait!(p,w,app => !p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.seek_count()>count&&(p.playhead.position()-(position+5.).min(p.duration)).abs()<0.03);
                 handle.update(cx,|_,w,cx|key(w,cx,"left"))?;
-                wait!(p,w,app => p.pending_seek.is_none()&&(p.position-position).abs()<0.03);
+                wait!(p,w,app => p.playhead.pending_seek().is_none()&&(p.playhead.position()-position).abs()<0.03);
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{
                     anyhow::ensure!(view.read(cx).header.read(cx).focused_control(w).as_deref()==Some("header-log"),"Arrows unexpectedly blurred button focus");
                     key(w,cx,"enter");Ok(())
                 })??;
                 wait!(p,w,app => p.screen==Screen::Log);
-                let count=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count)?;
+                let count=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count())?;
                 handle.update(cx,|_,w,cx|{key(w,cx,"space");key(w,cx,"right");})?;
-                wait!(p,w,app => p.screen==Screen::Log&&!p.playing&&p.native_seek_count==count);
+                wait!(p,w,app => p.screen==Screen::Log&&!p.playing&&p.playhead.seek_count()==count);
                 handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
                 wait!(p,w,app => p.screen==Screen::Player);
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{
@@ -303,12 +303,12 @@ pub fn run(
                     super::ui_training_run::click(w,cx,b.center());Ok(())
                 })??;
                 wait!(p,w,app => p.header.read(app).is_editing()&&p.header.read(app).title_input_focused(w,app));
-                let (before,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.header.read(cx).title_state().read(cx).value().to_string(),p.native_seek_count)})?;
+                let (before,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.header.read(cx).title_state().read(cx).value().to_string(),p.playhead.seek_count())})?;
                 handle.update(cx,|_,w,cx|{
                     key(w,cx,"right");
                     let mut stroke=Keystroke::parse("space").unwrap();stroke.key_char=Some(" ".into());w.dispatch_keystroke(stroke,cx);key(w,cx,"left");
                 })?;
-                wait!(p,w,app => !p.playing&&p.native_seek_count==count&&p.header.read(app).is_editing()
+                wait!(p,w,app => !p.playing&&p.playhead.seek_count()==count&&p.header.read(app).is_editing()
                     &&p.header.read(app).title_state().read(app).value().len()==before.len()+1);
                 handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
                 wait!(p,w,app => !p.header.read(app).is_editing()&&p.project.as_ref().unwrap().name==original_name);
@@ -316,7 +316,7 @@ pub fn run(
                     // Keep each real five-second seek away from the fixture's
                     // end; Tab traversal during the preceding Play can advance.
                     handle.update(cx,|_,w,cx|click_transport(&view,w,cx,"transport-restart"))??;
-                    wait!(p,w,app => !p.playing&&p.pending_seek.is_none()&&p.position.abs()<0.03);
+                    wait!(p,w,app => !p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03);
                     let changed=if button==0 {(!original_muted,original_solo)} else {(original_muted,!original_solo)};
                     let baseline=(original_muted,original_solo);
                     handle.update(cx,|_,w,cx|tab_stem_mix(&view,w,cx,button))??;
@@ -344,13 +344,13 @@ pub fn run(
                         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                     mix_receipts.push(handle.update(cx,|_,w,cx|serde_json::json!({"button":button,"phase":"space-pauses-without-toggle","state":state(view.read(cx),w,cx)}))?);
                     handle.update(cx,|_,w,cx|tab_stem_mix(&view,w,cx,button))??;
-                    let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_seek_count)})?;
+                    let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.playhead.seek_count())})?;
                     handle.update(cx,|_,w,cx|key(w,cx,"right"))?;
-                    wait!(p,w,app => p.track_mix_focus[0][button].is_focused(w)&&!p.playing&&p.pending_seek.is_none()
-                        &&p.native_seek_count>count&&(p.position-(position+5.).min(p.duration)).abs()<0.03);
+                    wait!(p,w,app => p.track_mix_focus[0][button].is_focused(w)&&!p.playing&&p.playhead.pending_seek().is_none()
+                        &&p.playhead.seek_count()>count&&(p.playhead.position()-(position+5.).min(p.duration)).abs()<0.03);
                     handle.update(cx,|_,w,cx|key(w,cx,"left"))?;
-                    wait!(p,w,app => p.track_mix_focus[0][button].is_focused(w)&&p.pending_seek.is_none()
-                        &&(p.position-position).abs()<0.03&&(p.muted[0],p.solo[0])==changed&&native_mix(p)==Some(changed));
+                    wait!(p,w,app => p.track_mix_focus[0][button].is_focused(w)&&p.playhead.pending_seek().is_none()
+                        &&(p.playhead.position()-position).abs()<0.03&&(p.muted[0],p.solo[0])==changed&&native_mix(p)==Some(changed));
                     mix_receipts.push(handle.update(cx,|_,w,cx|serde_json::json!({"button":button,"phase":"arrows-seek-with-focus","state":state(view.read(cx),w,cx)}))?);
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
                     wait!(p,w,app => p.track_mix_focus[0][button].is_focused(w)
@@ -360,7 +360,7 @@ pub fn run(
                     // Keep each real five-second seek away from the fixture's
                     // end; Tab traversal during the preceding Play can advance.
                     handle.update(cx,|_,w,cx|click_transport(&view,w,cx,"transport-restart"))??;
-                    wait!(p,w,app => !p.playing&&p.pending_seek.is_none()&&p.position.abs()<0.03);
+                    wait!(p,w,app => !p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03);
                     let original_on=if button==0 {original_muted} else {original_solo};
                     let enabled=if button==0 {(true,original_solo)} else {(original_muted,true)};
                     let cleared=if button==0 {(false,original_solo)} else {(original_muted,false)};
@@ -370,13 +370,13 @@ pub fn run(
                     }
                     wait!(p,w,app => (p.muted[0],p.solo[0])==enabled&&native_mix(p)==Some(enabled));
                     handle.update(cx,|_,w,cx|tab_mix_reset(&view,w,cx,button))??;
-                    let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_seek_count)})?;
+                    let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.playhead.seek_count())})?;
                     handle.update(cx,|_,w,cx|key(w,cx,"right"))?;
-                    wait!(p,w,app => p.track_reset_focus[button].is_focused(w)&&!p.playing&&p.pending_seek.is_none()
-                        &&p.native_seek_count>count&&(p.position-(position+5.).min(p.duration)).abs()<0.03);
+                    wait!(p,w,app => p.track_reset_focus[button].is_focused(w)&&!p.playing&&p.playhead.pending_seek().is_none()
+                        &&p.playhead.seek_count()>count&&(p.playhead.position()-(position+5.).min(p.duration)).abs()<0.03);
                     handle.update(cx,|_,w,cx|key(w,cx,"left"))?;
-                    wait!(p,w,app => p.track_reset_focus[button].is_focused(w)&&p.pending_seek.is_none()
-                        &&(p.position-position).abs()<0.03&&(p.muted[0],p.solo[0])==enabled&&native_mix(p)==Some(enabled));
+                    wait!(p,w,app => p.track_reset_focus[button].is_focused(w)&&p.playhead.pending_seek().is_none()
+                        &&(p.playhead.position()-position).abs()<0.03&&(p.muted[0],p.solo[0])==enabled&&native_mix(p)==Some(enabled));
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
                     wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)
                         &&(p.muted[0],p.solo[0])==enabled&&native_mix(p)==Some(enabled)
@@ -410,14 +410,14 @@ pub fn run(
                     // Keep each real five-second seek away from the fixture's
                     // end; Tab traversal during the preceding Play can advance.
                     handle.update(cx,|_,w,cx|click_transport(&view,w,cx,"transport-restart"))??;
-                    wait!(p,w,app => !p.playing&&p.pending_seek.is_none()&&p.position.abs()<0.03);
+                    wait!(p,w,app => !p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03);
                     handle.update(cx,|_,w,cx|tab_track_header(&view,w,cx,button))??;
-                    let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_seek_count)})?;
+                    let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.playhead.seek_count())})?;
                     handle.update(cx,|_,w,cx|key(w,cx,"right"))?;
-                    wait!(p,w,app => p.track_header_focus[button].is_focused(w)&&!p.playing&&p.pending_seek.is_none()
-                        &&p.native_seek_count>count&&(p.position-(position+5.).min(p.duration)).abs()<0.03);
+                    wait!(p,w,app => p.track_header_focus[button].is_focused(w)&&!p.playing&&p.playhead.pending_seek().is_none()
+                        &&p.playhead.seek_count()>count&&(p.playhead.position()-(position+5.).min(p.duration)).abs()<0.03);
                     handle.update(cx,|_,w,cx|key(w,cx,"left"))?;
-                    wait!(p,w,app => p.track_header_focus[button].is_focused(w)&&p.pending_seek.is_none()&&(p.position-position).abs()<0.03);
+                    wait!(p,w,app => p.track_header_focus[button].is_focused(w)&&p.playhead.pending_seek().is_none()&&(p.playhead.position()-position).abs()<0.03);
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
                     wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)
                         &&!p.stem_export_open&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
@@ -442,36 +442,36 @@ pub fn run(
                 handle.update(cx,|_,w,cx|click_stem_gain(&view,w,cx,0.5))??;
                 wait!(p,w,app => p.track_gain_focus[0].is_focused(w)&&p.gain[0]==50
                     &&native_gain(p).is_some_and(|gain|(gain-0.5).abs()<0.00001));
-                let seek_count=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count)?;
+                let seek_count=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count())?;
                 // All three events use one rendered control instance. A stale
                 // captured value would emit .51 three times rather than .53.
                 handle.update(cx,|_,w,cx|{for _ in 0..3 {key(w,cx,"right");}})?;
-                wait!(p,w,app => p.gain[0]==53&&p.native_seek_count==seek_count
+                wait!(p,w,app => p.gain[0]==53&&p.playhead.seek_count()==seek_count
                     &&native_gain(p).is_some_and(|gain|(gain-0.53).abs()<0.00001));
                 stem_receipts.push(handle.update(cx,|_,w,cx|state(view.read(cx),w,cx))?);
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
                 wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.track_gain_focus[0].is_focused(w)
-                    &&p.gain[0]==53&&p.native_seek_count==seek_count&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+                    &&p.gain[0]==53&&p.playhead.seek_count()==seek_count&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
                 wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.track_gain_focus[0].is_focused(w)
-                    &&p.gain[0]==53&&p.native_seek_count==seek_count&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
+                    &&p.gain[0]==53&&p.playhead.seek_count()==seek_count&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                 handle.update(cx,|_,w,cx|{key(w,cx,"home");key(w,cx,"left");})?;
-                wait!(p,w,app => p.gain[0]==0&&p.native_seek_count==seek_count
+                wait!(p,w,app => p.gain[0]==0&&p.playhead.seek_count()==seek_count
                     &&native_gain(p).is_some_and(|gain|gain==0.));
                 handle.update(cx,|_,w,cx|{key(w,cx,"end");key(w,cx,"right");})?;
-                wait!(p,w,app => p.gain[0]==100&&p.native_seek_count==seek_count
+                wait!(p,w,app => p.gain[0]==100&&p.playhead.seek_count()==seek_count
                     &&native_gain(p).is_some_and(|gain|gain==1.));
                 handle.update(cx,|_,w,cx|click_stem_gain(&view,w,cx,original_stem_gain as f32/100.))??;
-                wait!(p,w,app => p.gain[0]==original_stem_gain&&p.native_seek_count==seek_count
+                wait!(p,w,app => p.gain[0]==original_stem_gain&&p.playhead.seek_count()==seek_count
                     &&native_gain(p).is_some_and(|gain|(gain-original_stem_gain as f32/100.).abs()<0.00001));
                 handle.update(cx,|_,w,cx|click_transport(&view,w,cx,"transport-output"))??;
                 wait!(p,w,app => p.transport.read(app).has_popover());
-                let (gain,position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.master_volume,p.position,p.native_seek_count)})?;
+                let (gain,position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.master_volume,p.playhead.position(),p.playhead.seek_count())})?;
                 handle.update(cx,|_,w,cx|key(w,cx,"right"))?;
-                wait!(p,w,app => (p.master_volume-gain).abs()>0.001&&p.native_seek_count==count&&(p.position-position).abs()<0.03);
+                wait!(p,w,app => (p.master_volume-gain).abs()>0.001&&p.playhead.seek_count()==count&&(p.playhead.position()-position).abs()<0.03);
                 let gain=handle.update(cx,|_,_,cx|view.read(cx).master_volume)?;
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => !p.playing&&(p.master_volume-gain).abs()<0.00001&&p.native_seek_count==count);
+                wait!(p,w,app => !p.playing&&(p.master_volume-gain).abs()<0.00001&&p.playhead.seek_count()==count);
                 handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
                 wait!(p,w,app => !p.transport.read(app).has_popover());
                 // Restore the accepted, possibly off-grid gain through its real
@@ -481,7 +481,7 @@ pub fn run(
                 wait!(p,w,app => (p.master_volume-original_gain).abs()<0.00001
                     &&p.transport.read(app).output_state()["gain"].as_f64().is_some_and(|gain|(gain-original_gain as f64).abs()<0.00001));
                 handle.update(cx,|_,w,cx|click_transport(&view,w,cx,"transport-restart"))??;
-                wait!(p,w,app => p.pending_seek.is_none()&&p.position.abs()<0.03&&!p.playing);
+                wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03&&!p.playing);
                 handle.update(cx,|_,w,cx|tab_header(&view,w,cx,"header-save"))??;
                 handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
                 wait!(p,w,app => !p.saving&&p.saved_seq==p.edit_seq);
@@ -510,10 +510,10 @@ pub fn run(
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
                     wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                     receipts.push(handle.update(cx,|_,w,cx|footer_state(view.read(cx),w,cx,"footer-space-no-keyup-double"))?);
-                    let count=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count)?;
+                    let count=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count())?;
                     handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-restart"))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                    wait!(p,w,app => p.pending_seek.is_none()&&p.native_seek_count>count&&p.position.abs()<0.03&&!p.playing);
+                    wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.seek_count()>count&&p.playhead.position().abs()<0.03&&!p.playing);
                     for target in [!looping,looping]{
                         handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-loop"))??;
                         handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
@@ -576,22 +576,22 @@ pub fn run(
                     handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-output"))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
                     wait!(p,w,app => p.transport.read(app).output_state()["open"]==true);
-                    let (position,count,gain)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_seek_count,p.master_volume)})?;
+                    let (position,count,gain)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.playhead.seek_count(),p.master_volume)})?;
                     handle.update(cx,|_,w,cx|{key(w,cx,"right");key(w,cx,"space");})?;
-                    wait!(p,w,app => !p.playing&&p.native_seek_count==count&&(p.position-position).abs()<0.03&&(p.master_volume-gain).abs()>0.001);
+                    wait!(p,w,app => !p.playing&&p.playhead.seek_count()==count&&(p.playhead.position()-position).abs()<0.03&&(p.master_volume-gain).abs()>0.001);
                     let previous_gain=handle.update(cx,|_,_,cx|view.read(cx).master_volume)?;
                     handle.update(cx,|_,w,cx|tab_output_control(&view,w,cx,1))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                    wait!(p,w,app => p.master_volume==0.&&!p.playing&&p.native_seek_count==count&&(p.position-position).abs()<0.03
+                    wait!(p,w,app => p.master_volume==0.&&!p.playing&&p.playhead.seek_count()==count&&(p.playhead.position()-position).abs()<0.03
                         &&p.last_playback_status.as_ref().is_some_and(|s|s.observed_master_gain.is_some_and(|gain|gain.abs()<0.00001)));
                     receipts.push(handle.update(cx,|_,w,cx|footer_state(view.read(cx),w,cx,"output-popup-mute-enter"))?);
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => (p.master_volume-previous_gain).abs()<0.00001&&!p.playing&&p.native_seek_count==count&&(p.position-position).abs()<0.03
+                    wait!(p,w,app => (p.master_volume-previous_gain).abs()<0.00001&&!p.playing&&p.playhead.seek_count()==count&&(p.playhead.position()-position).abs()<0.03
                         &&p.last_playback_status.as_ref().is_some_and(|s|s.observed_master_gain.is_some_and(|gain|gain.abs()<0.00001)));
                     receipts.push(handle.update(cx,|_,w,cx|footer_state(view.read(cx),w,cx,"output-popup-unmute-space"))?);
                     handle.update(cx,|_,w,cx|tab_output_control(&view,w,cx,2))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                    wait!(p,w,app => (p.master_volume-1.).abs()<0.00001&&!p.playing&&p.native_seek_count==count&&(p.position-position).abs()<0.03
+                    wait!(p,w,app => (p.master_volume-1.).abs()<0.00001&&!p.playing&&p.playhead.seek_count()==count&&(p.playhead.position()-position).abs()<0.03
                         &&p.last_playback_status.as_ref().is_some_and(|s|s.observed_master_gain.is_some_and(|gain|gain.abs()<0.00001)));
                     receipts.push(handle.update(cx,|_,w,cx|footer_state(view.read(cx),w,cx,"output-popup-unity-enter"))?);
                     handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
@@ -655,13 +655,13 @@ pub fn run(
                     handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-split"))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
                     wait!(p,w,app => p.transport.read(app).split_focused(w,app));
-                    let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_seek_count)})?;
+                    let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.playhead.seek_count())})?;
                     handle.update(cx,|_,w,cx|->anyhow::Result<()>{
                         anyhow::ensure!(view.read(cx).transport.read(cx).focused_control(w).as_deref()==Some("split-stems"),"Split opening did not focus the first enabled action");Ok(())})??;
                     handle.update(cx,|_,w,cx|->anyhow::Result<()>{for stroke in ["home","down","end","up","tab","shift-tab","right","left"]{
                         key(w,cx,stroke);super::ui_training_run::draw(w,cx);let state=view.read(cx).transport.read(cx).keyboard_state(w,cx);
                         anyhow::ensure!(state["focusedControl"]=="split-stems","Disabled split action received keyboard focus after {stroke}; rawFocus={:?}; keyboard={state}",w.focused(cx));}Ok(())})??;
-                    wait!(p,w,app => !p.playing&&p.native_seek_count==count&&(p.position-position).abs()<0.03&&p.source_job.is_none());
+                    wait!(p,w,app => !p.playing&&p.playhead.seek_count()==count&&(p.playhead.position()-position).abs()<0.03&&p.source_job.is_none());
                     handle.update(cx,|_,w,cx|footer_capture(&view,w,cx,&out,&format!("footer-split-{}",width as u32)))??;
                     handle.update(cx,|_,w,cx|->anyhow::Result<()>{
                         view.read(cx).transport.clone().update(cx,|s,cx|s.set_split_state(true,false,false,cx));
@@ -671,7 +671,7 @@ pub fn run(
                     receipts.push(handle.update(cx,|_,w,cx|footer_state(view.read(cx),w,cx,"fixture-disabled-menu-recovers-scope"))?);
                     preparations.push(serde_json::json!({"viewport":[width,height],"fixtureOnly":true,"kind":"focused-menu-disable","resplit":false,"backing":false,"operationStarted":false}));
                     handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
-                    wait!(p,w,app => !p.transport.read(app).split_open()&&!p.playing&&p.native_seek_count==count&&p.transport.read(app).focused_control(w).as_deref()==Some("transport-split"));
+                    wait!(p,w,app => !p.transport.read(app).split_open()&&!p.playing&&p.playhead.seek_count()==count&&p.transport.read(app).focused_control(w).as_deref()==Some("transport-split"));
                     handle.update(cx,|_,_,cx|view.read(cx).transport.clone().update(cx,|s,cx|s.set_split_state(eligibility.0,eligibility.1,eligibility.2,cx)))?;
                     let (metadata,audio,epoch)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);let project=p.project.as_ref().unwrap();
                         Ok((std::fs::read(project.dir.join("project.json"))?,std::fs::read(project.lanes.iter().find(|(slot,_)|*slot==0).unwrap().1.clone())?,p.native_epoch))})??;
@@ -690,7 +690,7 @@ pub fn run(
                     wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome==met&&p.beats==beats&&!p.playing&&p.karaoke==karaoke);
                     handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-restart"))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                    wait!(p,w,app => p.pending_seek.is_none()&&p.position.abs()<0.03&&!p.playing);
+                    wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03&&!p.playing);
                     handle.update(cx,|_,w,cx|tab_header(&view,w,cx,"header-save"))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
                     wait!(p,w,app => !p.saving&&p.saved_seq==p.edit_seq&&(p.master_volume-original_gain).abs()<0.00001);
@@ -710,7 +710,7 @@ pub fn run(
             wait!(p,w,app => w.viewport_size()==size(px(1280.),px(800.)));
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);
                 anyhow::ensure!(p.native_epoch==original_epoch&&p.project.as_ref().is_some_and(|s|s.dir==project&&s.name==original_name)
-                    &&!p.playing&&p.position.abs()<0.03&&(p.master_volume-original_gain).abs()<0.00001
+                    &&!p.playing&&p.playhead.position().abs()<0.03&&(p.master_volume-original_gain).abs()<0.00001
                     &&p.gain[0]==original_stem_gain&&p.muted[0]==original_muted&&p.solo[0]==original_solo
                     &&native_mix(p)==Some((original_muted,original_solo)),"Keyboard journey did not restore its baseline");Ok(())
             })??;

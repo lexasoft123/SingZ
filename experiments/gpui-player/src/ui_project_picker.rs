@@ -88,7 +88,7 @@ fn capture(
     let value = serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],
         "scale":w.scale_factor(),"pickerOpen":p.project_picker_open,"picker":state(view,w,cx),
         "project":p.project.as_ref().map(|p|p.dir.clone()),"playing":p.playing,"epoch":p.native_epoch,
-        "nativeSeekCount":p.native_seek_count,"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),
+        "nativeSeekCount":p.playhead.seek_count(),"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),
         "hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
         "visualReference":"candidate only; matched production capture absent","liveFps":"unmeasured: hidden window"});
     std::fs::write(
@@ -147,7 +147,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 // inspecting storage must preserve the active audio session.
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").ok_or_else(||anyhow::anyhow!("Missing Play"))?;click(w,cx,b.center());Ok(())})??;
                 wait!(p,w,app=>p.playing);
-                let (epoch,seeks,project)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.native_epoch,p.native_seek_count,p.project.as_ref().unwrap().dir.clone())})?;
+                let (epoch,seeks,project)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.native_epoch,p.playhead.seek_count(),p.project.as_ref().unwrap().dir.clone())})?;
                 for (width,height) in [(1280.,800.),(1060.,640.)] {
                     handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;open!();
                     for _ in 0..(expected_count+6)*2 {
@@ -163,7 +163,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         anyhow::ensure!(state(&view,w,cx)["scrollOffset"][1].as_f64().is_some_and(|y|y<0.),"Long picker list did not scroll");Ok(())})??;}
                     shot!(&format!("{}-{}",if expected_count==0{"empty"}else{"scrolled"},width as i32));
                     handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;wait!(p,w,app=>!p.project_picker_open);
-                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.playing&&p.native_epoch==epoch&&p.native_seek_count==seeks&&p.project.as_ref().unwrap().dir==project,"Picker altered existing playback");Ok(())})??;
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.playing&&p.native_epoch==epoch&&p.playhead.seek_count()==seeks&&p.project.as_ref().unwrap().dir==project,"Picker altered existing playback");Ok(())})??;
                 }
                 flags.insert("twoSizes".into(),serde_json::json!(true));flags.insert("focusTrap".into(),serde_json::json!(true));flags.insert("escape".into(),serde_json::json!(true));flags.insert("playbackPreserved".into(),serde_json::json!(true));
                 if expected_count==0 {flags.insert("empty".into(),serde_json::json!(true));}

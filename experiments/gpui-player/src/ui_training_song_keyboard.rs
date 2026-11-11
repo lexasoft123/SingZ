@@ -51,7 +51,7 @@ fn state(p:&Player,w:&Window,cx:&App,phase:&str)->serde_json::Value {
         "screenTraining":p.screen==Screen::Training,"screenPlayer":p.screen==Screen::Player,
         "projectLoaded":p.project.is_some(),"projectPath":p.project.as_ref().map(|project|project.dir.to_string_lossy()),
         "keyRaw":p.project.as_ref().map(|project|project.raw["key"].clone()),
-        "epoch":p.native_epoch,"transpose":p.transpose,"playing":p.playing,"position":p.position,
+        "epoch":p.native_epoch,"transpose":p.transpose,"playing":p.playing,"position":p.playhead.position(),
         "preparationMatchesCurrent":p.training.read(cx).preparation_matches(Some(p.native_epoch)),
         "micIntent":p.mic_intent.is_some(),"capture":{"phase":format!("{:?}",p.mic_view.phase),"owner":p.mic_view.owner,"fixture":p.mic_view.fixture,"generation":p.mic_view.generation,"sequence":p.mic_view.sequence},
         "practice":p.practice.as_ref().map(|run|serde_json::json!({"phase":format!("{:?}",run.phase),
