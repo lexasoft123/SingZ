@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -9,11 +9,15 @@ import graphCases from '../shared/graph-document-cases.json'
 /** Every fs read of a stem file — the whole point of stored stem hashes is
  *  that a clean sync performs none (hashing evicted iCloud stems downloads
  *  them, which read as "sync re-uploads my library"). */
-const { stemReads } = vi.hoisted(() => ({ stemReads: { count: 0 } }))
+const { stemReads, failures } = vi.hoisted(() => ({ stemReads: { count: 0 }, failures: { stat: '' } }))
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...real,
+    stat: ((...a: Parameters<typeof real.stat>) => {
+      if (String(a[0]) === failures.stat) throw new Error('injected recovery stat failure')
+      return real.stat(...a)
+    }) as typeof real.stat,
     readFile: (async (...a: Parameters<typeof real.readFile>) => {
       if (/stems[/\\]/.test(String(a[0]))) stemReads.count++
       return real.readFile(...a)
@@ -370,5 +374,271 @@ describe('planSync', () => {
     )
     expect(plan.upload.sort()).toEqual(['b', 'c'])
     expect(plan.unchanged).toEqual(['a'])
+  })
+
+})
+
+async function recoveryInventory(dir: string, names: string[]): Promise<Record<string, { size: number; sha256: string }>> {
+  return Object.fromEntries(await Promise.all(names.map(async name => {
+    const bytes = await readFile(join(dir, name))
+    return [name, { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }]
+  })))
+}
+
+describe('native empty Drive compatibility', () => {
+  it('publishes a native empty arrangement without reading or deleting retained audio', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'singz-native-empty-'))
+    const dir = join(root, 'Empty Song')
+    await mkdir(join(dir, 'stems'), { recursive: true })
+    const retained = Buffer.from('retained audio for native recovery')
+    const retainedGraph = JSON.stringify(graphCases.base)
+    await writeFile(join(dir, 'stems/vocals.wav'), retained)
+    await utimes(join(dir, 'stems/vocals.wav'), 1, 1)
+    await writeFile(join(dir, 'original.wav'), retained)
+    await utimes(join(dir, 'original.wav'), 1, 1)
+    await writeFile(join(dir, 'graph.json'), retainedGraph)
+    await writeFile(join(dir, 'project.json'), JSON.stringify({
+      version: 2, name: 'Empty Song', songFile: 'original.wav', savedAt: new Date().toISOString(),
+      stemHashes: {},
+      graphHash: { format: 1, md5: createHash('md5').update(retainedGraph).digest('hex'), size: Buffer.byteLength(retainedGraph), mtimeMs: 0 },
+      settings: { nativeEmptyTracks: true, nativeOriginalDisabled: true, custom: [], loop: true }
+    }))
+    const { writeSettings } = await import('../../src/main/settings')
+    writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    stemReads.count = 0
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1, uploaded: 1 })
+    const folder = [...mock.files.values()].find(f => f.name === 'Empty Song' && !f.trashed)!
+    const files = [...mock.files.values()].filter(f => f.parents.includes(folder.id) && !f.trashed)
+    expect(files.map(f => f.name)).toEqual(['project.json'])
+    const doc = JSON.parse(files[0].bytes!.toString())
+    expect(doc.stemHashes).toEqual({})
+    expect(doc.songFile).toBeUndefined()
+    expect(doc.songHash).toBeUndefined()
+    expect(doc.graphHash).toBeUndefined()
+    expect(doc.settings.loop).toBeUndefined()
+    expect(stemReads.count).toBe(0)
+    expect(await readFile(join(dir, 'stems/vocals.wav'))).toEqual(retained)
+    expect(await readFile(join(dir, 'original.wav'))).toEqual(retained)
+    expect(await readFile(join(dir, 'graph.json'), 'utf8')).toBe(retainedGraph)
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 0 })
+  })
+})
+
+
+describe('stale native empty markers', () => {
+  it.each(['custom', 'new stem', 'new song'])('publishes real audio with %s', async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), 'singz-stale-empty-'))
+    const dir = join(root, `Returned ${kind}`)
+    await mkdir(join(dir, 'stems'), { recursive: true })
+    const audio = Buffer.from('returned audio')
+    const file = kind === 'custom' ? 'custom-returned.mp3' : 'vocals.flac'
+    await writeFile(join(dir, 'stems', file), audio)
+    // Content inventory, rather than mtime, proves an external media edit.
+    await utimes(join(dir, 'stems', file), 1, kind === 'new stem' ? 2 : 1)
+    if (kind === 'new song') {
+      await writeFile(join(dir, 'song.mp3'), 'replaced original')
+      await utimes(join(dir, 'song.mp3'), 2, 2)
+    }
+    const nativeRecoveryInventory = kind === 'new stem' ? {} : kind === 'new song'
+      ? await recoveryInventory(dir, [`stems/${file}`]) : undefined
+    await writeFile(join(dir, 'project.json'), JSON.stringify({
+      ...(kind === 'new song' ? { songFile: 'song.mp3' } : {}),
+      version: 2, name: `Returned ${kind}`, savedAt: new Date(1500).toISOString(), stemHashes: {},
+      nativeRecoveryInventory,
+      settings: { nativeEmptyTracks: true, nativeOriginalDisabled: true,
+        custom: kind === 'custom' ? [{ id: 'custom-returned', file: `stems/${file}` }] : [] }
+    }))
+    const { writeSettings } = await import('../../src/main/settings')
+    writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1, uploaded: 2 })
+    const folder = [...mock.files.values()].find(f => f.name === `Returned ${kind}` && !f.trashed)!
+    const members = [...mock.files.values()].filter(f => f.parents.includes(folder.id) && !f.trashed)
+    const stems = members.find(f => f.name === 'stems')!
+    expect([...mock.files.values()].find(f => f.parents.includes(stems.id) && f.name === file)?.bytes).toEqual(audio)
+    const published = JSON.parse(members.find(f => f.name === 'project.json')!.bytes!.toString())
+    expect(published.stemHashes[file]).toMatchObject({ size: audio.length })
+    expect(published.settings.nativeEmptyTracks).toBeUndefined()
+    expect(published.settings.nativeOriginalDisabled).toBe(true)
+  })
+
+  it('readds custom audio without reviving the retired original', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'singz-save-empty-'))
+    const dir = join(root, 'Saved')
+    await mkdir(join(dir, 'stems'), { recursive: true })
+    await writeFile(join(dir, 'song.mp3'), 'source')
+    await utimes(join(dir, 'song.mp3'), 1, 1)
+    await writeFile(join(dir, 'stems/vocals.flac'), 'retained stem')
+    await utimes(join(dir, 'stems/vocals.flac'), 1, 1)
+    const extra = join(root, 'custom.mp3')
+    await writeFile(extra, 'custom audio')
+    await writeFile(join(dir, 'stems/custom-recovery.mp3'), 'retained custom')
+    await writeFile(join(dir, 'project.json'), JSON.stringify({ version: 2, name: 'Saved', songFile: 'song.mp3', savedAt: new Date(2000).toISOString(), stemHashes: {},
+      settings: { nativeEmptyTracks: true, nativeOriginalDisabled: true, custom: [] } }))
+    const { saveProject } = await import('../../src/main/projects')
+    const result = await saveProject(join(dir, 'song.mp3'), 'Saved', { transpose: 0, tracks: {},
+      custom: [{ id: 'custom-returned', label: 'Returned', color: '#ffffff', file: extra }] })
+    expect(result.ok).toBe(true)
+    const saved = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+    expect(saved.settings.nativeEmptyTracks).toBeUndefined()
+    expect(saved.settings.nativeOriginalDisabled).toBe(true)
+    expect(saved.settings.custom).toHaveLength(1)
+    expect(await readFile(join(dir, 'stems/custom-recovery.mp3'), 'utf8')).toBe('retained custom')
+    const { writeSettings } = await import('../../src/main/settings')
+    writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 4 })
+    const folder = [...mock.files.values()].find(f => f.name === 'Saved' && !f.trashed)!
+    const members = [...mock.files.values()].filter(f => f.parents.includes(folder.id) && !f.trashed)
+    expect(members.map(f => f.name).sort()).toEqual(['project.json', 'stems'])
+    expect(JSON.parse(members.find(f => f.name === 'project.json')!.bytes!.toString()).settings.nativeOriginalDisabled).toBe(true)
+    const stems = members.find(f => f.name === 'stems')!
+    expect([...mock.files.values()].find(f => f.parents.includes(stems.id) && f.name === 'custom-returned.mp3')?.bytes?.toString()).toBe('custom audio')
+  })
+
+  it.each(['legacy', 'inventoried'])('keeps an empty arrangement after a touch and settings-only save (%s)', async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), 'singz-empty-settings-'))
+    const dir = join(root, 'Settings only')
+    await mkdir(join(dir, 'stems'), { recursive: true })
+    for (const file of ['song.mp3', 'stems/vocals.flac', 'stems/custom-retained.mp3']) {
+      await writeFile(join(dir, file), `recovery ${file}`)
+      await utimes(join(dir, file), 1, 1)
+    }
+    const { saveProject } = await import('../../src/main/projects')
+    const inventory = await recoveryInventory(dir, ['song.mp3', 'stems/vocals.flac', 'stems/custom-retained.mp3'])
+    await writeFile(join(dir, 'project.json'), JSON.stringify({ version: 2, name: 'Settings only',
+      songFile: 'song.mp3', savedAt: new Date(2000).toISOString(), stemHashes: {},
+      ...(kind === 'inventoried' ? { nativeRecoveryInventory: inventory } : {}),
+      settings: { nativeEmptyTracks: true, nativeOriginalDisabled: true, custom: [] } }))
+    await utimes(join(dir, 'stems/vocals.flac'), 3, 3)
+    await utimes(join(dir, 'song.mp3'), 3, 3)
+    const { writeSettings: tokens } = await import('../../src/main/settings')
+    tokens({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+    const { gdriveSync: syncTouched } = await import('../../src/main/gdrive')
+    expect(await syncTouched({ root })).toMatchObject({ ok: true, uploaded: 1 })
+    expect(await syncTouched({ root })).toMatchObject({ ok: true, uploaded: 0 })
+    expect((await saveProject(join(dir, 'song.mp3'), 'Renamed only',
+      { transpose: 0, tracks: {}, custom: [], masterVolume: 0.4, loop: true })).ok).toBe(true)
+    const { saveProjectSongVolume } = await import('../../src/main/projects')
+    expect(await saveProjectSongVolume(join(dir, 'song.mp3'), 0.5)).toEqual({ ok: true })
+    const saved = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+    expect(saved.settings).toMatchObject({ nativeEmptyTracks: true, nativeOriginalDisabled: true, masterVolume: 0.5, loop: true })
+    expect(saved.savedAt).toBe(new Date(2000).toISOString())
+    expect(saved.nativeRecoveryInventory).toEqual(kind === 'inventoried' ? inventory : undefined)
+    expect(saved.stemHashes).toEqual({})
+    for (const file of ['song.mp3', 'stems/vocals.flac', 'stems/custom-retained.mp3']) {
+      expect(await readFile(join(dir, file), 'utf8')).toBe(`recovery ${file}`)
+    }
+    const { writeSettings } = await import('../../src/main/settings')
+    writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 1 })
+    const folder = [...mock.files.values()].find(f => f.name === 'Settings only' && !f.trashed)!
+    const members = [...mock.files.values()].filter(f => f.parents.includes(folder.id) && !f.trashed)
+    expect(members.map(f => f.name)).toEqual(['project.json'])
+    const published = JSON.parse(members[0].bytes!.toString())
+    expect(published.settings).toMatchObject({ nativeEmptyTracks: true, nativeOriginalDisabled: true, custom: [] })
+    expect(published.songFile).toBeUndefined()
+    expect(published.stemHashes).toEqual({})
+  })
+
+  it.each(['removed', 'replaced', 'replaced on sync'])('ends the empty mix when a recorded stem is %s', async (change) => {
+    const root = await mkdtemp(join(tmpdir(), 'singz-empty-stem-edit-'))
+    const dir = join(root, 'Stem edit')
+    await mkdir(join(dir, 'stems'), { recursive: true })
+    await writeFile(join(dir, 'song.mp3'), 'retired original')
+    await utimes(join(dir, 'song.mp3'), 1, 1)
+    for (const name of ['vocals.flac', 'drums.flac']) {
+      await writeFile(join(dir, 'stems', name), name)
+      await utimes(join(dir, 'stems', name), 1, 1)
+    }
+    const { saveProject } = await import('../../src/main/projects')
+    const nativeRecoveryInventory = await recoveryInventory(dir, ['song.mp3', 'stems/vocals.flac', 'stems/drums.flac'])
+    await writeFile(join(dir, 'project.json'), JSON.stringify({ version: 2, name: 'Stem edit',
+      songFile: 'song.mp3', savedAt: new Date(2000).toISOString(), stemHashes: {}, nativeRecoveryInventory,
+      settings: { nativeEmptyTracks: true, nativeOriginalDisabled: true, custom: [] } }))
+    if (change === 'removed') await unlink(join(dir, 'stems/vocals.flac'))
+    else {
+      // Same size and restored mtime: only the content receipt proves this edit.
+      await writeFile(join(dir, 'stems/vocals.flac'), 'VOCALS.FLAC')
+      await utimes(join(dir, 'stems/vocals.flac'), 1, 1)
+    }
+    if (change === 'replaced on sync') {
+      const { writeSettings } = await import('../../src/main/settings')
+      writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+      const { gdriveSync } = await import('../../src/main/gdrive')
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 3 })
+    } else expect((await saveProject(join(dir, 'song.mp3'), 'Stem edit', { transpose: 0, tracks: {}, custom: [] })).ok).toBe(true)
+    const saved = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+    expect(saved.settings.nativeEmptyTracks).toBeUndefined()
+    expect(saved.settings.nativeOriginalDisabled).toBe(true)
+    expect(saved.nativeRecoveryInventory).toBeUndefined()
+    expect(Object.keys(saved.stemHashes)).toEqual(change === 'removed' ? ['drums.flac'] : ['drums.flac', 'vocals.flac'])
+  })
+
+  it.each(['legacy hashes without inventory', 'malformed inventory behind legacy hashes', 'missing original-disabled flag', 'symlinked song'])
+    ('skips an empty marker with %s instead of publishing recovery media', async (kind) => {
+      const root = await mkdtemp(join(tmpdir(), 'singz-unproven-empty-'))
+      const dir = join(root, `Unproven ${kind}`)
+      await mkdir(join(dir, 'stems'), { recursive: true })
+      await writeFile(join(dir, 'stems/vocals.flac'), 'retained recovery stem')
+      const hashes = kind.includes('hashes') ? { 'vocals.flac': {
+        md5: createHash('md5').update('retained recovery stem').digest('hex'), size: 22, mtimeMs: 0
+      } } : {}
+      let nativeRecoveryInventory: unknown
+      if (kind === 'malformed inventory behind legacy hashes') nativeRecoveryInventory = 'not an inventory'
+      if (kind === 'symlinked song') {
+        await writeFile(join(dir, 'song.mp3'), 'retired original')
+        nativeRecoveryInventory = await recoveryInventory(dir, ['song.mp3', 'stems/vocals.flac'])
+        const outside = join(root, 'outside.mp3')
+        await writeFile(outside, 'different outside media')
+        await unlink(join(dir, 'song.mp3'))
+        await symlink(outside, join(dir, 'song.mp3'))
+      }
+      const before = JSON.stringify({ version: 2, name: `Unproven ${kind}`,
+        savedAt: new Date(2000).toISOString(), stemHashes: hashes, nativeRecoveryInventory,
+        ...(kind === 'symlinked song' ? { songFile: 'song.mp3' } : {}),
+        settings: { nativeEmptyTracks: true, custom: [],
+          ...(kind === 'missing original-disabled flag' ? {} : { nativeOriginalDisabled: true }) } })
+      await writeFile(join(dir, 'project.json'), before)
+      const { writeSettings } = await import('../../src/main/settings')
+      writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+      const { gdriveSync } = await import('../../src/main/gdrive')
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 0 })
+      expect([...mock.files.values()].filter(f => !f.trashed && f.name === `Unproven ${kind}`)).toEqual([])
+      expect(await readFile(join(dir, 'project.json'), 'utf8')).toBe(before)
+      expect(await readFile(join(dir, 'stems/vocals.flac'), 'utf8')).toBe('retained recovery stem')
+    })
+
+  it.each(['rawJSON', 'reviver source', 'stat error'])('skips an empty project on %s', async (missing) => {
+    const root = await mkdtemp(join(tmpdir(), 'singz-json-feature-'))
+    const dir = join(root, `Feature ${missing}`)
+    await mkdir(join(dir, 'stems'), { recursive: true })
+    await writeFile(join(dir, 'stems/vocals.flac'), 'retained audio')
+    await utimes(join(dir, 'stems/vocals.flac'), 1, 1)
+    await writeFile(join(dir, 'project.json'), JSON.stringify({ version: 2, name: `Feature ${missing}`,
+      savedAt: new Date(2000).toISOString(), stemHashes: {},
+      nativeRecoveryInventory: await recoveryInventory(dir, ['stems/vocals.flac']),
+      settings: { nativeEmptyTracks: true, nativeOriginalDisabled: true, custom: [] } }))
+    const { writeSettings } = await import('../../src/main/settings')
+    writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const before = await readFile(join(dir, 'project.json'), 'utf8')
+    const parse = JSON.parse
+    const descriptor = Object.getOwnPropertyDescriptor(JSON, 'rawJSON')!
+    try {
+      if (missing === 'rawJSON') Object.defineProperty(JSON, 'rawJSON', { ...descriptor, value: undefined })
+      else if (missing === 'stat error') failures.stat = join(dir, 'stems/vocals.flac')
+      else vi.spyOn(JSON, 'parse').mockImplementation((text, reviver) => parse(text, reviver
+        ? function (key, value) { return reviver.call(this, key, value) } : undefined))
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 0 })
+      expect([...mock.files.values()].filter(f => !f.trashed && f.name === `Feature ${missing}`)).toEqual([])
+      expect(await readFile(join(dir, 'project.json'), 'utf8')).toBe(before)
+    } finally {
+      Object.defineProperty(JSON, 'rawJSON', descriptor)
+      failures.stat = ''
+      vi.restoreAllMocks()
+    }
   })
 })

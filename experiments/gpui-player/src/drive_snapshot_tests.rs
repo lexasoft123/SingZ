@@ -51,6 +51,42 @@ fn empty_remote() -> RemoteProject {
 }
 
 #[test]
+fn maintained_electron_document_is_transported_byte_for_byte() {
+    let f = Fixture::new();
+    fs::write(f.root.join("Song/lyrics.json"), br#"{"lines":[]}"#).unwrap();
+    let capture = f.capture().unwrap();
+    let path = &capture.snapshot.top.iter().find(|e| e.name == "project.json").unwrap().path;
+    let mut doc: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    // Both writers accept sub-2ms filesystem timestamp rounding. Preserve the
+    // existing hash record, including its field order and numeric spelling.
+    let timestamp = doc["lyricsHash"]["mtimeMs"].as_f64().unwrap();
+    doc["lyricsHash"]["mtimeMs"] = json!(timestamp + 0.5);
+    let bytes = format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()).into_bytes();
+    drop(capture);
+    fs::write(f.root.join("Song/project.json"), &bytes).unwrap();
+    let capture = f.capture().unwrap();
+    let path = &capture.snapshot.top.iter().find(|e| e.name == "project.json").unwrap().path;
+    assert_eq!(fs::read(path).unwrap(), bytes,
+        "native must not reserialize an already maintained Electron project");
+}
+
+#[test]
+fn null_optional_lyrics_hash_does_not_force_a_rewrite() {
+    let f = Fixture::new();
+    let capture = f.capture().unwrap();
+    let path = &capture.snapshot.top.iter().find(|e| e.name == "project.json").unwrap().path;
+    let mut doc: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    doc["lyricsHash"] = Value::Null;
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    drop(capture);
+    fs::write(f.root.join("Song/project.json"), &bytes).unwrap();
+    let capture = f.capture().unwrap();
+    let path = &capture.snapshot.top.iter().find(|e| e.name == "project.json").unwrap().path;
+    assert_eq!(fs::read(path).unwrap(), bytes,
+        "Electron treats absent and null lyrics hashes as unchanged");
+}
+
+#[test]
 fn transport_hash_maintenance_does_not_change_live_editor_cas_base() {
     let f = Fixture::new();
     let before = fs::read(f.root.join("Song/project.json")).unwrap();

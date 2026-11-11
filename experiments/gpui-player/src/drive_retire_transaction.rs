@@ -744,7 +744,7 @@ fn finish(
             .as_array_mut()
             .context("Invalid catalog projects")?;
         projects.retain(|r| r["dir"] != source.project);
-        let bytes = serde_json::to_vec(&c.document)?;
+        let bytes = crate::drive_sync::catalog_document(c.document.clone(), None)?;
         let payload = format!("catalog-{}.json", crate::drive_http::random_id()?);
         write(&journal_dir(storage, &j.operation)?.join(&payload), &bytes)?;
         j.attempt = Some(Attempt {
@@ -1400,7 +1400,8 @@ mod tests {
                     &|| false,
                 )
                 .unwrap();
-            let r = json!({"dir":project,"files":[{"id":file,"name":"project.json","md5Checksum":md5(&bytes),"size":bytes.len()}]});
+            // Stand in for a completed writer: carried rows already have its wire encoding.
+            let r = json!({"dir":project,"files":[{"id":file,"name":"project.json","size":bytes.len().to_string(),"md5Checksum":md5(&bytes)}]});
             let mut document =
                 catalog_optional(&self.remote, &self.binding, &self.storage, &|| false)
                     .unwrap()
@@ -1510,6 +1511,17 @@ mod tests {
             let _ = self.server.wait();
             let _ = fs::remove_dir_all(&self.base);
         }
+    }
+
+    #[test]
+    fn retirement_catalog_has_electron_encoding() {
+        let f = Fixture::new();
+        f.publish("Song");
+        f.operation("Song", "Renamed", Kind::Rename);
+        f.publish("Renamed");
+        let report = f.run();
+        assert!(report.changed);
+        crate::drive_sync_tests::assert_electron_catalog_encoding(&f.remote, &f.binding.singz_root, &f.base);
     }
 
     #[test]

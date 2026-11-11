@@ -17,6 +17,7 @@ import { log } from './log'
 import { t } from '../shared/i18n'
 import {
   projectsRoot,
+  recoveryMediaChanged,
   refreshFileHash,
   refreshStemHashes,
   withProjectDocumentTransaction,
@@ -679,12 +680,61 @@ interface CatalogProject {
 interface SyncDoc {
   name?: unknown
   savedAt?: unknown
-  settings?: { custom?: unknown }
+  nativeRecoveryInventory?: unknown
+  settings?: { custom?: unknown; nativeEmptyTracks?: unknown; nativeOriginalDisabled?: unknown }
   songFile?: unknown
   stemHashes?: Record<string, StemHash>
   lyricsHash?: StemHash
   songHash?: StemHash
   graphHash?: ProjectGraphHash
+}
+
+/** Native retains recovery media and references locally. Its empty export is
+ * metadata only; preserve numeric spellings too, so an Electron visit cannot
+ * invalidate the native transaction's exact terminal document receipt. */
+async function nativeEmptyBytes(projectDir: string, current: SyncDoc): Promise<Buffer | undefined> {
+  if (current.settings?.nativeEmptyTracks !== true) return undefined
+  // saveProject removes the marker when it records an explicit audio edit.
+  // Sync may clear a remaining marker only on positive content/custom evidence;
+  // an incomplete legacy marker alone never authorizes recovery publication.
+  if (Array.isArray(current.settings.custom) && current.settings.custom.length) return undefined
+  if (await recoveryMediaChanged(projectDir, current.nativeRecoveryInventory, current.songFile)) return undefined
+  if (current.settings.nativeOriginalDisabled !== true || !Array.isArray(current.settings.custom) ||
+      (current.stemHashes !== undefined && (!current.stemHashes || typeof current.stemHashes !== 'object' ||
+        Array.isArray(current.stemHashes) || Object.keys(current.stemHashes).length))) {
+    throw new Error(t('main.error.notReadableProjectFolder', { dir: projectDir }))
+  }
+  // Exact numeric spelling requires both JSON extensions. Unsupported
+  // runtimes fail closed rather than publishing retained recovery audio.
+  const rawNumber = (JSON as typeof JSON & { rawJSON?: (text: string) => unknown }).rawJSON
+  let hasSource = false
+  JSON.parse('1', (_key: string, value: unknown, context?: { source: string }) => {
+    hasSource = context?.source === '1'
+    return value
+  })
+  if (typeof rawNumber !== 'function' || !hasSource) throw new Error('Lossless JSON support unavailable for native empty export')
+  const exported = JSON.parse(await readFile(join(projectDir, 'project.json'), 'utf8'),
+    (_key: string, value: unknown, context?: { source: string }) =>
+      typeof value === 'number' ? rawNumber(context!.source) : value) as Record<string, unknown>
+  for (const key of ['songFile', 'songHash', 'graphHash', 'nativeRecoveryInventory']) delete exported[key]
+  exported.stemHashes = {}
+  const settings = exported.settings as Record<string, unknown>
+  for (const key of ['loop', 'selection', 'view']) delete settings[key]
+  try {
+    const lyrics = await readFile(join(projectDir, 'lyrics.json'))
+    const info = await stat(join(projectDir, 'lyrics.json'), { bigint: true })
+    // Match Rust's seconds+nanos -> f64 seconds -> milliseconds conversion.
+    const when = (Number(info.mtimeNs / 1_000_000_000n) + Number(info.mtimeNs % 1_000_000_000n) / 1e9) * 1000
+    const md5 = createHash('md5').update(lyrics).digest('hex')
+    const old = current.lyricsHash
+    if (!old || old.md5 !== md5 || old.size !== lyrics.length || !Number.isFinite(old.mtimeMs) || Math.abs(old.mtimeMs - when) >= 2) {
+      exported.lyricsHash = { md5, size: lyrics.length, mtimeMs: rawNumber(Number.isInteger(when) ? `${when}.0` : String(when)) }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    if (exported.lyricsHash != null) delete exported.lyricsHash
+  }
+  return Buffer.from(JSON.stringify(exported))
 }
 
 function validGraphHash(value: unknown): value is ProjectGraphHash {
@@ -878,6 +928,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
       let hashes: Record<string, StemHash> = {}
       let stemsReadable = true
       const top: LocalEntry[] = []
+      let emptyDocument: Buffer | undefined
       const captureTop = async (name: string, mime = 'application/json'): Promise<void> => {
         const path = join(projectDir, name)
         try {
@@ -903,6 +954,14 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         try {
           prepared = await withProjectDocumentTransaction(projectDir, async (current, replace) => {
             const syncDoc = current as SyncDoc
+            emptyDocument = await nativeEmptyBytes(projectDir, syncDoc)
+            if (emptyDocument) {
+              top.push({ name: 'project.json', path: join(projectDir, 'project.json'), mime: 'application/json',
+                md5: createHash('md5').update(emptyDocument).digest('hex'), size: emptyDocument.length })
+              await captureTop('lyrics.json')
+              return syncDoc
+            }
+            const clearEmptyMarker = syncDoc.settings?.nativeEmptyTracks === true
             // Fail closed before changing even the maintenance fields: ordinary
             // sync transports future graph bytes exactly, but never adopts a
             // missing or mismatched referenced graph.
@@ -933,10 +992,16 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
               }
             }
             if (
+              clearEmptyMarker ||
               stableJson(syncDoc.stemHashes ?? null) !== stableJson(hashes) ||
               stableJson(syncDoc.lyricsHash ?? null) !== stableJson(lyricsHash ?? null) ||
               stableJson(syncDoc.songHash ?? null) !== stableJson(songHash ?? null)
             ) {
+              if (clearEmptyMarker) {
+                // Returning lanes never reenables the deliberately retired original.
+                delete syncDoc.settings!.nativeEmptyTracks
+                delete syncDoc.nativeRecoveryInventory
+              }
               syncDoc.stemHashes = hashes
               if (lyricsHash) syncDoc.lyricsHash = lyricsHash
               else delete syncDoc.lyricsHash
@@ -978,6 +1043,10 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
 
       // An empty/unreadable stems folder is not proof Drive should lose its
       // only copy. Only a readable non-empty folder may drive stem orphaning.
+      // A native empty marker deliberately leaves mayTrash false. If Electron
+      // arrives before native archives remote stems, the empty document can
+      // briefly coexist with them; native's explicit-empty transaction removes
+      // those stale remote stems on its next continuation.
       const mayTrash = stemsReadable && Object.keys(hashes).length > 0
       const stems: LocalEntry[] = Object.keys(hashes)
         .sort()
@@ -1036,7 +1105,9 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         for (const step of ordered) {
           onProgress?.(t('main.sync.uploading', { file: `${dir}/${step.name}` }), (i + 0.5) / projectDirs.length)
           const parent = step.where === 'top' ? projId : (stemsParent as string)
-          freshIds.set(step.name, await uploadFile(step.path, step.name, parent, step.existingId, step.mime))
+          freshIds.set(step.name, emptyDocument && step.name === 'project.json'
+            ? await uploadBytes(emptyDocument, step.name, parent, step.existingId, step.mime)
+            : await uploadFile(step.path, step.name, parent, step.existingId, step.mime))
           uploaded++
           syncLog('upload', `${dir}/${step.name} → Drive${step.existingId ? ' (replaced)' : ''}`)
         }

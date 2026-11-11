@@ -40,7 +40,8 @@ fn file_children(children: &[RemoteEntry]) -> Vec<RemoteEntry> {
         .cloned()
         .collect()
 }
-fn catalog_manifest(mut document: Value, projects: Vec<Value>) -> Result<Vec<u8>> {
+fn catalog_manifest(mut document: Value, mut projects: Vec<Value>,
+    owned: &BTreeSet<String>) -> Result<Vec<u8>> {
     ensure!(document.is_object() && document["format"] == 2,
         "Unsupported library catalog document");
     if document["capabilities"].is_null() {
@@ -49,14 +50,59 @@ fn catalog_manifest(mut document: Value, projects: Vec<Value>) -> Result<Vec<u8>
     document["capabilities"].as_object_mut()
         .context("Invalid library catalog capabilities; cleanup deferred")?
         .insert("adopt".into(), json!(1));
-    document["projects"] = json!(projects);
-    Ok(serde_json::to_vec(&document)?)
+    // New capabilities or row/file fields must be added to both desktop
+    // writers together: Electron rebuilds them while native retains unknowns.
+    // Electron's JSON.stringify order is part of the content-addressed wire
+    // format. Normalize known fields while retaining future additive fields.
+    // JS Array.sort compares UTF-16 code units, including supplementary names.
+    projects.sort_by(|a, b| a["dir"].as_str().unwrap_or("").encode_utf16()
+        .cmp(b["dir"].as_str().unwrap_or("").encode_utf16()));
+    for row in &mut projects {
+        // A carried row belongs to another publication. Its schema and exact
+        // field order are opaque; only normalize rows this operation writes.
+        if !row["dir"].as_str().is_some_and(|name| owned.contains(name)) { continue; }
+        let files = row["files"].as_array_mut().context("Invalid catalog files")?;
+        let rank = |name: &str| match name {
+            "project.json" => 0, "lyrics.json" => 1, "graph.json" => 3, _ => 2,
+        };
+        files.sort_by_key(|file| rank(file["name"].as_str().unwrap_or("")));
+        for file in files {
+            let mut ordered = json!({"id":file["id"],"name":file["name"],
+                "size":file["size"].as_str().map(str::to_owned)
+                    .or_else(||file["size"].as_u64().map(|n|n.to_string()))
+                    .context("Invalid catalog file size")?});
+            if let Some(md5) = file.get("md5Checksum") {
+                ordered["md5Checksum"] = md5.clone();
+            }
+            append_unknown(&mut ordered, file)?;
+            *file = ordered;
+        }
+        let mut ordered = json!({"dir":row["dir"],"files":row["files"]});
+        append_unknown(&mut ordered, row)?;
+        *row = ordered;
+    }
+    let mut ordered = json!({"format":2,"capabilities":document["capabilities"],"projects":projects});
+    append_unknown(&mut ordered, &document)?;
+    Ok(serde_json::to_vec(&ordered)?)
+}
+pub(crate) fn catalog_document(document: Value, project: Option<&str>) -> Result<Vec<u8>> {
+    let projects = document["projects"].as_array().context("Invalid catalog projects")?.clone();
+    let owned = project.into_iter().map(str::to_owned).collect();
+    catalog_manifest(document, projects, &owned)
+}
+fn append_unknown(ordered: &mut Value, source: &Value) -> Result<()> {
+    let object = ordered.as_object_mut().context("Invalid catalog object")?;
+    for (key, value) in source.as_object().context("Invalid catalog object")? {
+        if !object.contains_key(key) { object.insert(key.clone(), value.clone()); }
+    }
+    Ok(())
 }
 // Preserve unknown fields on rows we publish, and retirement-protected rows,
 // while retaining the writer's existing pruning of unchanged nonlocal rows.
 fn cleanup_manifest(document: &Value, mut catalog: Vec<Value>,
-    protected_names: &BTreeSet<String>) -> Result<Vec<u8>> {
+    protected_names: &BTreeSet<String>, owned: &BTreeSet<String>) -> Result<Vec<u8>> {
     for row in &mut catalog {
+        if !row["dir"].as_str().is_some_and(|name| owned.contains(name)) { continue; }
         if let Some(mut current) = crate::drive_publication::catalog_project_row(
             document, row["dir"].as_str().context("Invalid planned catalog name")?)? {
             ensure!(crate::drive_publication::catalog_row_equal(&current, row)?,
@@ -72,7 +118,7 @@ fn cleanup_manifest(document: &Value, mut catalog: Vec<Value>,
             }
         }
     }
-    catalog_manifest(document.clone(), catalog)
+    catalog_manifest(document.clone(), catalog, owned)
 }
 fn remember_publication(
     remote: &Remote, storage: &Path, binding: &crate::drive_retirement::Binding,
@@ -403,6 +449,8 @@ fn run_inner(
         "Library changed during sync; retry required"
     );
     local_operations.assert_unchanged(&operation_guard)?;
+    let owned_catalog = catalog.iter().filter_map(|row| row["dir"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
     for row in &retirement.protected_rows {
         if !catalog.iter().any(|current| current["dir"] == row["dir"]) {
             catalog.push(row.clone());
@@ -419,7 +467,7 @@ fn run_inner(
         crate::drive_publication::read_catalog(remote, &singz, &spool.0, cancel)?
     };
     let mut manifest = cleanup_manifest(&current_catalog.document, catalog.clone(),
-        &retirement.protected_names)?;
+        &retirement.protected_names, &owned_catalog)?;
     let mut checksum = format!("{:x}", Md5::digest(&manifest));
     // Catalog reads can yield to new local operations too. Recheck the full
     // namespace and operation epoch immediately before destructive cleanup.
@@ -452,7 +500,7 @@ fn run_inner(
                 catalog.push(row.clone());
             }
         }
-        manifest = cleanup_manifest(&fresh.document, catalog, &retirement.protected_names)?;
+        manifest = cleanup_manifest(&fresh.document, catalog, &retirement.protected_names, &owned_catalog)?;
         checksum = format!("{:x}", Md5::digest(&manifest));
         current_catalog = fresh;
         // The fresh read can yield to a local rename/delete as well.
@@ -509,15 +557,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn catalog_bytes_match_electron_format_two() {
+        let bytes = catalog_manifest(json!({"projects":[],"capabilities":{"adopt":1},"format":2}),
+            vec![json!({"files":[
+                {"name":"lyrics.json","id":"lyrics","md5Checksum":"bb","size":7},
+                {"name":"project.json","id":"project","md5Checksum":"aa","size":"12"}
+            ],"dir":"Song"})], &BTreeSet::from(["Song".into()])).unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(),
+            r#"{"format":2,"capabilities":{"adopt":1},"projects":[{"dir":"Song","files":[{"id":"project","name":"project.json","size":"12","md5Checksum":"aa"},{"id":"lyrics","name":"lyrics.json","size":"7","md5Checksum":"bb"}]}]}"#);
+    }
+
+    #[test]
+    fn cleanup_preserves_opaque_foreign_row_without_files() {
+        let foreign:Value=serde_json::from_str(r#"{"future":1.0,"dir":"Foreign","opaque":123456789012345678901234567890}"#).unwrap();
+        let own=json!({"dir":"Song","files":[{"id":"p","name":"project.json","size":"7","md5Checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]});
+        let document=json!({"format":2,"capabilities":{"adopt":1},"future":"keep","projects":[foreign.clone(),own.clone()]});
+        let bytes=cleanup_manifest(&document,vec![own.clone()],&BTreeSet::from(["Foreign".into()]),&BTreeSet::from(["Song".into()])).unwrap();
+        let text=String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains(&serde_json::to_string(&foreign).unwrap()));
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(),document);
+    }
+
+    #[test]
+    fn absent_catalog_checksum_is_omitted_like_json_stringify() {
+        let bytes=catalog_manifest(json!({"format":2,"projects":[]}),
+            vec![json!({"dir":"Song","files":[{"id":"p","name":"project.json","size":7}]})],
+            &BTreeSet::from(["Song".into()])).unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(),
+            r#"{"format":2,"capabilities":{"adopt":1},"projects":[{"dir":"Song","files":[{"id":"p","name":"project.json","size":"7"}]}]}"#);
+    }
+
+    #[test]
     fn malformed_remote_capabilities_return_error_instead_of_panicking() {
         for value in [json!(7), json!("future"), json!([]), json!(true)] {
-            assert!(catalog_manifest(json!({"format":2,"capabilities":value,"projects":[]}), vec![]).is_err());
+            assert!(catalog_manifest(json!({"format":2,"capabilities":value,"projects":[]}), vec![], &BTreeSet::new()).is_err());
         }
         let bytes = catalog_manifest(json!({"format":2,"future":"keep",
-            "capabilities":{"future":9},"projects":[]}), vec![]).unwrap();
+            "capabilities":{"future":9},"projects":[]}), vec![], &BTreeSet::new()).unwrap();
         let document: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(document["capabilities"], json!({"future":9,"adopt":1}));
         assert_eq!(document["future"], "keep");
-        assert!(catalog_manifest(json!({"format":2,"projects":[]}), vec![]).is_ok());
+        assert!(catalog_manifest(json!({"format":2,"projects":[]}), vec![], &BTreeSet::new()).is_ok());
     }
 }

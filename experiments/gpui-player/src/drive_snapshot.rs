@@ -264,12 +264,13 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,config:Option<&Path>,canc
     let mut cache = config.map(|config| crate::drive_hash_cache::Cache::load(
         config, &source, capture.local_identity.clone())).transpose()?;
     let mut doc = parsed.unwrap_or(Value::Null);
+    let original = doc.clone();
     if explicit_empty {
         let object=doc.as_object_mut().context("Invalid empty project document")?;
-        for key in ["songFile","songHash","graphHash"] {object.remove(key);}
+        for key in ["songFile","songHash","graphHash","nativeRecoveryInventory"] {object.shift_remove(key);}
         object.insert("stemHashes".into(),json!({}));
         let settings=object.get_mut("settings").and_then(Value::as_object_mut).context("Invalid empty project settings")?;
-        for key in ["loop","selection","view"] {settings.remove(key);}
+        for key in ["loop","selection","view"] {settings.shift_remove(key);}
     }
     if !explicit_empty {
     let mut hashes = BTreeMap::new();
@@ -395,21 +396,35 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,config:Option<&Path>,canc
         Ok(_) => {
             let lyrics = read_bounded(&source.join("lyrics.json"), JSON_LIMIT)?;
             if capture.snapshot.doc_readable {
-                doc["lyricsHash"] = json!({"md5":format!("{:x}",Md5::digest(&lyrics)),"size":lyrics.len(),"mtimeMs":mtime(&ordinary(&source.join("lyrics.json"))?)?});
+                let hash = format!("{:x}", Md5::digest(&lyrics));
+                let modified = mtime(&ordinary(&source.join("lyrics.json"))?)?;
+                let previous = &doc["lyricsHash"];
+                if previous["md5"].as_str() != Some(hash.as_str())
+                    || previous["size"].as_u64() != Some(lyrics.len() as u64)
+                    || !previous["mtimeMs"].as_f64().is_some_and(|old|
+                        (old - modified).abs() < crate::drive_plan::MTIME_TOLERANCE_MS) {
+                    doc["lyricsHash"] = json!({"md5":hash,"size":lyrics.len(),"mtimeMs":modified});
+                }
             }
             capture.write_top("lyrics.json", &lyrics, "application/json")?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(object) = doc.as_object_mut() {
-                object.remove("lyricsHash");
+            // Electron compares missing and null optional hashes equally; a
+            // null field alone must not cause a transport-only rewrite.
+            if !doc["lyricsHash"].is_null() {
+                if let Some(object) = doc.as_object_mut() { object.shift_remove("lyricsHash"); }
             }
         }
         Err(error) => return Err(error.into()),
     }
     if capture.snapshot.doc_readable {
+        // Sync owns hash maintenance, not the editor's JSON encoding. Keeping
+        // the original bytes when no facts changed preserves Electron's pretty
+        // printing, optional fields, numeric spellings and trailing whitespace.
+        let transported = if doc == original { bytes.clone() } else { serde_json::to_vec(&doc)? };
         capture.write_top(
             "project.json",
-            &serde_json::to_vec(&doc)?,
+            &transported,
             "application/json",
         )?;
     } else {
@@ -559,7 +574,7 @@ mod empty_projection_tests {
         let export=capture_empty(&root,"Song",&spool,&||false).unwrap();assert_eq!(export.local_document,crate::project_store::fingerprint(doc));assert!(export.snapshot.stems.is_empty());
         assert_eq!(export.snapshot.top.iter().map(|f|f.name.as_str()).collect::<std::collections::BTreeSet<_>>(),std::collections::BTreeSet::from(["project.json","lyrics.json"]));
         let remote:Value=serde_json::from_slice(&fs::read(&export.snapshot.top.iter().find(|f|f.name=="project.json").unwrap().path).unwrap()).unwrap();
-        for key in ["songFile","songHash","graphHash"]{assert!(remote.get(key).is_none());}assert_eq!(remote["stemHashes"],json!({}));assert_eq!(remote["foreign"]["keep"],19);
+        for key in ["songFile","songHash","graphHash","nativeRecoveryInventory"]{assert!(remote.get(key).is_none());}assert_eq!(remote["stemHashes"],json!({}));assert_eq!(remote["foreign"]["keep"],19);
         for key in ["loop","selection","view"]{assert!(remote["settings"].get(key).is_none());}assert_eq!(remote["lyricsHash"]["md5"],format!("{:x}",Md5::digest(b"{\"lines\":[]}")));
         assert_eq!(fs::read(root.join("Song/project.json")).unwrap(),doc);assert_eq!(fs::read(root.join("Song/original.wav")).unwrap(),b"retained original");assert_eq!(fs::read(root.join("Song/stems/vocals.wav")).unwrap(),b"retained built-in");assert_eq!(fs::read(root.join("Song/graph.json")).unwrap(),b"retained graph");
         drop(export);fs::remove_dir_all(base).unwrap();

@@ -280,7 +280,7 @@ fn publish_one(remote:&Remote,r:&Request,cancel:&impl Fn()->bool,progress:&impl 
     check(cancel)?;local_authority(&j)?;validate_catalog_baseline(remote,&j,cancel)?;archive_proof(remote,&j,cancel)?;audio_free(remote,&j,cancel,true)?;
     let before:Value=serde_json::from_slice(&store.payload("catalog-before.json")?)?;
     active_namespace(remote,&j,false,cancel)?;
-    let catalog=merged_catalog(&before,&j.project,&installed_entries(&j)?)?;let bytes=serde_json::to_vec(&catalog)?;ensure!(bytes.len()as u64<=LIMIT,"Merged catalog exceeds supported size");
+    let catalog=merged_catalog(&before,&j.project,&installed_entries(&j)?)?;let bytes=crate::drive_sync::catalog_document(catalog,Some(&j.project))?;let catalog:Value=serde_json::from_slice(&bytes)?;ensure!(bytes.len()as u64<=LIMIT,"Merged catalog exceeds supported size");
     store.write("catalog-after.json",&bytes)?;store.save(&j)?; // Durable intent BEFORE HTTP.
     progress(format!("Publishing empty {}…",j.project),0.9);
     let sent=if let Some(old)=&j.old_catalog {remote.upload_bytes(&bytes,"catalog.json",&j.singz_root,Some(&old.entry.id),"application/json",cancel).map(|_|())}
@@ -500,6 +500,19 @@ pub fn prepare_ordinary_publication(remote:&Remote,root:&Path,journal_root:&Path
     hydrate_ordinary(&store,&mut j)?;
     let payload_file=format!("ordinary-{}.json",crate::project_store::fingerprint(&bytes));
     let intent=OrdinaryIntent{local_document:local_document.into(),document_id:id.into(),md5:planned_doc.md5.clone(),size:planned_doc.size,payload_file:Some(payload_file.clone()),expected_top,expected_stems};
+    if j.ordinary.is_none() {
+        // The other desktop may have fully published this captured Save before
+        // native observes it. Reuse the complete terminal proof, including all
+        // declared media, catalog entries and the preserved old archive. This
+        // only closes a local journal; it authorizes no remote mutation and
+        // never replaces an accepted partial ordinary intent.
+        immutable_payload(&store,&payload_file,&bytes)?;
+        let mut published=j.clone();published.ordinary=Some(intent.clone());
+        if ordinary_terminal(remote,&store,&published,cancel)?.is_some() {
+            ensure!(exact(&j.folder,&observed(remote,&j.folder.entry.id,cancel)?),"Ordinary active folder changed");
+            j.ordinary=Some(intent);mark_superseded(&store,&mut j)?;return Ok(());
+        }
+    }
     if let Some(old)=&j.ordinary {
         if *old==intent{return Ok(());}
         ensure!(complete_proof(remote,&store,&j,cancel)?.is_some(),"A partially applied ordinary publication requires verified recovery before replacing its intent");
@@ -647,7 +660,7 @@ mod tests {
             let remote=Remote::new(AuthClient::new(config,store));let f=Self{base,root,url,server,remote,local};
             let old=serde_json::to_vec(&json!({"version":2,"name":"Song","stemHashes":{"custom-a.wav":{"md5":md5(b"retained audio"),"size":14}},"settings":{"custom":[{"id":"custom-a","file":"stems/custom-a.wav"}]}})).unwrap();
             let other=b"{\"version\":2,\"name\":\"Other\"}";
-            let catalog=serde_json::to_vec(&json!({"format":2,"foreign":{"keep":17},"projects":[{"dir":"Other","files":[{"id":"other-doc","name":"project.json","size":other.len(),"md5Checksum":md5(other)}],"unknown":"keep"},{"dir":"Song","files":[{"id":"old-doc","name":"project.json","size":old.len(),"md5Checksum":md5(&old)}]}]})).unwrap();
+            let catalog=serde_json::to_vec(&json!({"format":2,"foreign":{"keep":17},"projects":[{"dir":"Other","files":[{"id":"other-doc","name":"project.json","size":other.len().to_string(),"md5Checksum":md5(other)}],"unknown":"keep"},{"dir":"Song","files":[{"id":"old-doc","name":"project.json","size":old.len(),"md5Checksum":md5(&old)}]}]})).unwrap();
             f.http("POST","/control",Some(json!({"files":[folder("singz","SingZ","root"),folder("project","Song","singz"),folder("stems","stems","project"),file("old-doc","project.json","project",&old),file("old-audio","custom-a.wav","stems",b"retained audio"),folder("other","Other","singz"),file("other-doc","project.json","other",other),file("catalog","catalog.json","singz",&catalog)]})));f
         }
         fn sync(&self)->Result<crate::drive_sync::Report> {crate::drive_sync::run(&self.remote,&self.root,&self.base.join("prefs/gdrive/spool"),&||false,&|_,_|{},&|_|{})}
@@ -670,6 +683,40 @@ mod tests {
     fn folder(id:&str,name:&str,parent:&str)->Value {json!({"id":id,"name":name,"mimeType":FOLDER,"parents":[parent]})}
     fn file(id:&str,name:&str,parent:&str,bytes:&[u8])->Value {use base64::Engine;json!({"id":id,"name":name,"mimeType":"application/octet-stream","parents":[parent],"contentBase64":base64::engine::general_purpose::STANDARD.encode(bytes)})}
     fn state_file<'a>(state:&'a Value,id:&str)->&'a Value {state["files"].as_array().unwrap().iter().find(|f|f["id"]==id).unwrap()}
+    #[test]
+    fn completed_other_writer_closes_only_local_empty_journal() {
+        let f=Fixture::new();assert!(f.run().unwrap().changed);
+        let before=reserved_fixture(&f);let id=before.staged_ids["project.json"].clone();
+        f.custom_save("custom-next",b"returned custom audio");
+        let mut capture=drive_snapshot::capture(&f.root,"Song",&f.base.join("captured"),&||false).unwrap();
+        let origin=capture.publication_capture();
+        let mut plan=crate::drive_plan::plan_project(&capture.snapshot,&Default::default()).unwrap();
+        capture.spool_uploads(&mut plan,&||false).unwrap();
+        let document=capture.snapshot.top.iter().find(|p|p.name=="project.json").unwrap().clone();
+        let bytes=fs::read(&document.path).unwrap();let raw:Value=serde_json::from_slice(&bytes).unwrap();
+        let stems=f.remote.folder("stems",Some("project"),&||false).unwrap();
+        for stem in &capture.snapshot.stems {f.remote.upload_bytes(&fs::read(&stem.path).unwrap(),&stem.name,&stems,None,&stem.mime,&||false).unwrap();}
+        f.remote.upload_bytes(&bytes,"project.json","project",Some(&id),"application/json",&||false).unwrap();
+        let catalog_path=f.base.join("catalog.json");f.remote.download("catalog",&catalog_path,LIMIT,&||false).unwrap();
+        let mut catalog:Value=serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+        let row=catalog["projects"].as_array_mut().unwrap().iter_mut().find(|r|r["dir"]=="Song").unwrap();
+        row["files"]=json!([{"id":id,"name":"project.json","size":document.size.to_string(),"md5Checksum":document.md5}]);
+        f.remote.upload_bytes(&serde_json::to_vec(&catalog).unwrap(),"catalog.json","singz",Some("catalog"),"application/json",&||false).unwrap();
+        let remote_before=f.state()["files"].clone();let local_before=fs::read(f.root.join("Song/project.json")).unwrap();
+        prepare_ordinary_publication(&f.remote,&f.root,&f.base.join("journals"),"singz","Song",&origin.local_document,&origin,Some(&document),Some(&id),&||false).unwrap();
+        let mut expected=before.clone();expected.phase=Phase::Superseded;
+        let (expected_top,expected_stems)=ordinary_rosters(&raw,&document.md5,document.size).unwrap();
+        expected.ordinary=Some(OrdinaryIntent{local_document:origin.local_document,document_id:id,md5:document.md5,size:document.size,
+            payload_file:Some(format!("ordinary-{}.json",crate::project_store::fingerprint(&bytes))),expected_top,expected_stems});
+        assert_eq!(serde_json::to_value(reserved_fixture(&f)).unwrap(),serde_json::to_value(expected).unwrap());
+        assert_eq!(f.state()["files"],remote_before);
+        assert_eq!(fs::read(f.root.join("Song/project.json")).unwrap(),local_before);
+        assert_eq!(fs::read(f.root.join("Song/original.wav")).unwrap(),b"retained original");
+    }
+    #[test] fn explicit_empty_catalog_has_electron_encoding() {
+        let f=Fixture::new(); f.run().unwrap();
+        crate::drive_sync_tests::assert_electron_catalog_encoding(&f.remote,"singz",&f.base);
+    }
     #[test] fn real_http_empty_publication_archives_ids_and_updates_catalog_last_then_reuses_row() {
         let f=Fixture::new();let before=f.state();let report=f.run().unwrap();assert!(report.changed);assert_eq!(report.uploaded,2);assert_eq!(report.synced[&f.root.join("Song")],crate::project_store::fingerprint(&f.local));
         let active=f.remote.children("project",&||false).unwrap();assert_eq!(active.len(),1);assert_eq!(active[0].name,"project.json");assert_ne!(active[0].id,"old-doc");

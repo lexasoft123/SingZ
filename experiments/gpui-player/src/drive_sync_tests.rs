@@ -34,6 +34,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(projects: usize) -> Self {
+        Self::with_server(projects, &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/drive_fixture.py"))
+    }
+
+    fn with_server(projects: usize, script: &Path) -> Self {
         let base = std::env::temp_dir().join(format!(
             "singz-drive-count-{}",
             crate::drive_http::random_id().unwrap()
@@ -43,7 +47,7 @@ impl Fixture {
         let root = base.join("library");
         build_library(&root, projects);
         let child = Command::new("python3")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/drive_fixture.py"))
+            .arg(script)
             .arg(base.join("remote"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -173,6 +177,87 @@ fn build_library(root: &Path, projects: usize) {
     }
 }
 
+pub(crate) fn assert_electron_catalog_encoding(remote: &Remote, singz: &str, scratch: &Path) {
+    use std::io::Write;
+    let catalog = remote.children(singz, &|| false).unwrap().into_iter()
+        .find(|entry| entry.name == "catalog.json").unwrap();
+    let path = scratch.join("catalog-encoding.json");
+    remote.download(&catalog.id, &path, 16 * 1024 * 1024, &|| false).unwrap();
+    let bytes = fs::read(path).unwrap();
+    let mut node = Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/roundtrip/catalog-encoding.cjs"))
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    node.stdin.take().unwrap().write_all(&bytes).unwrap();
+    let output = node.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(bytes).unwrap(), String::from_utf8(output.stdout).unwrap(),
+        "native writer differs from Electron's encoding of the same catalog");
+}
+
+// Bundles the real Electron sync with esbuild, so it needs the repository's
+// node_modules (`npm ci`). The gpui-native CI jobs and the VM runs don't install
+// them; run it explicitly: `cargo test -- --ignored two_desktops_roundtrip`.
+#[test]
+#[ignore = "needs node_modules (npm ci); run with --ignored"]
+fn two_desktops_roundtrip() {
+    for first in ["electron", "native"] {
+        let fixture = Fixture::with_server(2, &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/roundtrip/two-desktops-drive.py"));
+        let run = Command::new("node")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/roundtrip/two-desktops.cjs"))
+            .env("SINGZ_CROSS_BASE", &fixture.base)
+            .env("SINGZ_CROSS_URL", &fixture.url)
+            .env("SINGZ_CROSS_BINARY", std::env::current_exe().unwrap())
+            .env("SINGZ_CROSS_FIRST", first)
+            .env("SINGZ_MUTE", "1")
+            .output().unwrap();
+        assert!(run.status.success(), "{}\n{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    }
+}
+
+#[test]
+#[ignore = "Node cross-writer runner invokes this one full sync in a separate native process"]
+fn cross_writer_native_step() {
+    let base = PathBuf::from(std::env::var_os("SINGZ_CROSS_BASE").unwrap());
+    let config = Config::from_json(&std::env::var("SINGZ_GDRIVE_CONFIG").unwrap()).unwrap();
+    let preferences = base.join("preferences");
+    let store = TokenStore::new(&preferences).unwrap();
+    let ledger = crate::sync_dirty::Store::new(preferences.clone());
+    assert!(!ledger.snapshot().unwrap().is_dirty(), "native ledger must be clean");
+    if std::env::var_os("SINGZ_CROSS_NATIVE_EDIT").is_some() {
+        let project = base.join("library/Project-000");
+        let (mut doc, expected) = crate::project_store::read(&project, "project.json").unwrap();
+        doc["settings"]["masterVolume"] = json!(0.625);
+        crate::project_store::commit(&project, "project.json", &expected, &doc).unwrap();
+        return;
+    }
+    if std::env::var_os("SINGZ_CROSS_NATIVE_EMPTY").is_some() {
+        let project = base.join("library/Project-001");
+        let (doc, expected) = crate::project_store::read(&project, "project.json").unwrap();
+        crate::project_store::commit(&project, "project.json", &expected, &doc).unwrap();
+        return;
+    }
+    let remote = Remote::new(AuthClient::new(config, store));
+    // A native full sync follows the explicit-empty transaction's fresh-roster
+    // continuation, as the production service does. Bound it to two passes.
+    for pass in 0..2 {
+        let report = crate::drive_sync::run(&remote, &base.join("library"),
+            &preferences.join("gdrive/spool"), &|| false, &|_, _| {}, &|_| {}).unwrap();
+        if report.follow_up { assert_eq!(pass, 0, "sync did not settle in two passes"); continue; }
+        assert!(report.skipped.is_empty(), "skipped {:?}: {:?}", report.skipped, report.warnings);
+        if std::env::var("SINGZ_CROSS_ASSERT_RETIRED").as_deref() == Ok("1") {
+            let root = base.join("library");
+            let config = crate::project_library::Config { home: base.clone(), default_root: root.clone(),
+                preferences: preferences.join("library.json"), override_root: Some(root.clone()), one_drive: None };
+            let library = crate::project_library::refresh(&config, &|| false).unwrap();
+            let project = library.projects.iter().find(|item| item.dir == root.join("Project-001")).unwrap();
+            assert_eq!(project.song_path, project.dir.join("project.json"), "native reopened the retired original");
+        }
+        return;
+    }
+    panic!("native full sync did not complete");
+}
+
 fn grouped(requests: &[Value]) -> BTreeMap<String, usize> {
     let mut result = BTreeMap::new();
     for request in requests {
@@ -225,10 +310,11 @@ fn expected_clean(projects: usize) -> (usize, BTreeMap<String, usize>) {
 }
 
 fn expected_changed(projects: usize) -> (usize, BTreeMap<String, usize>) {
-    let cleanup_read = usize::from(projects > 1);
-    let lists = 36 + 2 * (projects.div_ceil(50) - 1) + cleanup_read;
-    let exact_gets = 114 + 2 * cleanup_read;
-    let uploads = if projects == 1 { 2 } else { 3 };
+    // Publication already writes the sorted Electron catalog; cleanup no
+    // longer rereads and uploads it just to restore project ordering.
+    let lists = 36 + 2 * (projects.div_ceil(50) - 1);
+    let exact_gets = 114;
+    let uploads = 2;
     (1 + lists + exact_gets + 2 * uploads, kinds(&[
         ("GET /drive/v3/about", 1), ("GET /drive/v3/files", lists),
         ("GET /drive/v3/files/{file-id}", exact_gets),

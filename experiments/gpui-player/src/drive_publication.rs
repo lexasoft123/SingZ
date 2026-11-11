@@ -249,7 +249,12 @@ pub fn prepare(remote:&Remote,storage:&Path,binding:&Binding,capture:&mut Captur
     if let Some(stems)=&stems {members.push(stems.clone());for local in &capture.snapshot.stems {let(m,u)=choose(remote,local,Location::Stems,&stems.entry.id,&destination.stem_files,plan,cancel)?;members.push(m);if let Some(u)=u{uploads.push(u);}}}
     uploads.sort_by_key(|u|u.desired.entry.name=="project.json");
     let mut files=vec![];for row in &plan.rows {let m=members.iter().find(|m|m.entry.parents==vec![folder.entry.id.clone()]&&m.entry.name==row.name).context("Catalog row lacks captured file")?;ensure!(m.entry.md5_checksum.as_deref()==Some(row.md5_checksum.as_str())&&m.entry.size.as_deref()==Some(row.size.as_str()),"Catalog plan differs from capture");files.push(json!({"name":row.name,"id":m.entry.id,"md5Checksum":row.md5_checksum,"size":row.size}));}
-    let row=json!({"dir":plan.dir,"files":files});let catalog=read_catalog(remote,&binding.singz_root,&base,cancel)?;
+    let row=json!({"dir":plan.dir,"files":files});
+    // Exact quiet-receipt comparisons must see the same ordered row that is
+    // serialized to Drive, rather than the capture's upload-oriented order.
+    let wire:Value=serde_json::from_slice(&crate::drive_sync::catalog_document(
+        json!({"format":2,"projects":[row]}), Some(&plan.dir))?)?;
+    let row=wire["projects"][0].clone();let catalog=read_catalog(remote,&binding.singz_root,&base,cancel)?;
     let reserved=match &catalog.metadata{Some(m)=>m.entry.id.clone(),None=>remote.generate_id(cancel)?};
     let handle=PublicationHandle{storage:storage.into(),path:base.join(&transaction)};private_dir(&handle.path)?;
     let old_paths=plan.upload.iter().map(|s|s.path.clone()).collect::<Vec<_>>();
@@ -293,7 +298,7 @@ fn catalog_commit(remote:&Remote,handle:&PublicationHandle,j:&mut Journal,cancel
             if current.metadata==attempt.before {put(remote,attempt.before.as_ref(),&attempt.desired,&payload(handle,&attempt.payload)?,cancel)?;continue;}
         }
         let mut doc=current.document;let projects=doc["projects"].as_array_mut().context("Invalid catalog")?;let mut replacement=projects.iter().find(|r|r["dir"]==j.project).cloned().unwrap_or_else(||j.row.clone());replacement["files"]=j.row["files"].clone();projects.retain(|r|r["dir"]!=j.project);projects.push(replacement);
-        let bytes=serde_json::to_vec(&doc)?;let relative=PathBuf::from(format!("catalog-{}.json",crate::drive_http::random_id()?));write(&handle.path.join(&relative),&bytes)?;
+        let bytes=crate::drive_sync::catalog_document(doc, Some(&j.project))?;let relative=PathBuf::from(format!("catalog-{}.json",crate::drive_http::random_id()?));write(&handle.path.join(&relative),&bytes)?;
         let mut entry=current.metadata.as_ref().map(|m|m.entry.clone()).unwrap_or_default();entry.id=current.metadata.as_ref().map(|m|m.entry.id.clone()).unwrap_or_else(||j.catalog_reserved.clone());entry.name="catalog.json".into();entry.parents=vec![j.binding.singz_root.clone()];entry.mime_type=Some("application/json".into());entry.md5_checksum=Some(md5(&bytes));entry.size=Some(bytes.len().to_string());
         let attempt=CatalogAttempt{before:current.metadata,desired:Metadata{entry,trashed:false},payload:relative};j.catalog_attempt=Some(attempt.clone());save(handle,j)?;
         put(remote,attempt.before.as_ref(),&attempt.desired,&payload(handle,&attempt.payload)?,cancel)?;
@@ -375,6 +380,25 @@ use std::{io::{BufRead,BufReader},process::{Child,Command,Stdio}};
         fn finish(&self,h:&PublicationHandle)->PublicationOutcome {finish(&self.remote,h,&||false,&|_,_|{}).unwrap()}
     }
     impl Drop for Fixture {fn drop(&mut self){let _=self.server.kill();let _=self.server.wait();let _=fs::remove_dir_all(&self.base);}}
+    #[test]
+    fn publication_catalog_has_electron_encoding() {
+        let f=Fixture::new(); f.document("A"); let b=f.binding(); let h=f.prepare(&b); f.finish(&h);
+        crate::drive_sync_tests::assert_electron_catalog_encoding(&f.remote,&b.singz_root,&f.base);
+    }
+    #[test]
+    fn odd_foreign_catalog_rows_survive_successful_upload() {
+        let f=Fixture::new(); f.document("A"); let b=f.binding();
+        let foreign=r#"{"future":1.0,"dir":"Foreign without files","opaque":123456789012345678901234567890}"#;
+        let odd_size=r#"{"dir":"Foreign size","files":[{"size":true,"name":"unknown","future":1.0},{"size":1.5,"id":"opaque"}]}"#;
+        let bytes=format!(r#"{{"format":2,"projects":[{foreign},{odd_size}]}}"#);
+        f.remote.upload_bytes(bytes.as_bytes(),"catalog.json",&b.singz_root,None,"application/json",&||false).unwrap();
+        let h=f.prepare(&b); f.finish(&h);
+        let catalog=read_catalog(&f.remote,&b.singz_root,&h.path,&||false).unwrap();
+        let text=serde_json::to_string(&catalog.document).unwrap();
+        assert!(text.contains(foreign),"foreign row was rewritten: {text}");
+        assert!(text.contains(odd_size),"foreign file rows were rewritten: {text}");
+        assert!(catalog_project_row(&catalog.document,"Song").unwrap().is_some());
+    }
     #[test]
     fn accepted_bytes_finish_after_delete_and_same_name_recreation(){let f=Fixture::new();f.document("A");let b=f.binding();let h=f.prepare(&b);let origin=read(&h).unwrap().capture;fs::rename(f.root.join("Song"),f.root.join("old-Song")).unwrap();fs::create_dir(f.root.join("Song")).unwrap();f.document("B");let outcomes=resume_pending(&f.remote,&f.storage,&b,&||false,&|_,_|{}).unwrap();assert_eq!(outcomes.len(),1);assert_eq!(outcomes[0].publication.capture,origin);assert_ne!(crate::directory_identity::read(&f.root.join("Song")).unwrap(),origin.local_identity);assert_eq!(read(&h).unwrap().phase,Phase::Complete);}
     #[test]

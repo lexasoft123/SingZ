@@ -3,8 +3,8 @@ import { driveProjectsRoot, isDriveProject } from './drive-storage'
 import { sanitizeSongVolume } from '../shared/song-volume'
 import { t } from '../shared/i18n'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync } from 'node:fs'
-import { access, cp, copyFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { createReadStream, existsSync, readdirSync } from 'node:fs'
+import { access, cp, copyFile, lstat, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import {
   STEMS,
@@ -411,7 +411,8 @@ async function resolveCustom(
  */
 async function storeCustomTracks(
   dir: string,
-  list: CustomTrack[] | undefined
+  list: CustomTrack[] | undefined,
+  prune = true
 ): Promise<CustomTrack[] | undefined> {
   const entries = Array.isArray(list) ? list : []
   const stemsDir = join(dir, 'stems')
@@ -444,10 +445,11 @@ async function storeCustomTracks(
   // Tracks the singer removed leave their copy behind; it would keep syncing
   // to Drive and reappear in nobody's mix. Only our own prefix is touched,
   // and only inside this project — the file the user picked is elsewhere.
+  // Native-empty recovery copies survive even when new custom audio is added.
   try {
     const keep = new Set(out.map((t) => basename(t.file)))
     for (const entry of await readdir(stemsDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.startsWith(CUSTOM_PREFIX) || keep.has(entry.name)) continue
+      if (!prune || !entry.isFile() || !entry.name.startsWith(CUSTOM_PREFIX) || keep.has(entry.name)) continue
       await rm(join(stemsDir, entry.name), { force: true })
       log('app', `removed custom track file stems/${entry.name} (no longer in the project)`)
     }
@@ -521,6 +523,8 @@ export async function migrateProjectToV2(
       const meta = await readMeta(dir)
       if (!meta) return { ok: false as const, error: t('main.error.notProjectFolder') }
       if (meta.version >= 2) return { ok: true as const, converted: false, compacted: [] }
+      // Legacy v1 migration still owns compaction; it needs a separate explicit-
+      // empty migration decision before altering retained recovery media.
       const { compact, compacted } = await convertStemsToFlac(dir)
       if (!compact) return { ok: false as const, error: t('main.error.stemsNotConverted') }
       meta.version = 2
@@ -590,7 +594,8 @@ export async function saveProjectSongVolume(songPath: string, value: number): Pr
       const masterVolume = sanitizeSongVolume(value)
       if (meta.settings.masterVolume === masterVolume) return { ok: true as const }
       return withDirty(dir, 'song output gain', async () => {
-        await replace({ ...meta, savedAt: new Date().toISOString(), settings: { ...meta.settings, masterVolume } })
+        await replace({ ...meta, savedAt: meta.settings.nativeEmptyTracks === true ? meta.savedAt : new Date().toISOString(),
+          settings: { ...meta.settings, masterVolume } })
         return { ok: true as const }
       })
     })
@@ -966,6 +971,56 @@ function mergeStoredSettings(
   return out as StoredProjectSettings
 }
 
+/** Native records this local-only inventory when retiring audio. Legacy empty
+ * documents have no baseline: timestamps alone never authorize resurrection.
+ * Hash in bounded chunks; a touch changes neither size nor content. Errors
+ * propagate so a save/sync cannot turn unreadable recovery media into audio. */
+export async function recoveryMediaChanged(dir: string, inventory: unknown, songFile: unknown): Promise<boolean> {
+  if (inventory === undefined) return false
+  if (!inventory || typeof inventory !== 'object' || Array.isArray(inventory)) throw new Error(t('main.error.notReadableProjectFolder', { dir }))
+  const expected = inventory as Record<string, { size: number; sha256: string }>
+  for (const value of Object.values(expected)) {
+    if (!value || !Number.isSafeInteger(value.size) || value.size < 0 || !/^[a-f0-9]{64}$/.test(value.sha256)) {
+      throw new Error(t('main.error.notReadableProjectFolder', { dir }))
+    }
+  }
+  const names: string[] = []
+  try {
+    for (const entry of await readdir(join(dir, 'stems'), { withFileTypes: true })) {
+      if (!AUDIO_EXT.has(extname(entry.name).toLowerCase())) continue
+      if (!entry.isFile()) {
+        if (expected[`stems/${entry.name}`]) throw new Error(t('main.error.notReadableProjectFolder', { dir }))
+        continue // Foreign links/directories are not owned recovery audio.
+      }
+      names.push(`stems/${entry.name}`)
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  if (typeof songFile === 'string' && songFile && basename(songFile) === songFile && !songFile.includes('\\')) {
+    try {
+      if (!(await lstat(join(dir, songFile))).isFile()) throw new Error(t('main.error.notReadableProjectFolder', { dir }))
+      names.push(songFile)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+  if (JSON.stringify(names.sort()) !== JSON.stringify(Object.keys(expected).sort())) return true
+  for (const name of names) {
+    const path = join(dir, name)
+    const before = await stat(path)
+    if (before.size !== expected[name].size) return true
+    const digest = createHash('sha256')
+    for await (const chunk of createReadStream(path)) digest.update(chunk)
+    const after = await stat(path)
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+      throw new Error(t('main.error.notReadableProjectFolder', { dir }))
+    }
+    if (digest.digest('hex') !== expected[name].sha256) return true
+  }
+  return false
+}
+
 export async function saveProject(
   songPath: string,
   name: string,
@@ -999,6 +1054,11 @@ export async function saveProject(
       const dir = inPlace ? own : join(projectsRoot(), safeName(name))
       const saveIntoDestination = async () => withDirty(dir, 'save', async () => {
         await mkdir(join(dir, 'stems'), { recursive: true })
+        const prevMeta = await readMeta(dir)
+        const wasEmpty = prevMeta?.settings?.nativeEmptyTracks === true
+        const recoveryChanged = wasEmpty && await recoveryMediaChanged(dir, prevMeta!.nativeRecoveryInventory, prevMeta!.songFile)
+        let stemSetChanged = recoveryChanged || Boolean(settings.pendingLeadVocal)
+        let changeAudio = !wasEmpty || recoveryChanged || Boolean(settings.custom?.length || settings.pendingLeadVocal)
 
         // in place, the opened song IS the project's song — keep its filename
         const songFile = inPlace ? basename(songPath) : `song${extname(songPath).toLowerCase()}`
@@ -1019,7 +1079,13 @@ export async function saveProject(
           const dst = join(dir, 'stems', `${s}.wav`)
           // an existing FLAC already carries this stem — don't resurrect the WAV
           if ((await exists(src)) && !(await exists(dst)) && !(await stemFile(dir, s))) {
+            // A cache timestamp is not evidence of an adopted re-split. The
+            // explicit split/import path must signal adoption; settings-only
+            // saves leave even a touched recovery cache alone.
+            if (!changeAudio) continue
             await copyFile(src, dst)
+            changeAudio = true
+            stemSetChanged = true
           }
         }
 
@@ -1034,11 +1100,15 @@ export async function saveProject(
         }
 
         // v2 on-disk format: stems live as FLAC (the splitter cache stays WAV)
-        const { compact } = await convertStemsToFlac(dir)
+        const { compact } = changeAudio ? await convertStemsToFlac(dir) : { compact: prevMeta!.version >= 2 }
 
         // The singer's own tracks land in stems/ too (Drive syncs that folder),
         // keeping whatever format they came in.
-        const stored = await storeCustomTracks(dir, settings.custom)
+        // An empty mix retains recovery customs too; settings-only saves must
+        // not compact, delete or refill that retired media from the split cache.
+        // An explicit add returns the retained stem set to ordinary publication too.
+        const stored = changeAudio ? await storeCustomTracks(dir, settings.custom, !wasEmpty) : []
+        const keepEmpty = wasEmpty && !stored?.length && !stemSetChanged
 
         // lyrics from the hash cache (project-local lyrics stay as they are)
         const cachedLyrics = hashDir ? join(hashDir, 'lyrics.json') : ''
@@ -1047,10 +1117,9 @@ export async function saveProject(
           await copyFile(cachedLyrics, projLyrics)
         }
 
-        // hashes carry over from the previous save — a settings-only save reads
-        // no stem bytes; whatever this save (re)wrote gets hashed while it is
-        // still warm and local
-        const prevMeta = await readMeta(dir)
+        // Ordinary settings saves reuse hashes. An inventoried native empty
+        // mix verifies recovery content before deciding whether audio returned;
+        // timestamps alone cannot safely make that decision.
         // A save must never REMOVE an analysis the project already had.
         //
         // The renderer serialises `beat` and `melody` straight out of its own
@@ -1081,13 +1150,20 @@ export async function saveProject(
           version: compact ? 2 : 1,
           name: safeName(name),
           songFile,
-          savedAt: new Date().toISOString(),
+          // Keep the empty save's timestamp as the recovery-media boundary.
+          savedAt: keepEmpty ? prevMeta!.savedAt : new Date().toISOString(),
           // project.json keeps custom tracks project-relative so the folder stays
           // portable; the renderer gets absolute paths back below.
           settings: storedSettings,
-          stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
+          stemHashes: keepEmpty ? {} : await refreshStemHashes(dir, prevMeta?.stemHashes),
           songHash: sourceExists ? await refreshFileHash(join(dir, songFile), prevMeta?.songHash) : prevMeta?.songHash,
           lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
+        }
+        // Readding lanes ends the empty mix, but never reenables its retired
+        // original. Merely naming the retained song is not an audio edit.
+        if (stored?.length || stemSetChanged) {
+          delete storedSettings.nativeEmptyTracks
+          delete meta.nativeRecoveryInventory
         }
         await writeMetaAtomic(dir, meta)
         log('app', `project saved: ${dir}`)

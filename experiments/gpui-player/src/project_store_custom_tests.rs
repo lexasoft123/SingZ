@@ -416,3 +416,30 @@ fn empty_then_readded_custom_does_not_restore_the_retired_original_intent() {
     assert!(original["settings"].get("nativeOriginalDisabled").is_none());
     assert!(original["settings"].get("nativeEmptyTracks").is_none());
 }
+
+#[test]
+fn explicit_empty_records_recovery_content_and_readding_drops_inventory() {
+    let f = Fixture::new();
+    fs::write(f.project.join("stems/vocals.wav"), b"retained stem").unwrap();
+    fs::write(f.project.join("song.wav"), b"retained song").unwrap();
+    let (mut raw, hash) = read(&f.project, "project.json").unwrap();
+    raw["songFile"] = json!("song.wav");
+    raw["stemHashes"] = json!({"vocals.wav":{"old":true}});
+    let empty = update_mix(raw, &empty_mix()).unwrap();
+    let saved = commit_custom(&f.project, &hash, &empty, &[], &|| false).unwrap();
+    assert_eq!(saved.raw["stemHashes"], json!({}));
+    assert_eq!(saved.raw["nativeRecoveryInventory"], json!({
+        "stems/vocals.wav": {"size":13, "sha256":fingerprint(b"retained stem")},
+        "song.wav": {"size":13, "sha256":fingerprint(b"retained song")}
+    }));
+    assert_eq!(fs::read(f.project.join("stems/vocals.wav")).unwrap(), b"retained stem");
+    let (reopened, _) = read(&f.project, "project.json").unwrap();
+    assert_eq!(reopened, saved.raw);
+    let mut mix = empty_mix();
+    mix.original = true;
+    mix.lanes = vec![0];
+    mix.selection = Some((0., 4.));
+    mix.view = (0., 4.);
+    let readded = update_mix(reopened, &mix).unwrap();
+    assert!(readded.get("nativeRecoveryInventory").is_none());
+}

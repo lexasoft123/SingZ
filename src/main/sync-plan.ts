@@ -193,6 +193,8 @@ export const STATE_ADOPTED = 'adopted'
  *  desktop says it adopts them: an older desktop would trash the folder as an
  *  orphan on its next sync. The catalog stays format 2 — phones reject any
  *  other number and would fall back to walking every folder. */
+// Any new capability or catalog row/file field must land in both desktop
+// writers together; native retains unknown fields while Electron rebuilds them.
 export const CATALOG_CAPABILITIES = { adopt: 1 } as const
 
 export const isPublished = (f: { appProperties?: Record<string, string> }): boolean =>

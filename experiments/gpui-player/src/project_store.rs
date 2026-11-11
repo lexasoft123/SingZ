@@ -64,6 +64,9 @@ pub fn update_mix(mut raw: Value, mix: &Mix) -> Result<Value> {
         empty || !mix.lanes.is_empty(),
         "Missing active lanes is not an explicit empty-track mix"
     );
+    if !empty {
+        raw.as_object_mut().context("Project must be an object")?.remove("nativeRecoveryInventory");
+    }
     let object = raw.as_object_mut().context("Project must be an object")?;
     let settings = object
         .entry("settings")
@@ -528,6 +531,10 @@ pub fn materialize_custom(
     if let Some(tracks) = settings.get_mut("tracks").and_then(Value::as_object_mut) {
         tracks.retain(|id, _| !id.starts_with("custom-") || retained.contains(id.as_str()));
     }
+    let removed = if raw["settings"]["nativeEmptyTracks"] == true {
+        unused_custom_files(source_root, &files, cancel)?.into_iter().collect()
+    } else { BTreeSet::new() };
+    record_empty_recovery(source_root, raw, &removed, cancel)?;
     Ok(CustomMaterialized {
         files,
         custom: saved,
@@ -579,6 +586,78 @@ pub fn unused_custom_files(
     }
     result.sort();
     Ok(result)
+}
+/// A local-only content receipt separates real recovery edits from filesystem
+/// timestamp drift. Capture once on retirement, never refresh it on a rename.
+/// Empty Drive exports omit it: another desktop may not have recovery media.
+fn record_empty_recovery(
+    dir: &Path,
+    raw: &mut Value,
+    removed: &BTreeSet<String>,
+    cancel: &impl Fn() -> bool,
+) -> Result<()> {
+    let invalid = || crate::project_publish::publish_error(&dir.join("project.json"));
+    if raw["settings"]["nativeEmptyTracks"] != true {
+        raw.as_object_mut().with_context(invalid)?.remove("nativeRecoveryInventory");
+        return Ok(());
+    }
+    // Retired media belongs to the recovery receipt, never the playable set.
+    raw["stemHashes"] = json!({});
+    if let Some(inventory) = raw.get_mut("nativeRecoveryInventory") {
+        if let Some(files) = inventory.as_object_mut() {
+            for name in removed { files.remove(name); }
+        }
+        return Ok(());
+    }
+    let mut paths = BTreeSet::new();
+    match fs::read_dir(dir.join("stems")) {
+        Ok(entries) => for (index, entry) in entries.enumerate() {
+            ensure!(index < 100000, "{}", invalid());
+            let entry = entry?;
+            // Foreign links/directories are not owned recovery audio.
+            if !entry.file_type()?.is_file() { continue; }
+            let path = entry.path();
+            let ext = path.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase();
+            if ["wav", "flac", "mp3", "m4a", "aac", "ogg", "oga", "opus", "aif", "aiff"].contains(&ext.as_str()) {
+                paths.insert(format!("stems/{}", entry.file_name().to_str().with_context(invalid)?));
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(e.into()),
+    }
+    if let Some(song) = raw["songFile"].as_str() {
+        ensure!(!song.is_empty() && !song.contains(['/', '\\']) && song != "." && song != "..", "{}", invalid());
+        match fs::symlink_metadata(dir.join(song)) {
+            Ok(_) => { paths.insert(song.to_owned()); },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let mut inventory = serde_json::Map::new();
+    for name in paths.difference(removed) {
+        custom_cancel(cancel)?;
+        let path = dir.join(name);
+        let before = fs::symlink_metadata(&path)?;
+        ensure!(before.is_file() && !before.file_type().is_symlink() && path.canonicalize()?.starts_with(dir), "{}", invalid());
+        let mut file = File::open(&path)?;
+        let mut digest = Sha256::new();
+        let mut count = 0u64;
+        let mut block = [0u8; 65536];
+        loop {
+            custom_cancel(cancel)?;
+            let n = file.read(&mut block)?;
+            if n == 0 { break; }
+            count += n as u64;
+            ensure!(count <= before.len(), "{}", invalid());
+            digest.update(&block[..n]);
+        }
+        let after = fs::symlink_metadata(&path)?;
+        ensure!(after.is_file() && !after.file_type().is_symlink() && before.len() == count && before.modified()? == after.modified()?, "{}", invalid());
+        let sha256: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        inventory.insert(name.clone(), json!({"size":count,"sha256":sha256}));
+    }
+    raw.as_object_mut().with_context(invalid)?.insert("nativeRecoveryInventory".into(), Value::Object(inventory));
+    Ok(())
 }
 pub fn commit_custom(
     dir: &Path,
@@ -751,6 +830,11 @@ pub(crate) fn commit_expected_locked(
     if current.as_deref() != expected {
         bail!("Project changed outside this app. Reopen it before saving.")
     }
+    let mut prepared = value.clone();
+    if name == "project.json" {
+        record_empty_recovery(dir, &mut prepared, &BTreeSet::new(), &|| false)?;
+    }
+    let value = &prepared;
     // An unchanged document must not acquire a new formatting-only fingerprint.
     if current_bytes.as_ref().is_some_and(|bytes| {
         serde_json::from_slice::<Value>(bytes).is_ok_and(|old| old == *value)
