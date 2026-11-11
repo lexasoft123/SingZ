@@ -11,7 +11,7 @@ std::optional<loopz::AudioReadResult> readEnabledChannels(
     const loopz::AudioSource&, uint64_t host, double rate, loopz::RoutingOutput,
     uint32_t frames, loopz::AudioReadCursor&, std::span<const uint32_t>) noexcept;
 }
-// Private analysis reader of LoopZ-owned history. All lifecycle calls run on
+// Private native-rate analysis tap of the LoopZ-owned capture bus. Lifecycle calls run on
 // the routing control owner; stop drains its reader before releasing the lease.
 struct BoxInputMeter {
   bool valid{false};
