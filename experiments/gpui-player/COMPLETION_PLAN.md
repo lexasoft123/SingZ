@@ -109,6 +109,12 @@ orca orchestration worker-start --spec-file <spec.md> --agent <agent> \
 same machine, same song, same display mode. Reference song: a 5-minute, 6-lane
 project with lyrics and a pitch line. Long-song variant: 12 minutes.
 
+**Interim frame-rate target (user decision, 2026-11-11).** No 120 Hz panel is
+available yet, so N1 to N3 and G1 are measured and gated at 60 Hz for now:
+60 presented FPS, p99 frame time ≤ 16.7 ms, zero dropped frames. The 120 Hz
+budgets below stay the release target and are re-measured once a 120 Hz panel
+is available, before Q-15.
+
 | # | Area | Budget | Scenario |
 |---|---|---|---|
 | N1 | Frame rate | 120 presented FPS on a 120 Hz panel; panel refresh elsewhere | 6-lane playback, lanes + lyrics + pitch strip visible |
@@ -156,7 +162,7 @@ rendering test images. They are not a baseline and must not be quoted as one.
 | Gate | Where enforced | Checks | Blocks |
 |---|---|---|---|
 | G0 Baseline | Q-01, Q-02 | Electron and native-release numbers exist on both machines from one harness | Any optimisation work, D-02 |
-| G1 120 FPS feasibility | Q-02 + D-02 | The probe shows N1-N3 are reachable, or D-02 names the architecture change that makes them reachable | Release pipeline spend beyond C-03/C-04 (wave 3) |
+| G1 120 FPS feasibility (interim: 60 FPS, see above) | Q-02 + D-02 | The probe shows N1-N3 are reachable, or D-02 names the architecture change that makes them reachable | Release pipeline spend beyond C-03/C-04 (wave 3) |
 | Perf smoke | CI on release builds (C-35), every push touching `$G` or the helpers | Offscreen frame cost, idle redraw count = 0, startup, open time, idle CPU, package size; thresholds from Q-02 with margin | Merge |
 | Beta gate | Coordinator, on each `-beta` tag | Full N1-N14 run, Mac visible | The prerelease tag |
 | Default gate | Section 6 | Every budget on both machines | "Native becomes default" |
@@ -345,7 +351,7 @@ three weeks and before any signing, installer or updater work is paid for.
 |---|---|
 | Merge the zCore pull request and approve the pin bump | C-02 |
 | Windows field laptop sessions (interactive-session scheduled task) | Q-01, Q-02, C-17, C-18, C-31, Q-11, Q-15 |
-| A 120 Hz display for the Mac runs, dedicated or virtual | Q-02, Q-15 |
+| A 120 Hz display for the Mac runs, dedicated or virtual (deferred 2026-11-11; 60 Hz gate meanwhile) | Q-02 re-run, Q-15 |
 | Apple Developer ID and App Store Connect key in CI secrets | C-30, C-34 |
 | Windows code-signing certificate decision | C-31 |
 | Real Google account and a phone | Q-12 |

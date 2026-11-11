@@ -36,8 +36,13 @@ def analyze_source_hash(root: Path = ROOT) -> str:
                    'gpui-analyze-hash', str(root)]
     else:
         command = ['bash', str(root / 'scripts/analyze-source-hash.sh'), str(root)]
-    result = subprocess.run(command, check=True, capture_output=True, text=True,
+    result = subprocess.run(command, check=False, capture_output=True, text=True,
                             timeout=120)
+    if result.returncode != 0:
+        # The hash script's own message is the only clue on a CI runner.
+        raise RuntimeError(
+            f'Canonical analyzer source hash failed (exit {result.returncode}): '
+            f'{result.stderr.strip() or "no stderr"}')
     value = result.stdout.strip()
     if not re.fullmatch('[0-9a-f]{40}', value):
         raise RuntimeError('Canonical analyzer source hash is not 40 lowercase hex characters')
