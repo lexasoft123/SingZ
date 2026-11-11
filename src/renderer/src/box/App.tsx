@@ -38,7 +38,9 @@ import {
   addQueueEntry, BOX_QUEUE_LIMIT, boxCloseWork, BoxQueueStore, entriesWithQueueRefs, moveQueueViewDir,
   projectQueue, queueEntryForViewDir, queueHasEntry, queueRefForEntry, removeQueueViewDir
 } from './collection/queue'
+import { parseSongName } from './song-identity'
 import { moveQueueRefInView } from './queue-model'
+import { endedFocusControl, nextNeedsConfirmation, nextQueued, queueAfterAdvance } from './next-song'
 import { resolveCollectionSelection, type CollectionEntry } from './collection/types'
 import { hydrateBoxLocally } from './collection/startup'
 import './collection/collection.css'
@@ -153,6 +155,9 @@ export default function BoxApp(): React.JSX.Element {
   const openIntent = useRef(new LatestOpenIntent())
   const previewStartIntent = useRef<number | null>(null)
   const pendingSwitchStart = useRef(false)
+  /** Set by Next: when `to` opens, `from` (the song that just played) leaves the queue. */
+  const advance = useRef<{ from: string; to: string } | null>(null)
+  const finishAdvance = useRef<(from: string) => void>(() => undefined)
   const catalogScroll = useRef(0)
   const gate = useRef(new RemoteKeyGate())
   const lastInput = useRef(performance.now())
@@ -164,6 +169,10 @@ export default function BoxApp(): React.JSX.Element {
   const allEntries = entriesWithQueueRefs(collectionSnapshot.entries, queueRefs)
   const queueProjection = hydrated ? projectQueue(collectionSnapshot.entries, queueRefs) : []
   const queueItems = queueProjection.map(item => item.item)
+  const nextItem = nextQueued(queueItems, snapshot.active?.item.dir ?? null)
+  const nextIdentity = nextItem ? parseSongName(nextItem.name) : null
+  const upNext = nextIdentity ? { title: nextIdentity.title, artist: nextIdentity.artist ?? null } : null
+  const endedWithNext = nextItem !== null && playbackStatus(snapshot) === 'ended'
   const selectedEntry = resolveCollectionSelection(allEntries, selectedId, previousSelected.current, route === 'details')
   if (selectedEntry && !selectedEntry.unavailable) previousSelected.current = selectedEntry
   const active = snapshot.active
@@ -451,6 +460,9 @@ export default function BoxApp(): React.JSX.Element {
   }, [goAccount, goCatalog, goCurrent, goHub, goQueue])
 
   const openNow = useCallback(async (entry: CollectionEntry, startFromPreview = false): Promise<void> => {
+    // Consume the Next marker up front so a guarded early return cannot leave it behind.
+    const advanced = advance.current?.to === entry.local?.dir ? advance.current : null
+    advance.current = null
     if (metronomeBlocked.current) return
     const item = entry.local
     if (!item || !item.songPath || collection.getSnapshot().rows[entry.id]?.inspection?.readiness !== 'ready') return
@@ -476,6 +488,7 @@ export default function BoxApp(): React.JSX.Element {
       if (!current() || !opened) return
       const openedSong = transport.getSnapshot().active
       if (openedSong) collection.recordOpened(item, { readiness: 'ready', project: openedSong.project, message: null }, openedSong.metadata)
+      if (advanced) finishAdvance.current(advanced.from)
       const published = await publishPhoneSnapshot()
       if (!current()) return
       if (startFromPreview) {
@@ -551,6 +564,26 @@ export default function BoxApp(): React.JSX.Element {
     setPendingSwitch(entry)
   }, [allEntries, collectionSnapshot.rows, goCurrent, openDetails, queueRefs, snapshot.active])
 
+  /** Player "Next": same open/switch path as the queue; the song that just played leaves the queue once the next one opens. */
+  const requestNext = useCallback(() => {
+    const current = snapshot.active?.item.dir ?? null
+    const next = nextQueued(queueItems, current)
+    const entry = next && queueEntryForViewDir(allEntries, queueRefs, next.dir)
+    if (!next || !entry) return
+    if (!entry.local || collectionSnapshot.rows[entry.id]?.inspection?.readiness !== 'ready') { openDetails(entry); return }
+    advance.current = current ? { from: current, to: next.dir } : null
+    if (nextNeedsConfirmation(playbackStatus(snapshot))) {
+      pendingSwitchStart.current = true
+      setPendingSwitch(entry)
+    } else void openNow(entry, true)
+  }, [allEntries, collectionSnapshot.rows, openDetails, openNow, queueItems, queueRefs, snapshot])
+  finishAdvance.current = (from: string): void => {
+    const refs = queueStore.getRefs()
+    const played = projectQueue(collectionSnapshot.entries, refs).find(row => row.item.dir === from)?.ref ?? null
+    const after = queueAfterAdvance(refs, played)
+    if (after) void commitQueue(after)
+  }
+
   const closeMix = useCallback(() => {
     gate.current.recover()
     setMixOpen(false)
@@ -569,6 +602,7 @@ export default function BoxApp(): React.JSX.Element {
       return
     }
     if (pendingSwitch) {
+      advance.current = null
       setPendingSwitch(null)
       return
     }
@@ -764,7 +798,8 @@ export default function BoxApp(): React.JSX.Element {
     else if (route === 'account') target = query('[data-account-primary]:not(:disabled)') ?? query('[data-focus="account-back"]')
     else if (route === 'home') return // JourneyHub owns focus through its asynchronous boot readiness.
     else if (route === 'player') {
-      target = snapshot.routingBlocked ? query('[data-control="settings"]') ?? query('[data-control="play"]') : query('[data-control="play"]')
+      const preferred = `[data-control="${endedWithNext ? endedFocusControl(true) : 'play'}"]`
+      target = snapshot.routingBlocked ? query('[data-control="settings"]') ?? query('[data-control="play"]') : query(preferred) ?? query('[data-control="play"]')
     } else {
       const index = Math.max(0, queueItems.findIndex(item => item.dir === queueSelectedDir))
       target = query(`[data-queue-index="${index}"]`) ?? query('[data-empty-browse]') ?? query('[data-queue-return]')
@@ -772,7 +807,7 @@ export default function BoxApp(): React.JSX.Element {
     focusTarget.current = target
     target?.focus({ preventScroll: true })
     target?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [route, hydrated, mixOpen, pendingSwitch, signOutConfirm, controlsVisible, focusVersion, snapshot.routingBlocked, metronomeError, metronomeBusy])
+  }, [route, hydrated, mixOpen, pendingSwitch, signOutConfirm, controlsVisible, focusVersion, snapshot.routingBlocked, endedWithNext, metronomeError, metronomeBusy])
 
   phoneActionsRef.current = async (envelope: BoxControllerEnvelope): Promise<void> => {
     let response: BoxControllerResponse = { ok: false, error: 'The command could not be completed.' }
@@ -978,7 +1013,7 @@ export default function BoxApp(): React.JSX.Element {
           canApplyOutput={canApplyOutput}
           applyUnavailableReason={applyUnavailableReason}
         />}
-        {route === 'player' && <Player snapshot={snapshot} microphones={microphones} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} onWake={() => { setControlsVisible(true); noteInput(); setFocusVersion(version => version + 1) }} />}
+        {route === 'player' && <Player snapshot={snapshot} microphones={microphones} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onNext={requestNext} next={upNext} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} onWake={() => { setControlsVisible(true); noteInput(); setFocusVersion(version => version + 1) }} />}
         {route === 'queue' && <Queue
           items={queueItems}
           rows={queueRows}
@@ -1002,7 +1037,7 @@ export default function BoxApp(): React.JSX.Element {
           onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }}
         />}
         {route === 'player' && mixOpen && <Mixer microphones={microphones} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} status={playbackStatus(snapshot)} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
-        {pendingSwitch?.local && <SwitchDialog active={active} target={pendingSwitch.local} onCancel={() => setPendingSwitch(null)} onConfirm={() => void openNow(pendingSwitch, pendingSwitchStart.current)} />}
+        {pendingSwitch?.local && <SwitchDialog active={active} target={pendingSwitch.local} onCancel={() => { advance.current = null; setPendingSwitch(null) }} onConfirm={() => void openNow(pendingSwitch, pendingSwitchStart.current)} />}
         {(queueError || queueSnapshot.loading) && route !== 'player' && route !== 'home' && <div className="box-state-toast" role="alert">
           <span>{queueSnapshot.loading ? t('box.queue.loading') : queueError}</span>
           {!queueSnapshot.loaded && !queueSnapshot.loading && <button type="button" onClick={() => { void hydrate(false) }}>{t('app.retry')}</button>}
