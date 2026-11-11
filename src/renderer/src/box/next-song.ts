@@ -14,10 +14,11 @@ export function nextQueued<T extends QueueSong>(items: readonly T[], currentDir:
   return null
 }
 
-/** Nothing is lost once the song has ended, so Next starts directly; mid-song it goes
- * through the same switch confirmation as choosing a song from the queue. */
-export function nextNeedsConfirmation(status: PlaybackStatus): boolean {
-  return status !== 'ended'
+/** One rule for the "start another song" actions (Sing, Next; a queue pick always asks): ask whenever a
+ * different song is loaded and has not ended (playing or paused), so a paused place is never
+ * lost silently. Nothing loaded, or a song that ended, switches without a question. */
+export function switchNeedsConfirmation(hasLoadedSong: boolean, status: PlaybackStatus): boolean {
+  return hasLoadedSong && status !== 'ended'
 }
 
 export type NextSlot = 'hidden' | 'next' | 'choose'

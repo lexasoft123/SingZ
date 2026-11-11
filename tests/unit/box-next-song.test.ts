@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { endedFocusControl, nextNeedsConfirmation, nextQueued, nextSlot, queueAfterAdvance, songLine } from '../../src/renderer/src/box/next-song'
+import { endedFocusControl, switchNeedsConfirmation, nextQueued, nextSlot, queueAfterAdvance, songLine } from '../../src/renderer/src/box/next-song'
 import { moveSpatialFocus } from '../../src/renderer/src/box/focus'
 import { box as en } from '../../src/shared/i18n/en/box'
 
@@ -28,10 +28,11 @@ describe('nextQueued', () => {
 
 describe('confirmation and slot rules', () => {
   it('confirms mid-song (playing, paused, error) and starts directly once ended', () => {
-    expect(nextNeedsConfirmation('playing')).toBe(true)
-    expect(nextNeedsConfirmation('paused')).toBe(true)
-    expect(nextNeedsConfirmation('error')).toBe(true)
-    expect(nextNeedsConfirmation('ended')).toBe(false)
+    expect(switchNeedsConfirmation(true, 'playing')).toBe(true)
+    expect(switchNeedsConfirmation(true, 'paused')).toBe(true)
+    expect(switchNeedsConfirmation(true, 'error')).toBe(true)
+    expect(switchNeedsConfirmation(true, 'ended')).toBe(false)
+    expect(switchNeedsConfirmation(false, 'paused')).toBe(false) // nothing loaded: nothing to lose
   })
   it('hides Next without a next song, except at the end where it offers a way to choose', () => {
     expect(nextSlot('playing', true)).toBe('next')

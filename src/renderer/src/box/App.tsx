@@ -40,7 +40,7 @@ import {
 } from './collection/queue'
 import { parseSongName } from './song-identity'
 import { moveQueueRefInView } from './queue-model'
-import { endedFocusControl, nextNeedsConfirmation, nextSwitchMode, nextQueued, queueAfterAdvance } from './next-song'
+import { endedFocusControl, switchNeedsConfirmation, nextSwitchMode, nextQueued, queueAfterAdvance } from './next-song'
 import { resolveCollectionSelection, type CollectionEntry } from './collection/types'
 import { hydrateBoxLocally } from './collection/startup'
 import './collection/collection.css'
@@ -155,6 +155,9 @@ export default function BoxApp(): React.JSX.Element {
   const openIntent = useRef(new LatestOpenIntent())
   const previewStartIntent = useRef<number | null>(null)
   const pendingSwitchMode = useRef<SwitchMode>('paused')
+  /** Set when an open reaches the player: Play/Pause must take focus, even if it is still disabled while lyrics/output settle. */
+  const playFocusPending = useRef(false)
+  const lastPlayEnabled = useRef(false)
   /** Set by Next: when `to` opens, `from` (the song that just played) leaves the queue. */
   const advance = useRef<{ from: string; to: string } | null>(null)
   const lastSeekKeyAt = useRef<number | null>(null)
@@ -173,6 +176,8 @@ export default function BoxApp(): React.JSX.Element {
   const nextItem = nextQueued(queueItems, snapshot.active?.item.dir ?? null)
   const nextIdentity = nextItem ? parseSongName(nextItem.name) : null
   const upNext = nextIdentity ? { title: nextIdentity.title, artist: nextIdentity.artist ?? null } : null
+  const playEnabled = snapshot.active !== null && snapshot.active.lyrics.status === 'ready' && snapshot.active.lyrics.lines.length > 0 &&
+    !snapshot.routingBlocked && !snapshot.applyingOutput && !snapshot.restartRequired
   const endedWithNext = nextItem !== null && playbackStatus(snapshot) === 'ended'
   const selectedEntry = resolveCollectionSelection(allEntries, selectedId, previousSelected.current, route === 'details')
   if (selectedEntry && !selectedEntry.unavailable) previousSelected.current = selectedEntry
@@ -500,6 +505,7 @@ export default function BoxApp(): React.JSX.Element {
       }
       setMixOpen(false)
       reachedPlayer = true
+      playFocusPending.current = true
       setRoute('player')
       setControlsVisible(true)
       setFocusVersion(version => version + 1)
@@ -519,7 +525,7 @@ export default function BoxApp(): React.JSX.Element {
   const requestSing = useCallback((entry: CollectionEntry) => {
     if (metronomeBlocked.current || !entry.local) return
     const current = transport.getSnapshot()
-    if (current.active && current.active.item.dir !== entry.local.dir && (current.playing || current.starting)) {
+    if (current.active && current.active.item.dir !== entry.local.dir && switchNeedsConfirmation(true, playbackStatus(current))) {
       pendingSwitchMode.current = 'start'
       setPendingSwitch(entry)
     } else void openNow(entry, true)
@@ -576,7 +582,7 @@ export default function BoxApp(): React.JSX.Element {
     if (!next || !entry) return
     if (!entry.local || collectionSnapshot.rows[entry.id]?.inspection?.readiness !== 'ready') { openDetails(entry); return }
     advance.current = current ? { from: current, to: next.dir } : null
-    if (nextNeedsConfirmation(playbackStatus(snapshot))) {
+    if (switchNeedsConfirmation(snapshot.active !== null, playbackStatus(snapshot))) {
       pendingSwitchMode.current = nextSwitchMode(current, queueItems)
       setPendingSwitch(entry)
     } else void openNow(entry, true)
@@ -781,6 +787,10 @@ export default function BoxApp(): React.JSX.Element {
   useEffect(() => {
     const root = tvRef.current
     if (!root || !controlsVisible && route === 'player' && !mixOpen) return
+    // Play becoming usable only matters to an open that is still waiting to put focus on it.
+    const playEnabledChanged = lastPlayEnabled.current !== playEnabled
+    lastPlayEnabled.current = playEnabled
+    if (playEnabledChanged && !playFocusPending.current) return
     if (route === 'player' && !mixOpen && !pendingSwitch && seekKeepsFocus(document.activeElement, lastSeekKeyAt.current, performance.now())) return
     const query = (selector: string): HTMLElement | null => Array.from(root.querySelectorAll<HTMLElement>(selector))
       .find(element => element.getClientRects().length > 0 && !element.closest('[hidden], [inert]')) ?? null
@@ -805,16 +815,19 @@ export default function BoxApp(): React.JSX.Element {
     else if (route === 'account') target = query('[data-account-primary]:not(:disabled)') ?? query('[data-focus="account-back"]')
     else if (route === 'home') return // JourneyHub owns focus through its asynchronous boot readiness.
     else if (route === 'player') {
+      const play = query('[data-control="play"]')
       const preferred = `[data-control="${endedWithNext ? endedFocusControl(true) : 'play'}"]`
-      target = snapshot.routingBlocked ? query('[data-control="settings"]') ?? query('[data-control="play"]') : query(preferred) ?? query('[data-control="play"]')
+      if (playFocusPending.current && play && !(play as HTMLButtonElement).disabled) { target = play; playFocusPending.current = false }
+      else target = snapshot.routingBlocked ? query('[data-control="settings"]') ?? play : query(preferred) ?? play
     } else {
       const index = Math.max(0, queueItems.findIndex(item => item.dir === queueSelectedDir))
       target = query(`[data-queue-index="${index}"]`) ?? query('[data-empty-browse]') ?? query('[data-queue-return]')
     }
+    if (route !== 'player') playFocusPending.current = false
     focusTarget.current = target
     target?.focus({ preventScroll: true })
     target?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [route, hydrated, mixOpen, pendingSwitch, signOutConfirm, controlsVisible, focusVersion, snapshot.routingBlocked, endedWithNext, metronomeError, metronomeBusy])
+  }, [route, hydrated, mixOpen, pendingSwitch, signOutConfirm, controlsVisible, focusVersion, snapshot.routingBlocked, endedWithNext, metronomeError, metronomeBusy, playEnabled])
 
   phoneActionsRef.current = async (envelope: BoxControllerEnvelope): Promise<void> => {
     let response: BoxControllerResponse = { ok: false, error: 'The command could not be completed.' }
