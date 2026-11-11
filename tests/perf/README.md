@@ -25,6 +25,13 @@ python3.13 -m unittest discover -s tests/perf -p 'test_*.py'
 node --check tests/perf/electron_driver.cjs
 ```
 
+For baseline runs, generate the reference library with
+`node tests/perf/make_reference.cjs <fresh-dir>`: two synthesized six-stem
+projects (300 s and 720 s) with timed lyrics, a pitch line, and analysis stamps
+read from the current zCore detector versions, so no run re-analyses. Its JSON
+has the same shape as `stage_fixture.cjs`. `python3 -m unittest
+tests/perf/test_reference_fixture.py` checks it (needs `ffprobe`).
+
 Stage a fresh library with `node tests/perf/stage_fixture.cjs <fresh-dir>`;
 the JSON it prints contains the two project paths, their names, and the sample
 description. Point `--reference-json` at a file containing that JSON. Each run
