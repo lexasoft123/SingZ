@@ -39,8 +39,8 @@ fn dots(total:usize,done:usize,per:usize)->String{(0..total).collect::<Vec<_>>()
 
 pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){cx.spawn(async move|cx|{
  let result:anyhow::Result<()>=async{
-  std::fs::create_dir_all(&out)?;let project=PathBuf::from(std::env::var_os("SINGZ_GPUI_TEST_PROJECT").unwrap());let fresh=PathBuf::from(std::env::var_os("SINGZ_GPUI_TIMING_GRIDLESS").unwrap());let variable=PathBuf::from(std::env::var_os("SINGZ_GPUI_TIMING_VARIABLE").unwrap());let same=PathBuf::from(std::env::var_os("SINGZ_GPUI_TIMING_SAME_BPM").unwrap());let stage=std::env::var("SINGZ_GPUI_TIMING_STAGE").unwrap_or_else(|_|"exercise".into());
-  macro_rules! wait{($p:ident,$app:ident=>$test:expr)=>{{let deadline=Instant::now()+Duration::from_secs(25);loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,$app|{let $p=view.read($app);$test})?{break;}anyhow::ensure!(Instant::now()<deadline,"Timing timeout: {}",stringify!($test));}}};}
+  std::fs::create_dir_all(&out)?;let project=PathBuf::from(std::env::var_os("SINGZ_GPUI_TEST_PROJECT").unwrap());let fresh=PathBuf::from(std::env::var_os("SINGZ_GPUI_TIMING_GRIDLESS").unwrap());let variable=PathBuf::from(std::env::var_os("SINGZ_GPUI_TIMING_VARIABLE").unwrap());let selected=PathBuf::from(std::env::var_os("SINGZ_GPUI_TIMING_SELECTED").unwrap());let same=PathBuf::from(std::env::var_os("SINGZ_GPUI_TIMING_SAME_BPM").unwrap());let stage=std::env::var("SINGZ_GPUI_TIMING_STAGE").unwrap_or_else(|_|"exercise".into());
+  macro_rules! wait{($p:ident,$app:ident=>$test:expr)=>{{let deadline=Instant::now()+Duration::from_secs(25);loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,$app|{let $p=view.read($app);$test})?{break;}anyhow::ensure!(Instant::now()<deadline,"Timing timeout: {}",stringify!($test));}}};($p:ident,$window:ident,$app:ident=>$test:expr)=>{{let deadline=Instant::now()+Duration::from_secs(25);loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,$window,$app|{draw($window,$app);let $p=view.read($app);$test})?{break;}anyhow::ensure!(Instant::now()<deadline,"Timing timeout: {}",stringify!($test));}}};}
   macro_rules! rate{($value:expr)=>{wait!(p,cx=>p.native_rate_pending.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|(s.rate-$value).abs()<0.00006)&&(p.tempo-$value).abs()<0.00006)};}
   macro_rules! resize_viewport{($width:expr,$height:expr)=>{{
    handle.update(cx,|_,w,_|w.resize(size(px($width),px($height))))?;
@@ -97,7 +97,17 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){c
   }else{
    for(width,height)in[(1280.,800.),(1060.,640.)]{
     resize_viewport!(width,height);
-    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==project));
+    let requested_at=Instant::now();let mut loaded_at=None;
+    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
+    // Opened precedes asynchronous analysis. A measured button can still be
+    // disabled. Its automatic Save also fences rate admission; wait for the
+    // complete readiness a singer needs before clicking it.
+    wait!(p,w,cx=>{
+     let loaded=!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==project);
+     if loaded&&loaded_at.is_none(){loaded_at=Some(Instant::now());}
+     loaded&&p.analysis_progress.is_none()&&!p.saving&&!p.beat_auto_save&&p.transport.read(cx).timing_state(w,cx)["enabled"]==true
+    });
+    std::fs::write(out.join(format!("open-readiness-{}.json",width as u32)),serde_json::to_vec_pretty(&serde_json::json!({"requestToControlsMs":requested_at.elapsed().as_secs_f64()*1000.,"loadedToControlsMs":loaded_at.map(|instant|instant.elapsed().as_secs_f64()*1000.)}))?)?;
     let initial=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.native_loop,p.project.as_ref().and_then(|p|p.selection))})?;
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("ready-{}",width as u32)))??;
     handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-bpm-up"))??;rate!(1.0083);
@@ -126,7 +136,12 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){c
      let deadline=Instant::now()+Duration::from_secs(4);while !ready.exists(){cx.background_executor().timer(Duration::from_millis(10)).await;anyhow::ensure!(Instant::now()<deadline,"Fast pause did not reach actual native rate receipt gate");}
      let bass_slot=handle.update(cx,|_,_,cx|view.read(cx).project.as_ref().unwrap().lane_specs.iter().find(|lane|lane.id=="bass").unwrap().slot)?;
      if pause_action=="button"{handle.update(cx,|_,w,cx|mute_lane(&view,w,cx,bass_slot))??;wait!(p,cx=>!p.muted[bass_slot]);}
-     handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_rate_pending.is_some()&&p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing),"Fast pause did not begin with real advancing playback and a held rate receipt");if pause_action!="space"{press(&view,w,cx,"transport-play")?;}else{draw(w,cx);anyhow::ensure!(view.read(cx).focus_handle.is_focused(w),"Space pause has no actual app-local player focus");key(w,cx,"space");}Ok(())})??;
+     handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_rate_pending.is_some()&&p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing),"Fast pause did not begin with real advancing playback and a held rate receipt");if pause_action!="space"{press(&view,w,cx,"transport-play")?;}else{
+      // Accessible BPM buttons own keyboard focus after a click. This case
+      // targets the player's Space handler, so establish its actual local
+      // focus explicitly, retaining the focus assertion before dispatch.
+      let focus=view.read(cx).focus_handle.clone();focus.focus(w,cx);draw(w,cx);
+      anyhow::ensure!(view.read(cx).focus_handle.is_focused(w),"Space pause has no actual app-local player focus");key(w,cx,"space");}Ok(())})??;
      wait!(p,cx=>p.native_play_intent.is_some_and(|(on,_)|!on));
      if pause_action.starts_with("rapid-buttons"){
       handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-play"))??;wait!(p,cx=>p.native_play_intent.is_some_and(|(on,_)|on));
@@ -164,13 +179,13 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){c
     handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let p=view.read(cx);let t=p.transport.read(cx).timing_state(w,cx);anyhow::ensure!(t["baseBpm"].as_f64()==Some(120.)&&t["effectiveBpm"].as_f64()==Some(120.)&&t["inputValue"]=="120"&&t["draft"].is_null()&&t["inputFocused"]==false&&p.native_rate_pending.is_none()&&p.native_rate_queued.is_none(),"Same-BPM project inherited an uncommitted old-song draft: {t}");shot(&view,w,cx,&out,&format!("same-bpm-reset-{}",width as u32))})??;
     // Count-in is configured through actual measured metronome controls,
     // never fabricated DSP or count-in receipts.
-    for(case,path,bars,expected_per)in[("grid",project.clone(),2usize,4usize),("gridless",fresh.clone(),1usize,3usize),("variable",variable.clone(),1usize,3usize)]{
+    for(case,path,bars,expected_per)in[("grid",project.clone(),2usize,4usize),("gridless",fresh.clone(),1usize,3usize),("variable",variable.clone(),1usize,3usize),("selected-variable",selected.clone(),1usize,3usize)]{
      handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(path.clone(),cx)))?;wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==path));
      if case=="gridless"{handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let t=view.read(cx).transport.read(cx).timing_state(w,cx);anyhow::ensure!(t["baseBpm"].is_null()&&t["enabled"]==false&&t["inputValue"]=="—","Missing BPM was editable: {t}");let before=view.read(cx).tempo;press(&view,w,cx,"transport-bpm-up")?;anyhow::ensure!(view.read(cx).tempo==before,"Disabled missing BPM edited tempo");shot(&view,w,cx,&out,&format!("missing-{}",width as u32))})??;}
      handle.update(cx,|_,w,cx|met_toggle(&view,w,cx))??;wait!(p,cx=>p.metronome_open);
      handle.update(cx,|_,w,cx|met(&view,w,cx,&format!("met-count-{bars}")))??;wait!(p,cx=>p.metronome_pending.is_none()&&p.metronome.count_in_bars==bars as u32);
      handle.update(cx,|_,w,cx|met_toggle(&view,w,cx))??;wait!(p,cx=>!p.metronome_open);
-     let anchor=if case=="variable"{0.5}else{3.};
+     let anchor=if case=="variable"||case=="selected-variable"{0.5}else{3.};
      handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.position=anchor;p.seek_native(cx);}))?;wait!(p,cx=>p.pending_seek.is_none()&&(p.position-anchor).abs()<0.03);
      handle.update(cx,|_,w,cx|press(&view,w,cx,"transport-play"))??;
      let deadline=Instant::now()+Duration::from_secs(12);let mut trace=vec![];let mut observed=std::collections::BTreeSet::new();let mut prior_done=0;let mut finished=false;
@@ -238,7 +253,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){c
    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_rate_pending.is_some()&&p.native_rate_queued.is_some()&&p.native_rate_save_requested&&p.native_rate_navigation.as_ref().is_some_and(|(path,source)|path==&fresh&&!*source)&&!p.loading&&!p.saving,"Failed-rate regression did not actually queue latest rate/Save/navigation");p.backend.as_ref().ok_or_else(||anyhow::anyhow!("Native backend missing"))?.control(p.native_epoch,"invalid-rate-test-command".into())?;Ok(())})??;
    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,"rate-failure-queued"))??;std::fs::remove_file(&gate)?;
    wait!(p,cx=>p.notice.is_some()&&p.native_rate_pending.is_none()&&p.native_rate_queued.is_none());
-   handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.notice.as_deref().is_some_and(|text|text.contains("Queued Save did not run"))&&!p.native_rate_save_requested&&!p.saving&&p.native_rate_navigation.as_ref().is_some_and(|(path,source)|path==&fresh&&!*source)&&p.project.is_none(),"Generic helper failure lost queued navigation or falsely completed Save: {:?}",p.notice);shot(&view,w,cx,&out,"rate-failure-notice")})??;
+   handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.notice.as_deref().is_some_and(|text|text.contains("The queued Save did not run"))&&!p.native_rate_save_requested&&!p.saving&&p.native_rate_navigation.as_ref().is_some_and(|(path,source)|path==&fresh&&!*source)&&p.project.as_ref().is_some_and(|retained|retained.dir==project)&&p.tracks_audio_failed&&!p.playing&&p.native_anchor.is_none()&&p.last_playback_status.is_none(),"Generic helper failure lost queued navigation or falsely completed Save: {:?}",p.notice);shot(&view,w,cx,&out,"rate-failure-notice")})??;
    anyhow::ensure!(std::fs::read(project.join("project.json"))?==before_failure,"Generic native failure published an unaccepted queued rate Save");
    handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;wait!(p,cx=>p.notice.is_none()&&!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==fresh));
    anyhow::ensure!(std::fs::read(project.join("project.json"))?==before_failure,"Acknowledging failure replayed the cancelled Save");

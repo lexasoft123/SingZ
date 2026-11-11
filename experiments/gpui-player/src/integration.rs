@@ -758,6 +758,28 @@ pub struct OwnedAudioProbe {
 }
 
 enum Request {
+    Wake,
+    Admitted(Box<Request>, Admission),
+    OpenPreparationFailed(u64,String),
+    LanePreparationFailed(u64,u64,String,Option<Project>),
+    Inventory,
+    InspectDelete(PathBuf,PathBuf,u64),
+    AdoptOpen(jobs::Open),AdoptLanes(jobs::Lanes),
+    AdoptRecovery(u64,u64,AudioRecovery,String,Option<provider_control::PendingWork>,bool,Option<jobs::Manifest>),
+    ImportCompleted(u64,crate::project_import::Outcome,bool,Option<provider_control::PendingWork>),
+    ProviderChosen(provider_control::ProviderState,String,bool),
+    OutputProbed(String,std::result::Result<(),String>),
+    RecoveryVerified(u64,u64,String,std::result::Result<RecoveredAudio,String>),
+    #[cfg(test)]
+    ActorBarrier(mpsc::SyncSender<()>),
+    #[cfg(test)]
+    SetTestMonitor(bool, mpsc::SyncSender<()>),
+    #[cfg(test)]
+    HoldJob(mpsc::SyncSender<()>, mpsc::Receiver<()>),
+    #[cfg(test)]
+    InstallTestConnection(Connection, mpsc::SyncSender<()>),
+    #[cfg(test)]
+    ReceiptFence(u64,u64,mpsc::SyncSender<(u64,u64,Status)>),
     Provider(u64,u64,u64,u64,crate::audio_devices::Provider),
     KaraokePref(u64,bool),
     Region(u64,u64,crate::region_gesture::Target,f64),
@@ -805,8 +827,6 @@ pub struct Backend {
     carry_intent:Arc<AtomicU64>,
     playback_intent:Arc<AtomicU64>,
     lanes_intent: Arc<AtomicU64>,
-    delete_inspect_requests: SyncSender<(PathBuf, PathBuf, u64)>,
-    delete_inspect_worker: Option<thread::JoinHandle<()>>,
     copy_handoff: Arc<AtomicU64>,
     catalog_intent: Arc<AtomicU64>,
     lyrics_search_intent: Arc<AtomicU64>,
@@ -814,9 +834,7 @@ pub struct Backend {
     lyrics_preview_intent: Arc<AtomicU64>,
     beat_intent: Arc<AtomicU64>,
     training_intent: Arc<AtomicU64>,
-    inventory_requests: SyncSender<()>,
-    inventory_worker: Option<thread::JoinHandle<()>>,
-    requests: SyncSender<Request>,
+    requests: Requests,
     events: Receiver<Event>,
     telemetry: Arc<Mutex<Option<(u64, Status)>>>,
     epoch: Arc<AtomicU64>,
@@ -829,13 +847,8 @@ impl Drop for Backend {
         // Capture yields to their memory intents even during application quit.
         self.saves.finish();
         self.alive.store(false, Ordering::Release);
+        let _=self.requests.transport.try_send(Request::Wake);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-        if let Some(worker) = self.inventory_worker.take() {
-            let _ = worker.join();
-        }
-        if let Some(worker) = self.delete_inspect_worker.take() {
             let _ = worker.join();
         }
     }
@@ -855,41 +868,12 @@ impl Backend {
         let alive = Arc::new(AtomicBool::new(true));
         let e = epoch.clone();
         let a = alive.clone();
-        // Inspection walks project files and must never queue ahead of Pause
-        // or Stop on the playback worker. Only one confirmation is requested
-        // at a time; the host fences completed inspections by their serial.
-        let (delete_inspect_requests, delete_inspect_rx) = mpsc::sync_channel::<(PathBuf, PathBuf, u64)>(1);
-        let delete_events = events.clone();
-        let delete_alive = alive.clone();
-        let delete_inspect_worker = thread::spawn(move || inspect_delete_requests(delete_inspect_rx,delete_events,delete_alive));
         let provider_selected=Arc::new(AtomicU64::new(crate::audio_devices::Provider::platform_default().code()));
         let provider_renderer=Arc::new(AtomicU64::new(1));
         let provider_pending=Arc::new(AtomicU64::new(0));
         let provider_retired=Arc::new(AtomicU64::new(0));
         let provider_gate=Arc::new(Mutex::new(()));
         let provider_reserved=Arc::new(AtomicBool::new(false));
-        let inventory_provider=provider_selected.clone();
-        let inventory_provider_gate=provider_gate.clone();
-        let (inventory_requests, inventory_rx) = mpsc::sync_channel(1);
-        let inventory_events = events.clone();
-        let inventory_alive = alive.clone();
-        let inventory_worker = thread::spawn(move || {
-            while inventory_alive.load(Ordering::Acquire) {
-                match inventory_rx.recv_timeout(Duration::from_millis(20)) {
-                    Ok(()) => {
-                        let token=inventory_provider.load(Ordering::Acquire);
-                        let selected=crate::audio_devices::Provider::from_code(token);
-                        let result = crate::audio_devices::inventory_with_provider(&inventory_alive,selected)
-                            .map_err(|e| format!("{e:#}"));
-                        let _gate=inventory_provider_gate.lock().unwrap_or_else(|e|e.into_inner());
-                        if inventory_provider.load(Ordering::Acquire)!=token{continue;}
-                        let _ = inventory_events.send(Event::Inventory(result));
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(_) => {}
-                }
-            }
-        });
         let playback_intent=Arc::new(AtomicU64::new(0));let playback_worker=playback_intent.clone();
         let training_intent = Arc::new(AtomicU64::new(0));
         let intent = training_intent.clone();
@@ -901,15 +885,31 @@ impl Backend {
         let lyrics_search_intent=Arc::new(AtomicU64::new(0));let lyrics_search=lyrics_search_intent.clone();
         let copy_handoff=Arc::new(AtomicU64::new(0));let worker_handoff=copy_handoff.clone();
         let provider_args=(provider_selected.clone(),provider_renderer.clone(),provider_pending.clone(),provider_retired.clone(),provider_gate.clone(),provider_reserved.clone());
-        let worker = thread::spawn(move || worker(rx, events, e, a, pending, text, intent, beat_cancel, lyrics_preview,lyrics_align,lyrics_search,worker_handoff,save_reanchors,playback_worker,provider_args));
+        let (jobs,jobs_rx)=jobs::mailboxes(provider_pending.clone(), tx.clone());let slots=jobs.slots.clone();
+        let job_sender=jobs.clone();let transport=tx.clone();
+        let owner_busy=Arc::new(AtomicBool::new(false));
+        let worker=thread::Builder::new().name("native-transport".into()).spawn(move||{
+            let (init,initialized)=mpsc::sync_channel(1);
+            let jobs_args=(events.clone(),e.clone(),a.clone(),intent.clone(),provider_args.clone(),owner_busy.clone());
+            let cleanup=job_sender.clone();
+            let jobs_worker=thread::Builder::new().name("native-jobs".into()).spawn(move||{
+                let (events,latest,alive,training,provider,busy)=jobs_args;
+                jobs::run(jobs_rx,transport,init,events,latest,alive,text,training,beat_cancel,lyrics_preview,lyrics_align,lyrics_search,provider,busy,slots,cleanup);
+            }).expect("spawn native jobs coordinator");
+            let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Ok((uid,state))=initialized.recv(){
+                transport_actor::run(rx,job_sender.clone(),events,e,a.clone(),pending,intent,worker_handoff,save_reanchors,playback_worker,provider_args.0,provider_args.2,provider_args.3,uid,state,owner_busy);
+            }
+            }));
+            let _=job_sender.send(jobs::Job::Shutdown);let _=jobs_worker.join();
+            if let Err(payload)=result{std::panic::resume_unwind(payload);}
+        }).expect("spawn native transport actor");
         Self {
             provider_selected,provider_renderer,provider_pending,provider_retired,provider_gate,provider_reserved,
             saves,
             carry_intent:Arc::new(AtomicU64::new(0)),
             playback_intent,
             lanes_intent:Arc::new(AtomicU64::new(0)),
-            delete_inspect_requests,
-            delete_inspect_worker: Some(delete_inspect_worker),
             copy_handoff,
             catalog_intent: Arc::new(AtomicU64::new(0)),
             lyrics_align_intent,
@@ -917,9 +917,7 @@ impl Backend {
             lyrics_preview_intent,
             beat_intent,
             training_intent,
-            inventory_requests,
-            inventory_worker: Some(inventory_worker),
-            requests: tx,
+            requests: Requests{admitted:Arc::new(AtomicU64::new(0)),transport:tx,jobs,alive:alive.clone()},
             events: output,
             telemetry,
             epoch,
@@ -945,13 +943,20 @@ impl Backend {
         let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
         let old=self.provider_renderer.load(Ordering::Acquire);
         if (old&1!=0)==busy{return old;}
-        let next=((old>>1)+1)*2+u64::from(busy);self.provider_renderer.store(next,Ordering::Release);next
+        let next=((old>>1)+1)*2+u64::from(busy);self.provider_renderer.store(next,Ordering::Release);
+        // An idle transport has no timer. Renderer lease changes must wake it
+        // so Settings receives the new provider eligibility revision.
+        // Test-only negative control for omitting the explicit wake.
+        #[cfg(test)]
+        if std::env::var_os("SINGZ_C17_SUPPRESS_RENDERER_WAKE").is_some(){return next;}
+        let _=self.requests.transport.try_send(Request::Wake);
+        next
     }
     pub fn provider(&self,serial:u64,expected_revision:u64,expected_epoch:u64,provider:crate::audio_devices::Provider)->Result<()> {
         anyhow::ensure!(serial>0&&expected_epoch==self.current_epoch(),"Audio provider eligibility changed");
         let renderer=self.provider_renderer.load(Ordering::Acquire);
         anyhow::ensure!(renderer&1==0,"Release renderer playback leases before changing provider");
-        self.requests.try_send(Request::Provider(serial,expected_revision,expected_epoch,renderer,provider)).context("Native command queue is full")
+        self.requests.try_send(Request::Provider(serial,expected_revision,expected_epoch,renderer,provider)).map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     /// Negative-control adapter: exercise the unchanged worker admission using
     /// its actual renderer fence. This never changes owner or renderer state.
@@ -959,22 +964,22 @@ impl Backend {
     pub fn probe_provider_worker(&self,serial:u64,expected_revision:u64,expected_epoch:u64,provider:crate::audio_devices::Provider)->Result<()> {
         anyhow::ensure!(serial>0,"Invalid provider probe identifier");
         let renderer=self.provider_renderer.load(Ordering::Acquire);
-        self.requests.try_send(Request::Provider(serial,expected_revision,expected_epoch,renderer,provider)).context("Native command queue is full")
+        self.requests.try_send(Request::Provider(serial,expected_revision,expected_epoch,renderer,provider)).map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     fn ownership_send(&self,request:Request)->Result<()> {
         self.provider_pending.fetch_add(1,Ordering::AcqRel);
         if self.requests.try_send(request).is_err(){self.provider_pending.fetch_sub(1,Ordering::AcqRel);bail!("Native command queue is full");}Ok(())
     }
     pub fn karaoke_pref(&self,sequence:u64,enabled:bool)->Result<()> {
-        self.requests.try_send(Request::KaraokePref(sequence,enabled)).context("Native command queue is full")
+        self.requests.try_send(Request::KaraokePref(sequence,enabled)).map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn input_prefs(&self, sequence: u64, prefs: crate::microphone::Prefs) -> Result<()> {
         self.requests
             .try_send(Request::InputPrefs(sequence, prefs))
-            .context("Native command queue is full")
+            .map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn inventory(&self) {
-        let _ = self.inventory_requests.try_send(());
+        let _ = self.requests.try_send(Request::Inventory);
     }
     pub fn park(&self, epoch: u64, serial: u64, parked: bool) -> Result<()> {
         let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
@@ -984,10 +989,10 @@ impl Backend {
     pub fn output(&self, uid: String) -> Result<()> {
         self.requests
             .try_send(Request::Output(uid))
-            .context("Native command queue is full")
+            .map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn restore_seek(&self,epoch:u64,position:f64)->Result<()> {
-        self.requests.try_send(Request::RestoreSeek(epoch,position)).context("Native command queue is full")
+        self.requests.try_send(Request::RestoreSeek(epoch,position)).map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn recover_output(&self, epoch: u64, serial: u64, request: AudioRecovery, uid: String) -> Result<()> {
         let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
@@ -995,12 +1000,12 @@ impl Backend {
         self.ownership_send(Request::RecoverOutput(epoch,serial,request,uid))
     }
     pub fn read_publication(&self, epoch: u64, serial: u64, publication: Publication) -> Result<()> {
-        self.requests.try_send(Request::ReadPublication(epoch, serial, publication)).context("Native command queue is full")
+        self.requests.try_send(Request::ReadPublication(epoch, serial, publication)).map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     #[cfg(feature="ui-tests")]
     pub fn fail_owned_audio(&self, epoch: u64) -> Result<()> {
         anyhow::ensure!(std::env::var("SINGZ_MUTE").as_deref()==Ok("1"), "Fault injection requires muted test audio");
-        self.requests.try_send(Request::FailOwnedAudio(epoch)).context("Native command queue is full")
+        self.requests.try_send(Request::FailOwnedAudio(epoch)).map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     /// A fresh native status command, read before host status admission. It
     /// neither consults the UI's cached status nor changes helper ownership.
@@ -1008,7 +1013,7 @@ impl Backend {
     pub fn probe_owned_audio(&self, epoch: u64) -> Result<Receiver<std::result::Result<OwnedAudioProbe, String>>> {
         anyhow::ensure!(std::env::var("SINGZ_MUTE").as_deref()==Ok("1"), "Native probe requires muted test audio");
         let (tx, rx) = mpsc::sync_channel(1);
-        self.requests.try_send(Request::ProbeOwnedAudio(epoch, tx)).context("Native command queue is full")?;
+        self.requests.try_send(Request::ProbeOwnedAudio(epoch, tx)).map_err(|_|anyhow::anyhow!("Native command queue is full"))?;
         Ok(rx)
     }
     pub fn catalog(&self) {
@@ -1061,7 +1066,7 @@ impl Backend {
         crate::beat::commands(&met, None)?;
         self.requests
             .try_send(Request::AdoptMetronomePreferences(epoch, met))
-            .context("Native command queue is full")
+            .map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn rename(&self, dir: PathBuf, expected: String, name: String) -> Result<u64> {
         let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
@@ -1097,7 +1102,7 @@ impl Backend {
     }
     pub fn inspect_delete(&self, root:PathBuf, dir:PathBuf, serial:u64)->Result<()> {
         anyhow::ensure!(self.alive.load(Ordering::Acquire), "Native backend has stopped");
-        self.delete_inspect_requests.try_send((root,dir,serial)).context("Project inspection queue is full")
+        self.requests.try_send(Request::InspectDelete(root,dir,serial)).map_err(|_|anyhow::anyhow!("Project inspection queue is full"))
     }
     /// The host captures whether the accepted target owns the loaded song,
     /// including a private working copy anchored to that saved destination.
@@ -1142,7 +1147,7 @@ impl Backend {
     }
     pub fn save_lyrics(&self, epoch:u64, serial:u64, project:&Project, lines:Value,credit:Option<String>) -> Result<()> {
         self.requests.try_send(Request::SaveLyrics(epoch,serial,project.dir.clone(),project.lyrics_fingerprint.clone(),lines,credit))
-            .context("Native command queue is full")
+            .map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn lyrics_envelope(&self,epoch:u64,serial:u64,project:&Project)->Result<()> {
         let old=self.lyrics_preview_intent.swap(serial,Ordering::AcqRel);
@@ -1175,7 +1180,7 @@ impl Backend {
     ) -> Result<()> {
         self.requests
             .try_send(Request::Metronome(epoch, serial, met, beat))
-            .context("Native command queue is full")
+            .map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn detect_beats(&self, epoch: u64, serial: u64, project: &Project) -> Result<()> {
         let old = self.beat_intent.swap(serial, Ordering::AcqRel);
@@ -1191,12 +1196,12 @@ impl Backend {
         admit_playback_request(&self.requests,&self.playback_intent,serial,|armed|Request::Playback(epoch,serial,command,armed))
     }
     pub fn region(&self,epoch:u64,serial:u64,target:crate::region_gesture::Target,duration:f64)->Result<()> {
-        self.requests.try_send(Request::Region(epoch,serial,target,duration)).context("Native command queue is full")
+        self.requests.try_send(Request::Region(epoch,serial,target,duration)).map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn control(&self, epoch: u64, command: String) -> Result<()> {
         self.requests
             .try_send(Request::Control(epoch, command))
-            .context("Native command queue is full")
+            .map_err(|_|anyhow::anyhow!("Native command queue is full"))
     }
     pub fn training_phrase(
         &self,
@@ -1236,6 +1241,7 @@ impl Backend {
         self.ownership_send(Request::CancelTraining(epoch,generation))
     }
 }
+#[cfg(test)]
 fn inspect_delete_requests(requests:Receiver<(PathBuf,PathBuf,u64)>,events:mpsc::Sender<Event>,alive:Arc<AtomicBool>) {
     while alive.load(Ordering::Acquire) {
         match requests.recv_timeout(Duration::from_millis(20)) {
@@ -1253,9 +1259,9 @@ fn delete_cancelled(was_loaded:bool,epoch:u64,latest:&AtomicU64,alive:&AtomicBoo
     !alive.load(Ordering::Acquire)||(was_loaded&&latest.load(Ordering::Acquire)!=epoch)
 }
 /// A rejected bounded-queue send cannot revoke an in-flight playback receipt.
-fn admit_playback_request<T>(requests:&SyncSender<T>,intent:&AtomicU64,serial:u64,make:impl FnOnce(Arc<AtomicBool>)->T)->Result<()> {
+fn admit_playback_request<T>(requests:&impl RequestQueue<T>,intent:&AtomicU64,serial:u64,make:impl FnOnce(Arc<AtomicBool>)->T)->Result<()> {
     let armed=Arc::new(AtomicBool::new(false));
-    requests.try_send(make(armed.clone())).map_err(|_|anyhow::anyhow!("Native command queue is full"))?;
+    requests.try_request(make(armed.clone())).map_err(|_|anyhow::anyhow!("Native command queue is full"))?;
     // Publish only after admission: a failed send cannot transiently cancel an
     // in-flight receipt. The consumer cannot run this packet before publication.
     intent.fetch_max(serial,Ordering::AcqRel);
@@ -1263,11 +1269,11 @@ fn admit_playback_request<T>(requests:&SyncSender<T>,intent:&AtomicU64,serial:u6
 }
 /// Admit before revoking playback. A failed bounded-queue send must not expose
 /// even a transient new epoch to the running connection or project workers.
-fn admit_delete_request<T>(requests:&SyncSender<T>,latest:&AtomicU64,advance:bool,make:impl FnOnce(u64,Arc<AtomicU8>)->T)->Result<u64> {
+fn admit_delete_request<T>(requests:&impl RequestQueue<T>,latest:&AtomicU64,advance:bool,make:impl FnOnce(u64,Arc<AtomicU8>)->T)->Result<u64> {
     let previous=latest.load(Ordering::Acquire);
     let epoch=if advance{previous.checked_add(1).context("Native project epoch exhausted")?}else{previous};
     let armed=Arc::new(AtomicU8::new(0));
-    requests.try_send(make(epoch,armed.clone())).map_err(|_|anyhow::anyhow!("Native command queue is full"))?;
+    requests.try_request(make(epoch,armed.clone())).map_err(|_|anyhow::anyhow!("Native command queue is full"))?;
     if advance&&latest.compare_exchange(previous,epoch,Ordering::AcqRel,Ordering::Acquire).is_err(){
         armed.store(2,Ordering::Release);bail!("Project changed before deletion could start");
     }
@@ -1714,6 +1720,7 @@ impl Connection {
         output_uid: &str,
         provider:crate::audio_devices::Provider,
         provider_retired:Arc<AtomicU64>,
+        graph_manifest:Option<jobs::Manifest>,
     ) -> Result<(Self, Value)> {
         crate::audio_devices::validate_output_uid(provider,output_uid,cfg!(windows))?;
         let helper = gated_env!("SINGZ_GPUI_AUDIO_HELPER")
@@ -1728,7 +1735,7 @@ impl Connection {
                     })
             });
         let mut command = Command::new(helper);
-        let graph_manifest=project.and_then(|p|p.graph.as_ref()).map(crate::native_graph::Manifest::new).transpose()?;
+        anyhow::ensure!(project.is_some_and(|p|p.graph.is_some())==graph_manifest.is_some(),"Native graph admission differs from the saved project request");
         if project.is_some_and(|p|p.empty_tracks){command.arg("--empty-project");}
         if project.is_none() {
             command.arg("--training-only");
@@ -2040,1014 +2047,41 @@ fn flush_metronome_adoptions(
     first_error.map_or(Ok(()),Err)
 }
 
-fn worker(
-    requests: Receiver<Request>,
-    events: mpsc::Sender<Event>,
-    latest: Arc<AtomicU64>,
-    alive: Arc<AtomicBool>,
-    telemetry: Arc<Mutex<Option<(u64, Status)>>>,
-    text: Arc<gpui_kit::TextSystem>,
-    training_intent: Arc<AtomicU64>,
-    beat_intent: Arc<AtomicU64>,
-    lyrics_preview_intent: Arc<AtomicU64>,
-    lyrics_align_intent: Arc<AtomicU64>,
-    lyrics_search_intent: Arc<AtomicU64>,
-    copy_handoff: Arc<AtomicU64>,
-    save_reanchors: save_worker::Reanchors,
-    playback_intent: Arc<AtomicU64>,
-    provider_args:(Arc<AtomicU64>,Arc<AtomicU64>,Arc<AtomicU64>,Arc<AtomicU64>,Arc<Mutex<()>>,Arc<AtomicBool>),
-) {
-    let _=events.send(Event::LyricsCapabilities(crate::lyrics_align::capability()));
-    let (audio_preferences, prefs_error) = match crate::audio_devices::load() {
-        Ok(raw) => (raw, None),
-        Err(error) => (
-            serde_json::json!({}),
-            Some(format!("Could not read audio preferences: {error}")),
-        ),
-    };
-    let mut global_met = match crate::metronome_store::load(&crate::audio_devices::directory()) {
-        Ok(met) => {
-            let _ = events.send(Event::MetronomePrefs(Ok(met.clone())));
-            met
-        }
-        Err(e) => {
-            let _ = events.send(Event::MetronomePrefs(Err(format!(
-                "Could not restore metronome preferences: {e:#}"
-            ))));
-            crate::beat::Metronome::default()
-        }
-    };
-    let mut global_carry=match crate::carry_line::load(&crate::audio_devices::directory()) {Ok(config)=>{let _=events.send(Event::CarryPrefs(Ok(config.clone())));config},Err(e)=>{let _=events.send(Event::CarryPrefs(Err(format!("Could not restore Carry the line preferences: {e:#}"))));Default::default()}};
-    let (provider_selected,provider_renderer,provider_pending,provider_retired,provider_gate,provider_reserved)=provider_args;
-    let selected=crate::audio_devices::restored_provider(&audio_preferences);
-    let selected_error=selected.as_ref().err().map(|e|format!("{e:#}"));
-    let selected=selected.unwrap_or(crate::audio_devices::Provider::Unsupported);
-    provider_selected.store(selected.code(),Ordering::Release);
-    let availability=crate::audio_devices::providers(&alive);
-    let unavailable_error=availability.as_ref().ok().and_then(|facts|facts.require_available(selected).err()).map(|e|format!("{e:#}"));
-    let mut provider_state=provider_control::ProviderState{snapshot:ProviderSnapshot{selected,availability:availability.as_ref().ok().cloned(),error:selected_error.or(unavailable_error).or_else(||availability.err().map(|e|format!("{e:#}"))),..Default::default()},
-        renderer:provider_renderer,pending:provider_pending,retired:provider_retired.clone(),gate:provider_gate,reserved:provider_reserved};
-    let restored_output=crate::audio_devices::scoped_output_uid(&audio_preferences,selected,cfg!(windows));
-    let mut output_uid=restored_output.as_ref().cloned().unwrap_or_else(|_|crate::audio_devices::output_uid(&audio_preferences).unwrap_or_default());
-    let prefs_error=prefs_error.or_else(||restored_output.err().map(|e|format!("Could not restore audio output: {e:#}")));
-    let _ = events.send(Event::KaraokePref(crate::audio_devices::karaoke(&audio_preferences)));
-    let _ = events.send(Event::AudioPrefs(output_uid.clone(), prefs_error));
-    let _ = events.send(Event::InputPrefs(
-        crate::microphone::Prefs::read(&audio_preferences).map_err(|e| e.to_string()),
-    ));
-    let mut connection: Option<Connection> = None;
-    let mut active_training: Option<(u64, u64)> = None;
-    let mut monitor_lease = false;
-    let mut analysis: Option<thread::JoinHandle<()>> = None;
-    let mut analysis_cancel:Option<Arc<AtomicBool>>=None;
-    let mut beat_analysis: Option<thread::JoinHandle<()>> = None;
-    let mut lyrics_envelope: Option<thread::JoinHandle<()>> = None;
-    let mut lyrics_alignment: Option<thread::JoinHandle<()>> = None;
-    let mut lyrics_search: Option<thread::JoinHandle<()>> = None;
-    let mut deletions:Vec<thread::JoinHandle<()>>=vec![];
-    let client=Arc::new(lyrics_client());
-    let mut poll = Instant::now();
-    let mut shutdown_preference = None;
-    let mut shutdown_carry=None;
-    let mut shutdown_karaoke=None;
-    while alive.load(Ordering::Acquire) {
-        provider_state.publish(&events,latest.load(Ordering::Acquire),connection.is_some(),monitor_lease,active_training.is_some(),training_intent.load(Ordering::Acquire));
-        let mut index=0;while index<deletions.len(){if deletions[index].is_finished(){let _=deletions.swap_remove(index).join();}else{index+=1;}}
-        // Cancellation intent bypasses the bounded command queue. Navigation
-        // must still retire a live cue if that queue is full.
-        if let Some((epoch, generation)) = active_training {
-            if training_intent.load(Ordering::Acquire) != generation
-                || latest.load(Ordering::Acquire) != epoch
-            {
-                if let Some(child) = connection.as_mut().filter(|c| c.epoch == epoch) {
-                    match child.command(&format!("cue-cancel {generation}")) {
-                        Ok(status)
-                            if status.training_only
-                                && (training_intent.load(Ordering::Acquire) == 0
-                                    || latest.load(Ordering::Acquire) != epoch) =>
-                        {
-                            drop(connection.take())
-                        }
-                        Err(_) => drop(connection.take()),
-                        _ => {}
-                    }
-                }
-                active_training = None;
-            }
-        }
-        let request = requests.recv_timeout(Duration::from_millis(20));
-        // Save completion is memory-only here. Do this after waiting, so a
-        // command sent in response to Saved cannot overtake its cache update.
-        let reanchors = std::mem::take(&mut *save_reanchors.lock().unwrap_or_else(|e| e.into_inner()));
-        for saved in reanchors {
-            if let Some(child) = connection.as_mut().filter(|child| child.epoch == saved.epoch && child.project_dir.as_ref() == Some(&saved.dir)) {
-                for (index, lane) in child.loaded_lanes.iter_mut().enumerate() {
-                    if let Some(source) = saved.custom.iter().find(|source| source.id == lane.id) {
-                        lane.file = source.file.clone();
-                        if let Some((_, stamp)) = saved.stamps.iter().find(|(id, _)| id == &lane.id) {
-                            if let Some(target) = child.loaded_stamps.get_mut(index) { *target = *stamp; }
-                        }
-                    }
-                }
-            }
-        }
-        let _provider_work=request.as_ref().ok().filter(|r|provider_control::ownership_request(r)).map(|_|provider_control::PendingWork(provider_state.pending.clone()));
-        match request {
-            // Drop can request shutdown while recv_timeout is waiting. Keep a
-            // received adoption, but never dispatch queued audio after observing
-            // that request. The remaining adoptions are drained below in FIFO.
-            Ok(request) if !alive.load(Ordering::Acquire) => {
-                match request{Request::AdoptMetronomePreferences(_,met)=>shutdown_preference=Some(met),Request::AdoptCarryPreferences(_,config)=>shutdown_carry=Some(config),Request::KaraokePref(_,enabled)=>shutdown_karaoke=Some(enabled),_=>{}}
-                break;
-            }
-            Ok(Request::Provider(serial,revision,epoch,renderer,provider))=>{
-                provider_state.choose(&events,&latest,&alive,&provider_selected,serial,revision,epoch,renderer,provider,
-                    connection.is_some(),monitor_lease,active_training.is_some(),&training_intent,&mut output_uid);
-            }
-            Ok(Request::Training(epoch, phrase)) => {
-                let generation = phrase.generation;
-                if epoch != latest.load(Ordering::Acquire)
-                    || training_intent.load(Ordering::Acquire) != generation
-                {
-                    continue;
-                }
-                let result = (|| -> Result<Option<Status>> {
-                    anyhow::ensure!(
-                        !monitor_lease,
-                        "Stop microphone monitoring before playing training audio"
-                    );
-                    if connection.is_none() {
-                        let (child, _) = Connection::open(
-                            None,
-                            epoch,
-                            latest.clone(),
-                            alive.clone(),
-                            copy_handoff.clone(),
-                            &output_uid,
-                            crate::audio_devices::Provider::from_code(provider_selected.load(Ordering::Acquire)),provider_retired.clone(),
-                        )?;
-                        connection = Some(child);
-                    }
-                    let child = connection
-                        .as_mut()
-                        .filter(|c| c.epoch == epoch)
-                        .context("Training audio project changed")?;
-                    let status = child.command(&phrase.command()?)?;
-                    if training_intent.load(Ordering::Acquire) != generation
-                        || epoch != latest.load(Ordering::Acquire)
-                    {
-                        let stopped = child.command(&format!("cue-cancel {generation}"))?;
-                        if stopped.training_only
-                            && (training_intent.load(Ordering::Acquire) == 0
-                                || latest.load(Ordering::Acquire) != epoch)
-                        {
-                            drop(connection.take());
-                        }
-                        return Ok(None);
-                    }
-                    Ok(Some(status))
-                })();
-                if let Err(error)=&result {
-                    drop(connection.take());
-                    *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                    let _=events.send(Event::TransportFailed(epoch,format!("{error:#}")));
-                }
-                if matches!(&result, Ok(Some(_))) {
-                    active_training = Some((epoch, generation));
-                }
-                let _ = events.send(Event::Training(
-                    epoch,
-                    generation,
-                    result.map_err(|e| format!("{e:#}")),
-                ));
-            }
-            Ok(Request::CancelTraining(epoch, generation)) => {
-                if active_training == Some((epoch, generation)) {
-                    active_training = None;
-                }
-                let result = (|| -> Result<Option<Status>> {
-                    if let Some(child) = connection.as_mut().filter(|c| c.epoch == epoch) {
-                        let status = child.command(&format!("cue-cancel {generation}"))?;
-                        if status.training_only
-                            && training_intent.load(Ordering::Acquire) == 0
-                            && status.cue.generation == generation
-                            && !status.cue.active
-                            && status.cue.start_host_ns == 0
-                        {
-                            drop(connection.take());
-                            return Ok(None);
-                        }
-                        return Ok(Some(status));
-                    }
-                    Ok(None)
-                })();
-                if let Err(error)=&result {
-                    drop(connection.take());
-                    *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                    let _=events.send(Event::TransportFailed(epoch,format!("{error:#}")));
-                }
-                *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                let _ = events.send(Event::Training(
-                    epoch,
-                    generation,
-                    result.map_err(|e| format!("{e:#}")),
-                ));
-            }
-            Ok(Request::Park(epoch, serial, parked)) => {
-                let result = (|| -> Result<Option<Status>> {
-                    anyhow::ensure!(
-                        epoch == latest.load(Ordering::Acquire),
-                        "Playback project changed during monitoring handoff"
-                    );
-                    if let Some(child) = connection.as_mut().filter(|c| c.epoch == epoch) {
-                        let status = child.command(if parked { "park" } else { "unpark" })?;
-                        anyhow::ensure!(
-                            status.parked == parked && (!parked || status.physical_output_released),
-                            "Playback output release was not confirmed"
-                        );
-                        Ok(Some(status))
-                    } else {
-                        Ok(None)
-                    }
-                })();
-                if result.is_ok() {
-                    monitor_lease = parked;
-                }
-                if result.is_err() {
-                    monitor_lease = false;
-                    // Never leave an uncertain live output behind a failed handoff.
-                    // Connection Drop kills/waits before the failure is published.
-                    drop(connection.take());
-                    let _ = events.send(Event::TransportFailed(
-                        epoch,
-                        "Native playback handoff failed; retry the output route in Settings".into(),
-                    ));
-                }
-                *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                let _ = events.send(Event::Parked(
-                    epoch,
-                    serial,
-                    parked,
-                    result.map_err(|e| format!("{e:#}")),
-                ));
-            }
-            Ok(Request::KaraokePref(sequence,enabled)) => {
-                let error=crate::audio_devices::save_karaoke(enabled).err().map(|error|
-                    format!("Karaoke mode changed, but its preference could not be saved: {error:#}"));
-                let _=events.send(Event::KaraokePrefSaved(sequence,error));
-            }
-            Ok(Request::InputPrefs(sequence, prefs)) => {
-                let error = crate::audio_devices::save_input(&prefs).err().map(|e| {
-                    format!(
-                        "Microphone choice was applied, but preferences could not be saved: {e:#}"
-                    )
-                });
-                let _ = events.send(Event::InputPrefsSaved(sequence, error));
-            }
+#[path="integration_jobs.rs"]
+mod jobs;
+#[path="integration_transport.rs"]
+mod transport_actor;
 
-            #[cfg(feature="ui-tests")]
-            Ok(Request::FailOwnedAudio(epoch)) => {
-                if epoch==latest.load(Ordering::Acquire) && std::env::var("SINGZ_MUTE").as_deref()==Ok("1") {
-                    if let Some(child)=connection.as_mut().filter(|c|c.epoch==epoch) {
-                        // Only the Child handle owned by this backend may be faulted.
-                        // The ordinary status reader detects the broken transport.
-                        let _=child.child.kill();let _=child.child.wait();
-                    }
-                }
-            }
-            #[cfg(feature = "ui-tests")]
-            Ok(Request::ProbeOwnedAudio(epoch, reply)) => {
-                let result = (|| -> Result<OwnedAudioProbe> {
-                    anyhow::ensure!(alive.load(Ordering::Acquire) && latest.load(Ordering::Acquire)==epoch, "Native probe superseded");
-                    let child=connection.as_mut().filter(|c|c.epoch==epoch).context("No matching owned helper for native probe")?;
-                    let helper_pid=child.child.id();
-                    let status=child.command("status")?;
-                    anyhow::ensure!(alive.load(Ordering::Acquire) && latest.load(Ordering::Acquire)==epoch, "Native probe superseded");
-                    Ok(OwnedAudioProbe {epoch,helper_pid,monitor_leased:monitor_lease,active_training,status})
-                })().map_err(|error|format!("{error:#}"));
-                let _=reply.send(result);
-            }
-            Ok(Request::ReadPublication(epoch,serial,publication)) => {
-                let result=(||->Result<Project>{
-                    anyhow::ensure!(alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch,"Publication adoption superseded");
-                    let project=recovery::read_publication(&publication)?;
-                    anyhow::ensure!(alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch,"Publication adoption superseded");
-                    Ok(project)
-                })().map_err(|e|format!("{e:#}"));
-                let _=events.send(Event::PublicationRead(epoch,serial,result));
-            }
-            Ok(Request::RecoverOutput(epoch,serial,request,uid)) => {
-                let result=(||->Result<RecoveredAudio>{
-                    anyhow::ensure!(alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch,"Output recovery superseded");
-                    anyhow::ensure!(!monitor_lease,"Stop microphone monitoring before recovering playback output");
-                    anyhow::ensure!(uid.len()<=2000&&!uid.contains('\0'),"Invalid output device");
-                    let (status,media)=if !request.replace && connection.as_ref().is_some_and(|c|c.epoch==epoch) {
-                        let routed=connection.as_mut().unwrap().output_route(&uid);
-                        let status=match routed {
-                            Ok(status)=>status,
-                            Err(LaneReplaceFailure::Refused(error))=>bail!("{error}"),
-                            Err(LaneReplaceFailure::Disconnected(error)|LaneReplaceFailure::Committed(error))=>{
-                                drop(connection.take());
-                                *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                                bail!("{error}");
-                            }
-                        };
-                        (status,None)
-                    } else {
-                        drop(connection.take());
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                        active_training=None;training_intent.store(0,Ordering::Release);
-                        let (child,status,media)=recovery::prepare(&request,epoch,latest.clone(),alive.clone(),copy_handoff.clone(),&uid,crate::audio_devices::Provider::from_code(provider_selected.load(Ordering::Acquire)),provider_retired.clone())?;
-                        connection=Some(child);(status,Some(media))
-                    };
-                    anyhow::ensure!(uid.is_empty()||status.output_uid==uid,"Native output differs from the selected device");
-                    anyhow::ensure!(alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch,"Output recovery superseded");
-                    output_uid=uid;
-                    let preference_error=crate::audio_devices::save(&output_uid).err().map(|e|format!("Output applied, but preferences could not be saved: {e:#}"));
-                    Ok(RecoveredAudio{status,preference_error,media})
-                })().map_err(|e|format!("{e:#}"));
-                if result.is_err() && connection.is_none() && epoch==latest.load(Ordering::Acquire) {
-                    let _=events.send(Event::TransportFailed(epoch,"Native output is unavailable".into()));
-                }
-                let _=events.send(Event::OutputRecovered(epoch,serial,output_uid.clone(),result));
-            }
-            Ok(Request::Output(uid)) => {
-                let epoch = connection.as_ref().map_or(0, |c| c.epoch);
-                let result = (|| -> Result<Option<Status>> {
-                    anyhow::ensure!(
-                        !monitor_lease,
-                        "Stop microphone monitoring before changing playback output"
-                    );
-                    anyhow::ensure!(
-                        uid.len() <= 2000 && !uid.contains('\0'),
-                        "Invalid output device"
-                    );
-                    if let Some(child) = connection
-                        .as_mut()
-                        .filter(|c| c.epoch == latest.load(Ordering::Acquire))
-                    {
-                        let routed=child.output_route(&uid);
-                        let status=match routed {
-                            Ok(status)=>status,
-                            Err(LaneReplaceFailure::Refused(error))=>bail!("{error}"),
-                            Err(LaneReplaceFailure::Disconnected(error)|LaneReplaceFailure::Committed(error))=>{
-                                drop(connection.take());
-                                *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                                let _=events.send(Event::TransportFailed(epoch,error.clone()));
-                                bail!("{error}");
-                            }
-                        };
-                        anyhow::ensure!(
-                            uid.is_empty() || status.output_uid == uid,
-                            "Native output differs from the selected device"
-                        );
-                        Ok(Some(status))
-                    } else {
-                        crate::audio_devices::inventory_with_provider(&alive,crate::audio_devices::Provider::from_code(provider_selected.load(Ordering::Acquire)))?.output(&uid)?;
-                        Ok(None)
-                    }
-                })();
-                match result {
-                    Ok(status) => {
-                        output_uid = uid.clone();
-                        let error = match crate::audio_devices::save(&uid) {
-                            Ok(_) => None,
-                            Err(e) => Some(format!(
-                                "Output applied, but preferences could not be saved: {e}"
-                            )),
-                        };
-                        let _ = events.send(Event::OutputChanged(epoch, uid, status, error));
-                    }
-                    Err(error) => {
-                        let _ = events.send(Event::OutputChanged(
-                            epoch,
-                            output_uid.clone(),
-                            None,
-                            Some(format!("{error:#}")),
-                        ));
-                    }
-                }
-            }
-            Ok(Request::Catalog(serial,catalog_intent)) => {
-                // Library/cloud filesystem access must not queue ahead of Pause/Stop.
-                let events = events.clone();
-                let alive = alive.clone();
-                thread::spawn(move || {
-                    let root = library_root();
-                    // Local crash recovery must also work while Drive is signed
-                    // out. It finishes before enumerating restored/moved rows.
-                    if root.is_dir() {
-                        let config = crate::audio_devices::directory();
-                        let recovery = crate::drive_local_ops::Store::new(config.clone())
-                            .recover_prepared(&root, &crate::sync_dirty::Store::new(config),
-                                |from, to| crate::project_delete::exclusive_move(from, to)
-                                    .map_err(anyhow::Error::from));
-                        match recovery {
-                            Ok(report) => for warning in report.warnings.iter().chain(report.blocked.iter()) {
-                                crate::diagnostics::event("projects", warning.clone(), crate::diagnostics::Level::Warn);
-                            },
-                            Err(error) => crate::diagnostics::event("projects",
-                                format!("Local project recovery remains unresolved: {error:#}"), crate::diagnostics::Level::Warn),
-                        }
-                    }
-                    let mut projects = vec![];
-                    if let Ok(entries) = fs::read_dir(&root) {
-                        for entry in entries.flatten() {
-                            if [".native-import-", ".native-split-", ".singz-adopting-", ".singz-library-", ".singz-native-"]
-                                .iter().any(|prefix|entry.file_name().to_string_lossy().starts_with(prefix))
-                            {
-                                continue;
-                            }
-                            if !alive.load(Ordering::Acquire)||catalog_intent.load(Ordering::Acquire)!=serial {
-                                return;
-                            }
-                            if entry.path().is_dir() {
-                                if let Ok(project) = read_project_mode(&entry.path(), false) {
-                                    projects.push(project)
-                                }
-                            }
-                        }
-                    }
-                    projects
-                        .sort_by(|a, b| b.saved.cmp(&a.saved).then_with(|| a.name.cmp(&b.name)));
-                    if alive.load(Ordering::Acquire)&&catalog_intent.load(Ordering::Acquire)==serial{
-                        let _ = events.send(Event::Catalog(serial,root,projects));
-                    }
-                });
-            }
-            Ok(Request::ResolveLyrics(epoch,serial,project,mode))=>{
-                if latest.load(Ordering::Acquire)!=epoch||lyrics_align_intent.load(Ordering::Acquire)!=serial{
-                    let _=events.send(Event::LyricsResolved(epoch,serial,Err(crate::lyrics_align::Failure::Cancelled)));
-                    #[cfg(feature="ui-tests")]
-                    let _=events.send(Event::LyricsJobSettled(epoch,serial));
-                    continue;
-                }
-                if let Some(job)=lyrics_alignment.take(){let _=job.join();}
-                let latest=latest.clone();let alive=alive.clone();let intent=lyrics_align_intent.clone();let events=events.clone();let client=client.clone();let text=text.clone();
-                lyrics_alignment=Some(thread::spawn(move||{
-                    let cancel=||!alive.load(Ordering::Acquire)||latest.load(Ordering::Acquire)!=epoch||intent.load(Ordering::Acquire)!=serial;
-                    let result=crate::lyrics_resolution::run(&project,mode,&client,&cancel,&|progress|{let _=events.send(Event::LyricsAlignmentProgress(epoch,serial,progress));})
-                        .and_then(|p|publish_resolved_lyrics(&project,p,&text,&cancel));
-                    let _=events.send(Event::LyricsResolved(epoch,serial,result));
-                    #[cfg(feature="ui-tests")]
-                    let _=events.send(Event::LyricsJobSettled(epoch,serial));
-                }));
-            }
-            Ok(Request::SearchLyrics(epoch,serial,query,duration))=>{
-                if latest.load(Ordering::Acquire)!=epoch||lyrics_search_intent.load(Ordering::Acquire)!=serial{continue;}
-                if let Some(job)=lyrics_search.take(){let _=job.join();}
-                let latest=latest.clone();let alive=alive.clone();let intent=lyrics_search_intent.clone();let events=events.clone();let client=client.clone();
-                lyrics_search=Some(thread::spawn(move||{
-                    let cancel=||!alive.load(Ordering::Acquire)||latest.load(Ordering::Acquire)!=epoch||intent.load(Ordering::Acquire)!=serial;
-                    let query=crate::lrclib::SearchQuery{free:Some(query),artist:None,title:None};
-                    let result=client.search(&query,duration,&cancel).map_err(|e|format!("{e:#}"));
-                    if !cancel(){let _=events.send(Event::LyricsSearch(epoch,serial,result));}
-                }));
-            }
-            Ok(Request::LyricsCapabilities)=>{let _=events.send(Event::LyricsCapabilities(crate::lyrics_align::capability()));}
-            Ok(Request::AlignLyrics(epoch,serial,project,draft,tier))=>{
-                if latest.load(Ordering::Acquire)!=epoch||lyrics_align_intent.load(Ordering::Acquire)!=serial{continue;}
-                if let Some(job)=lyrics_alignment.take(){let _=job.join();}
-                let latest=latest.clone();let alive=alive.clone();let intent=lyrics_align_intent.clone();let events=events.clone();
-                lyrics_alignment=Some(thread::spawn(move||{
-                    let cancel=||!alive.load(Ordering::Acquire)||latest.load(Ordering::Acquire)!=epoch||intent.load(Ordering::Acquire)!=serial;
-                    let result=crate::lyrics_align::capture(&project,draft,project.pitch.duration as f64,tier)
-                        .map_err(|e|crate::lyrics_align::Failure::Error(format!("{e:#}")))
-                        .and_then(|input|crate::lyrics_align::run(&input,&cancel,&|progress|{let _=events.send(Event::LyricsAlignmentProgress(epoch,serial,progress));}));
-                    if !cancel(){let _=events.send(Event::LyricsAligned(epoch,serial,result));}
-                }));
-            }
-            Ok(Request::LyricsEnvelope(epoch,serial,project)) => {
-                if latest.load(Ordering::Acquire)!=epoch||lyrics_preview_intent.load(Ordering::Acquire)!=serial{continue;}
-                if let Some(job)=lyrics_envelope.take(){let _=job.join();}
-                let latest=latest.clone();let alive=alive.clone();let intent=lyrics_preview_intent.clone();let events=events.clone();
-                lyrics_envelope=Some(thread::spawn(move||{
-                    let cancel=||!alive.load(Ordering::Acquire)||latest.load(Ordering::Acquire)!=epoch||intent.load(Ordering::Acquire)!=serial;
-                    let result=(||->Result<Arc<crate::lyrics_envelope::Envelopes>>{
-                        let source=&project.lanes.iter().find(|(i,_)|*i==0).context("No vocal source")?.1;
-                        crate::lyrics_envelope::run(source,project.vocal_stamp.context("Missing loaded vocal identity")?,&cancel)
-                    })().map_err(|e|format!("{e:#}"));
-                    if !cancel(){let _=events.send(Event::LyricsEnvelope(epoch,serial,result));}
-                }));
-            }
-            Ok(Request::DetectBeats(epoch, serial, project)) => {
-                if latest.load(Ordering::Acquire) != epoch || beat_intent.load(Ordering::Acquire) != serial {continue;}
-                if let Some(task) = beat_analysis.take() {let _ = task.join();}
-                let latest = latest.clone();let alive = alive.clone();let intent = beat_intent.clone();let events = events.clone();
-                beat_analysis = Some(thread::spawn(move || {
-                    let cancel = || !alive.load(Ordering::Acquire) || latest.load(Ordering::Acquire) != epoch || intent.load(Ordering::Acquire) != serial;
-                    let result = (|| -> Result<crate::beat_analysis::Output> {
-                        anyhow::ensure!(project.lanes.len() == project.lane_stamps.len(), "Missing loaded beat source stamps");
-                        for ((slot,path),stamp) in project.lanes.iter().zip(&project.lane_stamps).filter(|((slot,_),_)|*slot<crate::tracks::BUILTIN_SLOTS) {
-                            let _=slot;anyhow::ensure!(crate::project_analysis::stamp(path)? == *stamp, "Beat input changed after project loading");
-                        }
-                        let lines = project.lyrics.as_ref().map(|d| d.lines.iter().map(|l| l.words.first().map_or(l.start, |w|w.start) as f64).collect()).unwrap_or_default();
-                        let words = project.lyrics.as_ref().map(|d| d.lines.iter().flat_map(|l| l.words.iter().map(|w|(w.start as f64,w.end as f64))).collect()).unwrap_or_default();
-                        let input = crate::beat_analysis::capture(project.lanes.iter().filter(|(slot,_)|*slot<crate::tracks::BUILTIN_SLOTS).cloned().collect(), project.pitch.duration as f64, epoch, serial, lines, words)?;
-                        input.verify_loaded(&project.lanes, &project.lane_stamps)?;
-                        let output = crate::beat_analysis::run_with_progress(&input, &cancel, &|p| {let _ = events.send(Event::BeatsProgress(epoch, serial, p));})?;
-                        input.verify_loaded(&project.lanes, &project.lane_stamps)?;
-                        Ok(output)
-                    })().map_err(|e|format!("{e:#}"));
-                    if !cancel() {let _ = events.send(Event::BeatsDetected(epoch, serial, result));}
-                }));
-            }
-            Ok(Request::Open(epoch, path, fallback, confirmed, overlay)) => {
-                if monitor_lease {
-                    let _ = events.send(Event::Error(
-                        epoch,
-                        "Stop microphone monitoring before opening a project".into(),
-                    ));
-                    continue;
-                }
-
-                if epoch != latest.load(Ordering::Acquire) {
-                    continue;
-                }
-                stop_analysis(&mut analysis,&mut analysis_cancel);
-                let result = (|| -> Result<(Connection, Project, Status, Vec<Vec<f32>>)> {
-                    let mut project = read_open_project_overlay(&path,confirmed.as_ref(),overlay.as_ref())?;
-                    if !project.raw["settings"]["training"].is_object(){project.carry.config=global_carry.clone();}
-                    if let Some(overlay)=&overlay{project.carry=overlay.mix.carry.clone();}
-                    if project.empty_tracks{project.carry.enabled=false;}
-
-                    if !project.raw["settings"]["metronome"].is_object() {
-                        project.metronome = fallback.unwrap_or_else(|| global_met.clone());
-                    }
-                    let met_commands =
-                        crate::beat::commands(&project.metronome, project.beat.as_ref())?;
-
-                    #[cfg(feature="ui-tests")]
-                    if overlay.as_ref().is_some_and(|overlay| overlay.preserve_generated) {
-                        crate::project_import::test_gate("SINGZ_GPUI_SPLIT_LOAD_GATE", &||
-                            !alive.load(Ordering::Acquire) || latest.load(Ordering::Acquire) != epoch)?;
-                    }
-                    // Validate before retiring the previous output. Kill/wait proves the old process can no longer own a device.
-                    if let Some(target)=confirmed.as_ref(){verify_delete_recovery_path(&path,target)?;}
-                    drop(connection.take());
-                    let prepared = Connection::open(
-                        Some(&project),
-                        epoch,
-                        latest.clone(),
-                        alive.clone(),
-                        copy_handoff.clone(),
-                        &output_uid,
-                        crate::audio_devices::Provider::from_code(provider_selected.load(Ordering::Acquire)),provider_retired.clone(),
-                    )?;
-                    let (mut child,value)=checked_delete_recovery(&path,confirmed.as_ref(),prepared)?;
-                    child.command(&format!("master {}", project.master))?;
-                    // Prepare even gridless intent: previews and the global
-                    // count-in preference must survive songs without settings.
-                    if project.has_audio(){child.metronome(&met_commands)?;}
-                    for (lane, (i, _)) in project.lanes.iter().enumerate() {
-                        child.command(&format!(
-                            "lane {lane} {} {} {}",
-                            project.gain[*i],
-                            u8::from(project.muted[*i]),
-                            u8::from(project.solo[*i])
-                        ))?;
-                    }
-                    match crate::lyrics_store::identity(&project.dir){
-                        Ok(identity)=>project.lyrics_fingerprint=identity,
-                        Err(error)=>project.lyrics_error=Some(error.to_string()),
-                    }
-                    match crate::lyrics_store::read(&project.dir) {
-                        Ok(snapshot) if snapshot.document.is_some() => {
-                            project.lyrics_raw=snapshot.raw;project.lyrics_fingerprint=snapshot.fingerprint;
-                            let mut lyrics=snapshot.document.unwrap();
-                            match crate::project_lyrics::prepare_masks(&mut lyrics, &text, || {
-                                !alive.load(Ordering::Acquire)
-                                    || latest.load(Ordering::Acquire) != epoch
-                            }) {
-                                Ok(()) => project.lyrics = Some(Arc::new(lyrics)),
-                                Err(error) => project.lyrics_error = Some(error.to_string()),
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(error) => project.lyrics_error = Some(error.to_string()),
-                    }
-                    if epoch != latest.load(Ordering::Acquire) {
-                        bail!("Project load superseded")
-                    }
-                    let status = Status::parse(&value)?;
-                    project.vocal_duration=vocal_lane_duration(&value)?;
-                    Arc::make_mut(&mut project.pitch).bind_duration_for_lane(status.duration,project.vocal_duration);
-                    if project.has_audio() && (project.looping || project.selection.is_some()) {
-                        let target=crate::region_gesture::Target{selection:project.selection,looping:project.looping};
-                        child.command(&target.command(status.duration))?;
-                    }
-                    let peaks = peaks_from(&value);
-                    let status=if let Some(carry)=open_carry_plan(&mut project,status.duration as f64)?{
-                        child.carry_with_arming(&carry,false).map_err(|failure|anyhow::anyhow!("{}",match failure{LaneReplaceFailure::Refused(e)|LaneReplaceFailure::Disconnected(e)|LaneReplaceFailure::Committed(e)=>e}))?
-                    }else{
-                        // A genuine empty document has no training-duck graph.
-                        // Retain disabled preferences, and confirm its actual
-                        // released native state instead of issuing graph IPC.
-                        child.command("status")?
-                    };
-                    checked_delete_recovery(&path,confirmed.as_ref(),(child,project,status,peaks))
-                })();
-                match result {
-                    Ok((child, mut project, status, peaks)) => {
-                        connection = Some(child);
-                        if crate::project_analysis::needed(&project) {
-                            let snapshot = project.clone();
-                            let events = events.clone();
-                            let latest = latest.clone();
-                            let alive = alive.clone();
-                            Arc::make_mut(&mut project.pitch).warning =
-                                Some("Analyzing song…".into());
-                            // Start after Opened is published so the result cannot overtake its project.
-                            let _ = events.send(Event::Opened(epoch, project, status, peaks));
-                            restart_analysis(Some(snapshot),epoch,&events,&latest,&alive,&mut analysis,&mut analysis_cancel);
-                            continue;
-                        }
-                        let _ = events.send(Event::Opened(epoch, project, status, peaks));
-                    }
-                    Err(e) => {
-                        drop(connection.take());
-                        let _ = events.send(Event::Error(epoch, format!("{e:#}")));
-                    }
-                }
-            }
-            Ok(Request::SaveLyrics(epoch, serial, dir, expected, lines, credit)) => {
-                let result = (|| -> Result<ResolvedLyrics> {
-                    anyhow::ensure!(latest.load(Ordering::Acquire)==epoch,"Lyrics Save superseded");
-                    let (_,mut document)=crate::lyrics_store::edited_value(None,&lines,credit.as_deref())?;
-                    crate::project_lyrics::prepare_masks(&mut document,&text,||!alive.load(Ordering::Acquire)||latest.load(Ordering::Acquire)!=epoch)?;
-                    anyhow::ensure!(alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch,"Lyrics Save superseded");
-                    let saved=crate::lyrics_store::save(&dir,expected.as_deref(),&lines,credit.as_deref())?;
-                    // The explicit editor snapshot owns source and credit;
-                    // keep prepared masks while retaining its published metadata.
-                    if let Some(persisted)=saved.document {
-                        document.source=persisted.source;
-                        document.credit=persisted.credit;
-                    }
-                    #[cfg(feature="ui-tests")]
-                    if let Some(gate)=std::env::var_os("SINGZ_GPUI_LYRICS_TEST_RECEIPT_GATE").map(PathBuf::from).filter(|p|p.exists()) {
-                        let _=std::fs::write(gate.with_extension("ready"),b"saved");
-                        let deadline=Instant::now()+Duration::from_secs(5);
-                        while gate.exists()&&alive.load(Ordering::Acquire)&&Instant::now()<deadline {thread::sleep(Duration::from_millis(10));}
-                    }
-                    let raw=saved.raw.context("Saved lyrics metadata is missing")?;
-                    let mut warnings=vec![];
-                    if let Err(e)=crate::sync_dirty::mark_file(&dir.join("lyrics.json"),"lyrics") {warnings.push(format!("Lyrics were saved, but the pending-sync record could not be written: {e:#}. Save again to retry."));}
-                    Ok(ResolvedLyrics{document:Arc::new(document),fingerprint:saved.fingerprint,raw,check:None,written:true,cached:false,warnings})
-                })().map_err(|e|format!("{e:#}"));
-                let _=events.send(Event::LyricsSaved(epoch,serial,result));
-            }
-            Ok(Request::ReplaceLanes(epoch,serial,mut candidate,additions,intent))=>{
-                if latest.load(Ordering::Acquire)!=epoch||intent.load(Ordering::Acquire)!=serial{let _=events.send(Event::LanesReplaced(epoch,serial,Err("Track edit superseded".into())));continue;}
-                let refused_analysis=connection.as_ref().filter(|c|c.epoch==epoch&&c.project_dir.as_ref()==Some(&candidate.dir)).and_then(|c|accepted_analysis_snapshot(&candidate,&c.loaded_lanes,&c.loaded_stamps));
-                stop_analysis_for_epoch(&mut analysis,&mut analysis_cancel,&events,epoch);
-                beat_intent.store(0,Ordering::Release);lyrics_preview_intent.store(0,Ordering::Release);lyrics_align_intent.store(0,Ordering::Release);lyrics_search_intent.store(0,Ordering::Release);
-                if let Some(job)=beat_analysis.take(){let _=job.join();}if let Some(job)=lyrics_envelope.take(){let _=job.join();}if let Some(job)=lyrics_alignment.take(){let _=job.join();}if let Some(job)=lyrics_search.take(){let _=job.join();}
-                let validation=(||->Result<()>{
-                    anyhow::ensure!(!monitor_lease&&active_training.is_none(),"Release microphone monitoring/training before editing tracks");
-                    let child=connection.as_ref().filter(|c|c.epoch==epoch).context("Native project is unavailable")?;
-                    anyhow::ensure!(child.project_dir.as_ref()==Some(&candidate.dir),"Track edit belongs to a different project");
-                    let cancel=||!alive.load(Ordering::Acquire)||latest.load(Ordering::Acquire)!=epoch||intent.load(Ordering::Acquire)!=serial;
-                    prevalidate_new_tracks(&mut candidate,&child.loaded_lanes,&additions,&cancel)?;
-                    prepare_lane_candidate(&mut candidate,&child.loaded_lanes,&child.loaded_stamps,&cancel)
-                })();
-                if let Err(error)=validation{let _=events.send(Event::LanesReplaced(epoch,serial,Err(format!("{error:#}"))));restart_analysis(refused_analysis,epoch,&events,&latest,&alive,&mut analysis,&mut analysis_cancel);continue;}
-                let child=connection.as_mut().unwrap();let was_empty=child.loaded_lanes.is_empty();
-                let result=child.replace_lanes(&candidate).and_then(|(status,peaks,vocal_duration)|{
-                    let configured=configure_fresh_graph(was_empty,&candidate,|commands|child.metronome(commands))?;
-                    Ok((configured.unwrap_or(status),peaks,vocal_duration))
-                });
-                match result {
-                    Ok((status,peaks,vocal_duration))=>{
-                        candidate.vocal_duration=if candidate.empty_tracks{None}else{vocal_duration.or(candidate.vocal_duration)};
-                        let child=connection.as_mut().unwrap();child.loaded_lanes=candidate.lane_specs.clone();child.loaded_stamps=candidate.lane_stamps.clone();
-                        Arc::make_mut(&mut candidate.pitch).bind_duration_for_lane(status.duration,candidate.vocal_duration);
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,status.clone()));
-                        let snapshot=crate::project_analysis::needed(&candidate).then(||candidate.clone());
-                        let _=events.send(Event::LanesReplaced(epoch,serial,Ok((candidate,status,peaks))));
-                        restart_analysis(snapshot,epoch,&events,&latest,&alive,&mut analysis,&mut analysis_cancel);
-                    }
-                    Err(LaneReplaceFailure::Refused(error))=>{let _=events.send(Event::LanesReplaced(epoch,serial,Err(error)));restart_analysis(refused_analysis,epoch,&events,&latest,&alive,&mut analysis,&mut analysis_cancel);}
-                    Err(LaneReplaceFailure::Disconnected(error))=>{drop(connection.take());*telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;let _=events.send(Event::LanesTransportFailed(epoch,serial,error));}
-                    Err(LaneReplaceFailure::Committed(error))=>{drop(connection.take());*telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;let _=events.send(Event::LanesCommittedFailed(epoch,serial,candidate,error));}
-                }
-            }
-            Ok(Request::Delete(serial,epoch,was_loaded,target,armed))=>{
-                // The UI caller queues first, then commits the new epoch and
-                // arms this exact request. An unrelated accepted deletion is
-                // intentionally independent of subsequent song navigation.
-                while armed.load(Ordering::Acquire)==0&&alive.load(Ordering::Acquire){thread::yield_now();}
-                let prepared=(||->Result<()>{
-                    anyhow::ensure!(deletions.len()<4,"Project deletion queue is full");
-                    anyhow::ensure!(alive.load(Ordering::Acquire)&&armed.load(Ordering::Acquire)==1,"Project deletion was not accepted");
-                    if was_loaded {
-                        anyhow::ensure!(latest.load(Ordering::Acquire)==epoch,"Project changed before deletion could start");
-                        stop_analysis(&mut analysis,&mut analysis_cancel);
-                        if let Some(job)=beat_analysis.take(){let _=job.join();}
-                        if let Some(job)=lyrics_envelope.take(){let _=job.join();}
-                        if let Some(job)=lyrics_alignment.take(){let _=job.join();}
-                        if let Some(job)=lyrics_search.take(){let _=job.join();}
-                        active_training=None;
-                        drop(connection.take());
-                        copy_handoff.store(0,Ordering::Release);
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                    }else{
-                        anyhow::ensure!(!connection.as_ref().is_some_and(|c|c.project_dir.as_ref()==Some(&target.dir)),"Project became active before deletion; reopen its confirmation");
-                    }
-                    Ok(())
-                })();
-                if let Err(error)=prepared{let _=events.send(Event::Deleted(serial,epoch,was_loaded,Err(format!("{error:#}"))));continue;}
-                // Folder cleanup must not stall status/Pause for an unrelated
-                // project. Own these bounded jobs and join them at shutdown.
-                let alive=alive.clone();let latest=latest.clone();let events=events.clone();
-                deletions.push(thread::spawn(move||{
-                    let cancel=||delete_cancelled(was_loaded,epoch,&latest,&alive);
-                    // Domain owns config/root/project leases and verifies the
-                    // configured root there. It preserves committed success.
-                    let result=crate::project_delete::delete(&target,&crate::audio_devices::directory(),&cancel).map_err(|e|format!("{e:#}"));
-                    let _=events.send(Event::Deleted(serial,epoch,was_loaded,result));
-                }));
-            }
-            Ok(Request::ImportLibrary(epoch,input))=>{
-                if epoch!=latest.load(Ordering::Acquire){let _=copy_handoff.compare_exchange(epoch,0,Ordering::AcqRel,Ordering::Acquire);continue;}
-                stop_analysis(&mut analysis,&mut analysis_cancel);
-                if let Some(previous)=beat_analysis.take(){let _=previous.join();}
-                if let Some(previous)=lyrics_envelope.take(){let _=previous.join();}
-                if let Some(previous)=lyrics_alignment.take(){let _=previous.join();}
-                let copying=input.mode==crate::project_import::Mode::Copy;
-                if copying {if let Some(child)=&mut connection{child.epoch=epoch;}}
-                else {drop(connection.take());}
-                let _=copy_handoff.compare_exchange(epoch,0,Ordering::AcqRel,Ordering::Acquire);
-                *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                let cancel=||!alive.load(Ordering::Acquire)||latest.load(Ordering::Acquire)!=epoch;
-                let mut outcome=crate::project_import::execute(&input,&cancel);
-                if let Err(error)=crate::project_import::test_gate("SINGZ_GPUI_IMPORT_RECEIPT_GATE",&cancel){
-                    if outcome.warning.is_none(){outcome.warning=Some(format!("{error:#}"));}
-                }
-                let status=if copying&&!cancel(){connection.as_mut().and_then(|child|match child.command("status"){
-                    Ok(status)=>Some(status),Err(error)=>{if outcome.warning.is_none(){outcome.warning=Some(format!("Could not refresh playback after adding the project: {error:#}"));}None}
-                })}else{None};
-                let _=events.send(Event::ImportedLibrary(epoch,outcome,status));
-            }
-            Ok(Request::Rename(epoch, dir, expected, name)) => {
-                if epoch != latest.load(Ordering::Acquire) {
-                    continue;
-                }
-                stop_analysis(&mut analysis,&mut analysis_cancel);
-                // Release all native media handles before moving the directory,
-                // including on Windows. The UI reopens the authoritative path.
-                drop(connection.take());
-                *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                let (dir, warning) = match crate::project_rename::rename(&dir, &expected, &name) {
-                    Ok(result) => (result.dir, result.warning),
-                    Err(error) => (dir, Some(format!("{error:#}"))),
-                };
-                let identity = crate::project_store::read(&dir, "project.json")
-                    .ok()
-                    .and_then(|(raw, hash)| {
-                        raw["name"].as_str().map(|name| (name.to_owned(), hash))
-                    });
-                let _ = events.send(Event::Renamed(epoch, dir, warning, identity));
-            }
-            Ok(Request::Rate(epoch,serial,rate,transpose))=>{
-                if epoch!=latest.load(Ordering::Acquire){let _=events.send(Event::Rate(epoch,serial,Err("Tempo request superseded".into())));continue;}
-                let result=if monitor_lease||active_training.is_some(){Err(RateFailure::Refused("Release microphone monitoring/training before changing tempo".into()))}else{match connection.as_mut().filter(|c|c.epoch==epoch){Some(child)=>child.rate(rate,transpose),None=>Err(RateFailure::Refused("Native project is unavailable".into()))}};
-                #[cfg(feature="ui-tests")]
-                if result.is_ok()&&std::env::var_os("SINGZ_GPUI_TRANSPORT_TIMING_TEST").is_some(){if let Some(gate)=std::env::var_os("SINGZ_GPUI_RATE_RECEIPT_GATE").map(PathBuf::from).filter(|p|p.exists()){
-                    let _=fs::write(gate.with_extension("ready"),b"native-rate-applied");let deadline=Instant::now()+Duration::from_secs(5);while gate.exists()&&alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch&&Instant::now()<deadline{thread::sleep(Duration::from_millis(5));}
-                }}
-                match result{Ok(status)=>{*telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,status.clone()));let _=events.send(Event::Rate(epoch,serial,Ok(status)));},Err(RateFailure::Refused(error))=>{let _=events.send(Event::Rate(epoch,serial,Err(error)));},Err(RateFailure::Transport(error))=>{drop(connection.take());stop_analysis_for_epoch(&mut analysis,&mut analysis_cancel,&events,epoch);*telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;let _=events.send(Event::RateTransportFailed(epoch,serial,error));}}
-            }
-            Ok(Request::AdoptCarryPreferences(epoch,config))=>{
-                global_carry=config.clone();let error=crate::carry_line::retain(&crate::audio_devices::directory(),&config).err().map(|e|format!("Could not retain Carry the line preferences: {e:#}"));let _=events.send(Event::CarryPrefsSaved(epoch,0,error));
-            }
-            Ok(Request::Carry(epoch,serial,plan,intent))=>{
-                if epoch!=latest.load(Ordering::Acquire)||intent.load(Ordering::Acquire)!=serial{let _=events.send(Event::Carry(epoch,serial,Err("Carry the line request superseded".into())));continue;}
-                let result=if monitor_lease||active_training.is_some(){Err(LaneReplaceFailure::Refused("Release microphone monitoring/training before changing Carry the line".into()))}else{match connection.as_mut().filter(|c|c.epoch==epoch){Some(child)=>child.carry(&plan),None=>Err(LaneReplaceFailure::Refused("Native project is unavailable".into()))}};
-                #[cfg(feature="ui-tests")]
-                if result.is_ok()&&std::env::var_os("SINGZ_GPUI_CARRY_TEST").is_some(){
-                    if let Some(gate)=std::env::var_os("SINGZ_GPUI_CARRY_GATE").map(PathBuf::from).filter(|path|path.exists()){
-                        // The real native transaction has finished. Hold only
-                        // delivery, retaining its actual outcome on timeout or
-                        // navigation rather than fabricating a failed apply.
-                        let _=fs::write(gate.with_extension("ready"),b"native-carry-applied");
-                        let deadline=Instant::now()+Duration::from_secs(5);
-                        while gate.exists()&&alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch&&intent.load(Ordering::Acquire)==serial&&Instant::now()<deadline{thread::sleep(Duration::from_millis(5));}
-                    }
-                }
-                match result {
-                    Ok(status)=>{*telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,status.clone()));let _=events.send(Event::Carry(epoch,serial,Ok((plan.desired,status))));}
-                    Err(LaneReplaceFailure::Refused(error))=>{let _=events.send(Event::Carry(epoch,serial,Err(error)));}
-                    Err(LaneReplaceFailure::Disconnected(error))=>{drop(connection.take());stop_analysis_for_epoch(&mut analysis,&mut analysis_cancel,&events,epoch);*telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;let _=events.send(Event::CarryTransportFailed(epoch,serial,error));}
-                    Err(LaneReplaceFailure::Committed(error))=>{drop(connection.take());stop_analysis_for_epoch(&mut analysis,&mut analysis_cancel,&events,epoch);*telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;let _=events.send(Event::CarryCommittedFailed(epoch,serial,plan.desired,error));}
-                }
-            }
-            Ok(Request::AdoptMetronomePreferences(epoch, met)) => {
-                // This is an accepted app preference, not a pending audio
-                // command. Keep FIFO adoption even when later navigation has
-                // already advanced latest; that later legacy open must inherit
-                // the last preference the app actually displayed.
-                global_met = met.clone();
-                let error =
-                    crate::metronome_store::retain(&crate::audio_devices::directory(), &met)
-                        .err()
-                        .map(|e| format!("Could not save metronome preferences: {e:#}"));
-                let _ = events.send(Event::MetronomePrefsSaved(epoch, 0, error));
-            }
-            Ok(Request::Metronome(epoch, serial, met, beat)) => {
-                if epoch != latest.load(Ordering::Acquire) {
-                    continue;
-                }
-                let commands = match crate::beat::commands(&met, beat.as_ref()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = events.send(Event::Metronome(
-                            epoch,
-                            serial,
-                            met,
-                            beat,
-                            Err(e.to_string()),
-                        ));
-                        continue;
-                    }
-                };
-                let result = (|| -> Result<Status> {
-                    anyhow::ensure!(
-                        !monitor_lease,
-                        "Stop microphone monitoring before changing metronome audio"
-                    );
-                    let child = connection
-                        .as_mut()
-                        .filter(|c| c.epoch == epoch)
-                        .context("Metronome project changed")?;
-                    child.metronome(&commands)
-                })();
-                if result.is_err() && !monitor_lease {
-                    drop(connection.take());
-                    *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                    let _ = events.send(Event::TransportFailed(
-                        epoch,
-                        "Native metronome update failed; retry the output route in Settings".into(),
-                    ));
-                }
-                if let Ok(status) = &result {
-                    *telemetry.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some((epoch, status.clone()));
-                }
-                let preference_error = if result.is_ok() {
-                    global_met = met.clone();
-                    crate::metronome_store::retain(&crate::audio_devices::directory(), &met)
-                        .err()
-                        .map(|e| format!("Could not save metronome preferences: {e:#}"))
-                } else {
-                    None
-                };
-                let success = result.is_ok();
-                let _ = events.send(Event::Metronome(
-                    epoch,
-                    serial,
-                    met,
-                    beat,
-                    result.map_err(|e| format!("{e:#}")),
-                ));
-                if success {
-                    let _ =
-                        events.send(Event::MetronomePrefsSaved(epoch, serial, preference_error));
-                }
-            }
-            Ok(Request::Playback(epoch,serial,command,armed))=>{
-                while !armed.load(Ordering::Acquire)&&alive.load(Ordering::Acquire){thread::yield_now();}
-                let current=||alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch&&playback_intent.load(Ordering::Acquire)==serial;
-                if !current(){continue;}
-                let result=(||->Result<PlaybackReceipt>{
-                    validate_playback_command(&command)?;
-                    let child=connection.as_mut().filter(|child|child.epoch==epoch).context("Native playback project is unavailable")?;
-                    let reply=child.raw_command_for(&command,Duration::from_secs(10))?;
-                    let receipt=settle_playback_receipt(reply,Duration::from_secs(2),current,
-                        ||child.raw_command_for("status",Duration::from_secs(10)))?;
-                    if let PlaybackReceipt::Applied(status)=&receipt {
-                        admit_lane_revision(&mut child.lane_revision,status)?;
-                        admit_carry_revision(&mut child.carry_revision,status)?;
-                    }
-                    Ok(receipt)
-                })();
-                match result{
-                    Ok(PlaybackReceipt::Applied(status)) if current()=>publish_playback_receipt(&events,&telemetry,epoch,serial,status),
-                    Ok(_)=>{}, // Fully drained clean cancellation; keep the helper for Pause.
-                    Err(error)=>{
-                        // A failed read may leave a late reply in the stream.
-                        // Supersession cannot make that connection safe to reuse.
-                        drop(connection.take());
-                        training_intent.store(0,Ordering::Release);active_training=None;
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                        if alive.load(Ordering::Acquire)&&epoch==latest.load(Ordering::Acquire) {
-                            let _=events.send(Event::TransportFailed(epoch,error.to_string()));
-                        }
-                    }
-                }
-            }
-            Ok(Request::RestoreSeek(epoch,position)) => {
-                if epoch!=latest.load(Ordering::Acquire) { continue; }
-                let result=connection.as_mut().filter(|c|c.epoch==epoch).context("Native restoration project is unavailable")
-                    .and_then(|child|recovery::settled_seek(child,position));
-                match result {
-                    Ok(status)=>{
-                        #[cfg(feature="ui-tests")]
-                        let _=events.send(Event::SourceSeekRestored(epoch,status.clone()));
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,status));
-                    }
-                    Err(error)=>{
-                        drop(connection.take());
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                        training_intent.store(0,Ordering::Release);active_training=None;
-                        let _=events.send(Event::TransportFailed(epoch,format!("Native source restoration failed: {error:#}")));
-                    }
-                }
-            }
-            Ok(Request::Region(epoch,serial,target,duration)) => {
-                if epoch!=latest.load(Ordering::Acquire) {continue;}
-                let result=if monitor_lease||active_training.is_some() {
-                    Err(RateFailure::Refused("Release microphone monitoring/training before changing the playback region".into()))
-                } else {
-                    match connection.as_mut().filter(|c|c.epoch==epoch) {
-                        Some(child)=>child.region(target,duration),
-                        None=>Err(RateFailure::Refused("Native project is unavailable".into())),
-                    }
-                };
-                match result {
-                    Ok(status)=>{
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,status.clone()));
-                        let _=events.send(Event::Region(epoch,serial,Ok(status)));
-                    }
-                    Err(RateFailure::Refused(error))=>{let _=events.send(Event::Region(epoch,serial,Err(error)));}
-                    Err(RateFailure::Transport(error))=>{
-                        drop(connection.take());
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                        let _=events.send(Event::TransportFailed(epoch,error));
-                    }
-                }
-            }
-            Ok(Request::Control(epoch, command)) => {
-                if epoch != latest.load(Ordering::Acquire) {
-                    continue;
-                }
-                if let Some(child) = connection.as_mut().filter(|c| c.epoch == epoch) {
-                    match child.command(&command) {
-                        Ok(s) => {
-                            *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = Some((epoch, s));
-                        }
-                        Err(e) => {
-                            drop(connection.take());
-                            *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                            training_intent.store(0,Ordering::Release);active_training=None;
-                            let _ = events.send(Event::TransportFailed(epoch, e.to_string()));
-                        }
-                    }
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(_) => {}
-        }
-        if !alive.load(Ordering::Acquire) {
-            break;
-        }
-        if poll.elapsed() >= Duration::from_millis(33) {
-            poll = Instant::now();
-            if let Some(child) = connection
-                .as_mut()
-                .filter(|c| c.epoch == latest.load(Ordering::Acquire))
-            {
-                let epoch = child.epoch;
-                match child.command("status") {
-                    Ok(s) => {
-                        *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = Some((epoch, s));
-                    }
-                    Err(e) => {
-                        drop(connection.take());
-                        *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                        training_intent.store(0,Ordering::Release);active_training=None;
-                        let _ = events.send(Event::TransportFailed(epoch, e.to_string()));
-                    }
-                }
-            }
-        }
+// Unwinding an actor revokes admission and wakes its peer. The global C-22
+// hook owns the blocking internal-error notice; retain existing event text.
+struct ActorExit {wake:Option<SyncSender<Request>>,events:mpsc::Sender<Event>,latest:Arc<AtomicU64>,alive:Arc<AtomicBool>}
+impl ActorExit {fn new(events:mpsc::Sender<Event>,latest:Arc<AtomicU64>,alive:Arc<AtomicBool>)->Self{Self{wake:None,events,latest,alive}}fn with_wake(mut self,wake:SyncSender<Request>)->Self{self.wake=Some(wake);self}}
+impl Drop for ActorExit {fn drop(&mut self){if thread::panicking(){self.alive.store(false,Ordering::Release);if let Some(wake)=&self.wake{let _=wake.try_send(Request::Wake);}let epoch=self.latest.fetch_add(1,Ordering::AcqRel);let _=self.events.send(Event::TransportFailed(epoch,"Native output is unavailable".into()));}}}
+fn adopt_current(epoch:u64,serial:Option<(u64,&AtomicU64)>,latest:&AtomicU64,alive:&AtomicBool)->bool {
+    alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch&&serial.is_none_or(|(serial,intent)|intent.load(Ordering::Acquire)==serial)
+}
+trait RequestQueue<T> {fn try_request(&self,request:T)->std::result::Result<(),()>;}
+impl<T> RequestQueue<T> for SyncSender<T> {fn try_request(&self,request:T)->std::result::Result<(),()>{self.try_send(request).map_err(|_|())}}
+struct Admission(Arc<AtomicU64>);
+impl Drop for Admission {fn drop(&mut self){self.0.fetch_sub(1,Ordering::AcqRel);}}
+struct Requests {admitted:Arc<AtomicU64>,transport:SyncSender<Request>,jobs:jobs::Sender,alive:Arc<AtomicBool>}
+impl Requests {
+    fn try_send(&self,request:Request)->std::result::Result<(),()> {
+        if !self.alive.load(Ordering::Acquire){return Err(());}
+        if request.is_job(){
+            self.jobs.slots.fetch_update(Ordering::AcqRel,Ordering::Acquire,|n|(n<128).then_some(n+1)).map_err(|_|())?;
+            if self.jobs.send(jobs::Job::Request(request)).is_err(){self.jobs.slots.fetch_sub(1,Ordering::AcqRel);return Err(());}Ok(())
+        }else{self.admitted.fetch_update(Ordering::AcqRel,Ordering::Acquire,|n|(n<128).then_some(n+1)).map_err(|_|())?;self.transport.try_send(Request::Admitted(Box::new(request),Admission(self.admitted.clone()))).map_err(|_|())}
     }
-    drop(connection);
-    for task in deletions{let _=task.join();}
-    stop_analysis(&mut analysis,&mut analysis_cancel);
-    if let Some(task) = beat_analysis {let _ = task.join();}
-    if let Some(task) = lyrics_envelope {let _ = task.join();}
-    if let Some(task) = lyrics_alignment {let _ = task.join();}
-    if let Some(task) = lyrics_search {let _ = task.join();}
-    if let Some(config)=shutdown_carry{let _=crate::carry_line::retain(&crate::audio_devices::directory(),&config);}
-    if let Err(error) = flush_metronome_adoptions(
-        &requests,
-        shutdown_preference,
-        shutdown_karaoke,
-        &crate::audio_devices::directory(),
-    ) {
-        // The window/event consumer may already be gone. Do not disguise an
-        // orderly-quit preference failure as success merely because no UI remains.
-        eprintln!("Could not save accepted preferences during shutdown: {error:#}");
+    #[cfg(test)]
+    fn send(&self,request:Request)->std::result::Result<(),()> {self.try_send(request)}
+}
+impl RequestQueue<Request> for Requests {fn try_request(&self,request:Request)->std::result::Result<(),()>{self.try_send(request)}}
+impl Request {
+    fn is_preference(&self)->bool{matches!(self,Self::AdoptMetronomePreferences(..)|Self::AdoptCarryPreferences(..)|Self::KaraokePref(..)|Self::InputPrefs(..))}
+    fn is_job(&self)->bool{
+        #[cfg(test)] if matches!(self,Self::HoldJob(..)){return true;}
+        matches!(self,Self::RecoverOutput(..)|Self::Inventory|Self::InspectDelete(..)|Self::KaraokePref(..)|Self::InputPrefs(..)|Self::ReadPublication(..)|Self::Catalog(..)|Self::ResolveLyrics(..)|Self::SearchLyrics(..)|Self::LyricsCapabilities|Self::AlignLyrics(..)|Self::LyricsEnvelope(..)|Self::DetectBeats(..)|Self::SaveLyrics(..)|Self::AdoptCarryPreferences(..))
     }
 }
 
@@ -3651,3 +2685,12 @@ mod transport_timing_tests;
 #[cfg(test)]
 #[path="integration_timeline_tests.rs"]
 mod timeline_tests;
+
+#[cfg(test)]
+#[path="integration_actor_tests.rs"]
+mod actor_tests;
+
+impl Request {
+    fn helper_epoch(&self)->Option<u64>{match self{Self::Admitted(request,_)=>request.helper_epoch(),Self::Playback(e,..)|Self::Control(e,..)|Self::Rate(e,..)|Self::Metronome(e,..)|Self::Carry(e,..)|Self::Region(e,..)|Self::RestoreSeek(e,..)|Self::Training(e,..)|Self::Park(e,..)=>Some(*e),_=>None}}
+    fn admitted(self,permit:Option<Admission>)->Self{match permit{Some(permit)=>Self::Admitted(Box::new(self),permit),None=>self}}
+}

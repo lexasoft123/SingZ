@@ -123,7 +123,7 @@ def launch(environment, folder):
 with tempfile.TemporaryDirectory(prefix='singz-timing-ui-') as directory:
     root = Path(directory).resolve()
     library = root / 'library'
-    project, gridless, variable, same = [library / name for name in ('Timing fixture', 'Gridless fixture', 'Variable bars', 'Same BPM fixture')]
+    project, gridless, variable, selected, same = [library / name for name in ('Timing fixture', 'Gridless fixture', 'Variable bars', 'Selected variable bars', 'Same BPM fixture')]
     for path in (project, variable):
         audio(path / 'stems/vocals.wav', 220)
         audio(path / 'stems/bass.wav', 110)
@@ -148,33 +148,44 @@ with tempfile.TemporaryDirectory(prefix='singz-timing-ui-') as directory:
     variable_raw = json.loads(json.dumps(original))
     variable_raw['name'] = 'Variable bars'
     variable_raw['settings']['loop'] = False
+    # The variable-bar count-in starts at 0.5; an inherited 3..11 selection
+    # would correctly make Play return to 3 before the count-in begins.
+    variable_raw['settings']['selection'] = None
     variable_raw['settings']['beat'].update({'beats': [i*.25 for i in range(120)], 'bpm': 240,
         'beatsPerBar': 4, 'downbeat': 1, 'downbeats': [0, 3, 7, 10, 14, 17, 21, 24, 28, 31, 35, 38, 42, 45, 49, 52, 56, 59, 63, 66, 70, 73, 77, 80, 84, 87, 91, 94, 98, 101, 105, 108, 112, 115, 119],
         'autoDownbeats': [0, 3, 7, 10, 14, 17, 21, 24, 28, 31, 35, 38, 42, 45, 49, 52, 56, 59, 63, 66, 70, 73, 77, 80, 84, 87, 91, 94, 98, 101, 105, 108, 112, 115, 119], 'source': 'manual'})
     (variable / 'project.json').write_text(json.dumps(variable_raw))
+    shutil.copytree(variable, selected)
+    selected_raw = json.loads(json.dumps(variable_raw))
+    selected_raw['name'] = 'Selected variable bars'
+    selected_raw['settings']['selection'] = {'s': .5, 'e': 11}
+    (selected / 'project.json').write_text(json.dumps(selected_raw))
     shutil.copytree(project, same)
     same_raw = json.loads(json.dumps(original))
     same_raw['name'] = 'Same BPM fixture'
+    # Keep this inventory probe fully cached: automatic key analysis would
+    # legitimately Save, obscuring whether the old-song BPM draft was written.
+    same_raw['settings']['key'] = {'pc': 9, 'minor': False, 'detVersion': 2}
     (same / 'project.json').write_text(json.dumps(same_raw))
-    before = {str(path): inventory(path) for path in (project, gridless, variable, same)}
+    before = {str(path): inventory(path) for path in (project, gridless, variable, selected, same)}
     environment = {key: value for key, value in os.environ.items()
         if not key.startswith('SINGZ_GPUI_') and key not in ('SINGZ_PACK_DIR', 'SINGZ_MODELS_DIR', 'SINGZ_DEMUCS')}
     environment.update(SINGZ_MUTE='1', SINGZ_NO_SYNC='1', SINGZ_NO_SYSTEM_ENGINES='1',
         SINGZ_GPUI_BACKGROUND='1', SINGZ_GPUI_TEST_NO_CAPTURE='1',
         SINGZ_GPUI_CONFIG_DIR=str(root / 'prefs'), SINGZ_GPUI_PROJECTS_ROOT=str(library),
         SINGZ_GPUI_TEST_PROJECT=str(project), SINGZ_GPUI_TIMING_GRIDLESS=str(gridless),
-        SINGZ_GPUI_TIMING_VARIABLE=str(variable), SINGZ_GPUI_TIMING_SAME_BPM=str(same), SINGZ_GPUI_RATE_RECEIPT_GATE=str(root / 'rate.gate'),
+        SINGZ_GPUI_TIMING_VARIABLE=str(variable), SINGZ_GPUI_TIMING_SELECTED=str(selected), SINGZ_GPUI_TIMING_SAME_BPM=str(same), SINGZ_GPUI_RATE_RECEIPT_GATE=str(root / 'rate.gate'),
         SINGZ_PACK_DIR=str(root / 'missing-pack'), SINGZ_MODELS_DIR=str(root / 'missing-models'))
     helper = app.with_name('singz-gpui-audio.exe' if os.name == 'nt' else 'singz-gpui-audio')
     (out / 'fixture.json').write_text(json.dumps({'appSha256': sha(app), 'helperSha256': sha(helper),
-        'source': 'Transport.tsx BpmEntry/CountInDots', 'project': original, 'variable': variable_raw,
+        'source': 'Transport.tsx BpmEntry/CountInDots', 'project': original, 'variable': variable_raw, 'selectedVariable': selected_raw,
         'inventory': before, 'viewports': [[1280,800],[1060,640]], 'hidden': True, 'muted': True,
         'noNode': True, 'productionParity': 'unqualified; native candidate frames only'}, indent=2))
     try:
         for stage in ('exercise', 'restart'):
             folder = out / stage
             launch({**environment, 'SINGZ_GPUI_TRANSPORT_TIMING_TEST': str(folder), 'SINGZ_GPUI_TIMING_STAGE': stage}, folder)
-            for path in (project, gridless, variable, same):
+            for path in (project, gridless, variable, selected, same):
                 actual = inventory(path)
                 for name, stamp in before[str(path)].items():
                     if name != 'project.json':
@@ -220,24 +231,29 @@ with tempfile.TemporaryDirectory(prefix='singz-timing-ui-') as directory:
             assert same_state['timing']['inputValue'] == '120' and same_state['timing']['draft'] is None and not same_state['timing']['inputFocused']
             analysis = json.loads((out / 'exercise' / f'frozen-analysis-candidate-{width}.json').read_text())
             assert analysis['timing']['analysisPercent'] == 42 and analysis['timing']['enabled'] is False
-            for case in ('grid','gridless','variable'):
+            for case in ('grid','gridless','variable','selected-variable'):
                 trace = json.loads((out / 'exercise' / f'live-{case}-{width}.json').read_text())
                 steps = [row['timing']['countIn'] for row in trace if row['timing']['countIn'] is not None]
                 assert len({row['done'] for row in steps}) >= 2
                 assert [row['done'] for row in steps] == sorted(row['done'] for row in steps)
+                if case == 'selected-variable':
+                    for row in trace:
+                        if row['timing']['countIn'] is not None:
+                            assert row['selection'] == [.5, 11] and abs(row['position'] - .5) < .04, row
                 for row in steps:
                     assert row['total'] == row['perBar'] * (2 if case == 'grid' else 1)
             stale = json.loads((out / 'exercise' / f'stale-rejected-{width}.json').read_text())
             assert stale['timing']['dots'] == '' and stale['timing']['baseBpm'] is None and not stale['playing']
         assert inventory(same) == before[str(same)], 'Uncommitted old-song BPM draft changed the same-BPM project'
         failure = json.loads((out / 'exercise' / 'rate-failure-notice.json').read_text())
-        assert 'Queued Save did not run' in failure['notice']
+        assert 'The queued Save did not run' in failure['notice']
         assert failure['ratePending'] is False and failure['rateQueued'] is None and failure['rateSaveRequested'] is False
-        assert failure['rateNavigation'][0] == str(gridless) and failure['project'] is None
+        assert failure['rateNavigation'][0] == str(gridless) and failure['project'] == str(project)
+        assert failure['playing'] is False and failure['native'] is None
         after_ack = json.loads((out / 'exercise' / 'rate-failure-navigation-after-ack.json').read_text())
         assert after_ack['notice'] is None and after_ack['project'] == str(gridless)
         (out / 'saved-project.json').write_text(json.dumps(saved, indent=2))
     finally:
-        for path in (project, gridless, variable, same):
+        for path in (project, gridless, variable, selected, same):
             shutil.copytree(path, out / ('final-' + path.name), dirs_exist_ok=True)
 print('PASS hidden transport timing: native BPM edits/count-in clocks, grouped dots, cancellation/navigation and restart')

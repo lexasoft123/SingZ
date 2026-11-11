@@ -32,7 +32,7 @@ pub(super) fn read_publication(publication: &Publication) -> Result<Project> {
     Ok(project)
 }
 
-fn verify_media(project: &Project) -> Result<()> {
+pub(super) fn verify_media(project: &Project) -> Result<()> {
     anyhow::ensure!(
         fs::symlink_metadata(&project.dir)?.file_type().is_dir()
             && project.dir.canonicalize()? == project.dir,
@@ -62,7 +62,7 @@ fn verify_media(project: &Project) -> Result<()> {
     Ok(())
 }
 
-fn captured_project(request: &AudioRecovery) -> Result<Project> {
+pub(super) fn captured_project(request: &AudioRecovery) -> Result<Project> {
     let mut project = request.project.clone();
     let mix = &request.mix;
     anyhow::ensure!(
@@ -106,19 +106,20 @@ pub(super) fn prepare(
     uid: &str,
     provider:crate::audio_devices::Provider,
     provider_retired:Arc<AtomicU64>,
+    manifest:Option<jobs::Manifest>,
 ) -> Result<(Connection, Status, RecoveredMedia)> {
     anyhow::ensure!(
         uid.len() <= 2000 && !uid.contains('\0'),
         "Invalid output device"
     );
-    let mut project = captured_project(request)?;
+    let mut project = request.project.clone();
     let (mut child, receipt) = Connection::open(
         Some(&project),
         epoch,
         latest.clone(),
         alive.clone(),
         handoff,
-        uid,provider,provider_retired,
+        uid,provider,provider_retired,manifest,
     )?;
     let initial = Status::parse(&receipt)?;
     let media = RecoveredMedia {
@@ -156,7 +157,6 @@ pub(super) fn prepare(
             })?;
         }
         let status = settled_seek(&mut child, request.position)?;
-        verify_media(&project)?;
         anyhow::ensure!(
             alive.load(Ordering::Acquire) && latest.load(Ordering::Acquire) == epoch,
             "Output recovery superseded"
@@ -171,7 +171,6 @@ pub(super) fn prepare(
             && status.physical_output_released,
         "Empty project recovery opened song audio"
     );
-    verify_media(&project)?;
     anyhow::ensure!(
         alive.load(Ordering::Acquire) && latest.load(Ordering::Acquire) == epoch,
         "Output recovery superseded"

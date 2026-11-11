@@ -2,8 +2,13 @@
 use super::*;
 pub use crate::audio_devices::ProviderSnapshot;
 
-pub(super) struct PendingWork(pub Arc<AtomicU64>);
-impl Drop for PendingWork {fn drop(&mut self){let _=self.0.fetch_update(Ordering::AcqRel,Ordering::Acquire,|n|Some(n.saturating_sub(1)));}}
+pub(super) struct PendingWork(pub Arc<AtomicU64>, pub SyncSender<Request>);
+impl Drop for PendingWork {fn drop(&mut self){
+    let _=self.0.fetch_update(Ordering::AcqRel,Ordering::Acquire,|n|Some(n.saturating_sub(1)));
+    // Queue saturation already guarantees a receiver wake; never block a jobs
+    // lane or the transport actor while releasing an ownership lease.
+    let _=self.1.try_send(Request::Wake);
+}}
 pub(super) fn ownership_request(request:&Request)->bool {
     matches!(request,Request::Open(..)|Request::Training(..)|Request::CancelTraining(..)|Request::Park(..)|Request::RecoverOutput(..)|Request::Rename(..)|Request::ImportLibrary(..)|Request::Delete(..))
 }
@@ -37,6 +42,7 @@ fn commit_preferences(io:&mut impl PreferenceIo,gate:&Mutex<()>,reserved:&Atomic
     {let _guard=gate.lock().unwrap_or_else(|e|e.into_inner());reserved.store(false,Ordering::Release);}
     Err(failure)
 }
+#[derive(Clone)]
 pub(super) struct ProviderState {
     pub snapshot:ProviderSnapshot,
     pub renderer:Arc<AtomicU64>,pub pending:Arc<AtomicU64>,pub retired:Arc<AtomicU64>,pub gate:Arc<Mutex<()>>,pub reserved:Arc<AtomicBool>,
@@ -53,7 +59,8 @@ impl ProviderState {
     }
     pub fn choose(&mut self,events:&mpsc::Sender<Event>,latest:&AtomicU64,alive:&Arc<AtomicBool>,selected:&AtomicU64,
         request:u64,revision:u64,epoch:u64,renderer:u64,provider:crate::audio_devices::Provider,
-        connection:bool,monitor:bool,training:bool,intent:&AtomicU64,output_uid:&mut String) {
+        connection:bool,monitor:bool,training:bool,intent:&AtomicU64,output_uid:&mut String,owner_busy:&AtomicBool)->bool {
+        let transaction_reserved=AtomicBool::new(false);
         let result=(||->Result<()> {
             anyhow::ensure!(cfg!(windows),"Windows playback providers cannot be selected on this platform");
             anyhow::ensure!(revision==self.snapshot.revision&&epoch==latest.load(Ordering::Acquire),"Audio provider eligibility changed; refresh Settings");
@@ -63,13 +70,15 @@ impl ProviderState {
             // commit gate, then recheck every owner and generation at commit.
             let inventory=crate::audio_devices::inventory_with_provider(alive,provider).map_err(|e|format!("{e:#}"));
             let renderer_fence=self.renderer.clone();let pending=self.pending.clone();let retired=self.retired.clone();
-            let valid=||alive.load(Ordering::Acquire)&&epoch==latest.load(Ordering::Acquire)&&renderer==renderer_fence.load(Ordering::Acquire)
+            let valid=||!owner_busy.load(Ordering::Acquire)&&alive.load(Ordering::Acquire)&&epoch==latest.load(Ordering::Acquire)&&renderer==renderer_fence.load(Ordering::Acquire)
                 &&can_change(true,connection,monitor,training,intent.load(Ordering::Acquire),pending.load(Ordering::Acquire),retired.load(Ordering::Acquire)==0,renderer);
             let changed=provider!=self.snapshot.selected;
             // File lease, preparation, fsync and rollback never own the UI gate.
             let mut prefs=if changed{Some(crate::audio_devices::ProviderPreference::prepare(provider)?)}else{None};
             let inventory_error=inventory.as_ref().err().cloned();
-            let gate=self.gate.clone();let reservation=self.reserved.clone();
+            // The actor holds the public admission reservation until it adopts
+            // this result. This local reservation tracks rollback quarantine.
+            let gate=self.gate.clone();let reservation=&transaction_reserved;
             commit_preferences(&mut prefs,&gate,&reservation,valid,||{
                 let token=selected.load(Ordering::Acquire);
                 selected.store(provider.next_inventory_token(token),Ordering::Release);
@@ -86,7 +95,7 @@ impl ProviderState {
         self.snapshot.request=request;self.snapshot.error=result.err().map(|e|format!("{e:#}"));
         self.snapshot.epoch=latest.load(Ordering::Acquire);self.snapshot.renderer_revision=self.renderer.load(Ordering::Acquire);
         self.snapshot.can_change=can_change(cfg!(windows),connection,monitor,training,intent.load(Ordering::Acquire),self.pending.load(Ordering::Acquire),self.retired.load(Ordering::Acquire)==0,self.snapshot.renderer_revision)&&self.snapshot.availability.is_some()&&!self.reserved.load(Ordering::Acquire);
-        self.snapshot.revision+=1;let _=events.send(Event::Provider(self.snapshot.clone()));
+        self.snapshot.revision+=1;transaction_reserved.load(Ordering::Acquire)
     }
 }
 
@@ -132,7 +141,8 @@ mod tests {
             can_change(true,false,false,false,0,0,false,2),can_change(true,false,false,false,0,0,true,3)] {assert!(!blocked);}
     }
     #[test] fn completed_work_restores_pending_eligibility_without_resetting_renderer_fence() {
-        let count=Arc::new(AtomicU64::new(1));{let _work=PendingWork(count.clone());assert!(!can_change(true,false,false,false,0,count.load(Ordering::Acquire),true,4));}
+        let count=Arc::new(AtomicU64::new(1));let (wake,received)=mpsc::sync_channel(1);{let _work=PendingWork(count.clone(),wake);assert!(!can_change(true,false,false,false,0,count.load(Ordering::Acquire),true,4));}
         assert_eq!(count.load(Ordering::Acquire),0);assert!(can_change(true,false,false,false,0,0,true,4));
+        assert!(matches!(received.try_recv(),Ok(Request::Wake)));
     }
 }
