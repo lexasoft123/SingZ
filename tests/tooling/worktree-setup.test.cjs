@@ -48,7 +48,7 @@ function fixture(t) {
   execFileSync('git', ['clone', '--no-checkout', '-q', moduleOrigin, path.join(root, 'third_party/loopz')])
   git(path.join(root, 'third_party/loopz'), 'checkout', '--detach', moduleRevision)
   fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, '.githooks')); fs.mkdirSync(path.join(root, 'mobile/android'), { recursive: true })
-  for (const name of ['native-build-lock.cjs', 'with-native-build-lock.mjs', 'assert-native-build-lock.cjs', 'install-git-hooks.cjs', 'check-staged-review.cjs', 'verify-zcore-submodule.py'])
+  for (const name of ['native-build-lock.cjs', 'with-native-build-lock.mjs', 'assert-native-build-lock.cjs', 'install-git-hooks.cjs', 'ensure-git-exclude.cjs', 'check-staged-review.cjs', 'verify-zcore-submodule.py'])
     fs.copyFileSync(path.join(source, 'scripts', name), path.join(root, 'scripts', name))
   for (const name of fs.readdirSync(path.join(source, '.githooks')))
     fs.copyFileSync(path.join(source, '.githooks', name), path.join(root, '.githooks', name))

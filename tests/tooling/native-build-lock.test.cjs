@@ -513,3 +513,83 @@ test('wrapper runs four builds at once, queues the fifth, and exclusive runs alo
   for (const run of jobs.values()) assert.equal((await run.completed)[0], 0, run.diagnostics())
   assert.equal(existsSync(locks.nativeBuildLockPath(root)), false)
 })
+
+// ---- Atomic reclamation (reclaimers and fresh claimants interleaved) ----
+
+function liveRecord(root, extra = {}) {
+  return {
+    format: 2, token: `live-${randomHex()}-token`, pid: process.pid, owner: 'live',
+    hostname: require('node:os').hostname(), repoIdentity: locks.gitCommonDirectory(root),
+    checkout: root, startedAt: new Date().toISOString(), ...extra,
+  }
+}
+function leftovers(root) {
+  return require('node:fs').readdirSync(locks.nativeBuildSlotsPath(root))
+    .filter(name => name !== 'slot-1')
+}
+
+test('two reclaimers and a fresh claimant never remove or hide a live slot', (t) => {
+  const { root } = fixture(t)
+  t.after(() => locks.setNativeBuildLockTestHooks({}))
+  const slot = slotDirectory(root, 1)
+  plantRecord(slot, staleRecord())
+  let rival = 'not run', fresh = null
+  locks.setNativeBuildLockTestHooks({
+    // Reclaimer A has judged the slot stale and holds the reclaim mutex:
+    // reclaimer B must not be able to act on the same directory.
+    afterJudge() {
+      try { locks.acquireNativeBuildLock(root, 'reclaimer B', ONE_SLOT).release(); rival = 'acquired' }
+      catch (error) { rival = error.code }
+      assert.equal(existsSync(slot), true, 'B must not touch the slot A is reclaiming')
+    },
+    // A has moved the stale directory away; the slot name is free for a
+    // fresh claimant before A deletes the tombstone.
+    afterRename() {
+      locks.setNativeBuildLockTestHooks({})
+      fresh = locks.acquireNativeBuildLock(root, 'fresh claimant', ONE_SLOT)
+    },
+  })
+  assert.throws(() => locks.acquireNativeBuildLock(root, 'reclaimer A', ONE_SLOT), /busy/)
+  assert.equal(rival, 'SINGZ_NATIVE_BUILD_BUSY')
+  assert.ok(fresh, 'the fresh claimant takes the freed slot')
+  assert.equal(JSON.parse(readFileSync(join(slot, 'owner.json'), 'utf8')).token, fresh.token)
+  assert.equal(locks.assertNativeBuildLockHeld(root, fresh.token).owner, 'fresh claimant')
+  assert.deepEqual(leftovers(root), [], 'no tombstone or reclaim mutex is left behind')
+  fresh.release()
+})
+
+test('an owner that slips in after staleness was judged is put back, not deleted', (t) => {
+  const { root } = fixture(t)
+  t.after(() => locks.setNativeBuildLockTestHooks({}))
+  const slot = slotDirectory(root, 1)
+  plantRecord(slot, staleRecord())
+  const live = liveRecord(root)
+  locks.setNativeBuildLockTestHooks({
+    afterJudge() {
+      // Everything a late reclaimer cannot see: the stale directory is gone
+      // and a live owner holds a brand new one.
+      rmSync(slot, { recursive: true })
+      plantRecord(slot, live)
+    },
+  })
+  assert.throws(() => locks.acquireNativeBuildLock(root, 'reclaimer', ONE_SLOT), /busy/)
+  assert.equal(JSON.parse(readFileSync(join(slot, 'owner.json'), 'utf8')).token, live.token)
+  assert.equal(locks.assertNativeBuildLockHeld(root, live.token).owner, 'live')
+  assert.deepEqual(leftovers(root), [])
+})
+
+test('if the live owner cannot be put back reclamation fails closed and keeps it', (t) => {
+  const { root } = fixture(t)
+  t.after(() => locks.setNativeBuildLockTestHooks({}))
+  const slot = slotDirectory(root, 1)
+  plantRecord(slot, staleRecord())
+  const live = liveRecord(root)
+  locks.setNativeBuildLockTestHooks({
+    afterJudge() { rmSync(slot, { recursive: true }); plantRecord(slot, live) },
+    afterRename() { plantRecord(slot, liveRecord(root, { owner: 'newer' })) },
+  })
+  assert.throws(() => locks.acquireNativeBuildLock(root, 'reclaimer', ONE_SLOT), /changed owner during reclamation/)
+  const [tombstone] = leftovers(root).filter(name => name.includes('.reclaim-'))
+  assert.ok(tombstone, 'the displaced live owner stays recoverable')
+  assert.equal(JSON.parse(readFileSync(join(locks.nativeBuildSlotsPath(root), tombstone, 'owner.json'), 'utf8')).token, live.token)
+})

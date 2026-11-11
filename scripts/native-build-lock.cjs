@@ -122,20 +122,61 @@ function provenStale(directory) {
   return true
 }
 
-/** Remove a provably stale lock directory. The rename makes the removal
- *  single-winner; the token is re-read from the renamed copy so a directory
- *  replaced after we judged it is put back rather than deleted. */
+// Test seam: lets a regression interleave other actors between reclaim steps.
+const testHooks = {}
+function setNativeBuildLockTestHooks(hooks = {}) {
+  for (const key of Object.keys(testHooks)) delete testHooks[key]
+  Object.assign(testHooks, hooks)
+}
+// A reclaim mutex directory older than this has no live holder: a holder
+// needs milliseconds (one read, one rename, one delete).
+const RECLAIM_MUTEX_STALE_MS = 60_000
+
+/** Remove a provably stale lock directory, atomically with respect to other
+ *  reclaimers and fresh claimants.
+ *
+ *  1. Take `<dir>.reclaiming` (mkdir, single winner). Losers return false and
+ *     simply retry their acquisition; only one reclaimer ever acts on `dir`.
+ *  2. Judge staleness while holding it, so a directory a fresh claimant
+ *     created after an earlier look is judged on its own record.
+ *  3. Rename to a unique tombstone (single-winner, and the slot name is free
+ *     for no one until the directory is gone), re-read the tombstone's record
+ *     and delete only if it carries the token that was proven stale. If a
+ *     different owner slipped in anyway, put it back; if that is impossible,
+ *     fail closed by keeping the tombstone and throwing. */
 function reclaimIfStale(directory) {
   if (!existsSync(directory) || !provenStale(directory)) return false
-  const judged = readRecord(directory)?.token ?? null
-  const grave = `${directory}.reclaim-${process.pid}-${randomBytes(4).toString('hex')}`
-  try { renameSync(directory, grave) } catch { return false }
-  if ((readRecord(grave)?.token ?? null) !== judged) {
-    try { renameSync(grave, directory) } catch { /* replaced again: leave the grave for inspection */ }
+  const mutex = `${directory}.reclaiming`
+  try {
+    mkdirSync(mutex)
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    try {
+      if (Date.now() - statSync(mutex).mtimeMs > RECLAIM_MUTEX_STALE_MS)
+        rmSync(mutex, { recursive: true, force: true })
+    } catch { /* gone already */ }
     return false
   }
-  rmSync(grave, { recursive: true, force: true })
-  return true
+  try {
+    if (!existsSync(directory) || !provenStale(directory)) return false
+    const judged = readRecord(directory)?.token ?? null
+    testHooks.afterJudge?.(directory, judged)
+    const tombstone = `${directory}.reclaim-${process.pid}-${randomBytes(4).toString('hex')}`
+    try { renameSync(directory, tombstone) } catch { return false }
+    testHooks.afterRename?.(directory, tombstone)
+    if ((readRecord(tombstone)?.token ?? null) !== judged) {
+      try {
+        renameSync(tombstone, directory)
+      } catch (error) {
+        throw new Error(`Native build lock ${directory} changed owner during reclamation; the live owner's directory was kept at ${tombstone}: ${error.message}`)
+      }
+      return false
+    }
+    rmSync(tombstone, { recursive: true, force: true })
+    return true
+  } finally {
+    rmSync(mutex, { recursive: true, force: true })
+  }
 }
 
 function occupiedSlots(slotsPath) {
@@ -329,5 +370,6 @@ module.exports = {
   gitCommonDirectory,
   nativeBuildLockPath,
   nativeBuildSlotCount,
-  nativeBuildSlotsPath
+  nativeBuildSlotsPath,
+  setNativeBuildLockTestHooks
 }

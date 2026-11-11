@@ -618,7 +618,11 @@ per build as described above.
 **Stale locks.** A waiter reclaims a slot or exclusive claim only when its
 record was written by this host, the wrapper pid is gone, and no recorded child
 process group (or child pid) exists; an unrecorded directory is reclaimed after
-30 seconds. Old-format records, other hosts and Windows (where `taskkill /T`
+30 seconds. Reclamation is single-winner: the reclaimer holds a `<dir>.reclaiming`
+mutex, judges staleness under it, renames the directory to a unique
+`.reclaim-<pid>-<random>` tombstone and deletes it only if the tombstone's token
+is the one proven stale (otherwise it is put back, or kept and reported); a
+leftover mutex older than a minute is ignored. Old-format records, other hosts and Windows (where `taskkill /T`
 cannot prove the tree stopped) are never reclaimed automatically: inspect the
 recorded owner/tree, confirm it stopped, then remove that directory. On POSIX,
 the wrapper forwards signals to the complete child process group and retains

@@ -194,12 +194,10 @@ fi
 # a `git add -A` can never commit them: a committed vendor symlink once
 # merged into main and silently CLOBBERED the real vendor/ on checkout.
 EXCLUDE="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
-if ! grep -qs 'worktree-setup provisioning' "$EXCLUDE"; then
-  mkdir -p "$(dirname "$EXCLUDE")"
-  printf '%s\n' '# worktree-setup provisioning links (machine-local, every worktree)' \
-    'vendor' 'gdrive.config.json' 'local.properties' >>"$EXCLUDE"
-  echo "Registered provisioning links in $(basename "$(dirname "$(dirname "$EXCLUDE")")")/info/exclude"
-fi
+# Idempotent and safe under concurrent setups (lock + temp file + rename).
+node "$WT/scripts/ensure-git-exclude.cjs" "$EXCLUDE" \
+  '# worktree-setup provisioning links (machine-local, every worktree)' \
+  'vendor' 'gdrive.config.json' 'local.properties'
 for rel in vendor mobile/gdrive.config.json mobile/android/local.properties; do
   if [ -e "$WT/$rel" ] && ! git -C "$WT" check-ignore -q "$rel"; then
     echo "FATAL: $rel is NOT gitignored here — a git add -A would commit it (and a" >&2
