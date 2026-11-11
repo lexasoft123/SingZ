@@ -640,3 +640,23 @@ mod tests {
         assert!(load_receipts(&f.0).is_err());
     }
 }
+
+/// Import only schemas the native store can read, including its v1 upgrade.
+pub(crate) fn import_preferences(source: &Value, directory: &Path) -> Result<()> {
+    let doc = source.as_object().context("Invalid training preference document")?;
+    ensure!(doc.len() == 2 && source["formatVersion"] == 1, "Unsupported training preferences");
+    let mut raw = source["preferences"].clone();
+    if raw["formatVersion"] == 1 {
+        let keys = ["formatVersion", "range", "notation", "taskMode", "direction", "intervalSizes", "chordDegrees"];
+        let old = raw.as_object().context("Invalid legacy preferences")?;
+        ensure!(old.len() == keys.len() && keys.iter().all(|k| old.contains_key(*k)), "Invalid legacy preferences");
+        let mut upgraded = serde_json::to_value(Preferences::default())?;
+        for key in keys.into_iter().filter(|k| *k != "formatVersion") { upgraded[key] = raw[key].clone(); }
+        raw = upgraded;
+    }
+    let prefs: Preferences = serde_json::from_value(raw)?;
+    save_preferences(directory, &prefs)
+}
+pub(crate) fn import_controls(directory: &Path, controls: &Controls) -> Result<()> {
+    save_controls(directory, controls)
+}

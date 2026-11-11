@@ -1003,3 +1003,48 @@ mod root_sync_tests {
         fs::remove_dir_all(base).unwrap();
     }
 }
+
+/// Adopt an existing library at first launch. This never relocates projects,
+/// creates a library, takes a lock in it, or writes any file inside it.
+pub(crate) fn import_root(config: &Config, root: &Path) -> Result<()> {
+    let root = probe_import_root(root)?;
+    import_probed_root(config, &root)
+}
+/// This read-only probe runs on a migration worker, never on the UI thread.
+/// It has no publication side effects if a slow filesystem returns after timeout.
+pub(crate) fn probe_import_root(root: &Path) -> Result<PathBuf> {
+    ensure!(root.is_absolute(), "Invalid imported library root");
+    let root = root.canonicalize()?;
+    if !fs::metadata(&root)?.is_dir() { return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory).into()); }
+    let _ = fs::read_dir(&root)?;
+    Ok(root)
+}
+/// Publish only a path already validated by the bounded migration probe.
+/// Do not stat/canonicalize/read the adopted root here: it may be a network mount.
+pub(crate) fn import_probed_root(config: &Config, root: &Path) -> Result<()> {
+    ensure!(root.is_absolute(), "Invalid imported library root");
+    let parent = config.preferences.parent().context("Missing preference parent")?;
+    fs::create_dir_all(parent)?;
+    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(parent.join("library.lock"))?;
+    let _lease = crate::file_lease::Lease::acquire(lock)?;
+    let (mut raw, expected) = preferences(config)?;
+    ensure!(raw.get("projectsRoot").is_none_or(|v| v.is_null()), "Native library already selected");
+    raw["projectsRoot"] = json!(root);
+    let temporary = parent.join(format!(".library-{}.tmp", unique()));
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(&raw)?)?;
+        file.sync_all()?;
+        drop(file);
+        ensure!(read_optional(&config.preferences, 64 * 1024)? == expected, "Library preferences changed during import");
+        if expected.is_some() { crate::project_store::replace(&temporary, &config.preferences)?; }
+        else { fs::hard_link(&temporary, &config.preferences)?; }
+        #[cfg(unix)] File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(temporary);
+    result
+}

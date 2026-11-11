@@ -3,6 +3,7 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.migration.summary': 'Na-import ang {count} setting mula sa dati mong SingZ.',
   "settings.action.close": "Isara",
   "settings.common.systemDefault": "Default ng sistema",
   "settings.common.savedDeviceMissing": "Pag-iimbak ng mga aparato (hindi nakonekta)",

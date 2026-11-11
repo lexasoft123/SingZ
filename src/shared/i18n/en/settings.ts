@@ -1,5 +1,6 @@
 /* English strings for the `settings` namespace — see ../index.ts. */
 export const settings = {
+  'settings.migration.summary': 'Imported {count} settings from your previous SingZ.',
   // ── shared actions/labels, reused across dialogs in this namespace ──
   'settings.action.close': 'Close',
   'settings.common.systemDefault': 'System default',

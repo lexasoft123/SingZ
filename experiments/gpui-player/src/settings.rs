@@ -1975,7 +1975,8 @@ impl Render for SettingsScreen {
                                             .overflow_y_scroll()
                                             .track_scroll(&self.scroll)
                                             .pr(px(10.))
-                                            .child(self.audio(cx)),
+                                            .child(self.audio(cx))
+                                            .when(crate::migrate::imported_count() > 0, |view| view.child(div().mt(px(16.)).text_size(px(11.)).text_color(rgb(DIM)).child(crate::i18n::tv("settings.migration.summary", &[("count", crate::migrate::imported_count().to_string())])))),
                                     )
                                     .child(production_scrollbar(&self.scroll)),
                             ),

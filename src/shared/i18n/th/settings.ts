@@ -3,6 +3,7 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.migration.summary': 'นำเข้าการตั้งค่า {count} รายการจาก SingZ เวอร์ชันก่อนแล้ว',
   "settings.action.close": "ปิด",
   "settings.common.systemDefault": "ระบบโดยปกติ",
   "settings.common.savedDeviceMissing": "อุปกรณ์ที่เก็บไว้ (ไม่เชื่อมต่อ)",

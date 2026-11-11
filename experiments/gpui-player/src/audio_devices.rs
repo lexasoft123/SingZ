@@ -406,6 +406,9 @@ pub(crate) fn save_karaoke_at(directory: &Path, enabled: bool) -> Result<Value> 
     patch_at(directory, json!({"karaoke":enabled}))
 }
 fn patch_at(dir: &Path, patch: Value) -> Result<Value> {
+    patch_at_checked(dir, patch, |_| true)
+}
+fn patch_at_checked(dir: &Path, patch: Value, accept: impl FnOnce(&Value) -> bool) -> Result<Value> {
     fs::create_dir_all(dir)?;
     let lock_file = OpenOptions::new()
         .create(true)
@@ -416,6 +419,7 @@ fn patch_at(dir: &Path, patch: Value) -> Result<Value> {
     let _lock = Lease::acquire(lock_file)
         .context("Audio preferences are being changed by another app")?;
     let mut raw = load_at(dir)?;
+    ensure!(accept(&raw), "Native audio choice changed during migration");
     for (key, value) in patch
         .as_object()
         .context("Invalid audio preference update")?
@@ -623,4 +627,14 @@ mod tests {
         replay_linux_capabilities(&retained,&mut cache);
         assert_eq!(cache.len(),1024);assert_eq!(cache["busy unknown"].outputs,8);assert_eq!(cache["missing proof"].outputs,2);
     }
+}
+
+/// Migration passes only native UIDs validated against a current inventory.
+pub(crate) fn import_preferences(directory: &Path, patch: Value) -> Result<()> {
+    let _ = output_uid(&patch)?;
+    let _ = crate::microphone::Prefs::read(&patch)?;
+    patch_at_checked(directory, patch, |raw| {
+        let defaults = serde_json::json!({"outputUid":"","inputUid":"","inputChannel":0,"monitorOutputUid":"","monitorOutputChannels":[0,1],"monitorGainDb":-18,"nativeAudioProvider":Provider::platform_default().as_str()});
+        defaults.as_object().unwrap().iter().all(|(key,default)| raw.get(key).is_none_or(|value| value.is_null() || value==default))
+    }).map(|_| ())
 }

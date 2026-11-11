@@ -3,6 +3,7 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.migration.summary': 'Mengimport {count} tetapan daripada SingZ anda yang terdahulu.',
   "settings.action.close": "Tutup",
   "settings.common.systemDefault": "Sistem lalai",
   "settings.common.savedDeviceMissing": "Peranti yang disimpan (tidak disambungkan)",

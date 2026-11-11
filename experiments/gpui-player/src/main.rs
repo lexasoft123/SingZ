@@ -165,6 +165,7 @@ mod quick_start_store;
 mod release_highlights;
 mod whats_new;
 mod settings;
+mod migrate;
 mod source_jobs;
 mod text_rendering;
 mod training;
@@ -6190,6 +6191,7 @@ fn main() {
         }
         return;
     }
+    migrate::startup();
     text_rendering::configure();
     let application=gpui_kit::application().with_assets(Assets);
     application.on_reopen(desktop_lifecycle::reopen);
@@ -6210,6 +6212,7 @@ fn main() {
         let background = std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some();
         desktop_lifecycle::install_actions(cx);
         let (window_handle, view) = desktop_lifecycle::open_player_window(cx).expect("open player");
+        let _ = window_handle.update(cx, |_, window, _| window.on_next_frame(|_, _| migrate::after_first_frame()));
         let crash_view = view.clone();
         let startup_pending = std::cell::Cell::new(!previous_crashes.is_empty());
         let deliver_crash = std::rc::Rc::new(move |view: &Entity<Player>, cx: &mut App| {

@@ -454,3 +454,8 @@ fn windows_tags() -> Vec<String> {
 #[cfg(test)]
 #[path = "locale_service_tests.rs"]
 mod tests;
+
+/// Startup migration uses the same validated, leased preference writer.
+pub(crate) fn import_language(directory: &Path, language: Language) -> Result<()> {
+    retain(directory, language, &|| false)
+}

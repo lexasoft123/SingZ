@@ -112,10 +112,12 @@ pub(crate) fn resolve(
         .round()
         .max(MIN_HEIGHT)
         .min(area.height);
-    let x = snapshot
+    // A size-only migration has no native display identity or position.
+    let positioned = snapshot.filter(|s| s.display_uuid.is_some());
+    let x = positioned
         .map_or(area.x + (area.width - width) / 2., |s| s.normal.x.round())
         .clamp(area.x, area.x + area.width - width);
-    let y = snapshot
+    let y = positioned
         .map_or(area.y + (area.height - height) / 2., |s| s.normal.y.round())
         .clamp(area.y, area.y + area.height - height);
     ResolvedWindow {
@@ -184,7 +186,7 @@ impl StateStore {
         // the prior normal rectangle instead of persisting the maximized frame.
         // The current display must follow a maximized cross-monitor move.
         if snapshot.maximized {
-            if let Some(previous) = &self.snapshot {
+            if let Some(previous) = self.snapshot.as_ref().filter(|s| s.display_uuid.is_some()) {
                 snapshot.normal = previous.normal;
             }
         }

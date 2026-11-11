@@ -516,3 +516,15 @@ mod localization_tests {
         assert_eq!(localized(&translated, "en"), original);
     }
 }
+
+/// Electron's baseline may predate bundled notes. Retain it without replaying
+/// acknowledgement semantics that require a currently bundled release.
+pub(crate) fn import_baseline(directory: &Path, seen: &str) -> Result<()> {
+    ensure!(valid_version(seen), "Invalid imported release baseline");
+    fs::create_dir_all(directory)?;
+    let dir = directory.canonicalize()?;
+    let _lease = lease(&dir)?;
+    let document = read(&dir)?;
+    if state(&document).seen.is_none() { publish(&dir, document, seen)?; }
+    Ok(())
+}

@@ -3,6 +3,7 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.migration.summary': 'Önceki SingZ uygulamanızdan {count} ayar içe aktarıldı.',
   "settings.action.close": "Kapat",
   "settings.common.systemDefault": "Sistem varsayılanı",
   "settings.common.savedDeviceMissing": "Kaydedilmiş cihaz (bağlantıda değil)",

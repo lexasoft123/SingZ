@@ -3,6 +3,7 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.migration.summary': '已从之前的 SingZ 导入 {count} 项设置。',
   // ── shared actions/labels, reused across dialogs in this namespace ──
   'settings.action.close': '关闭',
   'settings.common.systemDefault': '系统默认',

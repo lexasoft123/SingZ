@@ -3,6 +3,7 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.migration.summary': 'Đã nhập {count} cài đặt từ SingZ trước đây của bạn.',
   "settings.action.close": "Đóng",
   "settings.common.systemDefault": "Hệ thống mặc định",
   "settings.common.savedDeviceMissing": "Thiết bị lưu (không kết nối)",

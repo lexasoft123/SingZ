@@ -3,6 +3,7 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.migration.summary': '以前の SingZ から {count} 件の設定を読み込みました。',
   "settings.action.close": "閉じる",
   "settings.common.systemDefault": "システムデフォルト",
   "settings.common.savedDeviceMissing": "保存された装置 (接続されていない)",
