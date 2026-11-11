@@ -62,7 +62,11 @@ const en = {
   'journey.setup.bootBody': 'Check your connections and sound before choosing a song.',
   'journey.setup.platformReady': 'Device settings available',
   'journey.setup.platformMissing': 'Device settings unavailable',
-  'journey.setup.audioReady': '{outputs} outputs and {inputs} inputs found',
+  'journey.setup.audioReady': '{outputs} and {inputs} found',
+  'journey.audio.outputs_one': '{n} output',
+  'journey.audio.outputs_other': '{n} outputs',
+  'journey.audio.inputs_one': '{n} input',
+  'journey.audio.inputs_other': '{n} inputs',
   'journey.setup.audioMissing': 'No usable audio output was reported',
   'journey.setup.welcomeTitle': 'A whole evening of singing',
   'journey.setup.welcomeBody': 'Choose a language, check your display and connect only what you need. Downloaded songs remain available offline.',
@@ -218,7 +222,8 @@ const en = {
   'journey.dialog.confirmWifi': 'Set up new Wi-Fi'
 } as const
 
-const ru: Record<keyof typeof en, string> = {
+type RussianPlural = `journey.audio.${'outputs' | 'inputs'}_${'few' | 'many'}`
+const ru: Record<keyof typeof en | RussianPlural, string> = {
   'journey.settings': 'Настройки', 'journey.subtitle': 'Настройка, восстановление и обслуживание Box',
   'journey.back': 'Назад', 'journey.backSettings': 'Назад к настройкам', 'journey.move': 'Переход', 'journey.select': 'Выбрать', 'journey.key.ok': 'OK', 'journey.key.back': 'Назад',
   'journey.refresh': 'Обновить', 'journey.retry': 'Повторить', 'journey.cancel': 'Отмена', 'journey.keep': 'Оставить',
@@ -242,7 +247,9 @@ const ru: Record<keyof typeof en, string> = {
   'journey.setup.network': 'Сеть', 'journey.setup.audio': 'Звук и микрофоны', 'journey.setup.account': 'Ваша коллекция', 'journey.setup.done': 'Готово',
   'journey.setup.bootTitle': 'Проверка Box без запуска песни', 'journey.setup.bootBody': 'Проверьте подключения и звук перед выбором песни.',
   'journey.setup.platformReady': 'Настройки устройства доступны', 'journey.setup.platformMissing': 'Настройки устройства недоступны',
-  'journey.setup.audioReady': 'Найдено выходов: {outputs}, входов: {inputs}', 'journey.setup.audioMissing': 'Подходящий аудиовыход не найден',
+  'journey.setup.audioReady': 'Найдено: {outputs}, {inputs}',
+  'journey.audio.outputs_one': '{n} выход', 'journey.audio.outputs_few': '{n} выхода', 'journey.audio.outputs_many': '{n} выходов', 'journey.audio.outputs_other': '{n} выхода',
+  'journey.audio.inputs_one': '{n} вход', 'journey.audio.inputs_few': '{n} входа', 'journey.audio.inputs_many': '{n} входов', 'journey.audio.inputs_other': '{n} входа', 'journey.setup.audioMissing': 'Подходящий аудиовыход не найден',
   'journey.setup.welcomeTitle': 'Вечер пения в вашей гостиной', 'journey.setup.welcomeBody': 'Выберите язык, проверьте экран и подключите только нужное. Загруженные песни доступны офлайн.',
   'journey.setup.language': 'Язык интерфейса', 'journey.setup.remoteTitle': 'Проверьте каждое действие пульта',
   'journey.setup.remoteBody': 'Перейдите на каждое направление и OK, затем выберите его. Кнопка «Назад» возвращает на предыдущий шаг.',
@@ -307,7 +314,8 @@ const zh: Record<keyof typeof en, string> = {
   'journey.signedIn': '已登录', 'journey.signedOut': '未登录', 'journey.count': '{count}', 'journey.setup.title': '设置 SingZ Box', 'journey.setup.step': '第 {step} 步，共 {total} 步',
   'journey.setup.boot': '就绪检查', 'journey.setup.welcome': '欢迎', 'journey.setup.remote': '遥控和显示', 'journey.setup.network': '网络', 'journey.setup.audio': '声音和麦克风', 'journey.setup.account': '你的曲库', 'journey.setup.done': '就绪',
   'journey.setup.bootTitle': '检查 Box，不启动歌曲', 'journey.setup.bootBody': '选歌前请检查连接和音频。', 'journey.setup.platformReady': '设备设置可用', 'journey.setup.platformMissing': '设备设置不可用',
-  'journey.setup.audioReady': '找到 {outputs} 个输出和 {inputs} 个输入', 'journey.setup.audioMissing': '未报告可用的音频输出', 'journey.setup.welcomeTitle': '尽享整晚歌唱', 'journey.setup.welcomeBody': '选择语言、检查显示并只连接所需服务。已下载歌曲可离线使用。',
+  'journey.setup.audioReady': '找到{outputs}和{inputs}',
+  'journey.audio.outputs_one': '{n}个输出', 'journey.audio.outputs_other': '{n}个输出', 'journey.audio.inputs_one': '{n}个输入', 'journey.audio.inputs_other': '{n}个输入', 'journey.setup.audioMissing': '未报告可用的音频输出', 'journey.setup.welcomeTitle': '尽享整晚歌唱', 'journey.setup.welcomeBody': '选择语言、检查显示并只连接所需服务。已下载歌曲可离线使用。',
   'journey.setup.language': '界面语言', 'journey.setup.remoteTitle': '逐项检查遥控操作', 'journey.setup.remoteBody': '移动到每个方向和 OK，再按确认。返回键会回到上一步。',
   'journey.setup.up': '上', 'journey.setup.down': '下', 'journey.setup.left': '左', 'journey.setup.right': '右', 'journey.setup.ok': '确定', 'journey.setup.checked': '已检查', 'journey.setup.safeArea': '电视安全区域', 'journey.setup.safeAreaBody': '确保四角均可见，整个电视界面均匀缩放。', 'journey.setup.restore': '恢复完整显示',
   'journey.setup.networkTitle': '现在连接或离线开始', 'journey.setup.networkBody': '连接以太网或用手机设置 Wi-Fi。离线时仍可使用已下载歌曲。', 'journey.setup.audioTitle': '选择音乐输出位置', 'journey.setup.audioBody': '在音频设置中选择扬声器或 HDMI，再检查每支麦克风。',

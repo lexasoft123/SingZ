@@ -1,5 +1,5 @@
 import type { BoxPhoneState, BoxPlatformSnapshot, BoxStorageSnapshot } from '../../../../shared/box-contract'
-import { type JourneyAudioInventory, audioCounts, formatBytes, networkStateLabel, updateStateLabel } from './format'
+import { type JourneyAudioInventory, audioCounts, audioReadyText, formatBytes, networkStateLabel, updateStateLabel } from './format'
 import { tJourney } from './i18n'
 import type { DriveStatus } from './useInventory'
 import { ErrorNotice, LoadingNotice, PageFrame, SettingRow } from './ui'
@@ -25,7 +25,7 @@ export function HomePage({ audio, platform, drive, phones, storage, loading, err
     <div className="journey-list">
       <SettingRow
         primary focus="journey-audio" title={tJourney('journey.home.audio')} help={tJourney('journey.home.audioHelp')}
-        status={audio?.ok && audio.physicalInputCount !== null ? tJourney('journey.setup.audioReady', counts) : tJourney('journey.unavailable')}
+        status={audio?.ok && audio.physicalInputCount !== null ? audioReadyText(counts) : tJourney('journey.unavailable')}
         onOpen={onOpenAudio}
       />
       <SettingRow

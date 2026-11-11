@@ -242,7 +242,7 @@ export function PlayerLyrics({ lines, position, playing, rate }: {
       const line = lines[index], offset = index - current
       return <div key={`${index}-${line.start}`} className="player-lyric-slot" data-context={Math.abs(offset) > 1 ? 'outside' : 'visible'} data-lyric-line={index}>
         {countdown?.target === index && <div className="player-singing-countdown" aria-hidden="true" data-countdown-target={countdown.target}>
-          {countdown.seconds > 0 ? <span>{countdown.seconds} s</span> : [0, 1, 2].map(dot => <i key={dot} data-lit={dot < countdown.dots} />)}
+          {countdown.seconds > 0 ? <span>{t('box.player.countdownSeconds', { seconds: countdown.seconds })}</span> : [0, 1, 2].map(dot => <i key={dot} data-lit={dot < countdown.dots} />)}
         </div>}
         <div key="visual" className="player-lyric-scale"><p key="text" data-line={index} className={`player-lyric ${offset === 0 ? 'current' : offset < 0 ? 'past' : 'up-next'}`} aria-hidden="true">
         {line.words.length > 0 ? line.words.map((word, wordIndex) => <span key={wordIndex} className="player-shaped-word" style={highlightStyle} data-line={index} data-lyric-word={wordIndex}>

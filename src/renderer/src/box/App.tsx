@@ -7,7 +7,7 @@ import { MultitrackEngine } from '../audio/engine'
 import { boxNativePlaybackPolicy } from './playback-policy'
 import { useLocale } from '../i18n'
 import { Catalog, type CatalogRow } from './Catalog'
-import { moveSpatialFocus, pickMixerFocusId, rangeOwnsArrow, remoteScope } from './focus'
+import { focusPrimaryNavigation, moveSpatialFocus, pickMixerFocusId, rangeOwnsArrow, remoteScope, seekKeepsFocus } from './focus'
 import { LatestOpenIntent } from './open-intent'
 import { Player } from './Player'
 import { BoxMicrophones } from './microphones'
@@ -22,7 +22,7 @@ import { restoreRetainedEntry, routeRestoredPlayback } from './retained-playback
 import { closeBoxSession } from './close-session'
 import { t } from './i18n'
 import { tSettings } from './settings-i18n'
-import { BoxSettingsNavigator, accountReturnFromHub, detailsReturnRoute, overlayReturnRoute, type BoxRoute } from './settings-navigation'
+import { BoxSettingsNavigator, accountReturnFromHub, detailsReturnRoute, overlayReturnRoute, routeAfterFailedOpen, routeWhileOpening, type BoxRoute } from './settings-navigation'
 import { SongDetails } from './SongDetails'
 import { StartupOverlay } from './StartupOverlay'
 import { SwitchDialog, type SwitchMode } from './SwitchDialog'
@@ -157,6 +157,7 @@ export default function BoxApp(): React.JSX.Element {
   const pendingSwitchMode = useRef<SwitchMode>('paused')
   /** Set by Next: when `to` opens, `from` (the song that just played) leaves the queue. */
   const advance = useRef<{ from: string; to: string } | null>(null)
+  const lastSeekKeyAt = useRef<number | null>(null)
   const finishAdvance = useRef<(from: string) => void>(() => undefined)
   const catalogScroll = useRef(0)
   const gate = useRef(new RemoteKeyGate())
@@ -479,7 +480,8 @@ export default function BoxApp(): React.JSX.Element {
     setActionError(null)
     // A failed open lands on details; Back must return to where it started (e.g. the queue).
     detailsReturn.current = detailsReturnRoute(latest.current.route, detailsReturn.current)
-    setRoute('details')
+    setRoute(routeWhileOpening(latest.current.route))
+    let reachedPlayer = false
     try {
       if (!await publishPhoneSnapshot()) throw new Error(t('box.details.openGuardFailed'))
       if (!current()) return
@@ -497,6 +499,7 @@ export default function BoxApp(): React.JSX.Element {
         if (!current()) return
       }
       setMixOpen(false)
+      reachedPlayer = true
       setRoute('player')
       setControlsVisible(true)
       setFocusVersion(version => version + 1)
@@ -504,6 +507,7 @@ export default function BoxApp(): React.JSX.Element {
       if (current()) setActionError(error instanceof Error ? error.message : String(error))
     } finally {
       if (current()) {
+        if (!reachedPlayer) setRoute(routeAfterFailedOpen(latest.current.route))
         previewStartIntent.current = null
         if (openingDir.current === item.dir) openingDir.current = null
         setBusyDir(null)
@@ -621,9 +625,10 @@ export default function BoxApp(): React.JSX.Element {
     else if (route === 'queue') {
       if (snapshot.active) goCurrent()
       else goCatalog()
-    } else {
-      setFocusVersion(version => version + 1)
-      tvRef.current?.querySelector<HTMLElement>('.box-navigation button.on')?.focus()
+    } else if (tvRef.current) {
+      // Catalog: Back moves focus to the top navigation (NAV-02). No focusVersion bump: that
+      // re-runs the focus effect, which would put focus straight back on the catalog row.
+      focusPrimaryNavigation(tvRef.current)
     }
   }, [backFromAccount, backFromDetails, backFromSettings, closeMix, goCatalog, goCurrent, goQueue, mixOpen, pendingSwitch, route, settingsNavigator, snapshot.active])
 
@@ -654,6 +659,7 @@ export default function BoxApp(): React.JSX.Element {
         return
       }
       const target = event.target instanceof HTMLElement ? event.target : null
+      if (target?.matches('[data-control="seek"]') && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) lastSeekKeyAt.current = performance.now()
       if (target && rangeOwnsArrow(target, event.key)) return
       event.preventDefault()
       event.stopPropagation()
@@ -775,6 +781,7 @@ export default function BoxApp(): React.JSX.Element {
   useEffect(() => {
     const root = tvRef.current
     if (!root || !controlsVisible && route === 'player' && !mixOpen) return
+    if (route === 'player' && !mixOpen && !pendingSwitch && seekKeepsFocus(document.activeElement, lastSeekKeyAt.current, performance.now())) return
     const query = (selector: string): HTMLElement | null => Array.from(root.querySelectorAll<HTMLElement>(selector))
       .find(element => element.getClientRects().length > 0 && !element.closest('[hidden], [inert]')) ?? null
     let target: HTMLElement | null = null

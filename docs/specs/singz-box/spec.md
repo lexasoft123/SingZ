@@ -137,6 +137,7 @@ flowchart TD
 | NAV-07 | Hide after 5 seconds with no input while actively playing and no dialog. Never hide during a held key, pause, end-of-song or mixer interaction. Idle starts again after interaction/dialog closure. |
 | NAV-08 | Map physical CEC/HID buttons to logical directions, OK, Back and MediaPlayPause. Do not intercept OS-reserved combinations. Reconnect must not replay stale presses. |
 | NAV-09 | Returning from hidden playback, app visibility recovery or natural song end restores Play focus. Focused rows scroll into view without changing selection. |
+| NAV-10 | Left/Right on the player seek bar only seek, also at its ends and when the end is reached; focus leaves it with Up/Down only. A queued row's actions are reached with Right (footer hint `→ Actions`) as well as Down. Back from a Settings sub-page returns to the row it was opened from; the "Setup, remote & display" row opens at the language step. Next/Sing from the player keeps the player on screen while the song opens. |
 
 Verify the idle deadline with input between transport updates, not only aligned
 to them. A coarse playback clock must not determine the five-second deadline.

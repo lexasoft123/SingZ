@@ -102,6 +102,8 @@ export const box = {
   'box.player.replay': 'Replay',
   'box.player.chooseSong': 'Choose a song',
   'box.player.hideHint': 'Controls hide after 5 seconds',
+  // One tight token: a narrow no-break space (U+202F), not a full-width space in the mono face.
+  'box.player.countdownSeconds': '{seconds}\u202Fs',
   'box.player.wake': 'Show player controls',
   'box.mix.label': 'Mixer',
   'box.mix.view': 'Mixer view',
@@ -153,6 +155,7 @@ export const box = {
   'box.switch.confirm': 'Switch song',
   'box.hints.browse': 'Browse',
   'box.hints.letters': 'Letters',
+  'box.hints.actions': 'Actions',
   'box.hints.details': 'Song details',
   'box.hints.navigation': 'Navigation',
   'box.hints.move': 'Move',

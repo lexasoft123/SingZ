@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Button } from '@singz/ui'
 import type { BoxPlatformSnapshot, BoxState } from '../../../../shared/box-contract'
 import type { DesktopAudioHostInventoryResult } from '../../../../shared/types'
-import { audioCounts, networkStateLabel } from './format'
+import { audioCounts, audioReadyText, networkStateLabel } from './format'
 import { tJourney, type JourneyKey } from './i18n'
 import { setupStages, type SetupStage } from './model'
 import { ErrorNotice, LoadingNotice, PageFrame } from './ui'
@@ -66,7 +66,7 @@ export function SetupPage({ stage, box, platform, audio, drive, loading, error, 
         <p>{tJourney('journey.setup.bootBody')}</p>
         <div className="journey-status-block">
           <strong>{platform?.available ? tJourney('journey.setup.platformReady') : tJourney('journey.setup.platformMissing')}</strong>
-          <span>{counts.outputs > 0 ? tJourney('journey.setup.audioReady', counts) : tJourney('journey.setup.audioMissing')}</span>
+          <span>{counts.outputs > 0 ? audioReadyText(counts) : tJourney('journey.setup.audioMissing')}</span>
         </div>
         <div className="journey-actions">
           {retry && <Button data-journey-primary variant="primary" onClick={onRetry}>{tJourney('journey.retry')}</Button>}
@@ -110,7 +110,7 @@ export function SetupPage({ stage, box, platform, audio, drive, loading, error, 
       </>}
       {stage === 'audio' && <>
         <h2>{tJourney('journey.setup.audioTitle')}</h2><p>{tJourney('journey.setup.audioBody')}</p>
-        <div className="journey-status-block"><strong>{counts.outputs > 0 ? tJourney('journey.setup.audioReady', counts) : tJourney('journey.setup.audioMissing')}</strong></div>
+        <div className="journey-status-block"><strong>{counts.outputs > 0 ? audioReadyText(counts) : tJourney('journey.setup.audioMissing')}</strong></div>
         <div className="journey-actions"><Button data-journey-primary variant="primary" onClick={onAudio}>{tJourney('journey.home.audio')}</Button><Button onClick={() => onStep(1)}>{tJourney('journey.continue')}</Button></div>
       </>}
       {stage === 'account' && <>

@@ -55,7 +55,7 @@ export function Queue({
       <Button data-queue-return onClick={onClose}>{active ? t('box.mix.back') : t('box.navigation.catalog')}</Button>
     </div>
     <div className="queue-columns">{['#', t('box.metadata.artist'), t('box.metadata.song'), t('box.metadata.key'), t('box.metadata.bpm'), t('box.metadata.range'), t('box.metadata.time'), ''].map((name, index) => <span key={index}>{name}</span>)}</div>
-    <div className="queue-list" aria-label={t('box.queue.list')}>{items.length ? items.map((item, index) => {
+    <div className="queue-list" aria-label={t('box.queue.list')} data-remote-right="[data-queue-action='select']">{items.length ? items.map((item, index) => {
       const metadata = rows[item.dir]?.metadata
       const readiness = rows[item.dir]?.inspection?.readiness
       const isCurrent = active?.item.dir === item.dir
@@ -87,6 +87,6 @@ export function Queue({
       </div>
       <span className="queue-selection-note">{t('box.queue.continuity')}</span>
     </div>
-    <footer className="queue-footer"><span><b>↑ ↓</b>{t('box.hints.browse')}<b>OK</b>{t('box.hints.select')}<b>Back</b>{active ? t('box.mix.back') : t('box.navigation.catalog')}</span><span>{selected ? `${selectedIndex + 1} / ${items.length}` : ''}</span></footer>
+    <footer className="queue-footer"><span><b>↑ ↓</b>{t('box.hints.browse')}{items.length > 0 && <><b>→</b>{t('box.hints.actions')}</>}<b>OK</b>{t('box.hints.select')}<b>Back</b>{active ? t('box.mix.back') : t('box.navigation.catalog')}</span><span>{selected ? `${selectedIndex + 1} / ${items.length}` : ''}</span></footer>
   </main>
 }
