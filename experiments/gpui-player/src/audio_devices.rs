@@ -175,7 +175,7 @@ pub(crate) fn remember_native_inventory(reply: &Value, kind: SnapshotKind, is_cu
     Ok(())
 }
 pub fn helper() -> PathBuf {
-    std::env::var_os("SINGZ_GPUI_AUDIO_HELPER")
+    gated_env!("SINGZ_GPUI_AUDIO_HELPER")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             std::env::current_exe()

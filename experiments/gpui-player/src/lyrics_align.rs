@@ -261,8 +261,8 @@ fn precise_flavor(config: &Config) -> Flavor {
         config.flavor
     }
 }
-fn resolve_engine(env: &str, name: &str) -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(env).map(PathBuf::from) {
+fn resolve_engine(override_path: Option<std::ffi::OsString>, name: &str) -> Option<PathBuf> {
+    if let Some(path) = override_path.map(PathBuf::from) {
         return regular(&path).then_some(path);
     }
     let exe = std::env::current_exe().ok()?;
@@ -301,10 +301,10 @@ fn resolve_engine(env: &str, name: &str) -> Option<PathBuf> {
 }
 fn capability_for(config: &Config) -> Capabilities {
     let mut missing = vec![];
-    if resolve_engine("SINGZ_LLAMA_SERVER", "llama-server").is_none() {
+    if resolve_engine(gated_env!("SINGZ_LLAMA_SERVER"), "llama-server").is_none() {
         missing.push("llama-server".into());
     }
-    if resolve_engine("SINGZ_CRISPASR", "crispasr").is_none() {
+    if resolve_engine(gated_env!("SINGZ_CRISPASR"), "crispasr").is_none() {
         missing.push("crispasr".into());
     }
     Capabilities {
@@ -471,7 +471,7 @@ fn transcribe_inner(
             let flat = flat_words(&work.draft);
             let assigned = chunk_of_each_word(&work.draft, &chunks);
             let runtime =
-                resolve_engine("SINGZ_CRISPASR", "crispasr").context("Word aligner is missing")?;
+                resolve_engine(gated_env!("SINGZ_CRISPASR"), "crispasr").context("Word aligner is missing")?;
             let mut warnings = vec![];
             let placed = place_chunks(
                 &work,
@@ -858,7 +858,7 @@ fn prepare_pcm(
     cancel: &impl Fn() -> bool,
 ) -> Result<(PathBuf, u64)> {
     let pcm = scratch.0.join("vocals.f32");
-    let helper = std::env::var_os("SINGZ_GPUI_AUDIO_HELPER")
+    let helper = gated_env!("SINGZ_GPUI_AUDIO_HELPER")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?.with_file_name(if cfg!(windows) {
             "singz-gpui-audio.exe"
@@ -1100,7 +1100,7 @@ struct Server {
 impl Server {
     fn start(input: &Inputs, cancel: &impl Fn() -> bool) -> Result<Self> {
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let exe = resolve_engine("SINGZ_LLAMA_SERVER", "llama-server")
+        let exe = resolve_engine(gated_env!("SINGZ_LLAMA_SERVER"), "llama-server")
             .context("llama-server is missing")?;
         let mut cmd = Command::new(exe);
         cmd.arg("-m")
@@ -1569,7 +1569,7 @@ fn fast(
     }
     let assigned = domain::assign_words_to_chunks(flat.len(), &anchor_chunk);
     let runtime =
-        resolve_engine("SINGZ_CRISPASR", "crispasr").context("Word aligner is missing")?;
+        resolve_engine(gated_env!("SINGZ_CRISPASR"), "crispasr").context("Word aligner is missing")?;
     let bad_lines: HashSet<_> = judged.check.bad_lines.iter().copied().collect();
     let placed = place_chunks(
         input,

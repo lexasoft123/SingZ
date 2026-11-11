@@ -19,9 +19,9 @@ The build installs singz-gpui-audio, singz-gpui-input, the existing singz-analyz
 and the shared CREPE tiny model and license under pitch/.
 The helper defaults to the UI executable's directory. For a release build, pass
 `experiments/gpui-player/target/release/singz-gpui-audio` to the build script.
-`SINGZ_GPUI_AUDIO_HELPER` can select an explicit helper executable.
-
-SINGZ_GPUI_ANALYZER can override the analyzer executable for deployment/testing.
+`SINGZ_GPUI_AUDIO_HELPER` can select an explicit helper executable, and
+`SINGZ_GPUI_ANALYZER` the analyzer executable, in `ui-tests`/qualify builds only:
+release builds ignore them (C-23; the list is `tests/shared/gpui-gated-env-names.json`).
 
 The native catalog reads `~/Documents/SingZ`, or `SINGZ_GPUI_PROJECTS_ROOT`.
 Open accepts audio, a project directory or its project.json, through the picker,

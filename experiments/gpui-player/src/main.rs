@@ -1,4 +1,14 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// Drop gate names at compile time from the distributable build.
+macro_rules! gated_env {
+    ($name:expr) => {{
+        #[cfg(feature = "ui-tests")]
+        { crate::gated_env::get($name) }
+        #[cfg(not(feature = "ui-tests"))]
+        { None::<std::ffi::OsString> }
+    }};
+}
+mod gated_env;
 #[cfg(feature = "ui-tests")]
 #[used]
 static SINGZ_GPUI_UI_TESTS_BUILD_MARKER: &[u8] = b"SINGZ_GPUI_UI_TESTS_BUILD_MARKER";
@@ -1309,7 +1319,7 @@ impl Player {
         let backend = (!integration::fixture_mode())
             .then(|| integration::Backend::new(cx.text_system().clone()));
         let stem_export_service=backend.as_ref().map(|_|stem_export::Service::new(
-            std::env::var_os("SINGZ_GPUI_AUDIO_HELPER").map(std::path::PathBuf::from)
+            gated_env!("SINGZ_GPUI_AUDIO_HELPER").map(std::path::PathBuf::from)
                 .unwrap_or_else(||std::env::current_exe().unwrap_or_default().with_file_name(if cfg!(windows){"singz-gpui-audio.exe"}else{"singz-gpui-audio"}))));
         let microphone = backend.as_ref().map(|_| microphone::Service::new());
         let training_store = backend.as_ref().map(|_| training_store::Service::new());
@@ -1441,14 +1451,14 @@ impl Player {
             loading: false,
             duration: DURATION,
             native_anchor: None,
-            screen: if std::env::var_os("SINGZ_GPUI_PROFILE").is_some() {
+            screen: if gated_env!("SINGZ_GPUI_PROFILE").is_some() {
                 Screen::Player
             } else {
                 Screen::Library
             },
             #[cfg(feature = "ui-tests")]
             text_phase_check: false,
-            loaded_song: std::env::var_os("SINGZ_GPUI_PROFILE").is_some(),
+            loaded_song: gated_env!("SINGZ_GPUI_PROFILE").is_some(),
             notice: None,
             previous_screen: Screen::Library,
             songs_catalog: true,
@@ -1592,7 +1602,7 @@ impl Player {
             stem_scroll_handle: ScrollHandle::new(),
             lyric_scroll_active: Rc::new(Cell::new(false)),
             lyric_hits: Rc::new(RefCell::new(vec![])),
-            playing: std::env::var_os("SINGZ_GPUI_PROFILE").is_some(),
+            playing: gated_env!("SINGZ_GPUI_PROFILE").is_some(),
             position: 64.,
             track_name_input,
             track_rename: None,
@@ -1640,7 +1650,7 @@ impl Player {
             release_external_urls:vec![],
             #[cfg(feature="ui-tests")]
             release_unexpected_browse:0,
-            capture_file: std::env::var_os("SINGZ_GPUI_CAPTURE_FILE").map(Into::into),
+            capture_file: gated_env!("SINGZ_GPUI_CAPTURE_FILE").map(Into::into),
             started: Instant::now(),
             last: Instant::now(),
         }
@@ -3435,7 +3445,7 @@ impl Player {
             return;
         };
         let settings = self.screen == Screen::Settings
-            && std::env::var_os("SINGZ_GPUI_TEST_NO_CAPTURE").is_none();
+            && gated_env!("SINGZ_GPUI_TEST_NO_CAPTURE").is_none();
         let player = self.screen == Screen::Player
             && self.project.is_some()
             && !self.loading
@@ -4487,8 +4497,8 @@ impl Player {
         let glow_textures = self.glow_textures.clone();
         let glow_bands = self.glow_bands.clone();
         let stats = self.frame_stats.clone();
-        let profile = std::env::var_os("SINGZ_GPUI_PROFILE").is_some()
-            || std::env::var_os("SINGZ_GPUI_OFFSCREEN_BENCHMARK").is_some();
+        let profile = gated_env!("SINGZ_GPUI_PROFILE").is_some()
+            || gated_env!("SINGZ_GPUI_OFFSCREEN_BENCHMARK").is_some();
         let shapes = self.shape_cache.clone();
         let layouts = self.layout_cache.clone();
         let scrolling = self.lyric_scroll.clone();
@@ -6329,31 +6339,31 @@ fn main() {
         #[cfg(feature = "ui-tests")]
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_DRIVE_RESTORE_TEST") {
             assert!(background && std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
-                && std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+                && gated_env!("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Some(std::ffi::OsStr::new("1")));
             ui_drive_restore::run(window_handle,view.clone(),directory.into(),cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_AUDIO_PROVIDER_TEST") {
             assert!(background&&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
-                &&std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+                &&gated_env!("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Some(std::ffi::OsStr::new("1")));
             ui_audio_provider::run(window_handle,view.clone(),directory.into(),cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_EMPTY_DRIVE_TEST") {
             assert!(background&&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
-                &&std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+                &&gated_env!("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Some(std::ffi::OsStr::new("1")));
             ui_empty_drive::run(window_handle,view.clone(),directory.into(),cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_DRIVE_RETIREMENT_TEST") {
             assert!(background&&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
-                &&std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+                &&gated_env!("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Some(std::ffi::OsStr::new("1")));
             ui_drive_retirement::run(window_handle,view.clone(),directory.into(),cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_PLAYBACK_GRAPH_TEST") {
             assert!(background && std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
-                && std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+                && gated_env!("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Some(std::ffi::OsStr::new("1")));
             ui_playback_graph::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
@@ -6551,7 +6561,7 @@ fn main() {
             ui_library_review::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
-        if let Some(output) = std::env::var_os("SINGZ_GPUI_OFFSCREEN_BENCHMARK") {
+        if let Some(output) = gated_env!("SINGZ_GPUI_OFFSCREEN_BENCHMARK") {
             assert!(background, "Offscreen benchmark requires background mode");
             ui_benchmark::run(window_handle, view.clone(), output.into(), cx);
         }

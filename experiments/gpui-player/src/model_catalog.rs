@@ -180,7 +180,7 @@ pub fn registry(flavor: Flavor, version: &str) -> Vec<Entry> {
                 "Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest — on your GPU when it can (GeForce RTX 30xx or newer; CPU otherwise).",
             ),
         };
-        entries.push(Entry{id:"gpu-splitter".into(),label:"Stem splitter · AI".into(),description:description.into(),optional:false,archive:true,parts:vec![part("gpu-splitter.tar.gz",std::env::var("SINGZ_GPU_PACK_URL").unwrap_or_else(|_|format!("https://github.com/lexasoft123/SingZ/releases/download/v{version}/gpu-splitter-{platform}-{arch}.tar.gz")),mb,FileKind::Archive)]});
+        entries.push(Entry{id:"gpu-splitter".into(),label:"Stem splitter · AI".into(),description:description.into(),optional:false,archive:true,parts:vec![part("gpu-splitter.tar.gz",gated_env!("SINGZ_GPU_PACK_URL").and_then(|v| v.into_string().ok()).unwrap_or_else(||format!("https://github.com/lexasoft123/SingZ/releases/download/v{version}/gpu-splitter-{platform}-{arch}.tar.gz")),mb,FileKind::Archive)]});
     }
     entries.push(Entry{id:"qwen-asr".into(),label:"Speech model · lyrics".into(),description:"Hears the vocals: transcribes lyrics when none are online, and checks & aligns downloaded lyrics against what is actually sung. Trained on singing, in 30 languages, with its own word aligner.".into(),optional:true,archive:false,parts:vec![
         part("Qwen3-ASR-1.7B-Q8_0.gguf","https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf".into(),2165,FileKind::Gguf),

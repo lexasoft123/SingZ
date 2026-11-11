@@ -41,8 +41,22 @@ def validate_runtime_profile(runtime: Path, allow_debug: bool) -> None:
     raise PackageError('Cannot determine build profile from runtime path; expected target/release or target/debug')
 
 def reject_ui_tests_binary(path: Path) -> None:
-    if UI_TESTS_MARKER in path.read_bytes():
+    try:
+        names = json.loads((ROOT / 'tests/shared/gpui-gated-env-names.json').read_text(encoding='utf-8'))
+        if (not isinstance(names, list) or not names or
+                any(not isinstance(name, str) or not name.startswith('SINGZ_') or
+                    len(name) <= len('SINGZ_') or
+                    any(c not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_' for c in name)
+                    for name in names) or names != sorted(set(names))):
+            raise ValueError('invalid gated environment name list')
+    except (OSError, ValueError, TypeError) as error:
+        raise PackageError(f'Cannot load gated environment name list: {error}') from error
+    binary = path.read_bytes()
+    if UI_TESTS_MARKER in binary:
         raise PackageError(f'Refusing ui-tests binary: {path}')
+    for name in names:
+        if name.encode('ascii') in binary:
+            raise PackageError(f'Refusing binary containing gated environment name {name}: {path}')
 
 
 def native_build_info(path: Path | None, executable: Path, platform: str, required: bool) -> dict | None:

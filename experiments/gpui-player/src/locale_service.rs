@@ -40,7 +40,7 @@ pub struct Service {
 impl Service {
     pub fn new(directory: PathBuf) -> Self {
         let env = std::env::var("SINGZ_LANG").ok();
-        let hidden = std::env::var("SINGZ_E2E_HIDDEN").as_deref() == Ok("1")
+        let hidden = gated_env!("SINGZ_E2E_HIDDEN").as_deref() == Some(std::ffi::OsStr::new("1"))
             || std::env::var("SINGZ_GPUI_BACKGROUND").as_deref() == Ok("1");
         // Hidden restart coverage must exercise the real saved preference,
         // without changing window visibility or the normal binary's policy.

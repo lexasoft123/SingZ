@@ -600,7 +600,7 @@ pub fn run_with_progress(
     let exe = crate::analyze_provenance::resolve()?;
     let config = Config::source();
     let scratch = Scratch::new()?;
-    let helper = std::env::var_os("SINGZ_GPUI_AUDIO_HELPER")
+    let helper = gated_env!("SINGZ_GPUI_AUDIO_HELPER")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?.with_file_name(if cfg!(windows) {
             "singz-gpui-audio.exe"

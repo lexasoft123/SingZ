@@ -97,7 +97,7 @@ pub(crate) fn shutdown() {
 
 pub(crate) fn resolve() -> Result<PathBuf> {
     let path = resolve_path(
-        std::env::var_os("SINGZ_GPUI_ANALYZER").map(PathBuf::from),
+        gated_env!("SINGZ_GPUI_ANALYZER").map(PathBuf::from),
         std::env::current_exe().context("Cannot locate native analyzer")?,
     );
     // The queue, hashing, probe and log belong to one background worker. A full

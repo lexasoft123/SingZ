@@ -762,14 +762,14 @@ impl Session {
         alive: Arc<AtomicBool>,
         recording_events: RecordingEvents,
     ) -> Result<(Self, View)> {
-        let exe = std::env::var_os("SINGZ_GPUI_INPUT_HELPER")
+        let exe = gated_env!("SINGZ_GPUI_INPUT_HELPER")
             .map(PathBuf::from)
             .unwrap_or(std::env::current_exe()?.with_file_name(if cfg!(windows) {
                 "singz-gpui-input.exe"
             } else {
                 "singz-gpui-input"
             }));
-        let model = std::env::var_os("SINGZ_GPUI_PITCH_MODEL")
+        let model = gated_env!("SINGZ_GPUI_PITCH_MODEL")
             .map(PathBuf::from)
             .unwrap_or_else(|| bundled_pitch_model(&exe));
         let mut command = Command::new(exe);

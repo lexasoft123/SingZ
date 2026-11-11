@@ -48,8 +48,22 @@ def validate_runtime_profile(runtime: Path, allow_debug: bool) -> None:
     raise PackageError('Cannot determine build profile from runtime path; expected target/release or target/debug')
 
 def reject_ui_tests_binary(path: Path) -> None:
-    if UI_TESTS_MARKER in path.read_bytes():
+    try:
+        names = json.loads((ROOT / 'tests/shared/gpui-gated-env-names.json').read_text(encoding='utf-8'))
+        if (not isinstance(names, list) or not names or
+                any(not isinstance(name, str) or not name.startswith('SINGZ_') or
+                    len(name) <= len('SINGZ_') or
+                    any(c not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_' for c in name)
+                    for name in names) or names != sorted(set(names))):
+            raise ValueError('invalid gated environment name list')
+    except (OSError, ValueError, TypeError) as error:
+        raise PackageError(f'Cannot load gated environment name list: {error}') from error
+    binary = path.read_bytes()
+    if UI_TESTS_MARKER in binary:
         raise PackageError(f'Refusing ui-tests binary: {path}')
+    for name in names:
+        if name.encode('ascii') in binary:
+            raise PackageError(f'Refusing binary containing gated environment name {name}: {path}')
 
 def native_build_info(path: Path | None, executable: Path, platform: str, required: bool) -> dict | None:
     """Validate supplied CLI metadata against copied, unsigned UI bytes; never execute it.
@@ -434,7 +448,10 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
         source = runtime / name
         if not source.stat().st_mode & 0o111 or not macho(source):
             raise PackageError(f'Required executable must be executable Mach-O: {source}')
-    reject_ui_tests_binary(runtime / 'singz-gpui-player')
+    # Every shipped executable, not only the player: a helper that ever reads a
+    # gated name must be refused here too (the desktop packager does the same).
+    for name in EXECUTABLES:
+        reject_ui_tests_binary(runtime / name)
     font_license_dir = Path(font_license_dir) if font_license_dir is not None else ROOT.parent / 'singz-ui/gpui/assets/fonts'
     try:
         ordinary(font_license_dir, True)

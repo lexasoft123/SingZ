@@ -344,14 +344,33 @@ pub fn library_root() -> PathBuf {
     crate::project_library::library_root()
 }
 pub fn fixture_mode() -> bool {
-    std::env::var_os("SINGZ_GPUI_DEMO").is_some()
+    #[cfg(feature = "ui-tests")]
+    { gated_env!("SINGZ_GPUI_DEMO").is_some()
         || std::env::vars_os().any(|(key, _)| {
             let key = key.to_string_lossy();
             key.starts_with("SINGZ_GPUI_")
                 && ["REVIEW", "SMOKE", "BENCHMARK", "PROFILE", "CAPTURE_FILE"]
                     .iter()
                     .any(|s| key.contains(s))
-        })
+        }) }
+    #[cfg(not(feature = "ui-tests"))]
+    { false }
+}
+#[cfg(all(test, not(feature = "ui-tests")))]
+mod gated_fixture_tests {
+    #[test]
+    fn release_ignores_demo_fixture() {
+        if std::env::var_os("SINGZ_C23_FIXTURE_CHILD").is_some() {
+            assert!(!super::fixture_mode());
+        } else {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("release_ignores_demo_fixture")
+                .env("SINGZ_C23_FIXTURE_CHILD", "1")
+                .env("SINGZ_GPUI_DEMO", "1")
+                .status().unwrap();
+            assert!(status.success(), "isolated fixture test failed");
+        }
+    }
 }
 #[path="integration_provider.rs"]
 mod provider_control;
@@ -1697,7 +1716,7 @@ impl Connection {
         provider_retired:Arc<AtomicU64>,
     ) -> Result<(Self, Value)> {
         crate::audio_devices::validate_output_uid(provider,output_uid,cfg!(windows))?;
-        let helper = std::env::var_os("SINGZ_GPUI_AUDIO_HELPER")
+        let helper = gated_env!("SINGZ_GPUI_AUDIO_HELPER")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 std::env::current_exe()

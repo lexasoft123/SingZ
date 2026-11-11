@@ -1,4 +1,7 @@
 import importlib.util
+import json
+import re
+from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import unittest
@@ -41,6 +44,56 @@ class ProfileTests(unittest.TestCase):
                 binary.flush()
                 with self.assertRaises(package.PackageError):
                     package.reject_ui_tests_binary(Path(binary.name))
+
+    def test_gated_environment_name_is_rejected(self):
+        for package in (DESKTOP, MACOS):
+            with self.subTest(package=package.__name__), tempfile.NamedTemporaryFile() as binary:
+                binary.write(b'headerSINGZ_GDRIVE_CONFIGsuffix')
+                binary.flush()
+                with self.assertRaises(package.PackageError):
+                    package.reject_ui_tests_binary(Path(binary.name))
+
+    def test_all_inventory_names_are_rejected_and_operator_names_remain_allowed(self):
+        names = json.loads((ROOT / 'tests/shared/gpui-gated-env-names.json').read_text())
+        for package in (DESKTOP, MACOS):
+            with tempfile.NamedTemporaryFile() as binary:
+                for name in names:
+                    with self.subTest(package=package.__name__, name=name):
+                        binary.seek(0)
+                        binary.truncate()
+                        binary.write(b'header' + name.encode('ascii') + b'suffix')
+                        binary.flush()
+                        with self.assertRaises(package.PackageError):
+                            package.reject_ui_tests_binary(Path(binary.name))
+                binary.seek(0)
+                binary.truncate()
+                binary.write(b'SINGZ_MUTE SINGZ_GPUI_BACKGROUND SINGZ_LANG')
+                binary.flush()
+                package.reject_ui_tests_binary(Path(binary.name))
+
+    def test_invalid_inventory_is_refused(self):
+        for package in (DESKTOP, MACOS):
+            with self.subTest(package=package.__name__), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                listing = root / 'tests/shared/gpui-gated-env-names.json'
+                listing.parent.mkdir(parents=True)
+                listing.write_text('[]')
+                binary = root / 'player'
+                binary.write_bytes(b'clean')
+                with patch.object(package, 'ROOT', root), self.assertRaises(package.PackageError):
+                    package.reject_ui_tests_binary(binary)
+
+    def test_inventory_covers_singz_source_literals(self):
+        # Conservative: all quoted names, including test-only names, must be in
+        # the inventory unless they are documented operator settings or a prefix.
+        operator = {'SINGZ_DEMUCS', 'SINGZ_GPUI_', 'SINGZ_GPUI_BACKGROUND',
+                    'SINGZ_GPUI_CONFIG_DIR', 'SINGZ_GPUI_PROJECTS_ROOT', 'SINGZ_LANG',
+                    'SINGZ_MODELS_DIR', 'SINGZ_MUTE', 'SINGZ_NO_SYNC',
+                    'SINGZ_NO_SYSTEM_ENGINES', 'SINGZ_PACK_DIR'}
+        names = json.loads((ROOT / 'tests/shared/gpui-gated-env-names.json').read_text())
+        found = {match for path in (ROOT / 'experiments/gpui-player/src').rglob('*.rs')
+                 for match in re.findall(r'"(SINGZ_[A-Z0-9_]+)"', path.read_text())}
+        self.assertEqual(sorted(found - operator), names)
 
 
 if __name__ == '__main__':

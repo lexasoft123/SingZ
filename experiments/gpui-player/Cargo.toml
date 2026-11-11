@@ -46,6 +46,9 @@ codegen-units = 16
 debug = "line-tables-only"
 strip = "symbols"
 
+[profile.qualify]
+inherits = "release"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSDictionary", "NSObject", "NSString", "NSUserDefaults", "NSValue"] }
 core-foundation-sys = "=0.8.7"

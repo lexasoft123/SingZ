@@ -65,7 +65,7 @@ impl Config {
         Ok(cfg)
     }
     pub fn from_env_or(baked: &str) -> Result<Self> {
-        Self::from_override_or(baked, std::env::var("SINGZ_GDRIVE_CONFIG"))
+        Self::from_override_or(baked, gated_env!("SINGZ_GDRIVE_CONFIG").map(|s| s.into_string().map_err(std::env::VarError::NotUnicode)).unwrap_or(Err(std::env::VarError::NotPresent)))
     }
     fn from_override_or(baked: &str, override_config: std::result::Result<String, std::env::VarError>) -> Result<Self> {
         match override_config {
