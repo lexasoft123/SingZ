@@ -10,11 +10,14 @@ import type {
 import { analysisIsStale, KEY_DETECT_VERSION, sanitizeKeyInfo } from '../audio/analysis-contract'
 import { decodeMelody, PITCH_DETECT_VERSION } from '../audio/melody'
 import { toNoteSegments } from '../audio/notes'
+import { parseSongName } from './song-identity'
 
 export type BoxReadiness = 'ready' | 'unprepared' | 'needs-lyrics' | 'damaged' | 'unsupported' | 'error'
 
 export interface BoxProjectMetadata {
-  artist: null
+  /** Parsed from the song name (see song-identity.ts); null when it has no "Artist - Title" form. */
+  artist: string | null
+  title: string
   key: KeyInfo | null
   bpm: number | null
   range: [number, number] | null
@@ -89,7 +92,18 @@ export function projectMetadata(project: ProjectInfo, duration: number | null = 
       ]
     }
   }
-  return { artist: null, key, bpm, range, duration }
+  const identity = parseSongName(project.name)
+  // An engine-measured length wins; otherwise the header read the main process
+  // attached to the project, so the catalog knows it before the song is opened.
+  const known = duration ?? project.durationSec ?? null
+  return {
+    artist: identity.artist,
+    title: identity.title,
+    key,
+    bpm,
+    range,
+    duration: known !== null && Number.isFinite(known) && known > 0 ? known : null
+  }
 }
 
 export function settingsWithTracks(

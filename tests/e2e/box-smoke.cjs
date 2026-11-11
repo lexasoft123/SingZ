@@ -114,6 +114,8 @@ let app = null
   const headers = await page.locator('.box-list-heading [role="columnheader"]').allTextContents()
   check(headers.slice(0, 6).join('|') === 'Artist|Song|Key|BPM|Vocal range|Time', 'catalog keeps artist-first compact columns')
   check(await page.locator('.box-song-row').count() === 2, 'real isolated catalog lists both projects')
+  await page.waitForFunction(() => Array.from(document.querySelectorAll('.box-song-row .box-time')).every(cell => cell.textContent === '0:30'), null, { timeout: 30000 })
+  check(true, 'catalog shows each song time (30 s fixture) from the stem headers before any song is opened')
 
   await watchdog.run('catalog Settings returns without opening a song', 60, async () => {
     await page.getByRole('button', { name: 'Settings', exact: true }).click()

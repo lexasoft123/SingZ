@@ -5,6 +5,7 @@ import { t } from './i18n'
 import { playbackStatus } from './playback-status'
 import { timeText } from './metadata'
 import { PlayerLyrics } from './PlayerLyrics'
+import { parseSongName } from './song-identity'
 import type { BoxTransportSnapshot } from './transport'
 import { tSettings, tMicrophone } from './settings-i18n'
 import { microphoneSlotStatus, microphoneStatusKey, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
@@ -55,7 +56,7 @@ export function Player({
       {/* Brand and song stay on screen while the controls are hidden. */}
       <header className="player-header">
         <div className="box-logo">Sing<span>Z</span><small>Box</small></div>
-        <div className="player-song"><strong>{active.item.name}</strong><span>{t('box.player.savedStems')}</span></div>
+        <div className="player-song"><strong>{parseSongName(active.item.name).title}</strong><span>{parseSongName(active.item.name).artist ?? t('box.player.savedStems')}</span></div>
         <div className="player-header-actions player-chrome" {...chromeProps}><Button data-control="settings" onClick={onSettings}>{tSettings('box.settings.navigation')}</Button><Button data-control="collection" onClick={onLibrary}>{t('box.navigation.catalog')}</Button></div>
       </header>
       {active.lyrics.status === 'ready' ? <PlayerLyrics key={active.item.dir} lines={lines} position={snapshot.position} playing={snapshot.playing} rate={snapshot.tempo} /> : <div className="player-no-lyrics">

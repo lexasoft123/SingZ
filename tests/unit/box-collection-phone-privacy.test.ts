@@ -12,7 +12,7 @@ const active = (dir: string, trackId: string): BoxActiveSong => ({
   project: {
     dir, name: 'Song', settings: { transpose: 0, tracks: {} }, stems: { vocals: `${dir}/vocals.flac` }, hasLyrics: true, inLibrary: true
   } as ProjectInfo,
-  metadata: { artist: null, key: null, bpm: null, range: null, duration: 10 },
+  metadata: { artist: null, title: 'Song', key: null, bpm: null, range: null, duration: 10 },
   lyrics: { status: 'ready', lines: [{ start: 0, end: 1, text: 'Line', words: [] }] }
 })
 const snapshot = (dir: string, trackId: string): BoxTransportSnapshot => ({

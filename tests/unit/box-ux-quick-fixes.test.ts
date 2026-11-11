@@ -36,7 +36,7 @@ class Fake {
     if (selector === '[inert]') return false
     if (selector === 'input[type="range"]') return this.tagName === 'input' && this.attributes.type === 'range'
     if (selector === '[data-mix-row]') return this.dataset.mixRow !== undefined
-    if (selector === '[data-remote-down]' || selector === '[data-remote-up]') return this.attr(selector.slice(1, -1)) !== undefined
+    if (['[data-remote-down]', '[data-remote-up]', '[data-remote-right]', '[data-remote-left]'].includes(selector)) return this.attr(selector.slice(1, -1)) !== undefined
     const exact = /^\[(data-[a-z-]+)="([^"]+)"\]$/.exec(selector)
     if (exact) return this.attr(exact[1]) === exact[2]
     const text = /^\[data-control='?([a-z]+)'?\]$/.exec(selector)
