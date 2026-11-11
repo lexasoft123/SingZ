@@ -87,6 +87,74 @@ class AssemblyTests(unittest.TestCase):
         for name in ('llama-server.exe', 'crispasr.exe'):
             self.assertTrue((self.output / 'engines' / name).is_file())
 
+    def test_installer_inputs_and_uninstall_are_payload_scoped(self):
+        self.executables('windows')
+        engines = self.base / 'engines'
+        engines.mkdir()
+        for name in ('llama-server.exe', 'crispasr.exe'):
+            (engines / name).write_bytes(pe())
+        self.assemble('windows', engines=engines)
+        commands = []
+        def runner(args, **kwargs):
+            commands.append(args)
+            include = Path(next(x[10:] for x in args if x.startswith('/DINCLUDE=')))
+            generated = include.read_text(encoding='utf-8')
+            self.assertIn('engines\\llama-server.exe', generated)
+            self.assertIn('pitch\\crepe-tiny.bin', generated)
+            self.assertNotIn('$APPDATA', generated.upper())
+            self.assertNotIn('RMDir /r', generated)
+            Path(next(x[9:] for x in args if x.startswith('/DOUTPUT='))).write_bytes(b'installer')
+            return SimpleNamespace(returncode=0)
+        package.build_installer(self.output, self.base / 'setup.exe', runner=runner, env={})
+        self.assertEqual(len(commands), 1)
+        source = (package.ROOT / 'experiments/gpui-player/packaging/windows/singz-native.nsi').read_text()
+        self.assertNotIn('RMDir /r', source)
+        self.assertNotIn('$APPDATA', source.upper())
+        self.assertIn('!uninstfinalize', source)
+        self.assertIn('= 0', source)
+        self.assertIn('MUI_LANGUAGE "PortugueseBR"', source)
+        self.assertIn('MUI_LANGUAGE "Hindi"', source)
+        self.assertNotIn('MUI_LANGDLL_DISPLAY', source)
+        self.assertNotIn('MUI_LANGUAGE "Filipino"', source)
+
+    def test_unsigned_warning_and_signed_hashes_with_no_secret_logged(self):
+        self.executables('windows')
+        with mock.patch('sys.stderr', new_callable=__import__('io').StringIO) as warnings:
+            self.assemble('windows')
+        manifest = json.loads((self.output / 'manifest.json').read_text())
+        self.assertEqual(manifest['signing'], 'unsigned')
+        self.assertIn('unsigned', warnings.getvalue().lower())
+        shutil.rmtree(self.output)
+        (self.runtime / 'codec.dll').write_bytes(pe(dll=True))
+        engines = self.base / 'signed-engines'
+        engines.mkdir()
+        for name in ('llama-server.exe', 'crispasr.exe'):
+            (engines / name).write_bytes(pe())
+        password = self.base / 'password.txt'
+        password.write_text('secret-password', encoding='utf-8')
+        calls = []
+        def runner(args, **kwargs):
+            calls.append(args)
+            Path(args[-1]).write_bytes(Path(args[-1]).read_bytes() + b'signed')
+            return SimpleNamespace(returncode=0)
+        env = {'SINGZ_SIGN_PFX': str(self.base / 'cert.pfx'), 'SINGZ_SIGN_PASSWORD_FILE': str(password), 'SINGZ_SIGN_TIMESTAMP_URL': 'https://timestamp.example'}
+        with mock.patch('sys.stdout', new_callable=__import__('io').StringIO) as out, mock.patch('sys.stderr', new_callable=__import__('io').StringIO) as err:
+            package.assemble('windows', self.runtime, self.output, uikit_dir=self.uikit, engines=engines, signing_env=env, runner=runner)
+        self.assertNotIn('secret-password', out.getvalue() + err.getvalue())
+        config = package.signing_config(env)
+        def failed_runner(args, **kwargs):
+            return SimpleNamespace(returncode=1, stdout='secret-password', stderr='secret-password')
+        with self.assertRaises(package.PackageError) as failure:
+            package.sign_file(self.runtime / 'singz-analyze.exe', config, failed_runner)
+        self.assertNotIn('secret-password', str(failure.exception))
+        manifest = json.loads((self.output / 'manifest.json').read_text())
+        self.assertEqual(manifest['signing'], 'authenticode')
+        self.assertTrue(calls[0][-1].endswith('codec.dll'))
+        self.assertEqual({Path(call[-1]).name for call in calls[1:3]}, {'llama-server.exe', 'crispasr.exe'})
+        self.assertTrue(calls[-1][-1].endswith('singz-gpui-player.exe'))
+        for item in manifest['files']:
+            self.assertEqual(item['sha256'], hashlib.sha256((self.output / item['path']).read_bytes()).hexdigest())
+
     def assert_clean(self):
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.base.glob('.singz-desktop-package-*')), [])

@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import plistlib
 import posixpath
+import re
 import stat
 import subprocess
 import sys
@@ -206,8 +207,88 @@ def command(argv: list[str]) -> str:
     try:
         return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
     except (OSError, subprocess.CalledProcessError) as error:
+        if any(tool in argv[0] for tool in ('xcrun', 'security', 'codesign')):
+            raise PackageError(f'{Path(argv[0]).name} failed; sensitive command details suppressed') from None
         detail = getattr(error, 'stderr', '')
         raise PackageError(f'Command failed: {argv!r}\n{detail}') from error
+
+ENTITLEMENTS = ROOT / 'experiments/gpui-player/packaging/macos/audio-input.plist'
+
+
+def signing_configuration(env: dict, run=command) -> tuple[str, dict | None]:
+    # Only the wrapper-provided keychain is searched. It must already contain
+    # an unlocked Developer ID identity; importing a p12 requires a password.
+    keychain = env.get('SINGZ_SIGNING_KEYCHAIN_PATH')
+    names = ('SINGZ_ASC_KEY_PATH', 'APP_STORE_CONNECT_API_KEY_ID', 'APP_STORE_CONNECT_API_ISSUER_ID')
+    if not keychain or not all(env.get(name) for name in names):
+        return '-', None
+    identities = run(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning', keychain])
+    matches = re.findall(r'\b([0-9A-Fa-f]{40})\s+"Developer ID Application: [^"\n]+"', identities)
+    if not matches:
+        return '-', None
+    if len(matches) != 1:
+        raise PackageError('Expected exactly one Developer ID Application identity in the signing keychain')
+    return matches[0], {'key': env[names[0]], 'key_id': env[names[1]], 'issuer': env[names[2]], 'keychain': keychain}
+
+
+def sign_bundle(bundle: Path, dependencies: list[dict], identity: str, run=command, keychain: str | None = None) -> None:
+    paths = [record['path'] for record in dependencies if record['path'] != 'Contents/MacOS/singz-gpui-player']
+    def stage(path):
+        if path.startswith('Contents/MacOS/ffmpeg/'):
+            return (0, path)
+        if path.startswith('Contents/Resources/engines/'):
+            return (1 if path.endswith('.dylib') else 2, path)
+        if path.endswith('/singz-analyze'):
+            return (3, path)
+        if path.endswith('/singz-gpui-audio'):
+            return (4, path)
+        if path.endswith('/singz-gpui-input'):
+            return (5, path)
+        return (2, path)
+    def sign(path: Path, identifier: str | None = None, entitlement: bool = False):
+        args = ['/usr/bin/codesign', '--force', '--sign', identity]
+        if identity != '-':
+            # Hardened runtime only with a real identity: its library validation
+            # rejects ad-hoc dylibs (no Team ID), so an ad-hoc app could not load
+            # its own bundled FFmpeg libraries.
+            args += ['--options', 'runtime', '--timestamp']
+            if keychain:
+                args += ['--keychain', keychain]
+        if identifier:
+            args += ['--identifier', identifier]
+        if entitlement:
+            args += ['--entitlements', str(ENTITLEMENTS)]
+        run(args + [str(path)])
+    ids = {'singz-analyze': 'analyze', 'singz-gpui-audio': 'audio', 'singz-gpui-input': 'input'}
+    for relative in sorted(paths, key=stage):
+        path = bundle / relative
+        suffix = ids.get(path.name)
+        sign(path, BUNDLE_ID + '.' + suffix if suffix else None, suffix == 'input')
+    sign(bundle, entitlement=True)
+    run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(bundle)])
+
+
+def release_artifacts(bundle: Path, dmg: Path, identity: str, credentials: dict | None, run=command) -> None:
+    def notarize(path: Path):
+        response = run(['/usr/bin/xcrun', 'notarytool', 'submit', str(path), '--key', credentials['key'],
+             '--key-id', credentials['key_id'], '--issuer', credentials['issuer'], '--wait', '--output-format', 'json'])
+        try:
+            status = json.loads(response)['status']
+        except (ValueError, KeyError, TypeError):
+            raise PackageError('Cannot parse notarization result') from None
+        if status != 'Accepted':
+            raise PackageError('Apple notarization did not accept the artifact')
+    if credentials:
+        archive = dmg.with_suffix('.zip')
+        run(['/usr/bin/ditto', '-c', '-k', '--keepParent', str(bundle), str(archive)])
+        notarize(archive)
+        run(['/usr/bin/xcrun', 'stapler', 'staple', str(bundle)])
+    run(['/usr/bin/hdiutil', 'create', '-format', 'UDZO', '-srcfolder', str(bundle), str(dmg)])
+    if credentials:
+        run(['/usr/bin/codesign', '--force', '--sign', identity, '--timestamp', '--keychain', credentials['keychain'], str(dmg)])
+        notarize(dmg)
+        run(['/usr/bin/xcrun', 'stapler', 'staple', str(dmg)])
+
 
 def version_key(value: str) -> tuple[int, ...]:
     try:
@@ -418,7 +499,7 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
              icon: Path | None = None, font_license_dir: Path | None = None,
              ad_hoc_sign: bool = False, inspector=inspect_dependencies,
              run=command, publisher=rename_exclusive, require_drive_config: bool = False,
-             build_info_file: Path | None = None) -> Path:
+             build_info_file: Path | None = None, release: bool = False, env=None) -> Path:
     runtime, output = Path(runtime).absolute(), Path(output).absolute()
     if publisher is rename_exclusive and sys.platform != 'darwin':
         raise PackageError('Actual macOS bundle publication requires macOS')
@@ -428,7 +509,8 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
     ordinary(output.parent, True)
     output = output.parent.resolve() / output.name
     manifest_path = output.with_name(output.name + '.manifest.json')
-    if os.path.lexists(output) or os.path.lexists(manifest_path):
+    dmg_path = output.with_suffix('.dmg')
+    if os.path.lexists(output) or os.path.lexists(manifest_path) or (release and os.path.lexists(dmg_path)):
         raise PackageError(f'Output bundle or manifest already exists: {output}')
     if version is None:
         with (ROOT / 'experiments/gpui-player/Cargo.toml').open('rb') as stream:
@@ -528,12 +610,15 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
             reported_arch = {'aarch64': 'arm64', 'x86_64': 'x86_64'}[build_info['arch']]
             if reported_arch not in app_image['architectures']:
                 raise PackageError('Native build-info architecture does not match payload')
-        if ad_hoc_sign:
-            for record in sorted(dependencies, key=lambda item: item['path']):
-                if record['path'] != 'Contents/MacOS/singz-gpui-player':
-                    run(['/usr/bin/codesign', '--force', '--sign', '-', str(bundle / record['path'])])
-            run(['/usr/bin/codesign', '--force', '--sign', '-', str(bundle)])
-            run(['/usr/bin/codesign', '--verify', '--strict', str(bundle)])
+        if release:
+            identity, credentials = ('-', None) if ad_hoc_sign else signing_configuration(os.environ if env is None else env, run)
+            if identity == '-':
+                print('Developer ID identity or notary credentials unavailable; using ad-hoc signing (not notarized).', file=sys.stderr)
+            sign_bundle(bundle, dependencies, identity, run, credentials.get('keychain') if credentials else None)
+            release_artifacts(bundle, staging / dmg_path.name, identity, credentials, run)
+            ad_hoc_sign = identity == '-'
+        elif ad_hoc_sign:
+            sign_bundle(bundle, dependencies, '-', run)
         contents = [{'path': path.relative_to(bundle).as_posix(), 'bytes': path.stat().st_size,
                      'sha256': hashlib.sha256(path.read_bytes()).hexdigest()} for path in tree_files(bundle)]
         manifest = staging / 'manifest.json'
@@ -541,9 +626,24 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
             'version': version, 'adHocSigned': ad_hoc_sign, 'machoDependencies': dependencies, 'files': contents, 'codecRuntime': codec_runtime}, indent=2) + '\n')
         # Reserve neither name by overwriting. Publish the manifest first, then
         # remove only our exact manifest if another process wins the bundle name.
+        if release:
+            dmg_identity = (staging / dmg_path.name).stat()
+            publisher(staging / dmg_path.name, dmg_path)
+        def remove_our_dmg():
+            if release:
+                try:
+                    current = dmg_path.lstat()
+                    if (current.st_dev, current.st_ino) == (dmg_identity.st_dev, dmg_identity.st_ino):
+                        dmg_path.unlink()
+                except OSError:
+                    pass
         with manifest.open('rb') as reserved:
             identity = os.fstat(reserved.fileno())
-            publisher(manifest, manifest_path)
+            try:
+                publisher(manifest, manifest_path)
+            except BaseException:
+                remove_our_dmg()
+                raise
             try:
                 publisher(bundle, output)
             except BaseException:
@@ -553,6 +653,7 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
                         manifest_path.unlink()
                 except OSError:
                     pass  # Cleanup must not mask the original publication error.
+                remove_our_dmg()
                 raise
     return manifest_path
 
@@ -577,10 +678,11 @@ def main() -> None:
             ordinary(engine)
             if not engine.stat().st_mode & 0o111 or not macho(engine):
                 raise PackageError(f'Required engine must be executable Mach-O: {engine}')
-        result = assemble(args.runtime_dir, args.output, version=args.version, engines=args.engines_dir, icon=args.icon, font_license_dir=args.font_license_dir, ad_hoc_sign=args.ad_hoc_sign, require_drive_config=args.require_drive_config, build_info_file=args.build_info_file)
+        result = assemble(args.runtime_dir, args.output, version=args.version, engines=args.engines_dir, icon=args.icon, font_license_dir=args.font_license_dir, ad_hoc_sign=args.ad_hoc_sign, require_drive_config=args.require_drive_config, build_info_file=args.build_info_file, release=True)
     except (PackageError, OSError, ValueError) as error:
         parser.exit(1, f'Packaging failed: {error}\n')
     print(result)
+    print('Gatekeeper check (run on the app inside a quarantined mounted dmg): spctl -a -vv -t open --context context:primary-signature <mounted-app-path>')
 
 if __name__ == '__main__':
     main()

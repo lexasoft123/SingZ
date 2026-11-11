@@ -312,6 +312,63 @@ class AssemblyTests(unittest.TestCase):
             self.assemble(ad_hoc_sign=True, run=fail)
         self.assert_clean()
 
+    def test_release_signing_order_entitlements_and_adhoc_fallback(self):
+        paths = ['Contents/MacOS/singz-gpui-player', 'Contents/MacOS/singz-gpui-input',
+                 'Contents/MacOS/singz-gpui-audio', 'Contents/MacOS/singz-analyze',
+                 'Contents/MacOS/ffmpeg/libav.dylib', 'Contents/Resources/engines/libengine.dylib',
+                 'Contents/Resources/engines/llama-server']
+        package.sign_bundle(self.output, [{'path': p} for p in paths], '-', run=lambda a: self.commands.append(a) or '')
+        signs = [c for c in self.commands if '--sign' in c]
+        self.assertEqual([Path(c[-1]).name for c in signs], ['libav.dylib', 'libengine.dylib', 'llama-server', 'singz-analyze', 'singz-gpui-audio', 'singz-gpui-input', self.output.name])
+        # Ad-hoc: no hardened runtime, whose library validation would refuse the
+        # app's own ad-hoc FFmpeg and engine dylibs (no Team ID).
+        self.assertFalse(any('--options' in c for c in signs))
+        self.assertEqual([Path(c[-1]).name for c in signs if '--entitlements' in c], ['singz-gpui-input', self.output.name])
+        self.commands.clear()
+        package.sign_bundle(self.output, [{'path': p} for p in paths], 'A' * 40, run=lambda a: self.commands.append(a) or '')
+        signed = [c for c in self.commands if '--sign' in c]
+        self.assertTrue(signed and all('--options' in c and c[c.index('--options') + 1] == 'runtime'
+                                       and '--timestamp' in c for c in signed))
+        self.assertEqual(package.signing_configuration({}, run=lambda a: ''), ('-', None))
+        env = {'SINGZ_SIGNING_KEYCHAIN_PATH': '/keychain', 'SINGZ_ASC_KEY_PATH': '/key.p8',
+               'APP_STORE_CONNECT_API_KEY_ID': 'key-id', 'APP_STORE_CONNECT_API_ISSUER_ID': 'issuer'}
+        fingerprint = 'A' * 40
+        identity, credentials = package.signing_configuration(env, run=lambda args: f'  1) {fingerprint} "Developer ID Application: Example"')
+        self.assertEqual(identity, fingerprint)
+        self.assertEqual(credentials['keychain'], '/keychain')
+        self.assertEqual(package.signing_configuration(env, run=lambda args: '0 valid identities found'), ('-', None))
+        with package.ENTITLEMENTS.open('rb') as stream:
+            self.assertEqual(plistlib.load(stream), {'com.apple.security.device.audio-input': True})
+
+    def test_release_notary_and_dmg_commands_and_redaction(self):
+        credentials = {'key': '/secret/key.p8', 'key_id': 'secret-key-id', 'issuer': 'secret-issuer', 'keychain': '/secret/keychain'}
+        package.release_artifacts(self.output, self.base / 'out.dmg', 'Developer ID', credentials, run=lambda a: self.commands.append(a) or ('{"status":"Accepted"}' if 'submit' in a else ''))
+        commands = self.commands
+        self.assertEqual(sum('submit' in c for c in commands), 2)
+        self.assertTrue(any('create' in c and '-srcfolder' in c for c in commands))
+        self.assertEqual(sum('staple' in c for c in commands), 2)
+        self.assertTrue(any('--timestamp' in c and str(self.base / 'out.dmg') in c for c in commands))
+        from unittest.mock import patch
+        import subprocess
+        with patch.object(package.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, [], stderr='secret-key-id secret-issuer /secret/key.p8')):
+            with self.assertRaises(package.PackageError) as error:
+                package.command(['/usr/bin/xcrun', 'notarytool', 'submit', '--key', '/secret/key.p8', '--key-id', 'secret-key-id', '--issuer', 'secret-issuer'])
+        self.assertNotIn('secret-', str(error.exception))
+        self.assertNotIn('/secret/', str(error.exception))
+
+    def test_input_plist_identifier_matches_signature(self):
+        with (package.ROOT / 'tools/native/gpui-input-info.plist').open('rb') as stream:
+            self.assertEqual(plistlib.load(stream)['CFBundleIdentifier'], package.BUNDLE_ID + '.input')
+
+    def test_rejected_notarization_stops_before_stapling(self):
+        credentials = {'key': 'key', 'key_id': 'id', 'issuer': 'issuer', 'keychain': 'chain'}
+        def runner(args):
+            self.commands.append(args)
+            return '{"status":"Invalid"}' if 'submit' in args else ''
+        with self.assertRaisesRegex(package.PackageError, 'notarization'):
+            package.release_artifacts(self.output, self.base / 'out.dmg', 'identity', credentials, run=runner)
+        self.assertFalse(any('staple' in command for command in self.commands))
+
     def test_publication_race_preserves_winners_bundle(self):
         def raced_publish(source, destination):
             if destination == self.output:

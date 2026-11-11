@@ -314,3 +314,41 @@ app inside is `accepted` — which is what a downloader's Gatekeeper actually
 evaluates, confirmed by the quarantined-mount test above. `dmg.sign` is
 `false` by default for a reason electron-builder states outright: signing it
 "will lead to unwanted errors in combination with notarization requirements".
+
+
+## Native GPUI package
+
+`scripts/package-gpui-macos.py` emits an app, an adjacent `.dmg`, and an
+app manifest. Run it with Python 3.11 or newer and the required `--runtime-dir`,
+`--engines-dir`, `--font-license-dir`, and `--output` arguments. The runtime
+must already be built; this script does not build or download dependencies.
+For a signed release run the command through `scripts/with-apple-secrets.sh`.
+
+The wrapper provides `SINGZ_SIGNING_KEYCHAIN_PATH`,
+`SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE`, `SINGZ_MAC_P12_PASSWORD`,
+`SINGZ_ASC_KEY_PATH`, `APP_STORE_CONNECT_API_KEY_ID`, and
+`APP_STORE_CONNECT_API_ISSUER_ID` when configured. The packager searches only
+the wrapper's keychain for one Developer ID Application identity. The
+certificate must already have been imported from the p12 and the keychain
+unlocked before packaging; the packager neither imports it nor reads either
+password. The keychain password file and p12 password serve the existing
+provisioning workflow and are not passed to packaging commands. With no
+identity or API-key credentials the script clearly reports an ad-hoc build;
+`--ad-hoc-sign` forces this local path. Ad-hoc artifacts are not notarized.
+
+FFmpeg and engine libraries are signed before engine executables, then the
+three helpers and the app. Only the input helper and app receive the
+microphone entitlement. Developer ID signatures use hardened runtime and
+secure timestamps. The app is notarized and stapled before constructing the
+image; the image is then signed, notarized and stapled. The manifest hashes the
+final stapled app bytes. Notary rejection stops publication. Real notarization
+and the clean-account microphone prompt require release qualification.
+
+For the Gatekeeper release gate, quarantine a copy of the completed dmg,
+mount it, and run the following with the mounted application path:
+
+```sh
+spctl -a -vv -t open --context context:primary-signature <mounted-app-path>
+```
+
+Also verify the app with `codesign --verify --deep --strict <mounted-app-path>`.

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>com.lexasoft.singz.gpui.input</string>
+<key>CFBundleIdentifier</key><string>com.lexasoft.singz.gpui.preview.input</string>
 <key>CFBundleName</key><string>SingZ Microphone</string>
 <key>NSMicrophoneUsageDescription</key><string>SingZ uses your selected microphone for live pitch matching, input meters and headphone monitoring.</string>
 </dict></plist>

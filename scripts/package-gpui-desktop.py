@@ -444,9 +444,103 @@ not that these applications launched or that audio/inference worked on this OS.
 '''
 
 
+def signing_config(env: dict) -> dict | None:
+    pfx, password_file = env.get('SINGZ_SIGN_PFX'), env.get('SINGZ_SIGN_PASSWORD_FILE')
+    thumbprint = env.get('SINGZ_SIGN_THUMBPRINT')
+    if not any((pfx, password_file, thumbprint)):
+        return None
+    if bool(pfx) != bool(password_file) or bool(pfx) == bool(thumbprint):
+        raise PackageError('Configure either PFX and password file together or a certificate thumbprint')
+    timestamp = env.get('SINGZ_SIGN_TIMESTAMP_URL')
+    if not timestamp:
+        raise PackageError('SINGZ_SIGN_TIMESTAMP_URL is required for signed builds')
+    return {'pfx': pfx, 'password_file': password_file, 'thumbprint': thumbprint, 'timestamp': timestamp,
+            'tool': env.get('SINGZ_SIGNTOOL', 'signtool.exe')}
+
+
+def sign_file(path: Path, config: dict, runner=subprocess.run) -> None:
+    command = [config['tool'], 'sign', '/fd', 'SHA256', '/tr', config['timestamp'], '/td', 'SHA256']
+    if config['pfx']:
+        password = Path(config['password_file']).read_text(encoding='utf-8-sig').rstrip('\r\n')
+        command += ['/f', config['pfx'], '/p', password]
+    else:
+        command += ['/sha1', config['thumbprint']]
+    command.append(str(path))
+    # SignTool output and exceptions may echo its command, including /p.
+    try:
+        result = runner(command, capture_output=True, text=True)
+    except OSError:
+        raise PackageError('Could not launch SignTool') from None
+    if result.returncode:
+        raise PackageError(f'SignTool failed for {path.name} (exit {result.returncode}); output suppressed')
+
+
+def nsis_literal(value: str) -> str:
+    if any(c in value for c in '\r\n"'):
+        raise PackageError('Path cannot be represented in the NSIS script')
+    return value.replace('$', '$$')
+
+
+def build_installer(payload: Path, output: Path, *, runner=subprocess.run, env=None) -> Path:
+    env = dict(os.environ if env is None else env)
+    config = signing_config(env)
+    payload, output = Path(payload).absolute(), Path(output).absolute()
+    ordinary(payload, True)
+    ordinary(output.parent, True)
+    if os.path.lexists(output):
+        raise PackageError(f'Installer output already exists: {output}')
+    manifest = json.loads((payload / 'manifest.json').read_text(encoding='utf-8'))
+    if manifest.get('platform') != 'windows' or manifest.get('signing') != ('authenticode' if config else 'unsigned'):
+        raise PackageError('Installer signing configuration must match its Windows payload')
+    paths = [entry['path'] for entry in manifest['files']] + ['manifest.json']
+    for required in [*(name + '.exe' for name in EXECUTABLES), 'engines/llama-server.exe', 'engines/crispasr.exe']:
+        if required not in paths:
+            raise PackageError(f'Installer payload missing {required}')
+    for relative in paths:
+        p = PurePosixPath(relative)
+        if p.is_absolute() or any(part in ('', '.', '..') for part in p.parts):
+            raise PackageError('Invalid manifest path')
+        ordinary(payload.joinpath(*p.parts))
+    dirs = {str(parent) for p in paths for parent in PurePosixPath(p).parents if parent != PurePosixPath('.')}
+    with tempfile.TemporaryDirectory(prefix='.singz-installer-', dir=output.parent) as temporary:
+        temp = Path(temporary)
+        include = temp / 'payload.nsh'
+        lines = ['!macro InstallPayload']
+        for path in sorted(paths):
+            parent = PurePosixPath(path).parent
+            suffix = '' if parent == PurePosixPath('.') else '\\' + nsis_literal(str(parent).replace('/', '\\'))
+            lines.append('SetOutPath "$INSTDIR' + suffix + '"')
+            lines.append('File "' + nsis_literal(str(payload.joinpath(*PurePosixPath(path).parts))) + '"')
+        lines.extend(['!macroend', '!macro UninstallPayload'])
+        for path in sorted(paths):
+            lines.append('Delete "$INSTDIR\\' + nsis_literal(path.replace('/', '\\')) + '"')
+        for directory in sorted(dirs, key=lambda p: (-len(PurePosixPath(p).parts), p)):
+            lines.append('RMDir "$INSTDIR\\' + nsis_literal(directory.replace('/', '\\')) + '"')
+        lines.append('!macroend')
+        include.write_text('\n'.join(lines) + '\n', encoding='utf-8-sig')
+        staged = temp / 'setup.exe'
+        script = ROOT / 'experiments/gpui-player/packaging/windows/singz-native.nsi'
+        command = [env.get('SINGZ_MAKENSIS', 'makensis'), '/V2', '/DINCLUDE=' + str(include), '/DOUTPUT=' + str(staged)]
+        if config:
+            command += ['/DSIGN_PYTHON=' + sys.executable, '/DSIGN_SCRIPT=' + str(Path(__file__).resolve())]
+        command.append(str(script))
+        try:
+            result = runner(command, capture_output=True, text=True, env=env)
+        except OSError:
+            raise PackageError('Could not launch NSIS makensis') from None
+        if result.returncode:
+            raise PackageError(f'NSIS compilation failed (exit {result.returncode}); output suppressed')
+        ordinary(staged)
+        if config:
+            sign_file(staged, config, runner)
+        rename_exclusive(staged, output)
+    return output
+
+
 def assemble(platform: str, runtime: Path, output: Path, *, uikit_dir: Path | None = None,
              publisher=rename_exclusive, require_drive_config: bool = False,
-             build_info_file: Path | None = None, engines: Path | None = None) -> Path:
+             build_info_file: Path | None = None, engines: Path | None = None,
+             signing_env=None, runner=subprocess.run) -> Path:
     if platform not in ('windows', 'linux'):
         raise PackageError('Platform must be windows or linux')
     if platform == 'linux' and os.name != 'posix':
@@ -520,11 +614,21 @@ def assemble(platform: str, runtime: Path, output: Path, *, uikit_dir: Path | No
         build_info = native_build_info(build_info_file, payload / (EXECUTABLES[0] + suffix), platform, require_drive_config)
         if build_info is not None and build_info['arch'] != architecture:
             raise PackageError('Native build-info architecture does not match payload')
+        config = signing_config(dict(os.environ if signing_env is None else signing_env)) if platform == 'windows' else None
+        if platform == 'windows':
+            if config is None:
+                print('Warning: Windows payload is unsigned; no Authenticode certificate configured.', file=sys.stderr)
+            else:
+                def signing_order(item):
+                    path = item['path']
+                    return (0 if path.lower().endswith('.dll') else 1 if path.startswith('engines/') else 3 if path == 'singz-gpui-player.exe' else 2, path)
+                for item in sorted(binaries, key=signing_order):
+                    sign_file(payload / item['path'], config, runner)
         (payload / 'README.txt').write_text(readme(platform, architecture), encoding='utf-8')
         files = [{'path': path.relative_to(payload).as_posix(), 'bytes': path.stat().st_size,
                   'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'mode': stat.S_IMODE(path.stat().st_mode)}
                  for path in sorted(payload.rglob('*')) if path.is_file()]
-        manifest = {'schema': 1, 'nativeBuildInfo': build_info, 'driveConfigRequired': require_drive_config, 'platform': platform, 'architecture': architecture,
+        manifest = {'schema': 1, 'signing': ('authenticode' if config else 'unsigned') if platform == 'windows' else 'not-applicable', 'nativeBuildInfo': build_info, 'driveConfigRequired': require_drive_config, 'platform': platform, 'architecture': architecture,
                     'runtimeSelection': str(runtime.resolve()), 'uikitSelection': str(uikit.resolve()),
                     'binaries': binaries, 'sources': sources, 'files': files, 'codecRuntime': codec_runtime,
                     'inventoryExcludes': ['manifest.json'],
@@ -540,6 +644,15 @@ def assemble(platform: str, runtime: Path, output: Path, *, uikit_dir: Path | No
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == '--sign-uninstaller':
+        try:
+            config = signing_config(dict(os.environ))
+            if config is None:
+                raise PackageError('Uninstaller signing requires a certificate')
+            sign_file(Path(sys.argv[2]), config)
+        except (PackageError, OSError, ValueError) as error:
+            sys.exit(f'Uninstaller signing failed: {error}')
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--platform', choices=('windows', 'linux'), required=True)
     parser.add_argument('--runtime-dir', type=Path, required=True)
@@ -549,11 +662,16 @@ def main() -> None:
     parser.add_argument('--require-drive-config', action='store_true', help='Require configured baked Drive metadata bound to the unsigned source UI hash')
     parser.add_argument('--build-info-file', type=Path, help='Safe JSON previously emitted by the source UI --native-build-info; assembler never runs it')
     parser.add_argument('--allow-debug', action='store_true', help='Allow packaging a target/debug build for local qualification')
+    parser.add_argument('--installer', type=Path, help='Also create an NSIS installer at this fresh path (Windows host only)')
     args = parser.parse_args()
     try:
+        if args.installer and (args.platform != 'windows' or os.name != 'nt'):
+            raise PackageError('Installer builds require a Windows host and --platform windows')
         require_fresh_vendor()
         validate_runtime_profile(args.runtime_dir, args.allow_debug)
         manifest = assemble(args.platform, args.runtime_dir, args.output_dir, uikit_dir=args.uikit_dir, engines=args.engines_dir, require_drive_config=args.require_drive_config, build_info_file=args.build_info_file)
+        if args.installer:
+            build_installer(args.output_dir, args.installer)
     except (PackageError, OSError, ValueError) as error:
         parser.exit(1, f'Packaging failed: {error}\n')
     print(manifest)
