@@ -158,11 +158,18 @@ export function PlayerLyrics({ lines, position, playing, rate }: {
     words.current = Array.from(root.current.querySelectorAll<HTMLElement>('.current [data-lyric-word]'))
     // Range measures the actual shaped glyph run, excluding the following space.
     // Normalize both the outer TV transform and the animated row scale.
-    // Keep the upcoming row's cached pixel grid as it grows: the .94 context
-    // scale bounds rounding error at ~.54 physical pixels at full size. Reading
-    // animated bounds on activation would force layout and change grids during
-    // the glide; font/viewport/TV-transform invalidation refreshes this cache.
+    // The pixel grid is cached at full row size: the animated context scale is
+    // divided out, so a row that grows into the current line keeps an exact grid
+    // without reading animated bounds during the glide. Font/viewport/TV-transform
+    // invalidation refreshes this cache.
     const available = root.current.clientWidth
+    const rowFactors = new Map<HTMLElement, number>()
+    for (const slot of slots) {
+      const wrapper = slot.querySelector<HTMLElement>('.player-lyric-scale')
+      if (!wrapper || !wrapper.offsetWidth || !slot.offsetWidth) continue
+      const factor = (wrapper.getBoundingClientRect().width / wrapper.offsetWidth) / (slot.getBoundingClientRect().width / slot.offsetWidth)
+      if (Number.isFinite(factor) && factor > 0) rowFactors.set(slot, factor)
+    }
     for (const element of root.current.querySelectorAll<HTMLElement>('[data-lyric-word]')) {
       const key = `${available}:${element.textContent}`
       if (geometryKeys.current.get(element) === key) continue
@@ -172,7 +179,8 @@ export function PlayerLyrics({ lines, position, playing, rate }: {
       if (width === null) widths.current.delete(element)
       else {
         const local = Number.parseFloat(getComputedStyle(element).width)
-        const scale = element.getBoundingClientRect().width / local
+        const slot = element.closest<HTMLElement>('[data-lyric-line]')
+        const scale = element.getBoundingClientRect().width / local / ((slot && rowFactors.get(slot)) || 1)
         const pixels = Math.max(.01, scale * (window.devicePixelRatio || 1)), cached = widths.current.get(element)
         if (!cached || cached.width !== width || cached.pixels !== pixels) widths.current.set(element, { width, pixels })
       }

@@ -332,6 +332,19 @@ let app = null
     check(await page.locator('.box-player').getAttribute('data-playing') === 'false', 'a later distinct OK press acts normally')
   })
 
+  await watchdog.run('mouse click reveals controls; brand and song stay visible', 60, async () => {
+    await page.locator('[data-control="play"]').click()
+    await page.waitForSelector('.box-player[data-playing="true"]')
+    await page.waitForSelector('.box-player[data-controls="hidden"]', { timeout: 15000 })
+    check(await page.locator('.player-header .box-logo').isVisible() && await page.locator('.player-song strong').isVisible(), 'logo and song name stay visible while controls are hidden')
+    check(!await page.locator('.player-header-actions').isVisible(), 'header buttons hide with the controls')
+    await page.locator('.player-wake').click()
+    await page.waitForSelector('.box-player[data-controls="visible"]')
+    check(await page.locator('.box-player').getAttribute('data-playing') === 'true', 'the waking click does not pause or seek')
+    await page.locator('[data-control="play"]').click()
+    await page.waitForSelector('.box-player[data-playing="false"]')
+  })
+
   await watchdog.run('fixed UHD frame scales uniformly', 60, async () => {
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(3840, 2160))
     await page.waitForFunction(() => Math.abs(document.querySelector('.box-tv').getBoundingClientRect().width - 3840) < 1)

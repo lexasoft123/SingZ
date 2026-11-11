@@ -19,7 +19,8 @@ export function Player({
   onSettings,
   onToggle,
   onSeek,
-  onSeekBy
+  onSeekBy,
+  onWake
 }: {
   snapshot: BoxTransportSnapshot
   microphones?: BoxMicrophones
@@ -32,6 +33,7 @@ export function Player({
   onToggle: () => void
   onSeek: (position: number) => void
   onSeekBy: (delta: number) => void
+  onWake: () => void
 }): React.JSX.Element | null {
   const active = snapshot.active
   if (!active) return null
@@ -49,10 +51,11 @@ export function Player({
     aria-label={t('box.player.label')}
   >
     <div className="player-content">
-      <header className="player-header player-chrome" {...chromeProps}>
+      {/* Brand and song stay on screen while the controls are hidden. */}
+      <header className="player-header">
         <div className="box-logo">Sing<span>Z</span><small>Box</small></div>
         <div className="player-song"><strong>{active.item.name}</strong><span>{t('box.player.savedStems')}</span></div>
-        <div className="player-header-actions"><Button data-control="settings" onClick={onSettings}>{tSettings('box.settings.navigation')}</Button><Button data-control="collection" onClick={onLibrary}>{t('box.navigation.catalog')}</Button></div>
+        <div className="player-header-actions player-chrome" {...chromeProps}><Button data-control="settings" onClick={onSettings}>{tSettings('box.settings.navigation')}</Button><Button data-control="collection" onClick={onLibrary}>{t('box.navigation.catalog')}</Button></div>
       </header>
       {active.lyrics.status === 'ready' ? <PlayerLyrics key={active.item.dir} lines={lines} position={snapshot.position} playing={snapshot.playing} rate={snapshot.tempo} /> : <div className="player-no-lyrics">
         <h1>{active.lyrics.status === 'error' ? t('box.player.lyricsError') : t('box.player.noLyrics')}</h1>
@@ -94,7 +97,7 @@ export function Player({
         </div>
         <div className="player-hints"><span>← → {t('box.hints.move')} <b>OK</b> {t('box.hints.select')} <b>Back</b> {t('box.navigation.catalog')}</span><span>{snapshot.restartRequired ? `${tSettings('box.settings.restartRequired')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.routingBlocked ? `${tSettings('box.settings.routingPaused')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.saveError ?? snapshot.outputError ?? snapshot.playbackError?.message ?? (ended ? t('box.player.ended') : snapshot.playing ? t('box.player.hideHint') : t('box.player.paused'))}</span></div>
       </div>
-      {!controlsVisible && <button className="player-wake" tabIndex={-1} aria-label={t('box.player.wake')} />}
+      {!controlsVisible && <button className="player-wake" tabIndex={-1} aria-label={t('box.player.wake')} onClick={onWake} />}
     </div>
   </section>
 }
