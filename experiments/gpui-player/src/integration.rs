@@ -788,6 +788,7 @@ enum Request {
     AdoptCarryPreferences(u64,crate::carry_line::Config),
     LyricsCapabilities,
     AlignLyrics(u64,u64,Project,Vec<crate::lyrics_edit::Line>,crate::lyrics_align::Tier),
+    RetryLrclib,
     ResolveLyrics(u64,u64,Project,crate::lyrics_resolution::Intent),
     SearchLyrics(u64,u64,String,f64),
     LyricsEnvelope(u64,u64,Project),
@@ -1160,6 +1161,9 @@ impl Backend {
         if self.requests.try_send(Request::AlignLyrics(epoch,serial,project.clone(),draft,tier)).is_err(){self.lyrics_align_intent.store(old,Ordering::Release);bail!("Native command queue is full");}Ok(())
     }
     pub fn cancel_lyrics_alignment(&self){self.lyrics_align_intent.store(0,Ordering::Release);}
+    pub fn retry_lrclib(&self)->Result<()> {
+        self.requests.try_send(Request::RetryLrclib).map_err(|_|anyhow::anyhow!("Native command queue is full"))
+    }
     pub fn resolve_lyrics(&self,epoch:u64,serial:u64,project:&Project,intent:crate::lyrics_resolution::Intent)->Result<()> {
         let old=self.lyrics_align_intent.swap(serial,Ordering::AcqRel);
         if self.requests.try_send(Request::ResolveLyrics(epoch,serial,project.clone(),intent)).is_err(){let _=self.lyrics_align_intent.compare_exchange(serial,old,Ordering::AcqRel,Ordering::Acquire);bail!("Native command queue is full");}Ok(())
@@ -2081,7 +2085,7 @@ impl Request {
     fn is_preference(&self)->bool{matches!(self,Self::AdoptMetronomePreferences(..)|Self::AdoptCarryPreferences(..)|Self::KaraokePref(..)|Self::InputPrefs(..))}
     fn is_job(&self)->bool{
         #[cfg(test)] if matches!(self,Self::HoldJob(..)){return true;}
-        matches!(self,Self::RecoverOutput(..)|Self::Inventory|Self::InspectDelete(..)|Self::KaraokePref(..)|Self::InputPrefs(..)|Self::ReadPublication(..)|Self::Catalog(..)|Self::ResolveLyrics(..)|Self::SearchLyrics(..)|Self::LyricsCapabilities|Self::AlignLyrics(..)|Self::LyricsEnvelope(..)|Self::DetectBeats(..)|Self::SaveLyrics(..)|Self::AdoptCarryPreferences(..))
+        matches!(self,Self::RecoverOutput(..)|Self::Inventory|Self::InspectDelete(..)|Self::KaraokePref(..)|Self::InputPrefs(..)|Self::ReadPublication(..)|Self::Catalog(..)|Self::RetryLrclib|Self::ResolveLyrics(..)|Self::SearchLyrics(..)|Self::LyricsCapabilities|Self::AlignLyrics(..)|Self::LyricsEnvelope(..)|Self::DetectBeats(..)|Self::SaveLyrics(..)|Self::AdoptCarryPreferences(..))
     }
 }
 

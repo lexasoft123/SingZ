@@ -70,6 +70,15 @@ struct Record {
     instrumental: Option<bool>,
     synced_lyrics: Option<String>,
 }
+#[derive(Debug)]
+struct RequestTimeout;
+impl std::fmt::Display for RequestTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LRCLIB request timed out")
+    }
+}
+impl std::error::Error for RequestTimeout {}
+
 enum Answer {
     Json(Value),
     Miss,
@@ -77,12 +86,16 @@ enum Answer {
 }
 struct State {
     failures: HashMap<String, Instant>,
+    host_since: Option<Instant>,
     server_until: Option<Instant>,
     last_finished: Option<Instant>,
 }
 pub struct Client {
     base: String,
     state: Mutex<State>,
+    /// A manual retry made while a fetch holds `state`. It is applied when the
+    /// next request takes the lock, so Retry never blocks the jobs lane.
+    retry_requested: Mutex<Option<Instant>>,
 }
 impl Default for Client {
     fn default() -> Self {
@@ -95,9 +108,11 @@ impl Client {
             base,
             state: Mutex::new(State {
                 failures: HashMap::new(),
+                host_since: None,
                 server_until: None,
                 last_finished: None,
             }),
+            retry_requested: Mutex::new(None),
         }
     }
     #[cfg(any(test, feature = "ui-tests"))]
@@ -119,14 +134,37 @@ impl Client {
         Ok(Self::at(base.trim_end_matches('/').into()))
     }
     pub fn retry_now(&self) -> Result<()> {
-        self.state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("LRCLIB transport state failed"))?
-            .failures
-            .clear();
-        Ok(())
+        self.retry_with(&Instant::now)
+    }
+    fn retry_with(&self, now: &impl Fn() -> Instant) -> Result<()> {
+        let at = now();
+        match self.state.try_lock() {
+            Ok(mut state) => {
+                apply_retry(&mut state, at);
+                Ok(())
+            }
+            // A fetch holds the state for up to its whole timeout. Record the
+            // request instead of waiting; the next request applies it.
+            Err(std::sync::TryLockError::WouldBlock) => {
+                *self
+                    .retry_requested
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("LRCLIB transport state failed"))? = Some(at);
+                Ok(())
+            }
+            Err(_) => bail!("LRCLIB transport state failed"),
+        }
     }
     fn request(&self, path: &str, cancel: &impl Fn() -> bool) -> Result<Answer> {
+        self.request_with(path, cancel, &Instant::now, &|url| fetch(url, cancel))
+    }
+    fn request_with(
+        &self,
+        path: &str,
+        cancel: &impl Fn() -> bool,
+        now: &impl Fn() -> Instant,
+        fetcher: &impl Fn(&str) -> Result<Response>,
+    ) -> Result<Answer> {
         ensure!(
             path.starts_with('/') && path.len() <= 16384,
             "LRCLIB request is too large"
@@ -139,6 +177,14 @@ impl Client {
                 Err(_) => bail!("LRCLIB transport state failed"),
             }
         };
+        if let Some(at) = self
+            .retry_requested
+            .lock()
+            .map_err(|_| anyhow::anyhow!("LRCLIB transport state failed"))?
+            .take()
+        {
+            apply_retry(&mut state, at);
+        }
         let family = if path.starts_with("/get/") {
             "/get/:id"
         } else {
@@ -146,37 +192,46 @@ impl Client {
         }
         .to_owned();
         if state
+            .host_since
+            .is_some_and(|since| now().saturating_duration_since(since) < Duration::from_secs(60))
+        {
+            return Ok(Answer::Down);
+        }
+        if state
             .failures
             .get(&family)
-            .is_some_and(|until| Instant::now() < *until)
+            .is_some_and(|until| now() < *until)
         {
             return Ok(Answer::Down);
         }
         state.failures.remove(&family);
         for attempt in 1..=3 {
-            let now = Instant::now();
+            let current = now();
             let next = state
                 .server_until
                 .into_iter()
                 .chain(state.last_finished.map(|t| t + Duration::from_millis(250)))
                 .max();
             if let Some(next) = next {
-                let delay = next.saturating_duration_since(now);
+                let delay = next.saturating_duration_since(current);
                 if delay > Duration::from_secs(2) {
                     return Ok(Answer::Down);
                 }
                 wait(delay, cancel)?;
             }
-            let response = fetch(&format!("{}{}", self.base, path), cancel);
-            state.last_finished = Some(Instant::now());
+            let response = fetcher(&format!("{}{}", self.base, path));
+            state.last_finished = Some(now());
             check(cancel)?;
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
                     eprintln!("LRCLIB: {error:#}");
+                    if error.downcast_ref::<RequestTimeout>().is_some() {
+                        state.host_since = Some(now());
+                    }
                     state
                         .failures
-                        .insert(family.clone(), Instant::now() + Duration::from_secs(300));
+                        .insert(family.clone(), now() + Duration::from_secs(300));
                     return Ok(Answer::Down);
                 }
             };
@@ -191,9 +246,9 @@ impl Client {
                     1
                 }));
                 let pause = jitter(minimum);
-                let until = Instant::now()
+                let until = now()
                     .checked_add(pause)
-                    .unwrap_or_else(|| Instant::now() + Duration::from_secs(86400 * 365));
+                    .unwrap_or_else(|| now() + Duration::from_secs(86400 * 365));
                 state.server_until = Some(state.server_until.map_or(until, |old| old.max(until)));
                 if response.status == 503
                     && retry.is_some()
@@ -205,7 +260,7 @@ impl Client {
                 if response.status == 503 {
                     state
                         .failures
-                        .insert(family.clone(), Instant::now() + Duration::from_secs(30));
+                        .insert(family.clone(), now() + Duration::from_secs(30));
                 }
                 return Ok(Answer::Down);
             }
@@ -215,19 +270,21 @@ impl Client {
             if !(200..300).contains(&response.status) {
                 state.failures.insert(
                     family.clone(),
-                    Instant::now()
-                        + Duration::from_secs(if response.status == 400 { 0 } else { 300 }),
+                    now() + Duration::from_secs(if response.status == 400 { 0 } else { 300 }),
                 );
                 return Ok(Answer::Down);
             }
             let decoded = serde_json::from_slice(&response.body);
-            state.last_finished = Some(Instant::now());
+            state.last_finished = Some(now());
             match decoded {
-                Ok(value) => return Ok(Answer::Json(value)),
+                Ok(value) => {
+                    state.host_since = None;
+                    return Ok(Answer::Json(value));
+                }
                 Err(_) => {
                     state
                         .failures
-                        .insert(family.clone(), Instant::now() + Duration::from_secs(300));
+                        .insert(family.clone(), now() + Duration::from_secs(300));
                     return Ok(Answer::Down);
                 }
             }
@@ -425,6 +482,18 @@ fn valid_duration(duration: f64) -> Result<()> {
         "Invalid lyrics duration"
     );
     Ok(())
+}
+/// Manual retry, as in `lrclib-transport.ts`: endpoint failures always clear;
+/// the host-wide timeout hold clears only once it is 15 s old at the moment
+/// Retry was pressed. A server Retry-After is never cleared.
+fn apply_retry(state: &mut State, at: Instant) {
+    state.failures.clear();
+    if state
+        .host_since
+        .is_some_and(|since| at.saturating_duration_since(since) >= Duration::from_secs(15))
+    {
+        state.host_since = None;
+    }
 }
 fn check(cancel: &impl Fn() -> bool) -> Result<()> {
     ensure!(!cancel(), "LRCLIB request cancelled");
@@ -914,7 +983,9 @@ fn fetch(url: &str, cancel: &impl Fn() -> bool) -> Result<Response> {
         if let Some(code) = process.0.try_wait()? {
             break code;
         }
-        ensure!(Instant::now() < deadline, "LRCLIB request timed out");
+        if Instant::now() >= deadline {
+            return Err(RequestTimeout.into());
+        }
         thread::sleep(Duration::from_millis(5));
     };
     let bounded = |path: &PathBuf, limit: u64| -> Result<Vec<u8>> {
@@ -927,6 +998,9 @@ fn fetch(url: &str, cancel: &impl Fn() -> bool) -> Result<Response> {
         Ok(value)
     };
     if !code.success() {
+        if code.code() == Some(28) {
+            return Err(RequestTimeout.into());
+        }
         let bytes = bounded(&errors, 65536)?;
         let detail: String = String::from_utf8_lossy(&bytes)
             .chars()

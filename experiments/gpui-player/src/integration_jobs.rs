@@ -414,6 +414,9 @@ pub(super) fn run(
                 let _ = entered.send(());
                 let _ = release.recv_timeout(Duration::from_secs(2));
             }
+            Request::RetryLrclib => {
+                if let Err(error) = client.retry_now() { eprintln!("LRCLIB retry: {error}"); }
+            }
             Request::ResolveLyrics(epoch, serial, project, mode) => {
                 if latest.load(Ordering::Acquire) != epoch
                     || lyrics_align_intent.load(Ordering::Acquire) != serial

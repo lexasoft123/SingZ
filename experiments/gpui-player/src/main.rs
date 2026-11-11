@@ -912,7 +912,7 @@ impl Player {
                 Precise=>this.start_sidebar_lyrics(lyrics_resolution::Intent::Precise,cx),
                 Edit=>this.open_lyrics_editor(w,cx),
                 Download=>this.download_sidebar_lyrics(cx),
-                Retry=>this.start_sidebar_lyrics(this.lyrics_sidebar_intent,cx),
+                Retry=>{if let Some(backend)=&this.backend{if let Err(e)=backend.retry_lrclib(){eprintln!("LRCLIB retry: {e}");}}this.start_sidebar_lyrics(this.lyrics_sidebar_intent,cx)},
                 Cancel=>this.cancel_sidebar_lyrics(cx),
                 Changed=>{},
             }cx.notify();

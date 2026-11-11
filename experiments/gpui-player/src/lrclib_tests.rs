@@ -582,3 +582,131 @@ fn lrc_expansion_and_large_words_refuse_without_allocating_repeated_megabytes() 
     assert!(parse_lrc(&input, 100.).is_err());
     assert!(parse_lrc(&format!("[00:01]{}", "a".repeat(1025)), 100.).is_err());
 }
+
+#[test]
+fn timeout_holds_host_and_manual_retry_obeys_floor() {
+    let client = Client::default();
+    let start = Instant::now();
+    let time = std::cell::Cell::new(start);
+    let calls = std::cell::Cell::new(0);
+    let fetch = |_: &str| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 1 {
+            Err(RequestTimeout.into())
+        } else {
+            Ok(Response {
+                status: 200,
+                headers: HashMap::new(),
+                body: b"[]".to_vec(),
+            })
+        }
+    };
+    let request = |path| {
+        client
+            .request_with(path, &|| false, &|| time.get(), &fetch)
+            .unwrap()
+    };
+    assert!(matches!(request("/get?a"), Answer::Down));
+    client.state.lock().unwrap().last_finished = None;
+    assert!(matches!(request("/search?a"), Answer::Down));
+    assert!(matches!(request("/get/42"), Answer::Down));
+    assert_eq!(calls.get(), 1);
+    time.set(start + Duration::from_millis(14_999));
+    client.retry_with(&|| time.get()).unwrap();
+    assert!(matches!(request("/search?a"), Answer::Down));
+    assert_eq!(calls.get(), 1);
+    time.set(start + Duration::from_secs(15));
+    client.retry_with(&|| time.get()).unwrap();
+    assert!(matches!(request("/search?a"), Answer::Json(_)));
+    assert_eq!(calls.get(), 2);
+    assert!(client.state.lock().unwrap().host_since.is_none());
+}
+
+#[test]
+fn timeout_expires_after_sixty_seconds() {
+    let client = Client::default();
+    let start = Instant::now();
+    let time = std::cell::Cell::new(start);
+    let calls = std::cell::Cell::new(0);
+    let fetch = |_: &str| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 1 {
+            Err(RequestTimeout.into())
+        } else {
+            Ok(Response {
+                status: 200,
+                headers: HashMap::new(),
+                body: b"[]".to_vec(),
+            })
+        }
+    };
+    let request = |path| {
+        client
+            .request_with(path, &|| false, &|| time.get(), &fetch)
+            .unwrap()
+    };
+    assert!(matches!(request("/get?a"), Answer::Down));
+    time.set(start + Duration::from_millis(59_999));
+    assert!(matches!(request("/search?a"), Answer::Down));
+    time.set(start + Duration::from_secs(60));
+    assert!(matches!(request("/search?a"), Answer::Json(_)));
+    assert_eq!(calls.get(), 2);
+    assert!(client.state.lock().unwrap().host_since.is_none());
+}
+
+#[test]
+fn manual_retry_retains_a_young_timeout_and_clears_it_at_the_floor() {
+    let client = Client::default();
+    let start = Instant::now();
+    client.state.lock().unwrap().host_since = Some(start);
+    client
+        .retry_with(&|| start + Duration::from_millis(14_999))
+        .unwrap();
+    assert!(client.state.lock().unwrap().host_since.is_some());
+    client
+        .retry_with(&|| start + Duration::from_secs(15))
+        .unwrap();
+    assert!(client.state.lock().unwrap().host_since.is_none());
+}
+
+#[test]
+fn retry_during_an_in_flight_fetch_returns_at_once_and_applies_on_the_next_request() {
+    let client = Client::default();
+    let start = Instant::now();
+    client.state.lock().unwrap().host_since = Some(start);
+    std::thread::scope(|scope| {
+        // A fetch holds the state lock for its whole timeout.
+        let held = client.state.lock().unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let client = &client;
+        scope.spawn(move || {
+            client
+                .retry_with(&|| start + Duration::from_secs(15))
+                .unwrap();
+            let _ = done.send(());
+        });
+        // Release the lock either way, so a blocking retry fails here
+        // instead of deadlocking the test.
+        let returned = finished.recv_timeout(Duration::from_millis(250)).is_ok();
+        drop(held);
+        assert!(returned, "Retry waited for the in-flight fetch");
+    });
+    assert!(client.state.lock().unwrap().host_since.is_some());
+    // The next request applies the recorded retry before checking the hold.
+    let answer = client
+        .request_with(
+            "/search?a",
+            &|| false,
+            &|| start + Duration::from_secs(16),
+            &|_: &str| {
+                Ok(Response {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: b"[]".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+    assert!(matches!(answer, Answer::Json(_)));
+    assert!(client.state.lock().unwrap().host_since.is_none());
+}
