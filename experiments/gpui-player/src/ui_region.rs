@@ -46,7 +46,7 @@ fn playing_restart(view:&Entity<Player>,w:&mut Window,cx:&mut App,target:f64)->a
         let p=view.read(cx);
         let evidence=serde_json::json!({"expectedTarget":target,"pendingSeek":p.playhead.pending_seek(),
             "nativeSeekCountBefore":before,"nativeSeekCount":p.playhead.seek_count(),"position":p.playhead.position(),"playing":p.playing,
-            "selection":p.region_target().selection,"restartCycle":format!("{:?}",p.restart_cycle),"playSerial":p.native_play_serial});
+            "selection":p.region_target().selection,"restartCycle":format!("{:?}",p.restart_cycle),"playSerial":p.transport_flight.native_play.serial()});
         let result=(||->anyhow::Result<(u64,serde_json::Value)>{
             let (count,actual)=p.playhead.pending_seek().ok_or_else(||anyhow::anyhow!("Restart button did not admit a seek: {evidence}"))?;
             anyhow::ensure!(p.playing&&count>before&&if target==0. {actual==0.}else{(actual-target).abs()<0.002},"Playing Restart admitted the wrong target: {evidence}");
@@ -147,7 +147,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             handle.update(cx,|_,_,cx|view.read(cx).transport.clone().update(cx,|_,cx|cx.emit(transport::TransportEvent::Loop)))?;
             accepted!(selection,true);
             handle.update(cx,|_,w,cx|play(&view,w,cx))??;
-            wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+            wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
             let restart_count=playing_restart_at!(duration*0.15,"restart-playing-selection-admitted.json");
             wait!(p,w,app => p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.seek_count()>=restart_count);
             let original_path=project.canonicalize()?;
@@ -161,7 +161,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 header.update(cx,|_,cx|cx.emit(header::HeaderEvent::Rename(temporary_name.clone())));epoch
             })?;
             wait!(p,w,app => p.native_epoch>rename_epoch&&!p.loading&&p.rename_pending.is_none()&&p.screen==Screen::Player&&p.playing
-                &&p.native_play_intent.is_none()&&p.project.as_ref().is_some_and(|p|p.dir==temporary_path)
+                &&p.transport_flight.native_play.is_none()&&p.project.as_ref().is_some_and(|p|p.dir==temporary_path)
                 &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
             let restart_count=playing_restart_at!(0.,"restart-playing-renamed-song-admitted.json");
             wait!(p,w,app => p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.seek_count()>=restart_count
@@ -176,7 +176,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             for _ in 0..10 {
                 cx.background_executor().timer(Duration::from_millis(50)).await;
                 handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);
-                    anyhow::ensure!(p.notice.is_none()&&p.screen==Screen::Library&&!p.playing&&!p.native_play_intent.is_some_and(|(playing,_)|playing)
+                    anyhow::ensure!(p.notice.is_none()&&p.screen==Screen::Library&&!p.playing&&!p.transport_flight.native_play.payload().is_some_and(|playing|*playing)
                         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing),"Same-song Rename autoplayed after Catalog Pause");Ok(())})??;
             }
             let renamed_catalog_paused=handle.update(cx,|_,w,cx|state(view.read(cx),w))?;

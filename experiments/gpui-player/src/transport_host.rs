@@ -17,30 +17,30 @@ fn normalized_rate(value: f32) -> Option<f32> {
 }
 impl Player {
     pub(super) fn rate_busy(&self) -> bool {
-        self.native_rate_pending.is_some() || self.native_rate_queued.is_some() || self.native_rate_deferred.is_some()
+        self.transport_flight.native_rate_pending.is_some() || self.transport_flight.native_rate_queued.is_some() || self.transport_flight.native_rate_deferred.is_some()
     }
     pub(super) fn requested_rate(&self) -> (f32, i32) {
-        self.native_rate_deferred.or(self.native_rate_queued)
+        self.transport_flight.native_rate_deferred.or(self.transport_flight.native_rate_queued)
             .or_else(|| {
-                self.native_rate_pending
-                    .map(|(_, _, rate, transpose)| (rate, transpose))
+                self.transport_flight.native_rate_pending.payload().copied()
             })
             .unwrap_or((self.tempo, self.transpose))
     }
     pub(super) fn reset_transport_timing(&mut self, cx: &mut Context<Self>) {
         self.reset_region();
+        self.transport_flight.queued_loop.take();
         self.transport.update(cx, |t, cx| t.reset_timing(cx));
         self.metronome_ui.update(cx, |s, cx| s.reset_taps(cx));
-        self.native_rate_pending = None;
-        self.native_rate_queued = None;
-        self.native_rate_deferred = None;
-        self.native_play_intent = None;
-        self.monitor_actions.retain(|action| !matches!(action, DeferredAudio::Rate(_, _)));
-        self.native_rate_save_requested = false;
-        self.native_rate_navigation = None;
-        self.native_rate_generation_floor = 0;
-        self.timing_status = None;
-        self.count_in_cache = None;
+        self.transport_flight.native_rate_pending.cancel();
+        self.transport_flight.native_rate_queued = None;
+        self.transport_flight.native_rate_deferred = None;
+        self.transport_flight.native_play.cancel();
+        self.monitor_flight.monitor_actions.retain(|action| !matches!(action, DeferredAudio::Rate(_, _)));
+        self.transport_flight.native_rate_save_requested = false;
+        self.transport_flight.native_rate_navigation = None;
+        self.transport_flight.native_rate_generation_floor = 0;
+        self.transport_flight.timing_status = None;
+        self.transport_flight.count_in_cache = None;
         self.analysis_progress = None;
         self.analysis_job = None;
     }
@@ -59,8 +59,8 @@ impl Player {
             || self.loading
             || self.saving
             || self.source_blocks_except_rate()
-            || self.metronome_pending.is_some()
-            || self.delete_pending.is_some()
+            || self.metronome_flight.metronome.is_some()
+            || self.delete_flight.delete.is_some()
             || self.project_delete.read(cx).is_open()
         {
             return;
@@ -68,19 +68,19 @@ impl Player {
         if self.requested_rate() == (rate, transpose) {
             return;
         }
-        if self.monitor_busy() || self.native_rate_deferred.is_some() {
+        if self.monitor_busy() || self.transport_flight.native_rate_deferred.is_some() {
             // One latest target is a barrier ahead of commands awaiting output
             // release. The accepted document remains unchanged until Rate.
-            self.monitor_requested = false;
-            self.monitor_actions.retain(|action| !matches!(action, DeferredAudio::Rate(_, _)));
-            if self.monitor_actions.len() >= 128 {
+            self.monitor_flight.monitor_requested = false;
+            self.monitor_flight.monitor_actions.retain(|action| !matches!(action, DeferredAudio::Rate(_, _)));
+            if self.monitor_flight.monitor_actions.len() >= 128 {
                 self.cancel_deferred_rate("Native handoff command queue is full".into(), cx);
                 return;
             }
-            self.native_rate_deferred = Some((rate, transpose));
-            self.monitor_actions.push_front(DeferredAudio::Rate(rate, transpose));
-        } else if self.native_rate_pending.is_some() {
-            self.native_rate_queued = Some((rate, transpose));
+            self.transport_flight.native_rate_deferred = Some((rate, transpose));
+            self.monitor_flight.monitor_actions.push_front(DeferredAudio::Rate(rate, transpose));
+        } else if self.transport_flight.native_rate_pending.is_some() {
+            self.transport_flight.native_rate_queued = Some((rate, transpose));
         } else {
             self.dispatch_rate(rate, transpose, cx);
         }
@@ -92,8 +92,8 @@ impl Player {
         cx.notify();
     }
     pub(super) fn dispatch_deferred_rate(&mut self, rate: f32, transpose: i32, cx: &mut Context<Self>) {
-        if self.native_rate_deferred != Some((rate, transpose)) {return;}
-        self.native_rate_deferred = None;
+        if self.transport_flight.native_rate_deferred != Some((rate, transpose)) {return;}
+        self.transport_flight.native_rate_deferred = None;
         if self.loading || self.project.is_none() || self.monitor_busy() {
             self.cancel_deferred_rate("Playback speed could not follow microphone cleanup".into(), cx);
             return;
@@ -102,25 +102,25 @@ impl Player {
     }
     pub(super) fn cancel_deferred_rate(&mut self, error: String, cx: &mut Context<Self>) {
         self.cancel_deferred_region();
-        self.native_rate_deferred = None;
-        self.monitor_actions.retain(|action| !matches!(action, DeferredAudio::Rate(_, _)));
-        let save = std::mem::take(&mut self.native_rate_save_requested);
+        self.transport_flight.native_rate_deferred = None;
+        self.monitor_flight.monitor_actions.retain(|action| !matches!(action, DeferredAudio::Rate(_, _)));
+        let save = std::mem::take(&mut self.transport_flight.native_rate_save_requested);
         self.notice = Some(format!("{error}{}",if save {" Queued Save did not run."} else {""}));
         cx.notify();
     }
     fn dispatch_rate(&mut self, rate: f32, transpose: i32, cx: &mut Context<Self>) {
-        self.native_rate_serial += 1;
-        let serial = self.native_rate_serial;
+        let serial = self.transport_flight.native_rate_pending.begin(self.native_epoch, (rate, transpose));
         if let Some(backend) = &self.backend {
             match backend.rate(self.native_epoch, serial, rate, transpose) {
-                Ok(()) => {
-                    self.native_rate_pending = Some((self.native_epoch, serial, rate, transpose))
-                }
+                Ok(()) => {}
                 Err(error) => {
-                    let save=std::mem::take(&mut self.native_rate_save_requested);
+                    self.transport_flight.native_rate_pending.cancel();
+                    let save=std::mem::take(&mut self.transport_flight.native_rate_save_requested);
                     self.notice = Some(format!("Could not apply playback speed: {error}{}",if save {" Queued Save did not run."} else {""}));
                 }
             }
+        } else {
+            self.transport_flight.native_rate_pending.cancel();
         }
         cx.notify();
     }
@@ -131,21 +131,17 @@ impl Player {
         result: Result<integration::Status, String>,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .native_rate_pending
-            .is_some_and(|(e, s, _, _)| e == epoch && s == serial && e == self.native_epoch)
-        {
+        if epoch != self.native_epoch || self.transport_flight.native_rate_pending.settle(epoch, serial).is_none() {
             return;
         }
-        self.native_rate_pending = None;
         match result {
             Ok(status) => {
-                let queued = self.native_rate_queued.take();
+                let queued = self.transport_flight.native_rate_queued.take();
                 let changed = self.tempo != status.rate || self.transpose != status.transpose;
                 self.tempo = status.rate;
                 self.transpose = status.transpose;
-                self.native_rate_generation_floor = self
-                    .native_rate_generation_floor
+                self.transport_flight.native_rate_generation_floor = self
+                    .transport_flight.native_rate_generation_floor
                     .max(status.graph_generation);
                 self.playback_status(epoch, status, cx);
                 if changed {
@@ -158,8 +154,8 @@ impl Player {
                 }
             }
             Err(error) => {
-                self.native_rate_queued = None;
-                let save = std::mem::take(&mut self.native_rate_save_requested);
+                self.transport_flight.native_rate_queued = None;
+                let save = std::mem::take(&mut self.transport_flight.native_rate_save_requested);
                 self.notice = Some(format!(
                     "Playback speed was not applied: {error}{}",
                     if save {
@@ -170,6 +166,7 @@ impl Player {
                 ));
             }
         }
+        self.flush_queued_loop(cx);
         cx.notify();
     }
     pub(super) fn rate_transport_failed(
@@ -179,24 +176,21 @@ impl Player {
         error: String,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .native_rate_pending
-            .is_some_and(|(e, s, _, _)| e == epoch && s == serial && e == self.native_epoch)
-        {
+        if epoch != self.native_epoch || self.transport_flight.native_rate_pending.settle(epoch, serial).is_none() {
             return;
         }
-        self.native_rate_pending = None;
-        self.native_rate_queued = None;
-        self.native_rate_deferred = None;
-        self.native_play_intent = None;
-        self.monitor_actions.retain(|action| !matches!(action, DeferredAudio::Rate(_, _)));
-        let queued_save = std::mem::take(&mut self.native_rate_save_requested);
+        self.transport_flight.native_rate_queued = None;
+        self.transport_flight.native_rate_deferred = None;
+        self.transport_flight.native_play.cancel();
+        self.monitor_flight.monitor_actions.retain(|action| !matches!(action, DeferredAudio::Rate(_, _)));
+        self.transport_flight.queued_loop.take();
+        let queued_save = std::mem::take(&mut self.transport_flight.native_rate_save_requested);
         self.analysis_progress = None;
         self.analysis_job = None;
-        self.timing_status = None;
+        self.transport_flight.timing_status = None;
         self.playing = false;
-        self.counting_in = false;
-        self.count_in_anchor = None;
+        self.transport_flight.counting_in = false;
+        self.transport_flight.count_in_anchor = None;
         self.playhead.stop_projection();
 
         self.tracks_audio_failed = true;
@@ -215,23 +209,23 @@ impl Player {
     ) -> bool {
         if self.rate_busy()
             || self.region_busy()
-            || self.native_rate_save_requested
-            || self.native_rate_navigation.is_some()
+            || self.transport_flight.native_rate_save_requested
+            || self.transport_flight.native_rate_navigation.is_some()
         {
             // New navigation supersedes older destinations still waiting for
             // microphone release; they must not overwrite this newer intent.
-            if let Some(index)=self.monitor_actions.iter().position(|action|matches!(action,DeferredAudio::Open(_))) {
+            if let Some(index)=self.monitor_flight.monitor_actions.iter().position(|action|matches!(action,DeferredAudio::Open(_))) {
                 // Commands after that Open belong to its arriving project.
                 // Cancel the superseded segment rather than rebinding it here.
-                let cancels_play=self.monitor_actions.iter().skip(index).any(|action|matches!(action,DeferredAudio::Command(command) if matches!(command.as_str(),"play"|"pause"|"play-flat")));
-                self.monitor_actions.truncate(index);
+                let cancels_play=self.monitor_flight.monitor_actions.iter().skip(index).any(|action|matches!(action,DeferredAudio::Command(command) if matches!(command.as_str(),"play"|"pause"|"play-flat")));
+                self.monitor_flight.monitor_actions.truncate(index);
                 if cancels_play {
                     // The removed command has no future native receipt.
-                    self.native_play_intent=None;
-                    if self.monitor_parked {self.playing=false;}
+                    self.transport_flight.native_play.cancel();
+                    if self.monitor_flight.monitor_parked {self.playing=false;}
                 }
             }
-            self.native_rate_navigation = Some((path, source));
+            self.transport_flight.native_rate_navigation = Some((path, source));
             self.carry_open = false;
             self.metronome_open = false;
             self.transport.update(cx, |t, cx| {
@@ -243,17 +237,26 @@ impl Player {
             false
         }
     }
+    fn flush_queued_loop(&mut self, cx: &mut Context<Self>) {
+        if !self.rate_busy() {
+            if let Some(target) = self.transport_flight.queued_loop.take() {
+                self.request_region(target, cx);
+            }
+        }
+    }
     pub(super) fn flush_rate_intents(&mut self, cx: &mut Context<Self>) {
         if self.audio_recovery.is_some() || self.source_publication.is_some() { return; }
-        if self.rate_busy() || self.region_busy() || !self.monitor_actions.is_empty() || self.loading || self.saving || self.notice.is_some() {
+        if self.rate_busy() || self.region_busy() || !self.monitor_flight.monitor_actions.is_empty() || self.loading || self.saving || self.notice.is_some() {
             return;
         }
-        if std::mem::take(&mut self.native_rate_save_requested) {
-            self.metronome_save_requested = true;
-            if let Some(path) = self.native_rate_navigation.take() {
-                self.metronome_navigation = Some(path);
+        self.flush_queued_loop(cx);
+        if self.region_busy() { return; }
+        if std::mem::take(&mut self.transport_flight.native_rate_save_requested) {
+            self.metronome_flight.metronome_save_requested = true;
+            if let Some(path) = self.transport_flight.native_rate_navigation.take() {
+                self.metronome_flight.metronome_navigation = Some(path);
             }
-        } else if let Some((path, source)) = self.native_rate_navigation.take() {
+        } else if let Some((path, source)) = self.transport_flight.native_rate_navigation.take() {
             if source {
                 self.open_source(path, cx);
             } else {
@@ -282,12 +285,12 @@ impl Player {
             analysis = Some(value.clone());
         }
         let count_in = if let Some((status, heard)) = self
-            .timing_status
+            .transport_flight.timing_status
             .as_ref()
             .filter(|_| self.playing)
             .and_then(|status| status.count_in_heard.map(|heard| (status, heard)))
         {
-            let matches = self.count_in_cache.as_ref().is_some_and(|cache| {
+            let matches = self.transport_flight.count_in_cache.as_ref().is_some_and(|cache| {
                 cache.graph == status.graph_generation
                     && cache.landing == heard.landing_seconds.to_bits()
                     && cache.rate == status.rate.to_bits()
@@ -299,7 +302,7 @@ impl Player {
                     }
             });
             if !matches {
-                self.count_in_cache = Some(CountInCache {
+                self.transport_flight.count_in_cache = Some(CountInCache {
                     graph: status.graph_generation,
                     landing: heard.landing_seconds.to_bits(),
                     rate: status.rate.to_bits(),
@@ -315,10 +318,10 @@ impl Player {
             }
             transport_timing::count_in_from_offsets(
                 status,
-                &self.count_in_cache.as_ref().unwrap().offsets,
+                &self.transport_flight.count_in_cache.as_ref().unwrap().offsets,
             )
         } else {
-            self.count_in_cache = None;
+            self.transport_flight.count_in_cache = None;
             None
         };
         let tempo = self.requested_rate().0;
@@ -340,4 +343,20 @@ mod tests {
         assert_eq!(normalized_rate(f32::NAN), None);
         assert_eq!(normalized_rate(f32::INFINITY), None);
     }
+}
+
+#[derive(Default)]
+pub(super) struct TransportFlight {
+    pub(super) queued_loop: inflight::QueuedLoop,
+    pub(super) native_play: inflight::Inflight<bool>,
+    pub(super) native_rate_pending: inflight::Inflight<(f32,i32)>,
+    pub(super) native_rate_queued: Option<(f32,i32)>,
+    pub(super) native_rate_deferred: Option<(f32,i32)>,
+    pub(super) native_rate_generation_floor: u64,
+    pub(super) native_rate_save_requested: bool,
+    pub(super) native_rate_navigation: Option<(std::path::PathBuf,bool)>,
+    pub(super) count_in_anchor: Option<f64>,
+    pub(super) counting_in: bool,
+    pub(super) timing_status: Option<integration::Status>,
+    pub(super) count_in_cache: Option<transport_host::CountInCache>,
 }

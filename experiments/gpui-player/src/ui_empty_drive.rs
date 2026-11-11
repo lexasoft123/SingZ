@@ -221,7 +221,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 cx.background_executor().timer(Duration::from_millis(700)).await;shot!("before-remove");
                 let slot=handle.update(cx,|_,_,cx|view.read(cx).project.as_ref().unwrap().custom_tracks()[0].slot)?;
                 act!(w,app=>crate::ui_custom_tracks::press(&view,w,app,&format!("remove-{slot}")));
-                wait!(15,p,w,app=>p.tracks_pending.is_none()&&empty(p)&&p.edit_seq!=p.saved_seq);
+                wait!(15,p,w,app=>p.tracks_flight.tracks_pending.is_none()&&empty(p)&&p.edit_seq!=p.saved_seq);
                 act!(w,app=>header(&view,w,app,"header-save"));
                 wait!(15,p,w,app=>!p.saving&&p.edit_seq==p.saved_seq&&empty(p));
                 let saved:serde_json::Value=serde_json::from_slice(&std::fs::read(project.join("project.json"))?)?;

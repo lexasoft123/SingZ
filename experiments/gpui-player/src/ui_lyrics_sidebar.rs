@@ -190,7 +190,7 @@ fn shot(
     let p = view.read(cx);
     let value = serde_json::json!({"viewport":[f32::from(viewport.width),f32::from(viewport.height)],"expectedViewport":expected,"scale":scale,"raster":[image.width(),image.height()],
         "sidebar":state(p,w,cx),"project":p.project.as_ref().map(|p|p.dir.clone()),"epoch":p.native_epoch,"playing":p.playing,"position":p.playhead.position(),"nativeSeekCount":p.playhead.seek_count(),
-        "pending":p.lyrics_sidebar_pending,"searchPending":p.lyrics_search_pending,"settled":p.lyrics_sidebar_settled,
+        "pending":p.lyrics_flight.lyrics_sidebar.key(),"searchPending":p.lyrics_flight.lyrics_search_pending,"settled":p.lyrics_sidebar_settled,
         "windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
         "scope":if std::env::var("SINGZ_GPUI_LYRICS_QWEN_AUTO_UI").as_deref()==Ok("1") {
             "actual automatic production LRCLIB lookup and preinstalled native Qwen transcription/publication; no timing-quality or live-cadence claim"
@@ -292,7 +292,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             let before=std::fs::read(folder.join("lyrics.json"))?;let previous=handle.update(cx,|_,w,cx|state(view.read(cx),w,cx)["details"].clone())?;
             control(&root,"good",5000)?;let calls=count(&root,"calls.jsonl",Some("crisp"));press!("lyrics-align");
             wait!(p,w,app=>state(p,w,app)["status"]=="loading"&&count(&root,"calls.jsonl",Some("crisp"))>calls);both!("alignment-busy");
-            let cancelled=handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar_pending.ok_or_else(||anyhow::anyhow!("Running alignment has no pending receipt")))??;
+            let cancelled=handle.update(cx,|_,_,cx|view.read(cx).lyrics_flight.lyrics_sidebar.key().ok_or_else(||anyhow::anyhow!("Running alignment has no pending receipt")))??;
             let late_progress=std::rc::Rc::new(std::cell::RefCell::new(None::<anyhow::Result<serde_json::Value>>));
             handle.update(cx,|_,w,cx|->anyhow::Result<()>{
                 press(&view,w,cx,"lyrics-cancel")?;
@@ -303,13 +303,13 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 w.defer(cx,move|w,cx|{
                     let proof=player.update(cx,|p,cx|->anyhow::Result<serde_json::Value>{
                         let restored=state(p,w,cx);
-                        anyhow::ensure!(p.lyrics_sidebar_pending==Some(cancelled),"Cancel discarded pending disposition before late-progress check");
+                        anyhow::ensure!(p.lyrics_flight.lyrics_sidebar.key()==Some(cancelled),"Cancel discarded pending disposition before late-progress check");
                         anyhow::ensure!(p.native_epoch==cancelled.0&&!matches!(p.lyrics_sidebar_job,lyrics_resolution::Intent::Candidate(_)),"Late-progress check would be rejected by epoch/job guards instead of the cancelled Ready state");
                         anyhow::ensure!(restored["status"]=="ready"&&restored["details"]==expected&&restored["showsLyrics"]==true,"Actual Cancel did not restore previous Ready state before delayed progress: {restored}");
                         p.sidebar_progress(cancelled.0,cancelled.1,lyrics_align::Progress{stage:"transcribing".into(),percent:97.},cx);
                         let after=state(p,w,cx);
                         anyhow::ensure!(after["status"]=="ready"&&after["details"]==expected&&after["showsLyrics"]==true,"Same-serial late progress reopened cancelled loading or replaced prior details: {after}");
-                        anyhow::ensure!(p.lyrics_sidebar_pending==Some(cancelled),"Ignoring late progress discarded final-result ownership");
+                        anyhow::ensure!(p.lyrics_flight.lyrics_sidebar.key()==Some(cancelled),"Ignoring late progress discarded final-result ownership");
                         Ok(serde_json::json!({"epoch":cancelled.0,"serial":cancelled.1,"sameAppEffectCycle":true,"pendingRetained":true,"injected":{"stage":"transcribing","percent":97},"before":restored,"after":after}))
                     });
                     *sink.borrow_mut()=Some(proof);
@@ -328,14 +328,14 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             anyhow::ensure!(std::fs::read(folder.join("lyrics.json"))?==before&&count(&root,"calls.jsonl",Some("crisp"))==calls,"Mismatch wrote lyrics or forced incorrect word timing");both!("mismatch");std::fs::write(&heard_path,heard_bytes)?;
 
             open!("cancel-http");let before=std::fs::read(root.join("cancel-http/lyrics.json"))?;press!("lyrics-change");results!();hold(&root)?;press!("lyrics-variant-101");
-            wait!(p,w,app=>root.join("http-ready.json").is_file()&&p.lyrics_sidebar_pending.is_some());
-            let cancelled=handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar_pending.unwrap())?;
+            wait!(p,w,app=>root.join("http-ready.json").is_file()&&p.lyrics_flight.lyrics_sidebar.is_some());
+            let cancelled=handle.update(cx,|_,_,cx|view.read(cx).lyrics_flight.lyrics_sidebar.key().unwrap())?;
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.cancel_sidebar_lyrics(cx)))?;release(&root)?;
             wait!(p,w,app=>p.lyrics_sidebar_settled.contains(&cancelled));saved!();
             anyhow::ensure!(std::fs::read(root.join("cancel-http/lyrics.json"))?==before,"Cancelled HTTP Apply wrote lyrics");
             open!("stale-http");let before=std::fs::read(root.join("stale-http/lyrics.json"))?;press!("lyrics-change");results!();hold(&root)?;press!("lyrics-variant-101");
-            wait!(p,w,app=>root.join("http-ready.json").is_file()&&p.lyrics_sidebar_pending.is_some());
-            let stale=handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar_pending.unwrap())?;let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
+            wait!(p,w,app=>root.join("http-ready.json").is_file()&&p.lyrics_flight.lyrics_sidebar.is_some());
+            let stale=handle.update(cx,|_,_,cx|view.read(cx).lyrics_flight.lyrics_sidebar.key().unwrap())?;let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
             let other=root.join("other");handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(other.clone(),cx)))?;
             wait!(p,w,app=>p.native_epoch!=epoch);release(&root)?;
             wait!(p,w,app=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==other)&&state(p,w,app)["status"]=="ready"&&p.lyrics_sidebar_settled.contains(&stale));
@@ -355,14 +355,14 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             open!("postcommit");press!("lyrics-change");results!();
             let gate=PathBuf::from(std::env::var_os("SINGZ_GPUI_LYRICS_RESOLVE_RECEIPT_GATE").ok_or_else(||anyhow::anyhow!("Missing resolver receipt gate"))?);
             let ready=gate.with_extension("ready");let _=std::fs::remove_file(&ready);std::fs::write(&gate,b"hold durable candidate receipt")?;
-            press!("lyrics-variant-101");wait!(p,w,app=>ready.is_file()&&p.lyrics_sidebar_pending.is_some());
-            let receipt=handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar_pending.unwrap())?;
+            press!("lyrics-variant-101");wait!(p,w,app=>ready.is_file()&&p.lyrics_flight.lyrics_sidebar.is_some());
+            let receipt=handle.update(cx,|_,_,cx|view.read(cx).lyrics_flight.lyrics_sidebar.key().unwrap())?;
             let folder=root.join("postcommit");let committed=lyrics_store::identity(&folder)?;
             anyhow::ensure!(raw(&folder.join("lyrics.json"))?["credit"]=="Fixture artist — Selected recording","Receipt gate was not after the real commit");
             let queued=handle.update(cx,|_,w,cx|view.update(cx,|p,cx|{p.cancel_sidebar_lyrics(cx);p.open_lyrics_editor(w,cx);
-                p.lyrics_sidebar_pending==Some(receipt)&&!p.lyrics_editor_open&&p.lyrics_sidebar_editor_after}))?;
+                p.lyrics_flight.lyrics_sidebar.key()==Some(receipt)&&!p.lyrics_editor_open&&p.lyrics_sidebar_editor_after}))?;
             anyhow::ensure!(queued,"Editor crossed the unresolved committed-receipt barrier");
-            wait!(p,w,app=>p.lyrics_sidebar_pending.is_none()&&p.lyrics_sidebar_settled.contains(&receipt)&&p.lyrics_editor_open);
+            wait!(p,w,app=>p.lyrics_flight.lyrics_sidebar.is_none()&&p.lyrics_sidebar_settled.contains(&receipt)&&p.lyrics_editor_open);
             let _=std::fs::remove_file(&gate);
             handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let p=view.read(cx);
                 anyhow::ensure!(p.project.as_ref().is_some_and(|p|p.lyrics_fingerprint==committed)&&p.lyric_document.credit=="Fixture artist — Selected recording"&&p.lyrics_editor.read(cx).rows()[0].text=="The song is with you","Cancelled committed receipt did not update document/fingerprint before opening editor");Ok(())})??;
@@ -376,13 +376,13 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             // actual publication receipt, then publish those latest lyrics.
             working!("working-target","working-copy");let target=root.join("working-target");let target_before=std::fs::read(target.join("lyrics.json"))?;
             press!("lyrics-change");results!();hold(&root)?;press!("lyrics-variant-104");
-            wait!(p,w,app=>root.join("http-ready.json").is_file()&&p.lyrics_sidebar_pending.is_some());
-            let receipt=handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar_pending.unwrap())?;
+            wait!(p,w,app=>root.join("http-ready.json").is_file()&&p.lyrics_flight.lyrics_sidebar.is_some());
+            let receipt=handle.update(cx,|_,_,cx|view.read(cx).lyrics_flight.lyrics_sidebar.key().unwrap())?;
             handle.update(cx,|_,w,cx|header_save(&view,w,cx))??;
-            wait!(p,w,app=>p.metronome_save_requested&&p.source_working&&p.source_job.is_none()&&p.lyrics_sidebar_pending==Some(receipt));
+            wait!(p,w,app=>p.metronome_flight.metronome_save_requested&&p.source_working&&p.source_job.is_none()&&p.lyrics_flight.lyrics_sidebar.key()==Some(receipt));
             anyhow::ensure!(std::fs::read(target.join("lyrics.json"))?==target_before,"Working-copy Save published before Apply resolved");
             release(&root)?;
-            wait!(p,w,app=>p.lyrics_sidebar_settled.contains(&receipt)&&p.lyrics_sidebar_pending.is_none()&&!p.loading&&!p.saving&&p.source_job.is_none()&&!p.source_working&&!p.metronome_save_requested&&!p.metronome_save_waiting&&p.project.as_ref().is_some_and(|p|p.dir==target));
+            wait!(p,w,app=>p.lyrics_sidebar_settled.contains(&receipt)&&p.lyrics_flight.lyrics_sidebar.is_none()&&!p.loading&&!p.saving&&p.source_job.is_none()&&!p.source_working&&!p.metronome_flight.metronome_save_requested&&!p.metronome_flight.metronome_save_waiting&&p.project.as_ref().is_some_and(|p|p.dir==target));
             anyhow::ensure!(raw(&target.join("lyrics.json"))?["lines"][0]["text"]=="Selected words survive the saved copy","Queued working-copy Save published stale lyrics");
             open!("working-target");anyhow::ensure!(handle.update(cx,|_,_,cx|view.read(cx).lyric_document.lines[0].text.clone())?=="Selected words survive the saved copy","Reload lost queued Apply/Save lyrics");
             shot!("pending-apply-working-save",Some((1060.,640.)));
@@ -396,7 +396,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             let requests=count(&root,"requests.jsonl",None);
             let optimistic=handle.update(cx,|_,w,cx|->anyhow::Result<bool>{header_save(&view,w,cx)?;press(&view,w,cx,"lyrics-variant-101")?;Ok(state(view.read(cx),w,cx)["busy"]==true)})??;
             anyhow::ensure!(optimistic,"Actual candidate control did not queue its optimistic Apply");
-            wait!(p,w,app=>ready.is_file()&&p.source_job.is_some()&&p.source_working&&p.lyrics_sidebar_pending.is_none()&&state(p,w,app)["busy"]==false);
+            wait!(p,w,app=>ready.is_file()&&p.source_job.is_some()&&p.source_working&&p.lyrics_flight.lyrics_sidebar.is_none()&&state(p,w,app)["busy"]==false);
             anyhow::ensure!(count(&root,"requests.jsonl",None)==requests,"Apply began HTTP while Source Save blocked the song");
             std::fs::remove_file(&gate)?;let target=root.join("blocked-target");
             wait!(p,w,app=>!p.loading&&p.source_job.is_none()&&!p.source_working&&p.project.as_ref().is_some_and(|p|p.dir==target));
@@ -410,7 +410,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").ok_or_else(||anyhow::anyhow!("Playable song lost transport"))?;click(w,cx,b.center());Ok(())})??;
             wait!(p,w,app=>p.playing&&p.playhead.position()>0.05);
             handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").unwrap();click(w,cx,b.center());Ok(())})??;
-            wait!(p,w,app=>!p.playing&&!p.counting_in);
+            wait!(p,w,app=>!p.playing&&!p.transport_flight.counting_in);
             anyhow::ensure!(std::fs::read(folder.join("lyrics.json"))?==original,"Opening/playing malformed oversized lyrics changed the file");
 
             open!("transcribe");let heard=root.join("transcribe/heard-words.json");if heard.exists(){std::fs::remove_file(heard)?;}
@@ -495,14 +495,14 @@ fn run_live(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mu
                         .ok_or_else(||anyhow::anyhow!("Karaoke control was not laid out"))?;
                     click(w,cx,b.center());Ok(())})??;
             }
-            wait!(p,w,app => p.karaoke&&p.lyrics_sidebar_pending.is_none()
+            wait!(p,w,app => p.karaoke&&p.lyrics_flight.lyrics_sidebar.is_none()
                 &&state(p,w,app)["status"]=="ready"&&state(p,w,app)["showsLyrics"]==true);
             handle.update(cx,|_,w,cx|press(&view,w,cx,"lyrics-change"))??;
             wait!(p,w,app => state(p,w,app)["view"]=="variants"&&!state(p,w,app)["busy"].as_bool().unwrap_or(true));
             handle.update(cx,|_,w,cx|query(&view,w,cx,&query_text))??;
             wait!(p,w,app => state(p,w,app)["query"].as_str()==Some(query_text.as_str()));
             handle.update(cx,|_,w,cx|press(&view,w,cx,"lyrics-search"))??;
-            wait!(p,w,app => p.lyrics_search_pending.is_none()&&state(p,w,app)["busy"]==false
+            wait!(p,w,app => p.lyrics_flight.lyrics_search_pending.is_none()&&state(p,w,app)["busy"]==false
                 &&state(p,w,app)["results"].as_array().is_some_and(|results|
                     results.iter().any(|candidate|candidate["id"].as_u64()==Some(candidate_id))));
             let candidate=handle.update(cx,|_,w,cx|->anyhow::Result<serde_json::Value>{
@@ -519,7 +519,7 @@ fn run_live(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mu
             anyhow::ensure!(std::fs::read(&lyrics_path)?==original,"Opening/searching variants wrote project lyrics before selection");
             handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,"live-search-variants",Some((1280.,800.))))??;
             handle.update(cx,|_,w,cx|press(&view,w,cx,&format!("lyrics-variant-{candidate_id}")))??;
-            wait!(p,w,app => p.lyrics_sidebar_pending.is_none()&&state(p,w,app)["status"]=="ready"
+            wait!(p,w,app => p.lyrics_flight.lyrics_sidebar.is_none()&&state(p,w,app)["status"]=="ready"
                 &&state(p,w,app)["showsLyrics"]==true&&p.project.as_ref()
                     .and_then(|loaded|loaded.lyrics_raw.as_ref()).is_some_and(|raw|raw["source"]=="lrclib"));
             let saved_bytes=std::fs::read(&lyrics_path)?;
@@ -646,7 +646,7 @@ fn run_qwen_auto(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut 
                     anyhow::ensure!(!w.is_visible()&&!w.is_window_active()&&p.notice.is_none()&&p.karaoke,"Automatic Qwen lost hidden Karaoke state");
                     anyhow::ensure!(!p.lyrics_sidebar_download_waiting&&p.lyrics_sidebar_needs.is_empty(),"Automatic Qwen unexpectedly requested model download");
                     let s=state(p,w,cx);anyhow::ensure!(s["status"]!="error"&&s["status"]!="consent","Automatic Qwen failed: {s}");
-                    Ok(serde_json::json!({"sidebar":s,"pending":p.lyrics_sidebar_pending,"settled":p.lyrics_sidebar_settled}))})??;
+                    Ok(serde_json::json!({"sidebar":s,"pending":p.lyrics_flight.lyrics_sidebar.key(),"settled":p.lyrics_sidebar_settled}))})??;
                 let s=&snapshot["sidebar"];let stage=s["details"]["progress"]["stage"].as_str().unwrap_or("");
                 searching|=s["status"]=="loading"&&stage=="searching"&&!snapshot["pending"].is_null();
                 transcribing|=s["status"]=="loading"&&stage=="transcribing"&&!snapshot["pending"].is_null();
@@ -684,7 +684,7 @@ fn run_qwen_auto(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut 
             let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
             wait!(90,p,w,app=>!p.loading&&p.native_epoch>epoch&&p.project.as_ref().is_some_and(|s|s.dir==project));
-            wait!(120,p,w,app=>p.karaoke&&p.lyrics_sidebar_pending.is_none()&&state(p,w,app)["status"]=="ready");
+            wait!(120,p,w,app=>p.karaoke&&p.lyrics_flight.lyrics_sidebar.is_none()&&state(p,w,app)["status"]=="ready");
             let published=raw(&lyrics_path)?;
             if published["source"]=="lrclib" {bypass!(initial.clone(),published.clone(),true,"Live LRCLIB returned a usable hit during reopen recheck");}
             let final_lines=qwen_auto_lines(&published,duration)?;

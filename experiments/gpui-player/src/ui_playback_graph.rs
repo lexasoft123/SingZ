@@ -27,7 +27,7 @@ fn settings_focus(view:&Entity<Player>,window:&mut Window,cx:&mut App,id:&str)->
 }
 fn quiet(p:&Player,window:&Window)->anyhow::Result<()> {
     anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"Playback graph test activated its window");
-    anyhow::ensure!(!p.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested,"Playback graph test requested microphone or monitoring");
+    anyhow::ensure!(!p.monitor_flight.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested,"Playback graph test requested microphone or monitoring");
     anyhow::ensure!(p.notice.is_none(),"Playback graph notice: {:?}",p.notice);
     Ok(())
 }
@@ -60,7 +60,7 @@ fn capture(view:&Entity<Player>,window:&mut Window,cx:&mut App,out:&Path,name:&s
         "hidden":true,"active":false,"playing":p.playing,"epoch":p.native_epoch,"graph":graph,"nativeGraph":native,
         "nativeGeneration":status.map(|s|s.graph_generation.to_string()),"explicitGraph":status.map(|s|s.explicit_graph),
         "rate":status.map(|s|s.rate),"transpose":status.map(|s|s.transpose),"state":status.map(|s|s.state),"transportState":status.map(|s|s.transport_state),
-        "monitorRequested":p.monitor_requested,"micRequested":p.mic_requested,"liveFps":"unmeasured","productionParity":"unqualified"});
+        "monitorRequested":p.monitor_flight.monitor_requested,"micRequested":p.mic_requested,"liveFps":"unmeasured","productionParity":"unqualified"});
     std::fs::write(out.join(format!("{name}.state.json")),serde_json::to_vec_pretty(&state)?)?;
     Ok(state)
 }
@@ -145,7 +145,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
                     let previous=handle.update(cx,|_,window,cx|->anyhow::Result<u64>{capture(&view,window,cx,&out,&format!("graph-{kind}-running-{}",width as u32),true)?;Ok(view.read(cx).last_playback_status.as_ref().unwrap().graph_generation)})??;
                     let rate=1.1+index as f32*0.1;let transpose=index as i32+1;
                     handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.native_transport(transport::TransportEvent::Tempo(rate),cx);p.native_transport(transport::TransportEvent::Transpose(transpose),cx);}))?;
-                    wait!("native graph replacement",|p:&Player,cx:&App|p.native_rate_pending.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.graph_generation>previous&&(s.rate-rate).abs()<0.001&&s.transpose==transpose)
+                    wait!("native graph replacement",|p:&Player,cx:&App|p.transport_flight.native_rate_pending.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.graph_generation>previous&&(s.rate-rate).abs()<0.001&&s.transpose==transpose)
                         &&p.settings.read(cx).graph_ui_state()["graph"]==native_graph(p).unwrap_or_default());
                     handle.update(cx,|_,window,cx|->anyhow::Result<()>{
                         let replaced=capture(&view,window,cx,&out,&format!("graph-{kind}-replaced-{}",width as u32),true)?;

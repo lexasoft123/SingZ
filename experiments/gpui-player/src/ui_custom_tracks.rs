@@ -72,7 +72,7 @@ fn snapshot(
     std::fs::write(
         out.join(format!("{name}.json")),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"lanes":p.project.as_ref().map(|s|&s.lane_specs),"duration":p.duration,"playing":p.playing,"position":p.playhead.position(),"gain":p.gain.as_slice(),"epoch":p.native_epoch,"pending":p.tracks_pending,"saving":p.saving,"editSeq":p.edit_seq,"savedSeq":p.saved_seq,"focusedRoot":p.focus_handle.is_focused(w),"error":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"entrancesSettled":settled,"hidden":true,"liveFps":"unmeasured","visualReference":"candidate only; production matched references absent"}),
+            &serde_json::json!({"lanes":p.project.as_ref().map(|s|&s.lane_specs),"duration":p.duration,"playing":p.playing,"position":p.playhead.position(),"gain":p.gain.as_slice(),"epoch":p.native_epoch,"pending":p.tracks_flight.tracks_pending,"saving":p.saving,"editSeq":p.edit_seq,"savedSeq":p.saved_seq,"focusedRoot":p.focus_handle.is_focused(w),"error":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"entrancesSettled":settled,"hidden":true,"liveFps":"unmeasured","visualReference":"candidate only; production matched references absent"}),
         )?,
     )?;
     Ok(())
@@ -110,7 +110,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;wait!(p,cx=>p.playing&&p.playhead.position()>0.05);
                 let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"add"))??;
-                wait!(p,cx=>p.tracks_pending.is_none()&&p.project.as_ref().is_some_and(|s|s.custom_tracks().len()==2));
+                wait!(p,cx=>p.tracks_flight.tracks_pending.is_none()&&p.project.as_ref().is_some_and(|s|s.custom_tracks().len()==2));
                 let first=handle.update(cx,|_,_,cx|->anyhow::Result<tracks::Lane>{let p=view.read(cx);anyhow::ensure!(p.notice.as_ref().is_some_and(|s|s.to_lowercase().contains("broken")),"Mixed picker batch did not report its rejected audio");anyhow::ensure!(p.native_epoch==epoch&&p.playing&&p.duration>=6.&&p.edit_seq!=p.saved_seq&&p.project.as_ref().is_some_and(|s|s.pitch.f0.len()==300)&&p.pitch_strip.read(cx).native_duration()==Some(p.duration),"Add lost native playback/epoch or duration");Ok(p.project.as_ref().unwrap().custom_tracks()[0].clone())})??;
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.notice=None;cx.notify();}))?;
                 // Record settled rows, then exercise visible controls. This is
@@ -142,7 +142,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 wait!(p,cx=>p.playhead.loop_range().is_some());
                 for lane in specs{
                     handle.update(cx,|_,w,cx|press(&view,w,cx,&format!("remove-{}",lane.slot)))??;
-                    wait!(p,cx=>p.tracks_pending.is_none()&&p.project.as_ref().is_some_and(|s|!s.lane_specs.iter().any(|l|l.id==lane.id)));
+                    wait!(p,cx=>p.tracks_flight.tracks_pending.is_none()&&p.project.as_ref().is_some_and(|s|!s.lane_specs.iter().any(|l|l.id==lane.id)));
                 }
                 let renamed=format!("Removed handoff {}",width as u32);
                 handle.update(cx,|_,w,cx|rename_project(&view,w,cx,&renamed))??;

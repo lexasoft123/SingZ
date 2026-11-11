@@ -34,10 +34,10 @@ fn snapshot(view: &Entity<Player>, window: &Window, cx: &App) -> Value {
     let mut value = json!({"viewport":[f32::from(window.viewport_size().width),f32::from(window.viewport_size().height)],"scale":window.scale_factor(),
         "windowPresented":window.is_visible(),"windowActive":window.is_window_active(),"hidden":!window.is_visible()&&!window.is_window_active(),
         "hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
-        "epoch":p.native_epoch,"publicationEpoch":p.monitor_publication_epoch,"screen":p.screen as u8,"position":p.playhead.position(),"duration":p.duration,"playing":p.playing,
+        "epoch":p.native_epoch,"publicationEpoch":p.monitor_flight.monitor_publication_epoch,"screen":p.screen as u8,"position":p.playhead.position(),"duration":p.duration,"playing":p.playing,
         "sourceWorking":p.source_working,"sourceJob":p.source_job,"publicationPending":p.source_publication.is_some(),"loading":p.loading,"saving":p.saving,
         "tracksAudioFailed":p.tracks_audio_failed,"audioRecoveryPending":p.audio_recovery.is_some(),"notice":p.notice,"editSeq":p.edit_seq,"savedSeq":p.saved_seq});
-    let monitor = json!({"requested":p.monitor_requested,"parked":p.monitor_parked,"pending":p.monitor_pending.is_some(),"monitorBusy":p.monitor_busy(),"micIntent":p.mic_intent.is_some(),
+    let monitor = json!({"requested":p.monitor_flight.monitor_requested,"parked":p.monitor_flight.monitor_parked,"pending":p.monitor_flight.monitor.is_some(),"monitorBusy":p.monitor_busy(),"micIntent":p.mic_intent.is_some(),
         "micPhase":format!("{:?}",p.mic_view.phase),"micOwner":p.mic_view.owner,"generation":p.mic_view.generation,"sequence":p.mic_view.sequence,"fixture":p.mic_view.fixture,"audibleMonitor":p.mic_view.monitor_enabled,
         "header":p.header.read(cx).monitor_state(),"tempo":p.tempo,"transpose":p.transpose,"master":p.master_volume,"looping":p.looping,"nativeLoop":p.playhead.loop_range()});
     value
@@ -55,14 +55,14 @@ fn snapshot(view: &Entity<Player>, window: &Window, cx: &App) -> Value {
         PRIMARY_SCOPE
     });
     value["heldSavingStateAdapter"] = json!(adapter_enabled());
-    value["queuedActionCount"] = json!(p.monitor_actions.len());
+    value["queuedActionCount"] = json!(p.monitor_flight.monitor_actions.len());
     value["queuedOutputCount"] = json!(p
-        .monitor_actions
+        .monitor_flight.monitor_actions
         .iter()
         .filter(|action| matches!(action, DeferredAudio::Output(_)))
         .count());
     value["queuedDefaultOutputCount"] = json!(p
-        .monitor_actions
+        .monitor_flight.monitor_actions
         .iter()
         .filter(|action| matches!(action,DeferredAudio::Output(uid) if uid.is_empty()))
         .count());
@@ -117,10 +117,10 @@ fn active(p: &Player, epoch: u64, generation: u64) -> bool {
         && p.mic_view.owner == 3
         && p.mic_view.fixture
         && !p.mic_view.monitor_enabled
-        && p.monitor_requested
-        && p.monitor_parked
-        && p.monitor_pending.is_none()
-        && p.monitor_actions.is_empty()
+        && p.monitor_flight.monitor_requested
+        && p.monitor_flight.monitor_parked
+        && p.monitor_flight.monitor.is_none()
+        && p.monitor_flight.monitor_actions.is_empty()
         && p.mic_intent.as_ref().is_some_and(|i| i.monitor)
         && p.notice.is_none()
         && !p.playing
@@ -175,7 +175,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 // Exercise the real disabled control and preserve production's platform policy.
                 // No monitoring lease or publication workflow is claimed on these platforms.
                 cx.background_executor().timer(Duration::from_millis(200)).await;
-                wait!(5,p,w,a=>p.native_epoch==epoch&&p.source_working&&p.project.as_ref().is_some_and(|v|v.dir==working)&&!p.monitor_requested&&!p.monitor_parked&&p.monitor_pending.is_none()&&!p.monitor_busy()&&p.mic_intent.is_none()&&p.mic_view.phase==microphone::Phase::Off&&p.mic_view.owner==0&&p.notice.is_none()&&!p.playing&&p.settings.read(a).monitor_route()==Err(crate::i18n::t("settings.monitor.routePlatformUnavailable").into()));
+                wait!(5,p,w,a=>p.native_epoch==epoch&&p.source_working&&p.project.as_ref().is_some_and(|v|v.dir==working)&&!p.monitor_flight.monitor_requested&&!p.monitor_flight.monitor_parked&&p.monitor_flight.monitor.is_none()&&!p.monitor_busy()&&p.mic_intent.is_none()&&p.mic_view.phase==microphone::Phase::Off&&p.mic_view.owner==0&&p.notice.is_none()&&!p.playing&&p.settings.read(a).monitor_route()==Err(crate::i18n::t("settings.monitor.routePlatformUnavailable").into()));
                 anyhow::ensure!(std::fs::read(working.join("project.json"))?==working_metadata,"Disabled Monitor changed working metadata");
                 let policy=probe!();let policy_value=probe_value(&policy,"platform-unavailable-after-click");
                 anyhow::ensure!(policy.helper_pid==pid&&policy.epoch==epoch&&!policy.monitor_leased&&!policy.status.parked&&!policy.status.playing&&(policy.status.position-2.).abs()<0.03,"Disabled Monitor disturbed native playback ownership");
@@ -191,7 +191,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&json!({"platformUnavailablePolicy":true,"publicationWorkflowExercised":false,"actualDisabledMonitorClick":true,"headphonesConfirmed":true,"noNativeLeaseAcquired":true,"hardwareMonitoringQualified":false,"reason":crate::i18n::t("settings.monitor.routePlatformUnavailable"),"policyScope":"Production Windows/Linux monitoring platform-unavailable policy only; real monitoring, publication while monitoring, Stop restoration and native advancement are not exercised","epoch":epoch,"originalHelperPid":pid,"workingDir":working,"workingMetadataSha256":hash(&working_metadata),"rawSourceSha256":hash(std::fs::read(&raw)?),"sizes":[[1280,800],[1060,640]],"hidden":true,"muted":true,"productionParity":"not evaluated","liveFps":"unmeasured"}))?)?;
                 return Ok(());
             }
-            wait!(15,p,w,a=>p.monitor_parked&&p.mic_view.phase==microphone::Phase::Monitoring&&p.mic_view.owner==3&&p.monitor_pending.is_none());
+            wait!(15,p,w,a=>p.monitor_flight.monitor_parked&&p.mic_view.phase==microphone::Phase::Monitoring&&p.mic_view.owner==3&&p.monitor_flight.monitor.is_none());
             let (generation,sequence)=handle.update(cx,|_,_,a|{let p=view.read(a);(p.mic_view.generation,p.mic_view.sequence)})?;
             wait!(5,p,w,a=>active(p,epoch,generation)&&p.mic_view.sequence>sequence);
             handle.update(cx,|_,w,a|{draw(w,a);w.dispatch_event(PlatformInput::KeyDown(KeyDownEvent{keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),a);})?;
@@ -210,7 +210,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let done=handle.update(cx,|_,w,a|->anyhow::Result<bool>{draw(w,a);let p=view.read(a);anyhow::ensure!(active(p,epoch,generation),"Save disturbed native monitor: {}",snapshot(&view,w,a));Ok(!p.loading&&!p.saving&&p.source_job.is_none()&&p.source_publication.is_none()&&!p.source_working&&p.project.as_ref().is_some_and(|v|v.dir!=working&&v.dir.starts_with(&library))&&p.edit_seq==p.saved_seq)})??;
                 if done {break;}anyhow::ensure!(Instant::now()<deadline,"Monitored publication timed out");cx.background_executor().timer(Duration::from_millis(30)).await;
             }
-            wait!(5,p,w,a=>active(p,epoch,generation)&&p.monitor_publication_epoch==Some(epoch)&&p.tracks_audio_failed&&p.audio_recovery.is_none()&&p.mic_view.sequence>sequence_before_save);
+            wait!(5,p,w,a=>active(p,epoch,generation)&&p.monitor_flight.monitor_publication_epoch==Some(epoch)&&p.tracks_audio_failed&&p.audio_recovery.is_none()&&p.mic_view.sequence>sequence_before_save);
             let published=handle.update(cx,|_,_,a|view.read(a).project.as_ref().unwrap().dir.clone())?;
             let metadata=std::fs::read(published.join("project.json"))?;let saved:Value=serde_json::from_slice(&metadata)?;
             let settings=&saved["settings"];
@@ -232,19 +232,19 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     view.update(a,|p,a|->anyhow::Result<()>{
                         anyhow::ensure!(p.monitor_busy(),"Actual Stop cleanup completed before synchronous controller intent");
                         p.select_output("".into(),a);
-                        anyhow::ensure!(p.monitor_actions.len()==1&&matches!(p.monitor_actions.front(),Some(DeferredAudio::Output(uid)) if uid.is_empty()),"Default Output was not queued exactly once during Stop cleanup");
+                        anyhow::ensure!(p.monitor_flight.monitor_actions.len()==1&&matches!(p.monitor_flight.monitor_actions.front(),Some(DeferredAudio::Output(uid)) if uid.is_empty()),"Default Output was not queued exactly once during Stop cleanup");
                         Ok(())
                     })
                 })??;
-                wait!(15,p,w,a=>p.native_epoch==epoch&&!p.monitor_busy()&&p.monitor_pending.is_none()&&p.mic_intent.is_none()&&p.mic_view.phase==microphone::Phase::Off&&p.mic_view.owner==0&&p.saving&&p.monitor_actions.len()==1&&matches!(p.monitor_actions.front(),Some(DeferredAudio::Output(uid)) if uid.is_empty())&&p.monitor_publication_epoch==Some(epoch)&&p.audio_recovery.is_none()&&p.tracks_audio_failed&&p.notice.is_none()&&!p.playing);
+                wait!(15,p,w,a=>p.native_epoch==epoch&&!p.monitor_busy()&&p.monitor_flight.monitor.is_none()&&p.mic_intent.is_none()&&p.mic_view.phase==microphone::Phase::Off&&p.mic_view.owner==0&&p.saving&&p.monitor_flight.monitor_actions.len()==1&&matches!(p.monitor_flight.monitor_actions.front(),Some(DeferredAudio::Output(uid)) if uid.is_empty())&&p.monitor_flight.monitor_publication_epoch==Some(epoch)&&p.audio_recovery.is_none()&&p.tracks_audio_failed&&p.notice.is_none()&&!p.playing);
                 let held=probe!();let held_value=probe_value(&held,"stop-held-saving-adapter");
                 anyhow::ensure!(held.helper_pid==pid&&!held.monitor_leased&&!held.status.parked&&!held.status.playing,"Held Save adapter did not release old native monitor lease");probes.push(held_value);
                 shot!("monitor-stop-held-saving-adapter-1060");
-                handle.update(cx,|_,w,a|->anyhow::Result<()>{draw(w,a);let p=view.read(a);anyhow::ensure!(p.saving&&p.monitor_actions.len()==1&&matches!(p.monitor_actions.front(),Some(DeferredAudio::Output(uid)) if uid.is_empty())&&p.monitor_publication_epoch==Some(epoch)&&p.audio_recovery.is_none()&&p.tracks_audio_failed,"A draw lost deferred recovery while Save held");view.update(a,|p,a|{p.saving=false;a.notify();});Ok(())})??;
+                handle.update(cx,|_,w,a|->anyhow::Result<()>{draw(w,a);let p=view.read(a);anyhow::ensure!(p.saving&&p.monitor_flight.monitor_actions.len()==1&&matches!(p.monitor_flight.monitor_actions.front(),Some(DeferredAudio::Output(uid)) if uid.is_empty())&&p.monitor_flight.monitor_publication_epoch==Some(epoch)&&p.audio_recovery.is_none()&&p.tracks_audio_failed,"A draw lost deferred recovery while Save held");view.update(a,|p,a|{p.saving=false;a.notify();});Ok(())})??;
             } else {
                 header!("monitor-stop");
             }
-            wait!(30,p,w,a=>p.native_epoch==epoch&&p.monitor_actions.is_empty()&&!p.monitor_busy()&&p.monitor_pending.is_none()&&p.mic_intent.is_none()&&p.mic_view.phase==microphone::Phase::Off&&p.mic_view.owner==0&&p.monitor_publication_epoch.is_none()&&p.audio_recovery.is_none()&&!p.tracks_audio_failed&&p.notice.is_none()&&!p.playing&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&!s.parked&&(s.position-2.).abs()<0.03&&(s.rate-0.8).abs()<0.0001&&s.transpose==-2&&s.loop_range==p.project.as_ref().unwrap().selection));
+            wait!(30,p,w,a=>p.native_epoch==epoch&&p.monitor_flight.monitor_actions.is_empty()&&!p.monitor_busy()&&p.monitor_flight.monitor.is_none()&&p.mic_intent.is_none()&&p.mic_view.phase==microphone::Phase::Off&&p.mic_view.owner==0&&p.monitor_flight.monitor_publication_epoch.is_none()&&p.audio_recovery.is_none()&&!p.tracks_audio_failed&&p.notice.is_none()&&!p.playing&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing&&!s.parked&&(s.position-2.).abs()<0.03&&(s.rate-0.8).abs()<0.0001&&s.transpose==-2&&s.loop_range==p.project.as_ref().unwrap().selection));
             let restored=probe!();let restored_value=probe_value(&restored,"stopped");let replacement_pid=restored.helper_pid;anyhow::ensure!(replacement_pid!=pid&&!restored.monitor_leased&&!restored.status.parked&&!restored.status.playing&&(restored.status.position-2.).abs()<0.03,"Stop did not replace owned helper and restore paused");probes.push(restored_value);shot!("monitor-stopped-1060");
             handle.update(cx,|_,w,_|w.resize(size(px(1280.),px(800.))))?;
             wait!(5,p,w,a=>w.viewport_size()==size(px(1280.),px(800.)));shot!("monitor-stopped-1280");

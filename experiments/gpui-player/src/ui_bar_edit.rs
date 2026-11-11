@@ -67,7 +67,7 @@ fn snapshot(view: &Entity<Player>, w: &mut Window, cx: &mut App, out: &Path, pro
         "popoverOpen": p.metronome_open, "popoverHandSetBars": hand_set,
         "popoverText": (hand_set > 0).then(|| i18n::tn("player.metronome.userBars", hand_set as f64, &[])),
         "redetectEnabled": popover.bounds.borrow().contains_key("met-redetect"),
-        "job": p.beat_job.is_some(), "pending": p.metronome_pending.is_some(), "autoSavePending": p.beat_auto_save,
+        "job": p.beat_job.is_some(), "pending": p.metronome_flight.metronome.is_some(), "autoSavePending": p.beat_auto_save,
         "saving": p.saving, "editSequence": p.edit_seq, "savedSequence": p.saved_seq, "notice": p.notice,
         "analyzerCalls": calls_now, "windowPresented": w.is_visible(), "windowActive": w.is_window_active(),
         "hiddenConfigured": std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),
@@ -100,7 +100,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             // A current-stamped auto grid is not re-derived on open; give a wrong
             // automatic run the chance to start before the baseline is taken.
             cx.background_executor().timer(Duration::from_millis(800)).await;
-            wait!("grid", |p: &Player| p.beats.as_ref().is_some_and(|g| g.source == "auto") && p.beat_job.is_none() && p.metronome_pending.is_none());
+            wait!("grid", |p: &Player| p.beats.as_ref().is_some_and(|g| g.source == "auto") && p.beat_job.is_none() && p.metronome_flight.metronome.is_none());
             let opened_calls = calls(&root);
             anyhow::ensure!(opened_calls == 0, "Opening a current auto grid ran the detector ({opened_calls} calls)");
             handle.update(cx, |_, w, cx| snapshot(&view, w, cx, &out, &project, "1-opened", opened_calls))??;
@@ -108,7 +108,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             // ---- drag: the bar saves itself, folded, source still auto -------
             let from = handle.update(cx, |_, w, cx| drag_bar(&view, w, cx, 26.))??;
             wait!("drag recorded", |p: &Player| p.beats.as_ref().is_some_and(|g| g.user_bars.as_ref().is_some_and(|b| b.len() == 1)));
-            wait!("drag saved", |p: &Player| p.metronome_pending.is_none() && !p.saving && !p.beat_auto_save && p.saved_seq == p.edit_seq);
+            wait!("drag saved", |p: &Player| p.metronome_flight.metronome.is_none() && !p.saving && !p.beat_auto_save && p.saved_seq == p.edit_seq);
             handle.update(cx, |_, w, cx| snapshot(&view, w, cx, &out, &project, "2-dragged", calls(&root)))??;
             std::fs::write(out.join("dragged-from.json"), serde_json::to_vec(&serde_json::json!({"from": from}))?)?;
 
@@ -118,14 +118,14 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx, |_, w, cx| snapshot(&view, w, cx, &out, &project, "3-popover-before", calls(&root)))??;
             handle.update(cx, |_, w, cx| click_redetect(&view, w, cx))??;
             wait!("detector started", |p: &Player| p.beat_job.is_some());
-            wait!("detector result applied", |p: &Player| p.beat_job.is_none() && p.beat_result.is_none() && p.metronome_pending.is_none());
+            wait!("detector result applied", |p: &Player| p.beat_job.is_none() && p.beat_result.is_none() && p.metronome_flight.metronome.is_none());
             handle.update(cx, |_, w, cx| click_metronome(&view, w, cx))??;
             wait!("popover reopened", |p: &Player| p.metronome_open);
             handle.update(cx, |_, w, cx| snapshot(&view, w, cx, &out, &project, "4-redetected", calls(&root)))??;
 
             // Re-detect marks the project dirty without saving; save as the singer would.
             handle.update(cx, |_, _, cx| view.update(cx, |p, cx| p.save_project(cx)))?;
-            wait!("saved", |p: &Player| !p.saving && p.metronome_pending.is_none() && p.saved_seq == p.edit_seq);
+            wait!("saved", |p: &Player| !p.saving && p.metronome_flight.metronome.is_none() && p.saved_seq == p.edit_seq);
             handle.update(cx, |_, w, cx| snapshot(&view, w, cx, &out, &project, "5-saved", calls(&root)))??;
             std::fs::write(out.join("result.json"), serde_json::to_vec_pretty(&serde_json::json!({"done": true}))?)?;
             Ok(())

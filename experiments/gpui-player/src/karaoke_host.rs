@@ -25,7 +25,7 @@ impl Player {
     pub(super) fn prepare_karaoke_lyrics(&mut self, cx: &mut Context<Self>) {
         let recheck=self.project.as_ref().and_then(|p|p.lyrics_raw.as_ref()).is_some_and(lyrics_resolution::needs_online_recheck);
         if self.karaoke && (recheck || !self.lyrics_sidebar.read(cx).is_ready())
-            && self.lyrics_sidebar_pending.is_none() && self.lyrics_sidebar_needs.is_empty()
+            && self.lyrics_flight.lyrics_sidebar.is_none() && self.lyrics_sidebar_needs.is_empty()
             && !self.lyrics_sidebar_download_waiting {
             self.start_sidebar_lyrics(self.lyrics_sidebar_intent,cx);
         }

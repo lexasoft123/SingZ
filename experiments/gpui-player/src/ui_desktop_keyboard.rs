@@ -268,7 +268,7 @@ pub fn run(
                 wait!(p,w,app => w.viewport_size()==size(px(width),px(height)));
                 handle.update(cx,|_,w,cx|tab_header(&view,w,cx,"header-log"))??;
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => p.screen==Screen::Player&&p.playing&&p.native_play_intent.is_none()
+                wait!(p,w,app => p.screen==Screen::Player&&p.playing&&p.transport_flight.native_play.is_none()
                     &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{
                     super::ui_training_run::draw(w,cx);let p=view.read(cx);
@@ -279,7 +279,7 @@ pub fn run(
                 })??;
                 handle.update(cx,|_,w,cx|tab_header(&view,w,cx,"header-log"))??;
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => p.screen==Screen::Player&&!p.playing&&p.native_play_intent.is_none()
+                wait!(p,w,app => p.screen==Screen::Player&&!p.playing&&p.transport_flight.native_play.is_none()
                     &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                 handle.update(cx,|_,w,cx|tab_header(&view,w,cx,"header-log"))??;
                 let (position,count)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playhead.position(),p.playhead.seek_count())})?;
@@ -334,12 +334,12 @@ pub fn run(
                         &&(p.muted[0],p.solo[0])==changed&&native_mix(p)==Some(changed));
                     mix_receipts.push(handle.update(cx,|_,w,cx|serde_json::json!({"button":button,"phase":"enter-toggle","state":state(view.read(cx),w,cx)}))?);
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)
+                    wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.focus_handle.is_focused(w)
                         &&(p.muted[0],p.solo[0])==changed&&native_mix(p)==Some(changed)
                         &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                     handle.update(cx,|_,w,cx|tab_stem_mix(&view,w,cx,button))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)
+                    wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none()&&p.focus_handle.is_focused(w)
                         &&(p.muted[0],p.solo[0])==changed&&native_mix(p)==Some(changed)
                         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                     mix_receipts.push(handle.update(cx,|_,w,cx|serde_json::json!({"button":button,"phase":"space-pauses-without-toggle","state":state(view.read(cx),w,cx)}))?);
@@ -378,12 +378,12 @@ pub fn run(
                     wait!(p,w,app => p.track_reset_focus[button].is_focused(w)&&p.playhead.pending_seek().is_none()
                         &&(p.playhead.position()-position).abs()<0.03&&(p.muted[0],p.solo[0])==enabled&&native_mix(p)==Some(enabled));
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)
+                    wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.focus_handle.is_focused(w)
                         &&(p.muted[0],p.solo[0])==enabled&&native_mix(p)==Some(enabled)
                         &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                     handle.update(cx,|_,w,cx|tab_mix_reset(&view,w,cx,button))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)
+                    wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none()&&p.focus_handle.is_focused(w)
                         &&(p.muted[0],p.solo[0])==enabled&&native_mix(p)==Some(enabled)
                         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                     reset_receipts.push(handle.update(cx,|_,w,cx|serde_json::json!({"button":button,"phase":"space-and-arrows-preserve-enabled-reset","state":state(view.read(cx),w,cx)}))?);
@@ -419,11 +419,11 @@ pub fn run(
                     handle.update(cx,|_,w,cx|key(w,cx,"left"))?;
                     wait!(p,w,app => p.track_header_focus[button].is_focused(w)&&p.playhead.pending_seek().is_none()&&(p.playhead.position()-position).abs()<0.03);
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)
+                    wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.focus_handle.is_focused(w)
                         &&!p.stem_export_open&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                     handle.update(cx,|_,w,cx|tab_track_header(&view,w,cx,button))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)
+                    wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none()&&p.focus_handle.is_focused(w)
                         &&!p.stem_export_open&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                     track_header_receipts.push(handle.update(cx,|_,w,cx|serde_json::json!({"button":button,"phase":"tab-space-arrows","state":state(view.read(cx),w,cx)}))?);
                     // Enter on Add is intentionally excluded: that is the OS
@@ -450,10 +450,10 @@ pub fn run(
                     &&native_gain(p).is_some_and(|gain|(gain-0.53).abs()<0.00001));
                 stem_receipts.push(handle.update(cx,|_,w,cx|state(view.read(cx),w,cx))?);
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.track_gain_focus[0].is_focused(w)
+                wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.track_gain_focus[0].is_focused(w)
                     &&p.gain[0]==53&&p.playhead.seek_count()==seek_count&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.track_gain_focus[0].is_focused(w)
+                wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none()&&p.track_gain_focus[0].is_focused(w)
                     &&p.gain[0]==53&&p.playhead.seek_count()==seek_count&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                 handle.update(cx,|_,w,cx|{key(w,cx,"home");key(w,cx,"left");})?;
                 wait!(p,w,app => p.gain[0]==0&&p.playhead.seek_count()==seek_count
@@ -500,15 +500,15 @@ pub fn run(
                         anyhow::ensure!(view.read(cx).transport.read(cx).focused_control(w).as_deref()!=Some("transport-play"),"Footer ShiftTab did not leave Play");Ok(())})??;
                     handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-play"))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                    wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+                    wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                     receipts.push(handle.update(cx,|_,w,cx|footer_state(view.read(cx),w,cx,"enter-play"))?);
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                    wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
+                    wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+                    wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.focus_handle.is_focused(w)&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                     handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-play"))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                    wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.focus_handle.is_focused(w)&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
+                    wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none()&&p.focus_handle.is_focused(w)&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                     receipts.push(handle.update(cx,|_,w,cx|footer_state(view.read(cx),w,cx,"footer-space-no-keyup-double"))?);
                     let count=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count())?;
                     handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-restart"))??;
@@ -549,7 +549,7 @@ pub fn run(
                     if beats.is_none(){
                         handle.update(cx,|_,_,cx|->anyhow::Result<()>{view.update(cx,|p,cx|->anyhow::Result<()>{
                             let grid=beat::Beats::constant(120.,0.,p.duration as f64,4)?;p.apply_beat_grid(grid,false,cx);Ok(())})})??;
-                        wait!(p,w,app => p.metronome_pending.is_none()&&p.beats.as_ref().is_some_and(|g|g.bpm==120.));
+                        wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.beats.as_ref().is_some_and(|g|g.bpm==120.));
                         preparations.push(serde_json::json!({"viewport":[width,height],"fixtureOnly":true,"kind":"missing-beat-grid","method":"constant120BPM through actual native metronome transaction; restored after BPM keys"}));
                     }
                     let base=handle.update(cx,|_,_,cx|view.read(cx).beats.as_ref().unwrap().bpm as f32)?;
@@ -637,7 +637,7 @@ pub fn run(
                         after_pointer["targetFocusedDebug"]=serde_json::json!(target_debug);
                         after_pointer["pointerPress"]=serde_json::json!([f32::from(play.center().x),f32::from(play.center().y)]);
                         after_pointer["pointerRelease"]=serde_json::json!([12,120]);
-                        anyhow::ensure!(after_pointer["keyboard"]["footerScopeFocused"]==false&&after_pointer["keyboard"]["focusedControl"]=="transport-play"&&after_pointer["keyboard"]["recoveryPending"]==true&&!view.read(cx).focus_handle.is_focused(w)&&!view.read(cx).playing&&view.read(cx).native_play_intent.is_none(),"Actual pointer did not focus Play before the pending footer handoff; before={before}; after={after_pointer}");
+                        anyhow::ensure!(after_pointer["keyboard"]["footerScopeFocused"]==false&&after_pointer["keyboard"]["focusedControl"]=="transport-play"&&after_pointer["keyboard"]["recoveryPending"]==true&&!view.read(cx).focus_handle.is_focused(w)&&!view.read(cx).playing&&view.read(cx).transport_flight.native_play.is_none(),"Actual pointer did not focus Play before the pending footer handoff; before={before}; after={after_pointer}");
                         view.update(cx,|_,cx|cx.notify());
                         super::ui_training_run::draw(w,cx);
                         let mut after=footer_state(view.read(cx),w,cx,"fixture-stale-handoff-preserves-pointer");
@@ -645,7 +645,7 @@ pub fn run(
                         after["targetStillFocused"]=serde_json::json!(target.is_focused(w));
                         after["headerFocused"]=serde_json::json!(view.read(cx).header.read(cx).focused_control(w));
                         after["beforeParent"]=after_pointer;
-                        anyhow::ensure!(after["keyboard"]["recoveryPending"]==false&&after["keyboard"]["lastFocusRecoveryScopeOwned"]==false&&target.is_focused(w)&&!view.read(cx).focus_handle.is_focused(w)&&!view.read(cx).playing&&view.read(cx).native_play_intent.is_none(),"Stale footer recovery did not consume its scope guard without stealing actual pointer focus: {after}");
+                        anyhow::ensure!(after["keyboard"]["recoveryPending"]==false&&after["keyboard"]["lastFocusRecoveryScopeOwned"]==false&&target.is_focused(w)&&!view.read(cx).focus_handle.is_focused(w)&&!view.read(cx).playing&&view.read(cx).transport_flight.native_play.is_none(),"Stale footer recovery did not consume its scope guard without stealing actual pointer focus: {after}");
                         Ok((before,after))})??;
                     receipts.extend([pending_handoff,settled_handoff]);
                     preparations.push(serde_json::json!({"viewport":[width,height],"fixtureOnly":true,"kind":"focused-footer-unmount","method":"set_split_state(false) removes focused Karaoke; root recovery then explicit production child-before-parent render ordering tests real pending handoff with actual pointer press on Play and drag/release outside cancelling activation","naturalDisplayRaceTested":false,"operationStarted":false}));
@@ -687,7 +687,7 @@ pub fn run(
                     handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);let project=p.project.as_ref().unwrap();
                         anyhow::ensure!(std::fs::read(project.dir.join("project.json"))?==metadata&&std::fs::read(project.lanes.iter().find(|(slot,_)|*slot==0).unwrap().1.clone())?==audio,"Refused Split changed original project/audio");Ok(())})??;
                     handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.apply_metronome(met.clone(),beats.clone(),cx)))?;
-                    wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome==met&&p.beats==beats&&!p.playing&&p.karaoke==karaoke);
+                    wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome==met&&p.beats==beats&&!p.playing&&p.karaoke==karaoke);
                     handle.update(cx,|_,w,cx|tab_footer(&view,w,cx,"transport-restart"))??;
                     handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
                     wait!(p,w,app => p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<0.03&&!p.playing);

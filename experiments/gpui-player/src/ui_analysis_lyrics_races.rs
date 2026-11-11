@@ -90,7 +90,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     let ready=handle.update(cx,|_,$w,$app|{let $p=view.read($app);let _=(&$p,&$w,&$app);$predicate})?;
                     if ready {break;}
                     if Instant::now()>=deadline {
-                        let state=handle.update(cx,|_,w,app|{let p=view.read(app);serde_json::json!({"sidebar":p.lyrics_sidebar.read(app).state(w,app),"editor":p.lyrics_editor.read(app).state(w,app),"notice":p.notice,"karaoke":p.karaoke,"loading":p.loading,"pending":p.lyrics_sidebar_pending})})?;
+                        let state=handle.update(cx,|_,w,app|{let p=view.read(app);serde_json::json!({"sidebar":p.lyrics_sidebar.read(app).state(w,app),"editor":p.lyrics_editor.read(app).state(w,app),"notice":p.notice,"karaoke":p.karaoke,"loading":p.loading,"pending":p.lyrics_flight.lyrics_sidebar})})?;
                         anyhow::bail!("Q-04 step timed out: {}; state={state}",stringify!($predicate));
                     }
                 }
@@ -102,7 +102,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             }};}
             macro_rules! press {($id:expr)=>{handle.update(cx,|_,w,cx|press(&view,w,cx,$id))??;};}
             macro_rules! checked {($p:ident,$app:ident => $body:block)=>{handle.update(cx,|_,_, $app|->anyhow::Result<()>{let $p=view.read($app);$body Ok(())})??;};}
-            macro_rules! settled {()=>{wait!(p,w,app => p.analysis_job.is_none()&&p.analysis_progress.is_none()&&p.beat_job.is_none()&&p.metronome_pending.is_none()&&!p.beat_auto_save&&!p.saving&&p.saved_seq==p.edit_seq);};}
+            macro_rules! settled {()=>{wait!(p,w,app => p.analysis_job.is_none()&&p.analysis_progress.is_none()&&p.beat_job.is_none()&&p.metronome_flight.metronome.is_none()&&!p.beat_auto_save&&!p.saving&&p.saved_seq==p.edit_seq);};}
             handle.update(cx,|_,w,_|w.resize(size(px(1280.),px(800.))))?;
             wait!(p,w,app => w.viewport_size()==size(px(1280.),px(800.)));
             let mut evidence=serde_json::json!({"case":case,"hidden":true,"muted":true});
@@ -127,15 +127,15 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     if !candidate {gate(&root,"http")?;}
                     open!("a");
                     if candidate {
-                        wait!(p,w,app => p.lyrics_sidebar_pending.is_none());
+                        wait!(p,w,app => p.lyrics_flight.lyrics_sidebar.is_none());
                         gate(&root,"http")?;
                         // Same event that a measured candidate Apply emits.
                         handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar.clone().update(cx,|_,cx|cx.emit(lyrics_sidebar::Event::Apply(101))))?;
                     } else {
                         handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar.clone().update(cx,|_,cx|cx.emit(lyrics_sidebar::Event::Retry)))?;
                     }
-                    wait!(p,w,app => root.join("http.ready").is_file()&&p.lyrics_sidebar_pending.is_some());
-                    let pending=handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar_pending.unwrap())?;
+                    wait!(p,w,app => root.join("http.ready").is_file()&&p.lyrics_flight.lyrics_sidebar.is_some());
+                    let pending=handle.update(cx,|_,_,cx|view.read(cx).lyrics_flight.lyrics_sidebar.key().unwrap())?;
                     let a=std::fs::read(root.join("a/lyrics.json"))?;
                     let b=std::fs::read(root.join("b/lyrics.json"))?;
                     // Revoke A while its real HTTP response is still withheld.
@@ -143,7 +143,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(other.clone(),cx)))?;
                     wait!(p,w,app => p.native_epoch!=pending.0);
                     release(&root,"http")?;
-                    wait!(p,w,app => !p.loading&&p.project.as_ref().is_some_and(|p|p.dir==other)&&p.lyrics_sidebar_pending.is_none()&&p.lyrics_sidebar_settled.contains(&pending));
+                    wait!(p,w,app => !p.loading&&p.project.as_ref().is_some_and(|p|p.dir==other)&&p.lyrics_flight.lyrics_sidebar.is_none()&&p.lyrics_sidebar_settled.contains(&pending));
                     checked!(p,app => {
                         anyhow::ensure!(p.lyric_document.credit=="B credit"&&p.lyric_document.lines[0].text=="B stays here","Late lyrics painted B");
                         anyhow::ensure!(p.project.as_ref().unwrap().lyrics_raw.as_ref().unwrap()["credit"]=="B credit","Late lyrics adopted into B");
@@ -183,7 +183,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     open!("a");
                     let original=std::fs::read(root.join("a/lyrics.json"))?;
                     handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar.clone().update(cx,|_,cx|cx.emit(lyrics_sidebar::Event::Retry)))?;
-                    wait!(p,w,app => p.lyrics_sidebar_pending.is_none());
+                    wait!(p,w,app => p.lyrics_flight.lyrics_sidebar.is_none());
                     if case=="tolerant" {
                         checked!(p,app => {
                             anyhow::ensure!(p.lyric_document.lines.len()==1,"Tolerant load did not skip bad rows");
@@ -201,7 +201,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         });
                         anyhow::ensure!(std::fs::read(root.join("a/lyrics.json"))?==original,"Auto overwrote protected lyrics");
                         handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar.clone().update(cx,|_,cx|cx.emit(lyrics_sidebar::Event::Apply(101))))?;
-                        wait!(p,w,app => p.lyric_document.credit=="Fixture artist — Selected recording"&&p.lyrics_sidebar_pending.is_none());
+                        wait!(p,w,app => p.lyric_document.credit=="Fixture artist — Selected recording"&&p.lyrics_flight.lyrics_sidebar.is_none());
                         anyhow::ensure!(std::fs::read(root.join("a/lyrics.json.bak"))?==b"existing backup","Replacement overwrote old backup");
                         anyhow::ensure!(std::fs::read(root.join("a/lyrics.json.bak.1"))?==original,"Replacement failed to back up exact protected bytes");
                         anyhow::ensure!(raw(&root.join("a/lyrics.json"))?["source"]=="lrclib","Explicit replacement did not save candidate");
@@ -209,7 +209,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     }
                 }
                 "lyrics-cancel"|"align"|"precise-align"|"editor-align-draft" => {
-                    open!("a");wait!(p,w,app => p.lyrics_sidebar_pending.is_none());
+                    open!("a");wait!(p,w,app => p.lyrics_flight.lyrics_sidebar.is_none());
                     let original=std::fs::read(root.join("a/lyrics.json"))?;
                     let shown=handle.update(cx,|_,_,cx|document(view.read(cx)))?;
                     let details=handle.update(cx,|_,w,cx|view.read(cx).lyrics_sidebar.read(cx).state(w,cx)["details"].clone())?;
@@ -227,7 +227,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                             anyhow::ensure!(p.lyrics_editor.read(app).rows()[0].text=="The song is with you together","Align ignored editor draft words");
                         });
                         anyhow::ensure!(std::fs::read(root.join("a/lyrics.json"))?==original,"Editor align-draft wrote before Save");
-                        press!("lyed-save");wait!(p,w,app => p.lyrics_editor_pending.is_none()&&!p.lyrics_editor_open);
+                        press!("lyed-save");wait!(p,w,app => p.lyrics_flight.lyrics_editor_pending.is_none()&&!p.lyrics_editor_open);
                         let saved=raw(&root.join("a/lyrics.json"))?;
                         anyhow::ensure!(saved["source"]=="edited"&&saved["lines"][0]["text"]=="The song is with you together","Editor aligned draft Save absent");
                     } else {
@@ -235,10 +235,10 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         if case=="precise-align" {wait!(p,w,app => p.lyrics_precise_cap);}
                         press!(if case=="precise-align" {"lyrics-precise"}else{"lyrics-align"});
                         if case=="lyrics-cancel" {
-                            wait!(p,w,app => root.join("align.ready").is_file()&&p.lyrics_sidebar_pending.is_some());
-                            let pending=handle.update(cx,|_,_,cx|view.read(cx).lyrics_sidebar_pending.unwrap())?;
+                            wait!(p,w,app => root.join("align.ready").is_file()&&p.lyrics_flight.lyrics_sidebar.is_some());
+                            let pending=handle.update(cx,|_,_,cx|view.read(cx).lyrics_flight.lyrics_sidebar.key().unwrap())?;
                             press!("lyrics-cancel");release(&root,"align")?;
-                            wait!(p,w,app => p.lyrics_sidebar_settled.contains(&pending)&&p.lyrics_sidebar_pending.is_none());
+                            wait!(p,w,app => p.lyrics_sidebar_settled.contains(&pending)&&p.lyrics_flight.lyrics_sidebar.is_none());
                             checked!(p,app => {
                                 anyhow::ensure!(document(p)==shown,"Cancel did not restore displayed lines");
                             });
@@ -246,7 +246,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                                 anyhow::ensure!(s["status"]=="ready"&&s["showsLyrics"]==true&&s["details"]==details,"Cancel did not restore shown Ready details: {s}");Ok(())})??;
                             anyhow::ensure!(std::fs::read(root.join("a/lyrics.json"))?==original,"Cancelled alignment changed saved lyrics");
                         } else {
-                            wait!(p,w,app => p.lyrics_sidebar_pending.is_none()&&p.lyrics_sidebar.read(app).state(w,app)["details"]["check"]["method"]==(if case=="precise-align" {"ctc"}else{"qwen"}));
+                            wait!(p,w,app => p.lyrics_flight.lyrics_sidebar.is_none()&&p.lyrics_sidebar.read(app).state(w,app)["details"]["check"]["method"]==(if case=="precise-align" {"ctc"}else{"qwen"}));
                             let saved=raw(&root.join("a/lyrics.json"))?;
                             anyhow::ensure!(saved["aligned"]==true&&saved["check"]["method"]==(if case=="precise-align" {"ctc"}else{"qwen"})&&std::fs::read(root.join("a/lyrics.json"))?!=original,"App Align did not persist");
                         }
@@ -255,7 +255,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         let saved=raw(&root.join("a/lyrics.json"))?;
                         let path=root.join("b");handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(path,cx)))?;
                         wait!(p,w,app => !p.loading&&p.project.as_ref().is_some_and(|p|p.dir==root.join("b")));
-                        open!("a");wait!(p,w,app => p.lyrics_sidebar_pending.is_none());
+                        open!("a");wait!(p,w,app => p.lyrics_flight.lyrics_sidebar.is_none());
                         checked!(p,app => {anyhow::ensure!(p.project.as_ref().unwrap().lyrics_raw.as_ref().unwrap()["lines"]==saved["lines"],"Reopen lost aligned lines");});
                     }
                 }

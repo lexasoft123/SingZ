@@ -86,7 +86,7 @@ fn snapshot(view: &Entity<Player>, window: &Window, cx: &App) -> Value {
         "playing": player.playing,
         "position": player.playhead.position(),
         "duration": player.duration,
-        "countingIn": player.counting_in,
+        "countingIn": player.transport_flight.counting_in,
         "pendingSeek": player.playhead.pending_seek(),
         "editSeq": player.edit_seq,
         "savedSeq": player.saved_seq,
@@ -699,8 +699,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         player.playhead.seek(2.5);
                         player.seek_native(cx);
                     }))?;
-                    wait!(15, player, window, app => player.native_rate_pending.is_none()
-                        && player.native_rate_queued.is_none()
+                    wait!(15, player, window, app => player.transport_flight.native_rate_pending.is_none()
+                        && player.transport_flight.native_rate_queued.is_none()
                         && player.playhead.pending_seek().is_none()
                         && player.edit_seq > player.saved_seq
                         && (player.playhead.position() - 2.5).abs() < 0.03
@@ -973,8 +973,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         player.native_transport(transport::TransportEvent::Transpose(-2), cx);
                     }))?;
                     // Region editing is unavailable while a native rate receipt is pending.
-                    wait!(15, player, window, app => player.native_rate_pending.is_none()
-                        && player.native_rate_queued.is_none()
+                    wait!(15, player, window, app => player.transport_flight.native_rate_pending.is_none()
+                        && player.transport_flight.native_rate_queued.is_none()
                         && player.last_playback_status.as_ref().is_some_and(|status|
                             (status.rate - 0.9).abs() < 0.0001 && status.transpose == -2));
                     handle.update(cx, |_, _, cx| view.update(cx, |player, cx| {
@@ -982,8 +982,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         player.playhead.seek(2.);
                         player.seek_native(cx);
                     }))?;
-                    wait!(15, player, window, app => player.native_rate_pending.is_none()
-                        && player.native_rate_queued.is_none()
+                    wait!(15, player, window, app => player.transport_flight.native_rate_pending.is_none()
+                        && player.transport_flight.native_rate_queued.is_none()
                         && player.playhead.pending_seek().is_none()
                         && (player.playhead.position() - 2.).abs() < 0.03
                         && player.last_playback_status.as_ref().is_some_and(|status| !status.playing
@@ -1003,7 +1003,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     }
                     wait!(20, player, window, app => player.karaoke
                         && !player.loading
-                        && player.lyrics_sidebar_pending.is_none()
+                        && player.lyrics_flight.lyrics_sidebar.is_none()
                         && matches!(player.lyrics_sidebar.read(app).state(window, app)["status"].as_str(), Some("ready" | "error")));
                     handle.update(cx, |_, window, cx| open_editor(&view, window, cx))??;
                     wait!(10, player, window, app => player.lyrics_editor_open && !player.lyrics_editor.read(app).rows().is_empty());

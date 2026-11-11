@@ -5,12 +5,15 @@ use std::time::Duration;
 
 impl Player {
     pub(super) fn cancel_delete_inspection(&mut self) {
-        if self.delete_inspect_pending.take().is_some() {
-            self.delete_serial += 1;
+        if self.delete_flight.delete_inspect.busy() {
+            self.delete_flight.delete_inspect.cancel();
+            // The inspection and the delete share one serial; a cancelled
+            // inspection retires its number so a late receipt cannot match.
+            self.delete_flight.delete_inspect.reserve();
         }
     }
     fn delete_project_operation_busy(&self) -> bool {
-        self.rate_busy() || self.carry_pending.is_some() || self.tracks_pending.is_some()
+        self.rate_busy() || self.carry_flight.carry.is_some() || self.tracks_flight.tracks_pending.is_some()
             || self.loading
             || self.saving
             || self.source_job.is_some()
@@ -19,9 +22,9 @@ impl Player {
             || self.rename_pending.is_some()
             || self.import_pending.is_some()
             || self.project_library_moving
-            || self.metronome_pending.is_some()
-            || self.metronome_save_requested
-            || self.metronome_save_waiting
+            || self.metronome_flight.metronome.is_some()
+            || self.metronome_flight.metronome_save_requested
+            || self.metronome_flight.metronome_save_waiting
     }
     fn delete_error(&mut self, error: String, cx: &mut Context<Self>) {
         diagnostics::event(
@@ -43,7 +46,7 @@ impl Player {
     pub(super) fn begin_project_delete(&mut self, dir: std::path::PathBuf, cx: &mut Context<Self>) {
         if self.screen != Screen::Library
             || self.project_delete.read(cx).is_open()
-            || self.delete_pending.is_some()
+            || self.delete_flight.delete.is_some()
             || self.notice.is_some()
             || self.project_picker_open
             || self.library_import_open
@@ -61,21 +64,20 @@ impl Player {
             );
             return;
         }
-        self.delete_serial += 1;
-        let serial = self.delete_serial;
+        let serial = self.delete_flight.delete_inspect.reserve();
         self.library
             .update(cx, |library, cx| library.set_delete_error(None, cx));
         let root = self.catalog_root.clone();
         if let Some(backend) = &self.backend {
             match backend.inspect_delete(root.clone(), dir, serial) {
-                Ok(()) => self.delete_inspect_pending = Some((serial, root)),
+                Ok(()) => self.delete_flight.delete_inspect.activate(self.native_epoch, serial, root),
                 Err(error) => self.delete_error(error.to_string(), cx),
             }
         }
         cx.notify();
     }
     pub(super) fn close_project_delete(&mut self, cx: &mut Context<Self>) {
-        if self.delete_pending.is_some() || self.delete_waiting_monitor.is_some() {
+        if self.delete_flight.delete.is_some() || self.delete_flight.delete_waiting_monitor.is_some() {
             return;
         }
         self.cancel_delete_inspection();
@@ -90,14 +92,9 @@ impl Player {
         result: Result<project_delete::Target, String>,
         cx: &mut Context<Self>,
     ) {
-        let Some((id, root)) = self.delete_inspect_pending.as_ref() else {
+        let Some(root) = self.delete_flight.delete_inspect.settle_serial(serial) else {
             return;
         };
-        if *id != serial {
-            return;
-        }
-        let root = root.clone();
-        self.delete_inspect_pending = None;
         if self.screen != Screen::Library
             || root != self.catalog_root
             || self.notice.is_some()
@@ -128,7 +125,7 @@ impl Player {
         cx.notify();
     }
     pub(super) fn confirm_project_delete(&mut self, cx: &mut Context<Self>) {
-        if self.delete_pending.is_some() || self.delete_waiting_monitor.is_some() {
+        if self.delete_flight.delete.is_some() || self.delete_flight.delete_waiting_monitor.is_some() {
             return;
         }
         let Some(target) = self.delete_target.as_ref() else {
@@ -152,8 +149,8 @@ impl Player {
         }
         self.project_delete.update(cx, |d, cx| d.set_busy(true, cx));
         if self.delete_target_loaded(&target.dir) && self.monitor_busy() {
-            self.monitor_requested = false;
-            self.delete_waiting_monitor = Some(Instant::now());
+            self.monitor_flight.monitor_requested = false;
+            self.delete_flight.delete_waiting_monitor = Some(Instant::now());
             cx.notify();
             return;
         }
@@ -171,7 +168,7 @@ impl Player {
                 target: self.source_target.clone(),
                 resume: SourceResume {
                     restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,false),
-                    play_serial:self.native_play_serial,
+                    play_serial:self.transport_flight.native_play.serial(),
                     position: self.playhead.position(),
                     playing: false,
                     mode: None,
@@ -187,26 +184,22 @@ impl Player {
             .backend
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Native project deletion is unavailable."))
-            .and_then(|backend| backend.delete(target, self.delete_serial, loaded));
+            .and_then(|backend| backend.delete(target, self.delete_flight.delete_inspect.serial(), loaded));
         match result {
             Ok((epoch, loaded)) => {
-                self.delete_pending = Some(DeletePending {
-                    serial: self.delete_serial,
-                    epoch,
-                    loaded,
-                    restore,
-                });
+                let serial = self.delete_flight.delete_inspect.serial();
+                self.delete_flight.delete.activate(epoch, serial, DeletePending { loaded, restore });
                 if loaded {
                     self.native_epoch = epoch;
                     self.loading = true;
                     self.playing = false;
                     self.playhead.stop_projection();
 
-                    self.counting_in = false;
-                    self.count_in_anchor = None;
+                    self.transport_flight.counting_in = false;
+                    self.transport_flight.count_in_anchor = None;
                     self.cancel_sidebar_lyrics(cx);
-                    self.lyrics_sidebar_pending = None;
-                    self.lyrics_search_pending = None;
+                    self.lyrics_flight.lyrics_sidebar.cancel();
+                    self.lyrics_flight.lyrics_search_pending.cancel();
                     self.lyrics_sidebar_editor_after = false;
                     self.lyrics_sidebar_import_after = None;
                     self.lyrics_sidebar_rename_after = None;
@@ -228,12 +221,12 @@ impl Player {
         cx.notify();
     }
     pub(super) fn poll_project_delete(&mut self, cx: &mut Context<Self>) {
-        if let Some(started) = self.delete_waiting_monitor {
+        if let Some(started) = self.delete_flight.delete_waiting_monitor {
             if !self.monitor_busy() {
-                self.delete_waiting_monitor = None;
+                self.delete_flight.delete_waiting_monitor = None;
                 self.dispatch_project_delete(cx);
             } else if started.elapsed() > Duration::from_secs(8) {
-                self.delete_waiting_monitor = None;
+                self.delete_flight.delete_waiting_monitor = None;
                 self.project_delete
                     .update(cx, |d, cx| d.set_busy(false, cx));
                 self.close_project_delete(cx);
@@ -253,12 +246,12 @@ impl Player {
         result: Result<project_delete::Outcome, String>,
         cx: &mut Context<Self>,
     ) {
-        if !self.delete_pending.as_ref().is_some_and(|pending| {
-            pending.serial == serial && pending.epoch == epoch && pending.loaded == loaded
-        }) {
+        if !self.delete_flight.delete.payload().is_some_and(|pending| pending.loaded == loaded) {
             return;
         }
-        let pending = self.delete_pending.take().unwrap();
+        let Some(pending) = self.delete_flight.delete.settle(epoch, serial) else {
+            return;
+        };
         let confirmed = self.delete_target.take();
         self.project_delete
             .update(cx, |d, cx| d.set_busy(false, cx));
@@ -336,19 +329,19 @@ impl Player {
         self.karaoke = false;
         self.looping = false;
 
-        self.counting_in = false;
-        self.count_in_anchor = None;
+        self.transport_flight.counting_in = false;
+        self.transport_flight.count_in_anchor = None;
         self.beats = None;
         self.paint_beats = None;
         self.beat_job = None;
         self.beat_result = None;
         self.beat_auto_serials.clear();
         self.beat_auto_save = false;
-        self.metronome_pending = None;
-        self.metronome_requested = None;
-        self.metronome_save_requested = false;
-        self.metronome_save_waiting = false;
-        self.metronome_navigation = None;
+        self.metronome_flight.metronome.cancel();
+        self.metronome_flight.metronome_requested = None;
+        self.metronome_flight.metronome_save_requested = false;
+        self.metronome_flight.metronome_save_waiting = false;
+        self.metronome_flight.metronome_navigation = None;
         self.metronome_open = false;
         self.lyric_document = Arc::default();
         self.native_glows.borrow_mut().clear();
@@ -359,8 +352,8 @@ impl Player {
         self.lyric_scroll_target.set(0.);
         self.lyric_active.set(usize::MAX);
         self.lyrics_editor_open = false;
-        self.lyrics_editor_pending = None;
-        self.lyrics_alignment_pending = None;
+        self.lyrics_flight.lyrics_editor_pending.cancel();
+        self.lyrics_flight.lyrics_alignment.cancel();
         self.stop_training(cx);
         self.training.update(cx, |screen, cx| screen.clear_song(cx));
         self.library
@@ -372,4 +365,11 @@ impl Player {
         self.screen = Screen::Library;
         self.previous_screen = Screen::Library;
     }
+}
+
+#[derive(Default)]
+pub(super) struct DeleteFlight {
+    pub(super) delete_inspect: inflight::Inflight<std::path::PathBuf>,
+    pub(super) delete: inflight::Inflight<DeletePending>,
+    pub(super) delete_waiting_monitor: Option<Instant>,
 }

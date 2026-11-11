@@ -27,33 +27,33 @@ impl Player {
             && (self.screen == Screen::Training
                 || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
                     && self.previous_screen == Screen::Training);
-        self.monitor_publication_epoch = None;
-        let queued_save = self.native_rate_save_requested
-            || self.metronome_save_requested
-            || self.carry_save_requested;
-        let navigation = self.native_rate_navigation.take();
+        self.monitor_flight.monitor_publication_epoch = None;
+        let queued_save = self.transport_flight.native_rate_save_requested
+            || self.metronome_flight.metronome_save_requested
+            || self.carry_flight.carry_save_requested;
+        let navigation = self.transport_flight.native_rate_navigation.take();
         let analysis = (self.analysis_job, self.analysis_progress);
         self.reset_transport_timing(cx);
-        self.native_rate_navigation = navigation;
+        self.transport_flight.native_rate_navigation = navigation;
         self.analysis_job = analysis.0;
         self.analysis_progress = analysis.1;
         self.tracks_audio_failed = self.project.is_some();
         self.playing = false;
         self.playhead.stop_projection();
 
-        self.counting_in = false;
-        self.count_in_anchor = None;
-        self.metronome_pending = None;
-        self.metronome_requested = None;
-        self.metronome_save_requested = false;
+        self.transport_flight.counting_in = false;
+        self.transport_flight.count_in_anchor = None;
+        self.metronome_flight.metronome.cancel();
+        self.metronome_flight.metronome_requested = None;
+        self.metronome_flight.metronome_save_requested = false;
         self.metronome_ui.update(cx, |s, cx| {
             s.adopt(self.metronome.clone(), self.beats.clone(), cx)
         });
-        self.carry_pending = None;
-        self.carry_save_requested = false;
-        self.carry_plan = None;
-        self.carry_stamp = None;
-        self.carry_attempt_stamp = None;
+        self.carry_flight.carry.cancel();
+        self.carry_flight.carry_save_requested = false;
+        self.carry_flight.carry_plan = None;
+        self.carry_flight.carry_stamp = None;
+        self.carry_flight.carry_attempt_stamp = None;
         self.pause_practice(cx);
         if exercise_failed {
             if let Some(run) = &mut self.practice {
@@ -102,9 +102,9 @@ impl Player {
         }
         if self.saving
             || self.source_job.is_some()
-            || self.tracks_pending.is_some()
-            || self.carry_pending.is_some()
-            || self.metronome_pending.is_some()
+            || self.tracks_flight.tracks_pending.is_some()
+            || self.carry_flight.carry.is_some()
+            || self.metronome_flight.metronome.is_some()
             || self.rate_busy()
             || self.loading
         {
@@ -179,10 +179,10 @@ impl Player {
                 self.native_graph = status.graph_generation;
                 self.native_lane_revision = status.lane_revision;
                 self.native_carry_revision = status.carry_revision;
-                self.native_rate_generation_floor = 0;
+                self.transport_flight.native_rate_generation_floor = 0;
                 self.native_rate = status.rate;
 
-                self.native_play_intent = None;
+                self.transport_flight.native_play.cancel();
 
                 self.duration = status.duration;
                 self.playing = false;
@@ -203,16 +203,16 @@ impl Player {
                 }
                 self.playhead.reset(status.position);
                 self.playhead.admit((&status).into(), Instant::now());
-                self.timing_status = Some(status.clone());
-                self.counting_in = false;
-                self.count_in_anchor = None;
+                self.transport_flight.timing_status = Some(status.clone());
+                self.transport_flight.counting_in = false;
+                self.transport_flight.count_in_anchor = None;
                 // An editor Save can finish while audio is preparing. Do not
                 // stamp the captured native plan as using those newer words.
                 // The existing receipt-gated Carry worker refreshes it next.
-                self.carry_plan = None;
+                self.carry_flight.carry_plan = None;
                 self.carry_document = None;
-                self.carry_stamp = None;
-                self.carry_attempt_stamp = None;
+                self.carry_flight.carry_stamp = None;
+                self.carry_flight.carry_attempt_stamp = None;
                 self.header.update(cx, |h, cx| {
                     h.set_output_label(status.output_label.clone(), cx)
                 });
@@ -244,7 +244,7 @@ impl Player {
     }
 
     pub(super) fn cancel_source_publication(&mut self, cx: &mut Context<Self>) {
-        self.monitor_publication_epoch = None;
+        self.monitor_flight.monitor_publication_epoch = None;
         if self
             .source_publication
             .take()
@@ -391,7 +391,7 @@ impl Player {
                         // Reading/adopting storage does not own monitoring.
                         // Keep its generation alive and prepare published media
                         // only after the matching clean release acknowledgment.
-                        self.monitor_publication_epoch = Some(self.native_epoch);
+                        self.monitor_flight.monitor_publication_epoch = Some(self.native_epoch);
                     } else {
                         self.begin_audio_recovery(uid, cx);
                     }
@@ -417,28 +417,28 @@ impl Player {
         if self.monitor_busy() {
             return;
         }
-        let Some(epoch) = self.monitor_publication_epoch else { return; };
+        let Some(epoch) = self.monitor_flight.monitor_publication_epoch else { return; };
         if epoch != self.native_epoch || self.project.is_none() || !self.tracks_audio_failed {
-            self.monitor_publication_epoch = None;
+            self.monitor_flight.monitor_publication_epoch = None;
             return;
         }
         // A second storage Save may still be writing when Stop completes.
         // Keep this intent (and the command queue) until that writer settles,
         // including when an explicit queued route will own the preparation.
-        if self.saving || self.source_job.is_some() || self.tracks_pending.is_some()
-            || self.carry_pending.is_some() || self.metronome_pending.is_some()
+        if self.saving || self.source_job.is_some() || self.tracks_flight.tracks_pending.is_some()
+            || self.carry_flight.carry.is_some() || self.metronome_flight.metronome.is_some()
             || self.rate_busy() || self.loading || self.audio_recovery.is_some()
         { return; }
         // Only the next queued owner can supersede this preparation. A later
         // route/Open must not cause an earlier Play to be silently discarded.
-        let replacement = self.monitor_actions.front().is_some_and(|action| matches!(
+        let replacement = self.monitor_flight.monitor_actions.front().is_some_and(|action| matches!(
             action, DeferredAudio::Open(_) | DeferredAudio::SourceOutput(_, _, _) | DeferredAudio::Output(_)
         ));
         if replacement {
-            self.monitor_publication_epoch = None;
+            self.monitor_flight.monitor_publication_epoch = None;
             return;
         }
-        self.monitor_publication_epoch = None;
+        self.monitor_flight.monitor_publication_epoch = None;
         let uid = self.settings.read(cx).output_uid();
         self.begin_audio_recovery(uid, cx);
     }

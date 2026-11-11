@@ -4,7 +4,7 @@ use super::*;
 impl Player {
     pub(super) fn open_stem_export(&mut self, cx: &mut Context<Self>) {
         if self.stem_export_open || self.backend.is_none() || !self.audio_available()
-            || self.loading || self.tracks_pending.is_some() || self.source_blocks_player()
+            || self.loading || self.tracks_flight.tracks_pending.is_some() || self.source_blocks_player()
             || self.lyrics_editor_open || self.project_picker_open || self.library_import_open
             || self.project_delete.read(cx).is_open() || self.notice.is_some()
         { return; }

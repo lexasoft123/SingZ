@@ -206,7 +206,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                         serde_json::json!({"karaoke":p.karaoke,"uiMuted":p.muted[0],"nativeMuted":native_vocals_muted(p),"epoch":p.native_epoch,
                             "nativeLanes":p.last_playback_status.as_ref().map(|status|&status.observed_lanes),
                             "muteBounds":p.track_bounds.borrow().get("mute-0").map(|b|format!("{b:?}")),"notice":p.notice,
-                            "tracksPending":p.tracks_pending.is_some(),"carryPending":p.carry_pending.is_some(),"tracksAudioFailed":p.tracks_audio_failed}))})?;
+                            "tracksPending":p.tracks_flight.tracks_pending.is_some(),"carryPending":p.carry_flight.carry.is_some(),"tracksAudioFailed":p.tracks_audio_failed}))})?;
                     if ready{break;}
                     if Instant::now()>=deadline {
                         std::fs::write(directory.join("karaoke-baseline-failure.json"),serde_json::to_vec_pretty(&diagnostic)?)?;

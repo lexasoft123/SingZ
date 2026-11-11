@@ -25,7 +25,7 @@ fn state(p: &Player, w: &Window, cx: &App) -> serde_json::Value {
         "muted": p.muted[0], "solo": p.solo[0], "gain": p.gain[0],
         "muteFocused": p.track_mix_focus[0][0].is_focused(w), "soloFocused": p.track_mix_focus[0][1].is_focused(w),
         "gainFocused": p.track_gain_focus[0].is_focused(w), "bpmFocused": p.transport.read(cx).bpm_focused(w, cx),
-        "rootFocused": p.focus_handle.is_focused(w), "playIntent": p.native_play_intent.is_some(),
+        "rootFocused": p.focus_handle.is_focused(w), "playIntent": p.transport_flight.native_play.is_some(),
         "native": p.last_playback_status.as_ref().map(|s| serde_json::json!({"playing": s.playing, "position": s.position})),
         "notice": p.notice, "hidden": !w.is_visible() && !w.is_window_active(),
     })
@@ -82,7 +82,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             legs.push(after_click.clone());
             for want_playing in [true, false] {
                 handle.update(cx, |_, w, cx| key(w, cx, "space"))?;
-                wait!("space toggled", |p: &Player| p.playing == want_playing && p.native_play_intent.is_none() && p.last_playback_status.as_ref().is_some_and(|s| s.playing == want_playing));
+                wait!("space toggled", |p: &Player| p.playing == want_playing && p.transport_flight.native_play.is_none() && p.last_playback_status.as_ref().is_some_and(|s| s.playing == want_playing));
                 legs.push(snap!(if want_playing { "mute-space-start" } else { "mute-space-stop" }));
             }
             handle.update(cx, |_, w, cx| click_lane_control(&view, w, cx, "mute-0", None))??;
@@ -97,7 +97,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             legs.push(snap!("fader-right"));
             for want_playing in [true, false] {
                 handle.update(cx, |_, w, cx| key(w, cx, "space"))?;
-                wait!("space toggled (fader)", |p: &Player| p.playing == want_playing && p.native_play_intent.is_none() && p.last_playback_status.as_ref().is_some_and(|s| s.playing == want_playing));
+                wait!("space toggled (fader)", |p: &Player| p.playing == want_playing && p.transport_flight.native_play.is_none() && p.last_playback_status.as_ref().is_some_and(|s| s.playing == want_playing));
                 legs.push(snap!(if want_playing { "fader-space-start" } else { "fader-space-stop" }));
             }
 

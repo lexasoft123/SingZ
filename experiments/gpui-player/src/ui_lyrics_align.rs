@@ -161,7 +161,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             control(&root,"slow","success",0)?;let requests=count(&root,"requests.jsonl",None);
             press!("lyed-align");wait!(p,w,app => state(p,w,app)["consent"].is_array());press!("lyed-align-download");
             wait!(p,w,app => p.lyrics_editor.read(app).busy&&count(&root,"requests.jsonl",None)>requests);
-            press!("lyed-align-cancel");wait!(p,w,app => !p.lyrics_editor.read(app).busy&&p.lyrics_download_pending.is_none());unchanged!();
+            press!("lyed-align-cancel");wait!(p,w,app => !p.lyrics_editor.read(app).busy&&p.lyrics_flight.lyrics_download_pending.is_none());unchanged!();
 
             let requests=count(&root,"requests.jsonl",None);let crisp_before=count(&root,"calls.jsonl",Some("crisp"));
             press!("lyed-align");wait!(p,w,app => state(p,w,app)["consent"].is_array());press!("lyed-align-download");
@@ -193,7 +193,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             control(&root,"good","success",5000)?;let calls=count(&root,"calls.jsonl",Some("crisp"));press!("lyed-align");
             wait!(p,w,app => p.lyrics_editor.read(app).busy&&count(&root,"calls.jsonl",Some("crisp"))>calls);
             both!("qwen-busy");press!("lyed-align-cancel");
-            wait!(p,w,app => !p.lyrics_editor.read(app).busy&&p.lyrics_alignment_pending.is_none());
+            wait!(p,w,app => !p.lyrics_editor.read(app).busy&&p.lyrics_flight.lyrics_alignment.is_none());
             anyhow::ensure!(handle.update(cx,|_,_,cx|rows(&view,cx))?==before_cancel,"Cancelled alignment replaced the draft");unchanged!();
 
             let warm=std::fs::read(root.join("heard-original.json"))?;let mut mismatch:serde_json::Value=serde_json::from_slice(&warm)?;
@@ -213,7 +213,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             let before_precise_cancel=handle.update(cx,|_,_,cx|rows(&view,cx))?;
             control(&root,"good","success",5000)?;let calls=count(&root,"calls.jsonl",Some("precise"));press!("lyed-precise");
             wait!(p,w,app => p.lyrics_editor.read(app).busy&&count(&root,"calls.jsonl",Some("precise"))>calls);
-            shot!("precise-busy");press!("lyed-align-cancel");wait!(p,w,app => !p.lyrics_editor.read(app).busy&&p.lyrics_alignment_pending.is_none());
+            shot!("precise-busy");press!("lyed-align-cancel");wait!(p,w,app => !p.lyrics_editor.read(app).busy&&p.lyrics_flight.lyrics_alignment.is_none());
             anyhow::ensure!(handle.update(cx,|_,_,cx|rows(&view,cx))?==before_precise_cancel,"Cancelled precise preview replaced draft");unchanged!();
 
             control(&root,"good","success",2000)?;let calls=count(&root,"calls.jsonl",Some("crisp"));press!("lyed-align");
@@ -413,7 +413,7 @@ fn run_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mu
                         click(w,cx,b.center());Ok(())})??;
                     wait!(30,p,w,app => p.karaoke);
                 }
-                wait!(30,p,w,app => p.lyrics_sidebar_pending.is_none()
+                wait!(30,p,w,app => p.lyrics_flight.lyrics_sidebar.is_none()
                     &&p.lyrics_sidebar.read(app).state(w,app)["status"]=="ready");
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);
                     let b=view.read(cx).lyrics_sidebar.read(cx).bounds("lyrics-edit")
@@ -444,7 +444,7 @@ fn run_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mu
                 let (downloading,busy,error,check) = handle.update(cx,|_,w,cx|->anyhow::Result<_>{
                     let p=view.read(cx);anyhow::ensure!(!w.is_visible()&&!w.is_window_active(),"Real inference activated window");
                     let editor=p.lyrics_editor.read(cx);let state=editor.state(w,cx);
-                    Ok((p.lyrics_download_pending.is_some(),editor.busy,state["error"].clone(),state["check"].clone()))
+                    Ok((p.lyrics_flight.lyrics_download_pending.is_some(),editor.busy,state["error"].clone(),state["check"].clone()))
                 })??;
                 saw_download |= downloading;
                 saw_inference |= busy && !downloading;
@@ -473,7 +473,7 @@ fn run_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mu
             anyhow::ensure!(std::fs::read(&lyrics_path)?==original_lyrics,"Precise preview wrote project lyrics before Save");
             handle.update(cx,|_,w,cx|capture(&view,w,cx,&out,"real-precise-preview"))??;
             press!("lyed-save");
-            wait!(60,p,w,app => !p.lyrics_editor_open&&p.lyrics_editor_pending.is_none());
+            wait!(60,p,w,app => !p.lyrics_editor_open&&p.lyrics_flight.lyrics_editor_pending.is_none());
             let saved_bytes=std::fs::read(&lyrics_path)?;
             let saved:serde_json::Value=serde_json::from_slice(&saved_bytes)?;
             let persisted:Vec<lyrics_edit::Line>=serde_json::from_value(saved["lines"].clone())?;
@@ -622,7 +622,7 @@ fn run_qwen_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx
                         click(w,cx,b.center());Ok(())})??;
                     wait!(30,p,w,app => p.karaoke);
                 }
-                wait!(30,p,w,app => p.lyrics_sidebar_pending.is_none()
+                wait!(30,p,w,app => p.lyrics_flight.lyrics_sidebar.is_none()
                     &&p.lyrics_sidebar.read(app).state(w,app)["status"]=="ready");
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);
                     let b=view.read(cx).lyrics_sidebar.read(cx).bounds("lyrics-edit")
@@ -651,7 +651,7 @@ fn run_qwen_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx
                 cx.background_executor().timer(Duration::from_millis(80)).await;
                 let (busy,editor)=handle.update(cx,|_,w,cx|->anyhow::Result<_>{let p=view.read(cx);
                     anyhow::ensure!(!w.is_visible()&&!w.is_window_active()&&p.notice.is_none(),"Real Qwen inference changed hidden state or raised a notice");
-                    anyhow::ensure!(p.lyrics_download_pending.is_none(),"Preinstalled Qwen flow must not download models");
+                    anyhow::ensure!(p.lyrics_flight.lyrics_download_pending.is_none(),"Preinstalled Qwen flow must not download models");
                     Ok((p.lyrics_editor.read(cx).busy,state(p,w,cx)))})??;
                 saw_inference|=busy;
                 anyhow::ensure!(!editor["error"].is_string(),"Real Qwen alignment failed: {}",editor["error"]);
@@ -681,7 +681,7 @@ fn run_qwen_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx
             anyhow::ensure!(std::fs::read(&lyrics_path)?==original_lyrics,"Qwen preview published before explicit Save");
             both!("qwen-preview");
             press!("lyed-save");
-            wait!(60,p,w,app => !p.lyrics_editor_open&&p.lyrics_editor_pending.is_none());
+            wait!(60,p,w,app => !p.lyrics_editor_open&&p.lyrics_flight.lyrics_editor_pending.is_none());
             let saved_bytes=std::fs::read(&lyrics_path)?;
             let saved:serde_json::Value=serde_json::from_slice(&saved_bytes)?;
             let persisted:Vec<lyrics_edit::Line>=serde_json::from_value(saved["lines"].clone())?;

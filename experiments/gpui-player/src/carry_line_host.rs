@@ -2,8 +2,6 @@
 use super::*;
 pub(super) type Stamp = (u64, u64, usize, u64);
 pub(super) struct Pending {
-    pub epoch: u64,
-    pub serial: u64,
     pub plan: carry_line::Plan,
     pub document: Arc<project_lyrics::Document>,
     pub stamp: Stamp,
@@ -36,11 +34,11 @@ impl Player {
         source: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.carry_pending.is_some()
-            || self.carry_save_requested
-            || self.carry_navigation.is_some()
+        if self.carry_flight.carry.is_some()
+            || self.carry_flight.carry_save_requested
+            || self.carry_flight.carry_navigation.is_some()
         {
-            self.carry_navigation = Some((path, source));
+            self.carry_flight.carry_navigation = Some((path, source));
             self.carry_open = false;
             cx.notify();
             true
@@ -50,15 +48,15 @@ impl Player {
     }
     pub(super) fn flush_carry_navigation(&mut self, cx: &mut Context<Self>) {
         if self.audio_recovery.is_some() || self.source_publication.is_some() { return; }
-        if self.carry_pending.is_some()
-            || self.carry_save_requested
+        if self.carry_flight.carry.is_some()
+            || self.carry_flight.carry_save_requested
             || self.saving
             || self.loading
             || self.notice.is_some()
         {
             return;
         }
-        if let Some((path, source)) = self.carry_navigation.take() {
+        if let Some((path, source)) = self.carry_flight.carry_navigation.take() {
             if source {
                 self.open_source(path, cx);
             } else {
@@ -68,14 +66,14 @@ impl Player {
     }
     pub(super) fn reset_carry(&mut self, cx: &mut Context<Self>) {
         self.carry_open = false;
-        self.carry_navigation = None;
-        self.carry_save_requested = false;
-        self.carry_pending = None;
-        self.carry_plan = None;
+        self.carry_flight.carry_navigation = None;
+        self.carry_flight.carry_save_requested = false;
+        self.carry_flight.carry.cancel();
+        self.carry_flight.carry_plan = None;
         self.carry_document = None;
         self.carry_mask = None;
-        self.carry_stamp = None;
-        self.carry_attempt_stamp = None;
+        self.carry_flight.carry_stamp = None;
+        self.carry_flight.carry_attempt_stamp = None;
         self.native_carry_revision = 0;
         self.carry.enabled = false;
         self.transport
@@ -83,16 +81,16 @@ impl Player {
     }
     pub(super) fn opened_carry(&mut self, status: &integration::Status, cx: &mut Context<Self>) {
         self.carry_open = false;
-        self.carry_navigation = None;
-        self.carry_save_requested = false;
-        self.carry_pending = None;
+        self.carry_flight.carry_navigation = None;
+        self.carry_flight.carry_save_requested = false;
+        self.carry_flight.carry.cancel();
         self.native_carry_revision = status.carry_revision;
         self.carry = self
             .project
             .as_ref()
             .map(|p| p.carry.clone())
             .unwrap_or_default();
-        self.carry_plan = self.carry_plan_for(self.carry.clone()).ok();
+        self.carry_flight.carry_plan = self.carry_plan_for(self.carry.clone()).ok();
         self.carry_document = Some(self.lyric_document.clone());
         self.carry_mask = carry_line::sing_mask(
             self.carry.enabled,
@@ -100,8 +98,8 @@ impl Player {
             self.lyric_document.lines.len(),
         )
         .map(Arc::new);
-        self.carry_stamp = Some(self.carry_stamp_now());
-        self.carry_attempt_stamp = self.carry_stamp;
+        self.carry_flight.carry_stamp = Some(self.carry_stamp_now());
+        self.carry_flight.carry_attempt_stamp = self.carry_flight.carry_stamp;
         self.adopt_carry_preferences(cx);
     }
     pub(super) fn adopt_carry_preferences(&mut self, cx: &mut Context<Self>) {
@@ -142,12 +140,12 @@ impl Player {
         cx.notify();
     }
     pub(super) fn change_carry(&mut self, desired: carry_line::Desired, cx: &mut Context<Self>) {
-        if self.carry_pending.is_some()
+        if self.carry_flight.carry.is_some()
             || self.loading
             || self.saving
             || self.source_blocks_player()
             || self.monitor_busy()
-            || self.metronome_pending.is_some()
+            || self.metronome_flight.metronome.is_some()
             || self.rename_pending.is_some()
             || self.import_pending.is_some()
         {
@@ -158,7 +156,7 @@ impl Player {
         }
         if desired.config.mode == carry_line::Mode::Lines
             && self.lyric_document.lines.is_empty()
-            && self.lyrics_sidebar_pending.is_none()
+            && self.lyrics_flight.lyrics_sidebar.is_none()
             && self.lyrics_sidebar_needs.is_empty()
             && !self.lyrics_sidebar_download_waiting
         {
@@ -176,18 +174,19 @@ impl Player {
             }
         };
         if let Some(backend) = &self.backend {
-            self.carry_serial += 1;
-            let serial = self.carry_serial;
+            let serial = self.carry_flight.carry.reserve();
             match backend.carry(self.native_epoch, serial, plan.clone()) {
                 Ok(()) => {
-                    self.carry_attempt_stamp = Some(self.carry_stamp_now());
-                    self.carry_pending = Some(Pending {
-                        epoch: self.native_epoch,
+                    self.carry_flight.carry_attempt_stamp = Some(self.carry_stamp_now());
+                    self.carry_flight.carry.activate(
+                        self.native_epoch,
                         serial,
-                        plan,
-                        document: self.lyric_document.clone(),
-                        stamp: self.carry_stamp_now(),
-                    });
+                        Pending {
+                            plan,
+                            document: self.lyric_document.clone(),
+                            stamp: self.carry_stamp_now(),
+                        },
+                    );
                 }
                 Err(error) => {
                     self.notice = Some(format!("Could not apply Carry the line: {error}"))
@@ -203,15 +202,12 @@ impl Player {
         result: Result<(carry_line::Desired, integration::Status), String>,
         cx: &mut Context<Self>,
     ) {
-        if epoch != self.native_epoch
-            || !self
-                .carry_pending
-                .as_ref()
-                .is_some_and(|p| p.epoch == epoch && p.serial == serial)
-        {
+        if epoch != self.native_epoch {
             return;
         }
-        let pending = self.carry_pending.take().unwrap();
+        let Some(pending) = self.carry_flight.carry.settle(epoch, serial) else {
+            return;
+        };
         match result {
             Ok((desired, status)) => {
                 let changed = self.carry != desired;
@@ -228,8 +224,8 @@ impl Player {
                     }
                 }
                 self.carry = desired;
-                self.carry_stamp = Some(pending.stamp);
-                self.carry_plan = Some(pending.plan);
+                self.carry_flight.carry_stamp = Some(pending.stamp);
+                self.carry_flight.carry_plan = Some(pending.plan);
                 self.carry_mask = carry_line::sing_mask(
                     self.carry.enabled,
                     &self.carry.config,
@@ -247,19 +243,19 @@ impl Player {
                     self.edit_seq += 1;
                     self.adopt_carry_preferences(cx);
                 }
-                if self.carry_save_requested {
-                    self.carry_save_requested = false;
+                if self.carry_flight.carry_save_requested {
+                    self.carry_flight.carry_save_requested = false;
                     // Share the existing publication lifecycle: a working-copy
                     // Save finishes by reopening its published destination.
                     // Its queued navigation must survive that internal Open.
-                    self.metronome_save_requested = true;
-                    if let Some(navigation) = self.carry_navigation.take() {
-                        self.metronome_navigation = Some(navigation);
+                    self.metronome_flight.metronome_save_requested = true;
+                    if let Some(navigation) = self.carry_flight.carry_navigation.take() {
+                        self.metronome_flight.metronome_navigation = Some(navigation);
                     }
                 }
             }
             Err(error) => {
-                let queued = std::mem::take(&mut self.carry_save_requested);
+                let queued = std::mem::take(&mut self.carry_flight.carry_save_requested);
                 self.notice = Some(format!(
                     "Carry the line was not applied: {error}{}",
                     if queued {
@@ -280,22 +276,19 @@ impl Player {
         error: String,
         cx: &mut Context<Self>,
     ) {
-        if epoch != self.native_epoch
-            || !self
-                .carry_pending
-                .as_ref()
-                .is_some_and(|p| p.epoch == epoch && p.serial == serial)
-        {
+        if epoch != self.native_epoch {
             return;
         }
-        let pending = self.carry_pending.take().unwrap();
-        self.carry_save_requested = false;
+        let Some(pending) = self.carry_flight.carry.settle(epoch, serial) else {
+            return;
+        };
+        self.carry_flight.carry_save_requested = false;
         self.carry_open = false;
-        self.carry_plan = None;
+        self.carry_flight.carry_plan = None;
         self.carry_document = None;
         self.carry_mask = None;
-        self.carry_stamp = None;
-        self.carry_attempt_stamp = None;
+        self.carry_flight.carry_stamp = None;
+        self.carry_flight.carry_attempt_stamp = None;
         self.tracks_audio_failed = true;
         self.playing = false;
         self.playhead.stop_projection();
@@ -327,19 +320,19 @@ impl Player {
     }
     pub(super) fn flush_carry(&mut self, cx: &mut Context<Self>) {
         if !self.carry.enabled
-            || self.carry_pending.is_some()
+            || self.carry_flight.carry.is_some()
             || self.loading
             || self.saving
             || self.source_blocks_player()
-            || self.metronome_pending.is_some()
+            || self.metronome_flight.metronome.is_some()
             || self.monitor_busy()
             || self.rename_pending.is_some()
             || self.import_pending.is_some()
         {
             return;
         }
-        if self.carry_stamp != Some(self.carry_stamp_now())
-            && self.carry_attempt_stamp != Some(self.carry_stamp_now())
+        if self.carry_flight.carry_stamp != Some(self.carry_stamp_now())
+            && self.carry_flight.carry_attempt_stamp != Some(self.carry_stamp_now())
         {
             self.submit_carry(self.carry.clone(), cx);
         }
@@ -360,9 +353,9 @@ impl Player {
         self.carry_paint_mask().map(|mask| mask.as_ref().clone())
     }
     pub(super) fn refresh_carry_widget(&mut self, cx: &mut Context<Self>) {
-        let ducking = self.carry_plan.as_ref().is_some_and(|p| {
+        let ducking = self.carry_flight.carry_plan.as_ref().is_some_and(|p| {
             p.on && !p.lane_ids.is_empty()
-                && !self.counting_in
+                && !self.transport_flight.counting_in
                 && if p.mode == 0 {
                     (self.playhead.position() as f64 / p.period_sec).floor() as u64 % 2 == 1
                 } else {
@@ -385,12 +378,12 @@ impl Player {
                 lane.label = self.lane_label(lane.slot).to_string();
             }
             let trigger = self.transport.read(cx).guides.get("carry");
-            let busy = self.carry_pending.is_some()
+            let busy = self.carry_flight.carry.is_some()
                 || self.loading
                 || self.saving
                 || self.source_blocks_player()
                 || self.monitor_busy()
-                || self.metronome_pending.is_some()
+                || self.metronome_flight.metronome.is_some()
                 || self.rename_pending.is_some()
                 || self.import_pending.is_some();
             self.carry_popover.update(cx, |p, cx| {
@@ -405,4 +398,14 @@ impl Player {
             });
         }
     }
+}
+
+#[derive(Default)]
+pub(super) struct CarryFlight {
+    pub(super) carry: inflight::Inflight<carry_line_host::Pending>,
+    pub(super) carry_plan: Option<carry_line::Plan>,
+    pub(super) carry_stamp: Option<carry_line_host::Stamp>,
+    pub(super) carry_attempt_stamp: Option<carry_line_host::Stamp>,
+    pub(super) carry_save_requested: bool,
+    pub(super) carry_navigation: Option<(std::path::PathBuf,bool)>,
 }

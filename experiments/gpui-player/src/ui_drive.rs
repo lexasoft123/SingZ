@@ -191,7 +191,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     }
     let catalog_epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
     handle.update(cx,|_,w,cx|songs(&view,w,cx,true))??;
-    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==catalog_epoch
+    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.transport_flight.native_play.is_none()&&p.native_epoch==catalog_epoch
         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
     if suffix==1280 {
      handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("connect-{suffix}")))??;
@@ -214,7 +214,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     }
     handshake!(format!("first-held-{suffix}"),"upload-held");
     wait!(p,w,app=>p.drive_snapshot.busy&&p.drive_snapshot.capture_project.is_none()&&p.screen==Screen::Library
-        &&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==catalog_epoch
+        &&!p.playing&&p.transport_flight.native_play.is_none()&&p.native_epoch==catalog_epoch
         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing)&&p.library.read(app).drive_state(w)["validFocus"]==true);
     handle.update(cx,|_,w,cx|marker(&out.join(format!("catalog-paused-held-{suffix}.json")),&state(&view,w,cx)))??;
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("uploading-{suffix}")))??;
@@ -250,7 +250,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"}))?;saved!();
     let cancel_epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
     handle.update(cx,|_,w,cx|songs(&view,w,cx,true))??;
-    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==cancel_epoch
+    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.transport_flight.native_play.is_none()&&p.native_epoch==cancel_epoch
         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
     handle.update(cx,|_,w,cx|library(&view,w,cx,"library-drive-sync"))??;
     handshake!(format!("cancel-held-{suffix}"),"upload-held");
@@ -261,7 +261,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     handle.update(cx,|_,w,cx|marker(&out.join(format!("busy-focus-recovered-{suffix}.json")),&state(&view,w,cx)))??;
     handle.update(cx,|_,w,cx|library(&view,w,cx,"library-drive-cancel"))??;
     wait!(p,w,app=>!p.drive_snapshot.busy&&p.drive_snapshot.scheduler.dirty!=0&&p.drive_snapshot.progress.contains("Sync paused")
-        &&p.screen==Screen::Library&&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==cancel_epoch
+        &&p.screen==Screen::Library&&!p.playing&&p.transport_flight.native_play.is_none()&&p.native_epoch==cancel_epoch
         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing)
         &&p.library.read(app).drive_state(w)["validFocus"]==true&&p.library.read(app).drive_state(w)["focusedControl"]=="library-drive-sync");
     handle.update(cx,|_,w,cx|marker(&out.join(format!("cancel-focus-recovered-{suffix}.json")),&state(&view,w,cx)))??;
@@ -276,7 +276,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     handshake!(format!("release-cancel-{suffix}"),"release-upload");
     let cancelled_sync=handle.update(cx,|_,_,cx|view.read(cx).drive_snapshot.scheduler.last_sync)?;
     handle.update(cx,|_,w,cx|songs(&view,w,cx,true))??;
-    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==cancel_epoch
+    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.transport_flight.native_play.is_none()&&p.native_epoch==cancel_epoch
         &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
     handle.update(cx,|_,w,cx|library(&view,w,cx,"library-drive-sync"))??;clean!();
     wait!(p,w,app=>p.drive_snapshot.scheduler.last_sync>cancelled_sync);

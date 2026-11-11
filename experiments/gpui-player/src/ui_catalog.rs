@@ -173,7 +173,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, project: PathBuf,
                 handle.update(cx,|_,w,cx|{super::ui_training_run::draw(w,cx);key(w,cx,"tab");})?;
                 wait!(p,w,app => p.library.read(app).focused_project(w)==Some((renamed.clone(),true)));
                 handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                wait!(p,w,app => p.delete_inspect_pending.is_none() && p.project_delete.read(app).is_open());
+                wait!(p,w,app => p.delete_flight.delete_inspect.is_none() && p.project_delete.read(app).is_open());
                 handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
                 wait!(p,w,app => !p.project_delete.read(app).is_open());
                 anyhow::ensure!(renamed.is_dir(),"Escape removed the catalog fixture");

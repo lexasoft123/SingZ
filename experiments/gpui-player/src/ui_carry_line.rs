@@ -56,7 +56,7 @@ fn snapshot(
     std::fs::write(
         out.join(format!("{name}.json")),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"popover":p.carry_popover.read(cx).state(w,cx),"carry":p.carry,"open":p.carry_open,"pending":p.carry_pending.is_some(),"queuedSave":p.carry_save_requested,"queuedNavigation":p.carry_navigation,"epoch":p.native_epoch,"carryRevision":p.native_carry_revision,"native":native,"plan":p.carry_plan.as_ref().map(|plan|serde_json::json!({"on":plan.on,"mode":plan.mode,"period":plan.period_sec,"laneIds":plan.lane_ids,"windows":plan.windows})),"lineMask":p.carry_sing_mask(),"muted":p.muted.as_slice(),"selection":p.project.as_ref().and_then(|p|p.selection),"project":p.project.as_ref().map(|p|&p.dir),"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":true,"liveFps":"unmeasured","productionParity":"unqualified; native candidate only"}),
+            &serde_json::json!({"popover":p.carry_popover.read(cx).state(w,cx),"carry":p.carry,"open":p.carry_open,"pending":p.carry_flight.carry.is_some(),"queuedSave":p.carry_flight.carry_save_requested,"queuedNavigation":p.carry_flight.carry_navigation,"epoch":p.native_epoch,"carryRevision":p.native_carry_revision,"native":native,"plan":p.carry_flight.carry_plan.as_ref().map(|plan|serde_json::json!({"on":plan.on,"mode":plan.mode,"period":plan.period_sec,"laneIds":plan.lane_ids,"windows":plan.windows})),"lineMask":p.carry_sing_mask(),"muted":p.muted.as_slice(),"selection":p.project.as_ref().and_then(|p|p.selection),"project":p.project.as_ref().map(|p|&p.dir),"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":true,"liveFps":"unmeasured","productionParity":"unqualified; native candidate only"}),
         )?,
     )?;
     Ok(())
@@ -66,7 +66,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
  let result:anyhow::Result<()>=async{
   std::fs::create_dir_all(&out)?;let project=PathBuf::from(std::env::var_os("SINGZ_GPUI_TEST_PROJECT").unwrap());let stage=std::env::var("SINGZ_GPUI_CARRY_STAGE").unwrap_or_else(|_|"exercise".into());
   macro_rules! wait{($p:ident,$app:ident=>$condition:expr)=>{{let deadline=Instant::now()+Duration::from_secs(30);loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,$app|{let $p=view.read($app);$condition})?{break;}anyhow::ensure!(Instant::now()<deadline,"Carry timeout: {}",stringify!($condition));}}};}
-  macro_rules! action{($id:expr)=>{{handle.update(cx,|_,w,cx|press(&view,w,cx,$id))??;wait!(p,cx=>p.carry_pending.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.carry_revision==p.native_carry_revision));}};}
+  macro_rules! action{($id:expr)=>{{handle.update(cx,|_,w,cx|press(&view,w,cx,$id))??;wait!(p,cx=>p.carry_flight.carry.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.carry_revision==p.native_carry_revision));}};}
   if stage=="restart"{
    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;wait!(p,cx=>!p.loading&&p.project.is_some()&&p.native_carry_revision>0);
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.carry.enabled&&p.carry.config.mode==carry_line::Mode::Lines&&p.carry.config.hear==2&&p.carry.config.sing==1&&p.carry.config.stems==["custom-harmony-0"]&&p.muted[2],"Restart lost Carry or independent manual mute");toggle(&view,w,cx)})??;wait!(p,cx=>p.carry_open);handle.update(cx,|_,w,cx|snapshot(&view,w,cx,&out,"saved-restart"))??;
@@ -85,7 +85,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
      reached.insert(focused.clone());
      if focused=="carry-lane-15"{
       let selected=handle.update(cx,|_,_,cx|view.read(cx).carry.config.stems.contains(&"custom-crowded-15".to_owned()))?;
-      if !selected{handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;wait!(p,cx=>p.carry_pending.is_none()&&p.carry.config.stems.contains(&"custom-crowded-15".to_owned()));}
+      if !selected{handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;wait!(p,cx=>p.carry_flight.carry.is_none()&&p.carry.config.stems.contains(&"custom-crowded-15".to_owned()));}
      }
     }
     anyhow::ensure!(order.iter().all(|id|reached.contains(id)),"Maximum-lane keyboard traversal omitted controls");
@@ -109,11 +109,11 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    let deadline=Instant::now()+Duration::from_secs(3);while !ready.exists(){cx.background_executor().timer(Duration::from_millis(5)).await;anyhow::ensure!(Instant::now()<deadline,"Working Carry receipt gate was not reached");}
    handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"}))?;
    let fresh=PathBuf::from(std::env::var_os("SINGZ_GPUI_CARRY_FRESH_PROJECT").unwrap());
-   handle.update(cx,|_,_,cx|->anyhow::Result<()>{view.update(cx,|p,cx|{anyhow::ensure!(p.carry_save_requested&&p.carry_pending.is_some()&&p.source_job.is_none(),"Working Save did not queue behind actual receipt");p.open_project(fresh.clone(),cx);anyhow::ensure!(p.source_working&&!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==working),"Working navigation escaped the Carry queue");Ok(())})})??;
+   handle.update(cx,|_,_,cx|->anyhow::Result<()>{view.update(cx,|p,cx|{anyhow::ensure!(p.carry_flight.carry_save_requested&&p.carry_flight.carry.is_some()&&p.source_job.is_none(),"Working Save did not queue behind actual receipt");p.open_project(fresh.clone(),cx);anyhow::ensure!(p.source_working&&!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==working),"Working navigation escaped the Carry queue");Ok(())})})??;
    anyhow::ensure!(std::fs::read(target_dir.join("project.json"))?==before,"Working target published before accepted receipt");
    handle.update(cx,|_,w,cx|snapshot(&view,w,cx,&out,"working-queued"))??;
    std::fs::remove_file(&gate)?;
-   wait!(p,cx=>!p.loading&&!p.saving&&p.source_job.is_none()&&!p.metronome_save_requested&&!p.metronome_save_waiting&&p.project.as_ref().is_some_and(|p|p.dir==fresh));
+   wait!(p,cx=>!p.loading&&!p.saving&&p.source_job.is_none()&&!p.metronome_flight.metronome_save_requested&&!p.metronome_flight.metronome_save_waiting&&p.project.as_ref().is_some_and(|p|p.dir==fresh));
    let saved:serde_json::Value=serde_json::from_slice(&std::fs::read(target_dir.join("project.json"))?)?;
    anyhow::ensure!(saved["settings"]["training"]["on"]==true&&saved["settings"]["training"]["periodSec"]==15,"Working Save was cancelled/lost before deferred navigation");
    std::fs::write(out.join("published-project.json"),serde_json::to_vec_pretty(&saved)?)?;
@@ -126,7 +126,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     let(epoch,old_status)=handle.update(cx,|_,w,cx|->anyhow::Result<_>{let p=view.read(cx);let old=p.last_playback_status.clone().unwrap();let epoch=p.native_epoch;anyhow::ensure!(!p.carry.enabled&&p.muted[2],"Fixture disabled/manual mute state changed");toggle(&view,w,cx)?;Ok((epoch,old))})??;wait!(p,cx=>p.carry_open);
     handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let ui=view.read(cx).carry_popover.clone();let before=ui.read(cx).state(w,cx);anyhow::ensure!(before["caption"]=="Guide plays 10 s, then you take the next 10 s.","Default time caption changed");anyhow::ensure!(ui.read(cx).state(w,cx)["scrollMax"]==serde_json::json!([0.0,0.0]),"Ordinary Carry layout has spurious scroll overflow");snapshot(&view,w,cx,&out,&format!("off-{}",width as u32))?;let order=before["focusOrder"].as_array().unwrap();for _ in 0..order.len()+2{let before=ui.read(cx).state(w,cx);let expected=&order[(order.iter().position(|v|v==&before["focusedControl"]).map(|i|i+1).unwrap_or(0))%order.len()];key(w,cx,"tab");let after=ui.read(cx).state(w,cx);anyhow::ensure!(after["focusInside"]==true&&after["focusedControl"]==*expected&&after["keyboardFocus"]==true,"Carry Tab skipped/escaped actual control");}key(w,cx,"shift-tab");Ok(())})??;
     // Last selected lane is guarded by the real button, not only validation.
-    let serial=handle.update(cx,|_,_,cx|view.read(cx).carry_serial)?;action!("carry-lane-0");anyhow::ensure!(handle.update(cx,|_,_,cx|{let p=view.read(cx);p.carry_serial==serial&&p.carry.config.stems==["vocals"]})?,"Last selected stem was removed");
+    let serial=handle.update(cx,|_,_,cx|view.read(cx).carry_flight.carry.serial())?;action!("carry-lane-0");anyhow::ensure!(handle.update(cx,|_,_,cx|{let p=view.read(cx);p.carry_flight.carry.serial()==serial&&p.carry.config.stems==["vocals"]})?,"Last selected stem was removed");
     action!("carry-on");wait!(p,cx=>p.carry.enabled&&p.native_carry_revision>old_status.carry_revision);
     handle.update(cx,|_,_,cx|->anyhow::Result<()>{view.update(cx,|p,cx|{let revision=p.native_carry_revision;let position=p.playhead.position();let playing=p.playing;p.playback_status(epoch,old_status.clone(),cx);anyhow::ensure!(p.native_carry_revision==revision&&p.playhead.position()==position&&p.playing==playing,"Actual delayed old-revision status overwrote new Carry receipt");Ok(())})})??;
     for _ in 0..3{action!("carry-period-minus");}anyhow::ensure!(handle.update(cx,|_,_,cx|view.read(cx).carry.config.period_sec==5)?,"Period lower clamp failed");
@@ -135,7 +135,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     action!("carry-lines");for _ in 0..8{action!("carry-hear-plus");action!("carry-sing-plus");}anyhow::ensure!(handle.update(cx,|_,_,cx|{let c=&view.read(cx).carry.config;c.hear==8&&c.sing==8})?,"Hear/sing upper clamps failed");
     for _ in 0..8{action!("carry-hear-minus");action!("carry-sing-minus");}anyhow::ensure!(handle.update(cx,|_,_,cx|{let c=&view.read(cx).carry.config;c.hear==1&&c.sing==1})?,"Hear/sing lower clamps failed");
     action!("carry-hear-plus");action!("carry-lane-2");action!("carry-lane-0");
-    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.carry.config.stems==["custom-harmony-0"]&&p.carry_sing_mask()==Some(vec![false,false,true,false,false,true]),"Line grouping/custom stable ID changed");let windows=&p.carry_plan.as_ref().unwrap().windows;anyhow::ensure!(windows.len()==2&&(windows[0].s-9.85).abs()<0.001&&(windows[0].e-14.85).abs()<0.001&&(windows[1].s-24.85).abs()<0.001&&(windows[1].e-30.).abs()<0.001,"Native line window plan differs from source");snapshot(&view,w,cx,&out,&format!("lines-{}",width as u32))})??;
+    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.carry.config.stems==["custom-harmony-0"]&&p.carry_sing_mask()==Some(vec![false,false,true,false,false,true]),"Line grouping/custom stable ID changed");let windows=&p.carry_flight.carry_plan.as_ref().unwrap().windows;anyhow::ensure!(windows.len()==2&&(windows[0].s-9.85).abs()<0.001&&(windows[0].e-14.85).abs()<0.001&&(windows[1].s-24.85).abs()<0.001&&(windows[1].e-30.).abs()<0.001,"Native line window plan differs from source");snapshot(&view,w,cx,&out,&format!("lines-{}",width as u32))})??;
     // Source global Save remains available while the popover owns keyboard
     // focus, without dismissing it or activating a transport control.
     if width==1060. {
@@ -153,7 +153,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Tempo(1.25),cx)))?;wait!(p,cx=>p.last_playback_status.as_ref().is_some_and(|s|(s.rate-1.25).abs()<0.001));
     handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Loop,cx)))?;wait!(p,cx=>p.playhead.loop_range().is_some());
     handle.update(cx,|_,w,cx|key(w,cx,"space"))?;wait!(p,cx=>p.playing&&p.playhead.position()>0.1);
-    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_epoch==epoch&&p.native_carry_revision>old_status.carry_revision&&p.carry_plan.as_ref().is_some_and(|p|p.windows.len()==2),"Native tempo/loop replaced Carry ownership");snapshot(&view,w,cx,&out,&format!("playing-{}",width as u32))?;key(w,cx,"space");Ok(())})??;wait!(p,cx=>!p.playing);
+    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_epoch==epoch&&p.native_carry_revision>old_status.carry_revision&&p.carry_flight.carry_plan.as_ref().is_some_and(|p|p.windows.len()==2),"Native tempo/loop replaced Carry ownership");snapshot(&view,w,cx,&out,&format!("playing-{}",width as u32))?;key(w,cx,"space");Ok(())})??;wait!(p,cx=>!p.playing);
    }
    // A genuinely native-applied receipt is held on the worker, not a fake
    // Root pending value. Save and navigation must wait for that accepted plan.
@@ -165,14 +165,14 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    handle.update(cx,|_,w,cx|press(&view,w,cx,"carry-hear-plus"))??;
    let deadline=Instant::now()+Duration::from_secs(3);while !ready.exists(){cx.background_executor().timer(Duration::from_millis(5)).await;anyhow::ensure!(Instant::now()<deadline,"Actual native Carry receipt gate was not reached");}
    anyhow::ensure!(std::fs::read(&ready)?==b"native-carry-applied","Wrong Carry gate stage");
-   handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.carry_pending.as_ref().is_some_and(|pending|pending.plan.desired.config.hear==3)&&p.carry.config.hear==2,"Held receipt was optimistically adopted");key(w,cx,"escape");Ok(())})??;wait!(p,cx=>!p.carry_open);
+   handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.carry_flight.carry.payload().is_some_and(|pending|pending.plan.desired.config.hear==3)&&p.carry.config.hear==2,"Held receipt was optimistically adopted");key(w,cx,"escape");Ok(())})??;wait!(p,cx=>!p.carry_open);
    handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"}))?;
    let fresh=PathBuf::from(std::env::var_os("SINGZ_GPUI_CARRY_FRESH_PROJECT").unwrap());
-   handle.update(cx,|_,_,cx|->anyhow::Result<()>{view.update(cx,|p,cx|{anyhow::ensure!(p.carry_save_requested&&!p.saving&&p.carry_pending.is_some(),"Save did not queue behind actual Carry receipt");p.open_project(fresh.clone(),cx);anyhow::ensure!(p.native_epoch==old_epoch&&!p.loading&&!p.saving&&p.project.as_ref().is_some_and(|p|p.dir==project)&&p.carry_navigation.as_ref().is_some_and(|(path,source)|path==&fresh&&!*source),"Navigation revoked pending Carry/Save instead of deferring");Ok(())})})??;
+   handle.update(cx,|_,_,cx|->anyhow::Result<()>{view.update(cx,|p,cx|{anyhow::ensure!(p.carry_flight.carry_save_requested&&!p.saving&&p.carry_flight.carry.is_some(),"Save did not queue behind actual Carry receipt");p.open_project(fresh.clone(),cx);anyhow::ensure!(p.native_epoch==old_epoch&&!p.loading&&!p.saving&&p.project.as_ref().is_some_and(|p|p.dir==project)&&p.carry_flight.carry_navigation.as_ref().is_some_and(|(path,source)|path==&fresh&&!*source),"Navigation revoked pending Carry/Save instead of deferring");Ok(())})})??;
    anyhow::ensure!(std::fs::read(project.join("project.json"))?==before_metadata,"Queued Save published before native Carry receipt");
    handle.update(cx,|_,w,cx|snapshot(&view,w,cx,&out,"queued-save-navigation"))??;
    std::fs::remove_file(&gate)?;
-   wait!(p,cx=>!p.loading&&!p.saving&&p.carry_pending.is_none()&&p.project.as_ref().is_some_and(|p|p.dir==fresh));
+   wait!(p,cx=>!p.loading&&!p.saving&&p.carry_flight.carry.is_none()&&p.project.as_ref().is_some_and(|p|p.dir==fresh));
    let committed:serde_json::Value=serde_json::from_slice(&std::fs::read(project.join("project.json"))?)?;
    anyhow::ensure!(committed["settings"]["training"]["on"]==true&&committed["settings"]["training"]["hear"]==3,"Deferred Save did not publish the actual accepted Carry config");
    std::fs::write(out.join("queued-save-project.json"),serde_json::to_vec_pretty(&committed)?)?;

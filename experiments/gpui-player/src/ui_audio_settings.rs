@@ -143,7 +143,7 @@ fn preferences_choose(view: &Entity<Player>, window: &mut Window, cx: &mut App, 
 fn preferences_capture(view: &Entity<Player>, window: &mut Window, cx: &mut App, out: &std::path::Path, name: &str) -> anyhow::Result<()> {
     draw_preferences(window,cx);anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"Settings test presented or activated a window");
     let p=view.read(cx);let (prefs,error)=p.settings.read(cx).input_preferences_snapshot();
-    anyhow::ensure!(!p.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested,"Settings regression requested hardware");
+    anyhow::ensure!(!p.monitor_flight.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested,"Settings regression requested hardware");
     let state=serde_json::json!({"viewport":[f32::from(window.viewport_size().width),f32::from(window.viewport_size().height)],"preferences":prefs.patch(),"error":error,"labels":{"input":p.settings.read(cx).field_label("settings-channel"),"left":p.settings.read(cx).field_label("settings-output-left"),"right":p.settings.read(cx).field_label("settings-output-right")},"hidden":true,"active":false,"inventory":"synthetic; real Settings controls and persistence","liveFps":"unmeasured: hidden window"});
     window.render_to_image()?.save(out.join(format!("{name}.png")))?;
     std::fs::write(out.join(format!("{name}.state.json")),serde_json::to_vec_pretty(&state)?)?;Ok(())
@@ -158,7 +158,7 @@ fn preferences_tab_to(view:&Entity<Player>,window:&mut Window,cx:&mut App,id:&st
 }
 fn preferences_keyboard_state(view:&Entity<Player>,window:&mut Window,cx:&mut App,step:&str)->anyhow::Result<serde_json::Value> {
     draw_preferences(window,cx);let p=view.read(cx);let settings=p.settings.read(cx);let state=settings.keyboard_snapshot(window,cx);
-    anyhow::ensure!(!p.playing&&!p.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested&&p.native_play_intent.is_none(),"Settings keys escaped to song or hardware at {step}");
+    anyhow::ensure!(!p.playing&&!p.monitor_flight.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested&&p.transport_flight.native_play.is_none(),"Settings keys escaped to song or hardware at {step}");
     anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"Settings keyboard test activated its window");
     if p.screen==Screen::Settings {
         anyhow::ensure!(state["focusInside"]==true,"Tab focus escaped Settings at {step}: {state}");
@@ -172,7 +172,7 @@ fn preferences_keyboard_state(view:&Entity<Player>,window:&mut Window,cx:&mut Ap
             }
         } else if !matches!(step,"fixture-disabled-focus-recovery"|"fixture-unmounted-focus-recovery")||!state["focusedControl"].is_null() {anyhow::bail!("Focused Settings control has no measured bounds at {step}: {state}");}
     }
-    Ok(serde_json::json!({"step":step,"fixtureOnlyTransition":matches!(step,"fixture-disabled-focus-recovery"|"fixture-unmounted-focus-recovery"),"keyboard":state,"preferences":p.mic_prefs.patch(),"playing":p.playing,"position":p.playhead.position(),"monitorRequested":p.monitor_requested,"micRequested":p.mic_requested}))
+    Ok(serde_json::json!({"step":step,"fixtureOnlyTransition":matches!(step,"fixture-disabled-focus-recovery"|"fixture-unmounted-focus-recovery"),"keyboard":state,"preferences":p.mic_prefs.patch(),"playing":p.playing,"position":p.playhead.position(),"monitorRequested":p.monitor_flight.monitor_requested,"micRequested":p.mic_requested}))
 }
 fn run_preferences(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut App) {
     cx.spawn(async move|cx|{

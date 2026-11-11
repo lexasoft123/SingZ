@@ -10,10 +10,10 @@ impl Player {
                     .is_some_and(integration::Project::has_audio))
     }
     pub(super) fn empty_timeline(&mut self, cx: &mut Context<Self>) {
-        self.native_play_intent=None;
-        self.timing_status=None;
-        self.count_in_cache=None;
-        self.native_rate_generation_floor=0;
+        self.transport_flight.native_play.cancel();
+        self.transport_flight.timing_status=None;
+        self.transport_flight.count_in_cache=None;
+        self.transport_flight.native_rate_generation_floor=0;
         self.analysis_progress=None;
         self.analysis_job=None;
         self.duration = 0.;
@@ -23,9 +23,9 @@ impl Player {
         self.view_start = 0.;
         self.view_end = 1.;
 
-        self.counting_in = false;
-        self.count_in_anchor = None;
-        self.carry_open=false;self.carry.enabled=false;self.carry_plan=None;self.carry_document=None;self.carry_mask=None;self.carry_stamp=None;self.carry_attempt_stamp=None;
+        self.transport_flight.counting_in = false;
+        self.transport_flight.count_in_anchor = None;
+        self.carry_open=false;self.carry.enabled=false;self.carry_flight.carry_plan=None;self.carry_document=None;self.carry_mask=None;self.carry_flight.carry_stamp=None;self.carry_flight.carry_attempt_stamp=None;
         self.metronome_open = false;
         self.karaoke = false;
         self.transport.update(cx, |t, cx| {
@@ -47,7 +47,7 @@ impl Player {
         if self.tracks_audio_failed || self.project.is_none() || status.training_only {
             return;
         }
-        if self.native_rate_pending.is_some() || status.graph_generation<self.native_rate_generation_floor {return;}
+        if self.transport_flight.native_rate_pending.is_some() || status.graph_generation<self.transport_flight.native_rate_generation_floor {return;}
         // A lane commit receipt adopts inventory and revision together. Neither
         // old telemetry nor early telemetry for a pending inventory may cross it.
         if status.carry_revision!=self.native_carry_revision{return;}
@@ -59,7 +59,7 @@ impl Player {
         }
         if !self.playhead.admit((&status).into(), Instant::now()) { return; }
         self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
-        self.timing_status=Some(status.clone());
+        self.transport_flight.timing_status=Some(status.clone());
         #[cfg(feature = "ui-tests")]
         {
             self.last_playback_status = Some(status.clone());
@@ -71,12 +71,12 @@ impl Player {
             return;
         }
         self.native_graph = status.graph_generation;
-        self.counting_in = status.counting_in;
+        self.transport_flight.counting_in = status.counting_in;
         if status.playing && !status.counting_in && status.rendered_frame >= 0 {
-            self.count_in_anchor = None;
+            self.transport_flight.count_in_anchor = None;
         }
         self.duration = status.duration;
-        let playing=self.native_play_intent.map_or(status.playing,|(target,_)|target);
+        let playing=self.transport_flight.native_play.payload().map_or(status.playing,|target|*target);
         if self.playing!=playing {self.restart_cycle.reset();}
         self.playing = playing;
         self.native_rate = status.rate;

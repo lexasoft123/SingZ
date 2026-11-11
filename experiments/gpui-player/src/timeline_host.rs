@@ -84,7 +84,7 @@ impl Player {
             self.timeline_view(),
             self.duration as f64,
             self.playhead.position() as f64,
-            self.playing && !self.counting_in,
+            self.playing && !self.transport_flight.counting_in,
             if self.backend.is_some() {
                 self.native_rate
             } else {

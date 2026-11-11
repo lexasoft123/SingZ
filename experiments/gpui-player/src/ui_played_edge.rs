@@ -156,7 +156,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx, |_, _, cx| view.update(cx, |p, cx| { p.playhead.seek(start + 3.0); p.seek_native(cx); }))?;
             wait!("seek", |p: &Player| p.playhead.pending_seek().is_none());
             handle.update(cx, |_, _, cx| view.update(cx, |p, cx| p.native_transport(transport::TransportEvent::Play, cx)))?;
-            wait!("playing", |p: &Player| p.playing && p.native_play_intent.is_none() && p.last_playback_status.as_ref().is_some_and(|s| s.playing));
+            wait!("playing", |p: &Player| p.playing && p.transport_flight.native_play.is_none() && p.last_playback_status.as_ref().is_some_and(|s| s.playing));
             let mut playing = Vec::new();
             for index in 0..12 {
                 cx.background_executor().timer(Duration::from_millis(70)).await;

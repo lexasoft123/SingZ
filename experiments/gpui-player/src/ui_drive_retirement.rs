@@ -251,7 +251,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             macro_rules! clean {()=>{wait!(60,p,w,app=>!p.drive_snapshot.busy&&p.drive_snapshot.is_up_to_date()&&p.drive_snapshot.scheduler.last_sync.is_some())};}
             macro_rules! sync {($name:expr)=>{{let before=handle.update(cx,|_,_,cx|view.read(cx).drive_snapshot.scheduler.last_sync)?;library!("library-drive-sync");wait!(60,p,w,app=>!p.drive_snapshot.busy&&p.drive_snapshot.is_up_to_date()&&p.drive_snapshot.scheduler.last_sync>before);shot!($name);}};}
             macro_rules! empty_save_sync {($name:expr)=>{{cx.background_executor().timer(Duration::from_millis(700)).await;let slot=handle.update(cx,|_,_,cx|view.read(cx).project.as_ref().unwrap().custom_tracks()[0].slot)?;
-                act!(w,app=>crate::ui_custom_tracks::press(&view,w,app,&format!("remove-{slot}")));wait!(15,p,w,app=>p.tracks_pending.is_none()&&empty(p)&&p.edit_seq!=p.saved_seq);
+                act!(w,app=>crate::ui_custom_tracks::press(&view,w,app,&format!("remove-{slot}")));wait!(15,p,w,app=>p.tracks_flight.tracks_pending.is_none()&&empty(p)&&p.edit_seq!=p.saved_seq);
                 act!(w,app=>header(&view,w,app,"header-save"));wait!(15,p,w,app=>!p.saving&&p.edit_seq==p.saved_seq&&empty(p));act!(w,app=>header(&view,w,app,"header-catalog"));wait!(10,p,w,app=>p.screen==Screen::Library);sync!($name);
             }};}
             macro_rules! open_fresh {($name:expr)=>{{
@@ -269,9 +269,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             // confirmation; no fake clear/unload path can satisfy this phase.
             wait!(15,p,w,app=>p.library.read(app).project_delete_bounds(&project).is_some());
             act!(w,app=>{let b=view.read(app).library.read(app).project_delete_bounds(&project).unwrap();anyhow::ensure!(b.top()>=px(52.)&&b.bottom()<=w.viewport_size().height,"Delete card clipped");click(w,app,b.center());Ok(())});
-            wait!(15,p,w,app=>p.delete_inspect_pending.is_none()&&p.project_delete.read(app).is_open());shot!("confirm-last-project-delete");
+            wait!(15,p,w,app=>p.delete_flight.delete_inspect.is_none()&&p.project_delete.read(app).is_open());shot!("confirm-last-project-delete");
             act!(w,app=>{let b=view.read(app).project_delete.read(app).bounds("project-delete-confirm").ok_or_else(||anyhow::anyhow!("Delete confirm unmeasured"))?;click(w,app,b.center());Ok(())});
-            wait!(20,p,w,app=>p.delete_pending.is_none()&&!p.project_delete.read(app).is_open()&&!project.exists()&&p.project.is_none()&&!p.loaded_song&&!p.playing&&p.library.read(app).project_snapshot().as_array().is_some_and(Vec::is_empty));
+            wait!(20,p,w,app=>p.delete_flight.delete.is_none()&&!p.project_delete.read(app).is_open()&&!project.exists()&&p.project.is_none()&&!p.loaded_song&&!p.playing&&p.library.read(app).project_snapshot().as_array().is_some_and(Vec::is_empty));
             sync!("last-project-deleted-synced");handshake!("deleted-last");handshake!("prepare-after-delete");open_fresh!("fresh-after-delete-open");
             act!(w,app=>header(&view,w,app,"header-catalog"));wait!(10,p,w,app=>p.screen==Screen::Library);sync!("fresh-after-delete-synced");handshake!("fresh-after-delete");
             act!(w,app=>header(&view,w,app,"header-catalog"));wait!(10,p,w,app=>p.screen==Screen::Player);empty_save_sync!("empty-lineage-two");handshake!("empty-two");

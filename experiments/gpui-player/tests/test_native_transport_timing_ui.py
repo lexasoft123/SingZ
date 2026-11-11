@@ -201,6 +201,8 @@ with tempfile.TemporaryDirectory(prefix='singz-timing-ui-') as directory:
         for width,height in ((1280,800),(1060,640)):
             ready = json.loads((out / 'exercise' / f'ready-{width}.json').read_text())
             typed = json.loads((out / 'exercise' / f'typed-{width}.json').read_text())
+            loop_after_rate = json.loads((out / 'exercise' / f'loop-after-rate-{width}.json').read_text())
+            assert loop_after_rate['ratePending'] is False and loop_after_rate['playerLoop'] is False and loop_after_rate['native']['loop'] is None
             assert ready['viewport'] == typed['viewport'] == [width,height] and typed['hidden']
             assert typed['timing']['inputValue'] == '150' and typed['timing']['effectiveBpm'] == 150
             restarted = json.loads((out / 'restart' / f'saved-restart-{width}.json').read_text())

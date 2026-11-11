@@ -7,7 +7,7 @@ use std::{
 };
 fn state(view: &Entity<Player>, w: &Window, cx: &App) -> serde_json::Value {
     let p = view.read(cx);
-    serde_json::json!({"dialog":p.project_delete.read(cx).state(w,cx),"target":p.delete_target.as_ref().map(|t|t.dir.clone()),"inspectPending":p.delete_inspect_pending.as_ref().map(|(serial,dir)|serde_json::json!({"serial":serial,"dir":dir})),"deletePending":p.delete_pending.as_ref().map(|d|serde_json::json!({"serial":d.serial,"epoch":d.epoch,"loaded":d.loaded})),"deleteSerial":p.delete_serial,"project":p.project.as_ref().map(|s|s.dir.clone()),"loadedSong":p.loaded_song,"playing":p.playing,"position":p.playhead.position(),"nativeEpoch":p.native_epoch,"nativeAnchorAgeSeconds":p.playhead.anchor().map(|(_,at)|at.elapsed().as_secs_f64()),"screen":p.screen as u8,"notice":p.notice,"error":p.library.read(cx).delete_error(),"projects":p.library.read(cx).project_snapshot()})
+    serde_json::json!({"dialog":p.project_delete.read(cx).state(w,cx),"target":p.delete_target.as_ref().map(|t|t.dir.clone()),"inspectPending":p.delete_flight.delete_inspect.current().map(|(_,serial,dir)|serde_json::json!({"serial":serial,"dir":dir})),"deletePending":p.delete_flight.delete.current().map(|(epoch,serial,d)|serde_json::json!({"serial":serial,"epoch":epoch,"loaded":d.loaded})),"deleteSerial":p.delete_flight.delete_inspect.serial(),"project":p.project.as_ref().map(|s|s.dir.clone()),"loadedSong":p.loaded_song,"playing":p.playing,"position":p.playhead.position(),"nativeEpoch":p.native_epoch,"nativeAnchorAgeSeconds":p.playhead.anchor().map(|(_,at)|at.elapsed().as_secs_f64()),"screen":p.screen as u8,"notice":p.notice,"error":p.library.read(cx).delete_error(),"projects":p.library.read(cx).project_snapshot()})
 }
 fn key(w: &mut Window, cx: &mut App, value: &'static str) {
     w.dispatch_keystroke(Keystroke::parse(value).unwrap(), cx);
@@ -136,7 +136,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   macro_rules! wait {($p:ident,$w:ident,$app:ident=>$condition:expr)=>{{let deadline=Instant::now()+Duration::from_secs(15);loop{cx.background_executor().timer(Duration::from_millis(20)).await;let ready=handle.update(cx,|_,$w,$app|{let $p=view.read($app);let _=(&$p,&$w,&$app);$condition})?;if ready{break;}if Instant::now()>=deadline{let actual=handle.update(cx,|_,w,cx|state(&view,w,cx))?;anyhow::bail!("Native delete wait timeout {}; {actual}",stringify!($condition));}}}};}
   macro_rules! press {($id:expr)=>{handle.update(cx,|_,w,cx|press(&view,w,cx,$id))??;};}
   macro_rules! shot {($name:expr)=>{handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,$name,viewport))??;};}
-  macro_rules! ask {($dir:expr)=>{{handle.update(cx,|_,w,cx|library_target(&view,w,cx,$dir,true))??;wait!(p,w,app=>p.delete_inspect_pending.is_none()&&p.project_delete.read(app).is_open());handle.update(cx,|_,w,cx|{pinned(&view,w,cx);})?;}};}
+  macro_rules! ask {($dir:expr)=>{{handle.update(cx,|_,w,cx|library_target(&view,w,cx,$dir,true))??;wait!(p,w,app=>p.delete_flight.delete_inspect.is_none()&&p.project_delete.read(app).is_open());handle.update(cx,|_,w,cx|{pinned(&view,w,cx);})?;}};}
   for (width,height) in [(1280.,800.),(1060.,640.)]{
    viewport=(width,height);let current=root.join(format!("current-{}",width as u32));let other=root.join(format!("other-{}",width as u32));
    handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;wait!(p,w,app=>w.viewport_size()==size(px(width),px(height))&&p.library.read(app).project_snapshot().as_array().is_some_and(|rows|rows.iter().any(|row|row["dir"].as_str()==current.to_str())));
@@ -152,26 +152,26 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    wait!(p,w,app=>!p.project_delete.read(app).is_open());anyhow::ensure!(other.is_dir(),"Keep removed project");
    ask!(&other);handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;wait!(p,w,app=>!p.project_delete.read(app).is_open());
    ask!(&other);handle.update(cx,|_,w,cx|click(w,cx,point(px(5.),px(5.))))?;wait!(p,w,app=>!p.project_delete.read(app).is_open());anyhow::ensure!(other.is_dir(),"Dismissal deleted native project");
-   ask!(&other);gate(&prepare)?;press!("project-delete-confirm");wait!(p,w,app=>p.delete_pending.is_some()&&prepare.with_extension("ready").exists());
-   let (serial,position,anchor)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.delete_serial,p.playhead.position(),p.playhead.anchor().map(|(_,at)|at))})?;
+   ask!(&other);gate(&prepare)?;press!("project-delete-confirm");wait!(p,w,app=>p.delete_flight.delete.is_some()&&prepare.with_extension("ready").exists());
+   let (serial,position,anchor)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.delete_flight.delete_inspect.serial(),p.playhead.position(),p.playhead.anchor().map(|(_,at)|at))})?;
    for id in ["project-delete-keep","project-delete-confirm"]{press!(id);}
    handle.update(cx,|_,w,cx|{key(w,cx,"escape");click(w,cx,point(px(5.),px(5.)));})?;
    wait!(p,w,app=>p.playhead.position()>position+0.25&&p.playhead.anchor().map(|(_,at)|at)>anchor);
-   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.delete_serial==serial&&p.delete_pending.is_some()&&p.project_delete.read(cx).is_open()&&p.playing&&p.native_epoch==epoch,"Busy delete dismissed or disturbed unrelated native playback");Ok(())})??;
+   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.delete_flight.delete_inspect.serial()==serial&&p.delete_flight.delete.is_some()&&p.project_delete.read(cx).is_open()&&p.playing&&p.native_epoch==epoch,"Busy delete dismissed or disturbed unrelated native playback");Ok(())})??;
    shot!(&format!("busy-other-{}",width as u32));std::fs::remove_file(&prepare)?;
-   wait!(p,w,app=>p.delete_pending.is_none()&&!p.project_delete.read(app).is_open()&&!other.exists()&&p.playing&&p.project.as_ref().is_some_and(|s|s.dir==current));
+   wait!(p,w,app=>p.delete_flight.delete.is_none()&&!p.project_delete.read(app).is_open()&&!other.exists()&&p.playing&&p.project.as_ref().is_some_and(|s|s.dir==current));
    // Confirmed loaded deletion releases audio first. A changed confirmation
    // snapshot must fail, preserve the new metadata, and recover only paused.
-   ask!(&current);gate(&prepare)?;press!("project-delete-confirm");wait!(p,w,app=>p.delete_pending.is_some()&&prepare.with_extension("ready").exists());
+   ask!(&current);gate(&prepare)?;press!("project-delete-confirm");wait!(p,w,app=>p.delete_flight.delete.is_some()&&prepare.with_extension("ready").exists());
    let meta_path=current.join("project.json");let mut changed:serde_json::Value=serde_json::from_slice(&std::fs::read(&meta_path)?)?;changed["externalDeleteFixture"]=serde_json::json!(format!("external-{}",width as u32));std::fs::write(&meta_path,serde_json::to_vec_pretty(&changed)?)?;std::fs::remove_file(&prepare)?;
-   wait!(p,w,app=>p.delete_pending.is_none()&&!p.project_delete.read(app).is_open()&&!p.loading&&p.project.as_ref().is_some_and(|s|s.dir==current)&&!p.playing&&p.library.read(app).delete_error().is_some());
+   wait!(p,w,app=>p.delete_flight.delete.is_none()&&!p.project_delete.read(app).is_open()&&!p.loading&&p.project.as_ref().is_some_and(|s|s.dir==current)&&!p.playing&&p.library.read(app).delete_error().is_some());
    anyhow::ensure!(current.is_dir()&&serde_json::from_slice::<serde_json::Value>(&std::fs::read(&meta_path)?)?==changed,"Conflict lost external metadata or native project");
    std::fs::write(out.join(format!("conflict-preserved-{}.json",width as u32)),std::fs::read(&meta_path)?)?;
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).screen==Screen::Library,"Failed loaded deletion left the source catalog");ensure_library(&view,w,cx)?;Ok(())})??;wait!(p,w,app=>p.screen==Screen::Library);shot!(&format!("conflict-inline-{}",width as u32));
    // Use the same real writer lease the backend honors, acquired only after
    // the ordinary-file inspection has produced the displayed confirmation.
    ask!(&current);let lock_file=std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(current.join(".singz-native-write.lock"))?;let writer=crate::file_lease::Lease::acquire(lock_file)?;
-   press!("project-delete-confirm");wait!(p,w,app=>p.delete_pending.is_none()&&!p.project_delete.read(app).is_open()&&!p.loading&&p.project.as_ref().is_some_and(|s|s.dir==current)&&!p.playing&&p.library.read(app).delete_error().is_some());drop(writer);
+   press!("project-delete-confirm");wait!(p,w,app=>p.delete_flight.delete.is_none()&&!p.project_delete.read(app).is_open()&&!p.loading&&p.project.as_ref().is_some_and(|s|s.dir==current)&&!p.playing&&p.library.read(app).delete_error().is_some());drop(writer);
    anyhow::ensure!(current.is_dir()&&serde_json::from_slice::<serde_json::Value>(&std::fs::read(&meta_path)?)?==changed,"Busy-writer refusal mutated native project");
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).screen==Screen::Library,"Failed loaded deletion left the source catalog");ensure_library(&view,w,cx)?;Ok(())})??;wait!(p,w,app=>p.screen==Screen::Library);shot!(&format!("writer-refused-{}",width as u32));
    // Resume from the actual native Player transport, then delete that exact
@@ -180,7 +180,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    handle.update(cx,|_,w,cx|songs(&view,w,cx))??;wait!(p,w,app=>p.screen==Screen::Library);ask!(&current);
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{anyhow::ensure!(state(&view,w,cx)["dialog"]["details"]["opened"]==true,"Loaded delete confirmation omitted stop/close note");Ok(())})??;
    shot!(&format!("confirm-loaded-{}",width as u32));press!("project-delete-confirm");
-   wait!(p,w,app=>p.delete_pending.is_none()&&!p.project_delete.read(app).is_open()&&!current.exists()&&p.project.is_none()&&!p.loaded_song&&!p.playing&&p.screen==Screen::Library);
+   wait!(p,w,app=>p.delete_flight.delete.is_none()&&!p.project_delete.read(app).is_open()&&!current.exists()&&p.project.is_none()&&!p.loaded_song&&!p.playing&&p.screen==Screen::Library);
    cx.background_executor().timer(Duration::from_millis(350)).await;
    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.project.is_none()&&!p.loaded_song&&!p.playing&&!p.loading&&p.notice.is_none(),"Deleted project resurrected or opened an error modal");Ok(())})??;shot!(&format!("deleted-loaded-{}",width as u32));
   }

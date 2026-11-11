@@ -8,7 +8,7 @@ fn key(window:&mut Window,cx:&mut App,name:&'static str) {
 }
 fn quiet(p:&Player,window:&Window)->anyhow::Result<()> {
     anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"Drive restore activated a window");
-    anyhow::ensure!(!p.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested,"Drive restore requested physical input");
+    anyhow::ensure!(!p.monitor_flight.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested,"Drive restore requested physical input");
     anyhow::ensure!(p.notice.is_none(),"Native restore notice: {:?}",p.notice);Ok(())
 }
 fn measured(bounds:Option<Bounds<Pixels>>,window:&Window,id:&str)->anyhow::Result<()> {
@@ -183,12 +183,12 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
                 state["query"]=="Custom graph"&&state["visibleRows"].as_array().is_some_and(|rows|rows.len()==1&&rows[0]["id"]=="project-custom")});
             let search_ownership=handle.update(cx,|_,window,cx|->anyhow::Result<serde_json::Value>{
                 let p=view.read(cx);let native=p.last_playback_status.as_ref().unwrap();let browser=p.drive_projects.read(cx).state(window,cx);
-                anyhow::ensure!(p.native_epoch==search_epoch&&!p.playing&&!native.playing&&p.native_play_intent.is_none()
+                anyhow::ensure!(p.native_epoch==search_epoch&&!p.playing&&!native.playing&&p.transport_flight.native_play.is_none()
                     &&(native.position-search_position).abs()<0.001&&native.seek_count==search_seek,
                     "Actual space in Drive search escaped into paused song transport");
                 Ok(serde_json::json!({"query":browser["query"],"searchValue":browser["searchValue"],"searchFocused":browser["searchFocused"],
                     "epochBefore":search_epoch,"epochAfter":p.native_epoch,"positionBefore":search_position,"positionAfter":native.position,
-                    "seekBefore":search_seek,"seekAfter":native.seek_count,"playing":p.playing,"nativePlaying":native.playing,"playIntentPending":p.native_play_intent.is_some()}))
+                    "seekBefore":search_seek,"seekAfter":native.seek_count,"playing":p.playing,"nativePlaying":native.playing,"playIntentPending":p.transport_flight.native_play.is_some()}))
             })??;
             choose!("project-custom");native!("project-custom","native-custom");
             if !offline {

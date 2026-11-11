@@ -63,7 +63,7 @@ fn snapshot(view: &Entity<Player>, w: &mut Window, cx: &mut App, out: &Path, nam
     let mut controls=popover.bounds.borrow().keys().cloned().collect::<Vec<_>>();controls.sort();
     let state=serde_json::json!({"project":p.project.as_ref().map(|p|p.name.clone()),"beat":p.beats,"metronome":p.metronome,
         "popover":p.metronome_open,"popoverControls":controls,"popoverMetronome":popover.met,"popoverBeat":popover.grid,
-        "job":p.beat_job,"pending":p.metronome_pending,"autoSavePending":p.beat_auto_save,"editSequence":p.edit_seq,
+        "job":p.beat_job,"pending":p.metronome_flight.metronome.current_serial(),"autoSavePending":p.beat_auto_save,"editSequence":p.edit_seq,
         "savedSequence":p.saved_seq,"position":p.playhead.position(),"playing":p.playing,"nativeSeekCount":p.playhead.seek_count(),
         "notice":p.notice,"windowPresented":w.is_visible(),"windowActive":w.is_window_active(),
         "hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
@@ -81,9 +81,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             macro_rules! open_pop {()=>{{handle.update(cx,|_,w,cx|open_popover(&view,w,cx))??;wait!(|p:&Player|p.metronome_open);}};}
 
             mode(&root,"valid",0)?;open!("missing");
-            wait!(|p:&Player|p.beats.as_ref().is_some_and(|g|g.source=="auto"&&g.det_version==Some(beat_analysis::version() as f64))&&p.beat_job.is_none()&&p.metronome_pending.is_none()&&!p.saving&&p.saved_seq==p.edit_seq);
+            wait!(|p:&Player|p.beats.as_ref().is_some_and(|g|g.source=="auto"&&g.det_version==Some(beat_analysis::version() as f64))&&p.beat_job.is_none()&&p.metronome_flight.metronome.is_none()&&!p.saving&&p.saved_seq==p.edit_seq);
             anyhow::ensure!(raw(&root,"missing")?["settings"]["beat"]["bpm"].as_f64()==Some(120.),"Missing-grid auto detection was not saved");shot!("auto-missing");
-            open!("stale");wait!(|p:&Player|p.beats.as_ref().is_some_and(|g|(g.bpm-120.).abs()<1e-6&&g.det_version==Some(beat_analysis::version() as f64))&&p.beat_job.is_none()&&p.metronome_pending.is_none()&&!p.saving&&p.saved_seq==p.edit_seq);
+            open!("stale");wait!(|p:&Player|p.beats.as_ref().is_some_and(|g|(g.bpm-120.).abs()<1e-6&&g.det_version==Some(beat_analysis::version() as f64))&&p.beat_job.is_none()&&p.metronome_flight.metronome.is_none()&&!p.saving&&p.saved_seq==p.edit_seq);
             anyhow::ensure!(raw(&root,"stale")?["settings"]["beat"]["detVersion"].as_f64()==Some(beat_analysis::version() as f64),"Stale-grid result was not saved");shot!("auto-stale");
             let before_protected=calls(&root);let manual_before=raw(&root,"manual")?;open!("manual");
             cx.background_executor().timer(Duration::from_millis(500)).await;
@@ -102,9 +102,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx,|_,w,cx|redetect(&view,w,cx))??;
             wait!(|p:&Player|p.beat_job.is_some()&&calls(&root)>before_redetect);
             handle.update(cx,|_,w,cx|move_live_bar(&view,w,cx))??;
-            wait!(|p:&Player|p.beats.as_ref().is_some_and(|g|g.user_bars.as_deref()==Some(&[3.][..]))&&p.metronome_pending.is_none()&&!p.saving&&p.saved_seq==p.edit_seq);
+            wait!(|p:&Player|p.beats.as_ref().is_some_and(|g|g.user_bars.as_deref()==Some(&[3.][..]))&&p.metronome_flight.metronome.is_none()&&!p.saving&&p.saved_seq==p.edit_seq);
             let bar_saved=raw(&root,"manual")?;anyhow::ensure!(bar_saved["settings"]["beat"]["source"]=="manual","Manual bar Save raced past the delayed detector fixture");
-            wait!(|p:&Player|p.beat_job.is_none()&&p.metronome_pending.is_none()&&p.beats.as_ref().is_some_and(|g|g.source=="auto"&&(g.bpm-120.).abs()<1e-6));
+            wait!(|p:&Player|p.beat_job.is_none()&&p.metronome_flight.metronome.is_none()&&p.beats.as_ref().is_some_and(|g|g.source=="auto"&&(g.bpm-120.).abs()<1e-6));
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);let g=p.beats.as_ref().unwrap();anyhow::ensure!(g.user_bars.as_deref()==Some(&[3.][..])&&g.auto_downbeats.as_deref()==Some(&[0,4,8,12,16,20][..]),"Re-detect did not fold LIVE bar edits over the new detector base");anyhow::ensure!(p.edit_seq>p.saved_seq&&!p.beat_auto_save,"Explicit Re-detect was auto-saved");Ok(())})??;
             anyhow::ensure!(raw(&root,"manual")?==bar_saved,"Explicit Re-detect unexpectedly published settings");shot!("redetect-live-bars");
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.save_project(cx)))?;wait!(|p:&Player|!p.saving&&p.saved_seq==p.edit_seq);
@@ -118,7 +118,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     let grid=p.beats.as_ref().unwrap().set_user_bar(4.5,None);let on=!p.metronome.accent;
                     p.apply_beat_grid(grid.clone(),true,cx);(grid,on)
                 });
-                let first=view.read(cx).metronome_pending.ok_or_else(||anyhow::anyhow!("Ruler edit did not queue native acceptance"))?;
+                let first=view.read(cx).metronome_flight.metronome.current_serial().ok_or_else(||anyhow::anyhow!("Ruler edit did not queue native acceptance"))?;
                 // Rendering and app-local input cannot drain Backend receipts
                 // inside this single synchronous update.
                 accent(&view,w,cx,on)?;
@@ -128,8 +128,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             // Child control subscriptions are delivered after the enclosing
             // update. Wait for that delivery rather than reading stale Root
             // state synchronously inside the click's update.
-            wait!(|p:&Player|p.metronome_serial>first_serial);
-            wait!(|p:&Player|p.metronome_pending.is_none()&&!p.saving&&!p.beat_auto_save&&p.saved_seq==p.edit_seq);
+            wait!(|p:&Player|p.metronome_flight.metronome.serial()>first_serial);
+            wait!(|p:&Player|p.metronome_flight.metronome.is_none()&&!p.saving&&!p.beat_auto_save&&p.saved_seq==p.edit_seq);
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.beats.as_ref()==Some(&requested_grid)&&p.metronome.accent==requested_accent,"Later setting receipt erased the pending ruler edit");Ok(())})??;
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.save_project(cx)))?;wait!(|p:&Player|!p.saving&&p.saved_seq==p.edit_seq);
             let race_saved=raw(&root,"manual")?;
@@ -145,13 +145,13 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             let barrier_epoch=handle.update(cx,|_,_,cx|view.update(cx,|p,cx|->anyhow::Result<_>{
                 let epoch=p.native_epoch;let grid=p.beats.as_ref().unwrap().set_user_bar(5.5,None);
                 p.apply_beat_grid(grid,true,cx);p.open_project(root.join("future"),cx);
-                anyhow::ensure!(p.native_epoch==epoch&&!p.loading&&p.metronome_pending.is_some(),"Navigation overtook pending bar acceptance/automatic Save");Ok(epoch)
+                anyhow::ensure!(p.native_epoch==epoch&&!p.loading&&p.metronome_flight.metronome.is_some(),"Navigation overtook pending bar acceptance/automatic Save");Ok(epoch)
             }))??;
-            wait!(|p:&Player|p.metronome_pending.is_none()&&!p.saving&&p.notice.as_ref().is_some_and(|n|n.contains("changed outside")));
+            wait!(|p:&Player|p.metronome_flight.metronome.is_none()&&!p.saving&&p.notice.as_ref().is_some_and(|n|n.contains("changed outside")));
             cx.background_executor().timer(Duration::from_millis(300)).await;
-            handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_epoch==barrier_epoch&&!p.loading&&p.project.as_ref().is_some_and(|p|p.name=="manual")&&p.notice.is_some()&&p.metronome_navigation.is_some(),"Automatic Save conflict did not retain the old project and blocked navigation");Ok(())})??;
+            handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_epoch==barrier_epoch&&!p.loading&&p.project.as_ref().is_some_and(|p|p.name=="manual")&&p.notice.is_some()&&p.metronome_flight.metronome_navigation.is_some(),"Automatic Save conflict did not retain the old project and blocked navigation");Ok(())})??;
             anyhow::ensure!(std::fs::read(root.join("manual/project.json"))?==external_bytes,"Automatic Save overwrote external metadata");shot!("auto-save-navigation-conflict");
-            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.notice=None;p.metronome_navigation=None;cx.notify();}))?;
+            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.notice=None;p.metronome_flight.metronome_navigation=None;cx.notify();}))?;
 
             mode(&root,"valid",1500)?;let before_changed=calls(&root);let changed_before=raw(&root,"changed")?;open!("changed");
             wait!(|p:&Player|p.beat_job.is_some()&&calls(&root)>before_changed);
@@ -168,7 +168,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             let before_intent=calls(&root);open!("intent");wait!(|p:&Player|p.beat_job.is_some()&&calls(&root)>before_intent);
             open_pop!();
             handle.update(cx,|_,w,cx|manual_tempo(&view,w,cx))??;
-            wait!(|p:&Player|p.beat_job.is_none()&&p.beat_result.is_none()&&p.metronome_pending.is_none()&&p.beats.as_ref().is_some_and(|g|g.source=="manual"&&(g.bpm-111.).abs()<1e-6));
+            wait!(|p:&Player|p.beat_job.is_none()&&p.beat_result.is_none()&&p.metronome_flight.metronome.is_none()&&p.beats.as_ref().is_some_and(|g|g.source=="manual"&&(g.bpm-111.).abs()<1e-6));
             cx.background_executor().timer(Duration::from_millis(500)).await;
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.notice.is_none()&&!p.beat_auto_save&&p.beats.as_ref().is_some_and(|g|(g.bpm-111.).abs()<1e-6),"Cancelled automatic analysis overwrote manual tempo or retained busy/error state");Ok(())})??;shot!("manual-intent-cancelled");
 
@@ -177,7 +177,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             let rejected_before=std::fs::read(root.join("intent/project.json"))?;
             let accepted=handle.update(cx,|_,_,cx|view.read(cx).beats.clone())?;
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{let mut invalid=p.beats.clone().unwrap();invalid.beats[0]=-0.01;p.apply_beat_grid(invalid,true,cx);}))?;
-            wait!(|p:&Player|p.metronome_pending.is_none()&&p.notice.is_some());
+            wait!(|p:&Player|p.metronome_flight.metronome.is_none()&&p.notice.is_some());
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.beats==accepted&&!p.beat_auto_save&&!p.saving,"Rejected grid replaced accepted settings or triggered Save");Ok(())})??;
             anyhow::ensure!(std::fs::read(root.join("intent/project.json"))?==rejected_before,"Rejected grid was published");shot!("rejected-grid-not-saved");
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.notice=None;cx.notify();}))?;

@@ -33,7 +33,7 @@ fn volume(view:&Entity<Player>,w:&mut Window,cx:&mut App,value:f64)->anyhow::Res
 fn state(p:&Player,w:&Window,cx:&App)->serde_json::Value {
     serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],
         "scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),"metronome":p.metronome,
-        "pending":p.metronome_pending,"open":p.metronome_open,"playing":p.playing,"position":p.playhead.position(),
+        "pending":p.metronome_flight.metronome.current_serial(),"open":p.metronome_open,"playing":p.playing,"position":p.playhead.position(),
         "masterVolume":p.master_volume,"output":p.transport.read(cx).output_state(),
         "focused":p.metronome_ui.read(cx).focused_control(w,cx),"seekCount":p.playhead.seek_count(),
         "scope":"real popup keyboard and accepted native transactions; no nonzero audio measurement","liveFps":"unmeasured"})
@@ -71,7 +71,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 let old_tap=Instant::now();
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"met-tap"))??;
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);
-                    anyhow::ensure!(p.metronome_ui.read(cx).tap_count()==2&&p.beats==grid_before&&p.metronome_pending.is_none(),"Two initial taps unexpectedly edited the grid");
+                    anyhow::ensure!(p.metronome_ui.read(cx).tap_count()==2&&p.beats==grid_before&&p.metronome_flight.metronome.is_none(),"Two initial taps unexpectedly edited the grid");
                     key(w,cx,"escape");Ok(())})??;
                 wait!(p,w,app => !p.metronome_open);
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"metronome"))??;
@@ -83,24 +83,24 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                     handle.update(cx,|_,w,cx|press(&view,w,cx,"met-tap"))??;
                     handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);let popup=p.metronome_ui.read(cx);
                         anyhow::ensure!(old_tap.elapsed()<Duration::from_millis(2500),"Tap reopen regression exceeded idle timeout and is unqualified");
-                        anyhow::ensure!(popup.tap_count()==count&&p.beats==grid_before&&p.metronome_pending.is_none(),"Reopen reused taps from the dismissed popup");
+                        anyhow::ensure!(popup.tap_count()==count&&p.beats==grid_before&&p.metronome_flight.metronome.is_none(),"Reopen reused taps from the dismissed popup");
                         if grid_before.is_none(){anyhow::ensure!(popup.caption()==crate::i18n::t("player.metronome.tapHint"),"Fresh tap hint is missing");}
                         Ok(())})??;
                 }
-                let serial=handle.update(cx,|_,_,cx|view.read(cx).metronome_serial)?;
+                let serial=handle.update(cx,|_,_,cx|view.read(cx).metronome_flight.metronome.serial())?;
                 cx.background_executor().timer(Duration::from_millis(150)).await;
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"met-tap"))??;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome_serial>serial
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome_flight.metronome.serial()>serial
                     &&p.metronome_ui.read(app).tap_count()==3&&p.beats.as_ref().is_some_and(|g|g.source=="manual"&&g.bpm.is_finite()&&(30. ..=300.).contains(&g.bpm)));
                 // The trigger reports click/grid state, as in Transport.tsx.
                 for id in ["met-click-0","met-count-0","met-grid-1"] {
                     handle.update(cx,|_,w,cx|press(&view,w,cx,id))??;
-                    wait!(p,w,app => p.metronome_pending.is_none());
+                    wait!(p,w,app => p.metronome_flight.metronome.is_none());
                 }
                 wait!(p,w,app => !p.metronome.click&&p.metronome.count_in_bars==0&&p.metronome.grid&&p.transport.read(app).met_enabled);
                 for id in ["met-grid-0","met-count-1"] {
                     handle.update(cx,|_,w,cx|press(&view,w,cx,id))??;
-                    wait!(p,w,app => p.metronome_pending.is_none());
+                    wait!(p,w,app => p.metronome_flight.metronome.is_none());
                 }
                 wait!(p,w,app => !p.metronome.click&&!p.metronome.grid&&p.metronome.count_in_bars==1&&!p.transport.read(app).met_enabled);
                 let restore=[if original.click{"met-click-1"}else{"met-click-0"},
@@ -108,7 +108,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                     match original.count_in_bars{0=>"met-count-0",1=>"met-count-1",_=>"met-count-2"}];
                 for id in restore {
                     handle.update(cx,|_,w,cx|press(&view,w,cx,id))??;
-                    wait!(p,w,app => p.metronome_pending.is_none());
+                    wait!(p,w,app => p.metronome_flight.metronome.is_none());
                 }
                 let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
@@ -130,29 +130,29 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 handle.update(cx,|_,w,cx|key(w,cx,"shift-tab"))?;
                 wait!(p,w,app => !p.metronome_ui.read(app).volume_focused(w));
                 handle.update(cx,|_,w,cx|volume(&view,w,cx,0.5))??;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==0.5&&p.metronome_ui.read(app).volume_focused(w));
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome.volume==0.5&&p.metronome_ui.read(app).volume_focused(w));
                 let count=handle.update(cx,|_,_,cx|view.read(cx).playhead.seek_count())?;
                 handle.update(cx,|_,w,cx|{for _ in 0..3{key(w,cx,"right");}})?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==0.53&&p.playhead.seek_count()==count);
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome.volume==0.53&&p.playhead.seek_count()==count);
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.metronome_open&&p.metronome_ui.read(app).volume_focused(w)
+                wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.metronome_open&&p.metronome_ui.read(app).volume_focused(w)
                     &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.metronome_open&&p.metronome_ui.read(app).volume_focused(w)
+                wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none()&&p.metronome_open&&p.metronome_ui.read(app).volume_focused(w)
                     &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                 handle.update(cx,|_,w,cx|{key(w,cx,"home");key(w,cx,"left");})?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==0.&&p.playhead.seek_count()==count);
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome.volume==0.&&p.playhead.seek_count()==count);
                 handle.update(cx,|_,w,cx|{key(w,cx,"end");key(w,cx,"right");})?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==1.&&p.playhead.seek_count()==count);
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome.volume==1.&&p.playhead.seek_count()==count);
                 handle.update(cx,|_,w,cx|volume(&view,w,cx,original.volume))??;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.volume==original.volume);
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome.volume==original.volume);
                 handle.update(cx,|_,w,cx|tab_to(&view,w,cx,"met-accent-1"))??;
                 handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&!p.metronome.accent);
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&!p.metronome.accent);
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&!p.metronome.accent&&p.metronome_open&&p.focus_handle.is_focused(w));
+                wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&!p.metronome.accent&&p.metronome_open&&p.focus_handle.is_focused(w));
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => !p.playing&&p.native_play_intent.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
+                wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
                 handle.update(cx,|_,w,cx|tab_to(&view,w,cx,"met-accent-0"))??;
                 let position=handle.update(cx,|_,_,cx|view.read(cx).playhead.position())?;
                 handle.update(cx,|_,w,cx|key(w,cx,"right"))?;
@@ -160,24 +160,24 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 handle.update(cx,|_,w,cx|key(w,cx,"left"))?;
                 wait!(p,w,app => p.playhead.pending_seek().is_none()&&(p.playhead.position()-position).abs()<0.03);
                 handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome.accent);
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome.accent);
                 if !original.accent {handle.update(cx,|_,w,cx|press(&view,w,cx,"met-accent-1"))??;}
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome==original);
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.metronome==original);
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{ui_training_run::draw(w,cx);let value=state(view.read(cx),w,cx);
                     let name=format!("metronome-keyboard-{}",width as u32);w.render_to_image()?.save(out.join(format!("{name}.png")))?;
                     std::fs::write(out.join(format!("{name}.json")),serde_json::to_vec_pretty(&value)?)?;cases.push(value);Ok(())})??;
                 handle.update(cx,|_,w,cx|tab_to(&view,w,cx,"met-bpm"))??;
                 handle.update(cx,|_,w,cx|{key(w,cx,if cfg!(target_os="macos"){"cmd-a"}else{"ctrl-a"});for text in ["1","2","0"]{key(w,cx,text);}key(w,cx,"enter");})?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.beats.as_ref().is_some_and(|g|g.bpm==120.));
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.beats.as_ref().is_some_and(|g|g.bpm==120.));
                 handle.update(cx,|_,w,cx|tab_to(&view,w,cx,"met-half"))??;
                 handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.beats.as_ref().is_some_and(|g|g.bpm==60.));
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.beats.as_ref().is_some_and(|g|g.bpm==60.));
                 handle.update(cx,|_,w,cx|key(w,cx,"enter"))?;
-                wait!(p,w,app => p.metronome_pending.is_none()&&p.beats.as_ref().is_some_and(|g|g.bpm==30.)&&p.metronome_ui.read(app).focused_control(w,app).is_none());
+                wait!(p,w,app => p.metronome_flight.metronome.is_none()&&p.beats.as_ref().is_some_and(|g|g.bpm==30.)&&p.metronome_ui.read(app).focused_control(w,app).is_none());
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => p.playing&&p.native_play_intent.is_none()&&p.metronome_open);
+                wait!(p,w,app => p.playing&&p.transport_flight.native_play.is_none()&&p.metronome_open);
                 handle.update(cx,|_,w,cx|key(w,cx,"space"))?;
-                wait!(p,w,app => !p.playing&&p.native_play_intent.is_none());
+                wait!(p,w,app => !p.playing&&p.transport_flight.native_play.is_none());
                 handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
                 wait!(p,w,app => !p.metronome_open);
                 // Boundary edits stay unsaved. Reload through production Open
@@ -188,7 +188,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                     &&!p.playing&&p.playhead.position().abs()<0.03&&p.metronome==original&&p.beats==grid_before);
             }
             handle.update(cx,|_,w,cx|{let focus=view.read(cx).focus_handle.clone();focus.focus(w,cx);key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"});})?;
-            wait!(p,w,app => !p.saving&&p.saved_seq==p.edit_seq&&p.metronome_pending.is_none()&&p.metronome==original);
+            wait!(p,w,app => !p.saving&&p.saved_seq==p.edit_seq&&p.metronome_flight.metronome.is_none()&&p.metronome==original);
             let (saved,_)=project_store::read(&project,"project.json")?;
             anyhow::ensure!(beat::Metronome::sanitize(&saved["settings"]["metronome"])==original,"Metronome keyboard journey did not restore saved baseline");
             handle.update(cx,|_,w,_|w.resize(size(px(1280.),px(800.))))?;

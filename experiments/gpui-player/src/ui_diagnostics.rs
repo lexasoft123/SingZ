@@ -142,9 +142,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     w.defer(cx,move|w,cx|{
                         let proof=(||->anyhow::Result<serde_json::Value>{let p=player.read(cx);let panel=state(&player,w,cx);
                             anyhow::ensure!(p.screen==Screen::Log&&p.log_panel.read(cx).is_open(),"Header Log event did not open native panel before deferred boundary");
-                            anyhow::ensure!(p.diagnostics_list_pending.is_some_and(|(_,session)|session==p.diagnostics_session),"New session inventory was not pending at Header event boundary");
+                            anyhow::ensure!(p.diagnostics_flight.diagnostics_list.current().is_some_and(|(session,_,_)|session==p.diagnostics_session),"New session inventory was not pending at Header event boundary");
                             anyhow::ensure!(panel["sessions"].as_array().is_some_and(Vec::is_empty),"Reopened Log exposed stale/pruned session IDs before list reply: {panel}");
-                            Ok(serde_json::json!({"scope":"Window.defer in same actual HeaderLog App effect cycle; before list adoption","previousInventoryCount":previous_count,"sessions":panel["sessions"],"selectedSession":panel["selectedSession"],"modalSession":p.diagnostics_session,"pendingList":p.diagnostics_list_pending}))
+                            Ok(serde_json::json!({"scope":"Window.defer in same actual HeaderLog App effect cycle; before list adoption","previousInventoryCount":previous_count,"sessions":panel["sessions"],"selectedSession":panel["selectedSession"],"modalSession":p.diagnostics_session,"pendingList":p.diagnostics_flight.diagnostics_list.current().map(|(session,id,_)|(id,session))}))
                         })();*sink.borrow_mut()=Some(proof);
                     });Ok(())
                 })??;
@@ -181,7 +181,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 // no backend ring or LogPanel fixture is cleared to manufacture this.
                 for (width,height) in [(1280.,800.),(1060.,640.)] {
                     viewport=(width,height);handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;wait!(p,w,app=>w.viewport_size()==size(px(width),px(height)));open!();
-                    wait!(p,w,app=>p.diagnostics_list_pending.is_none()&&state(&view,w,app)["sessions"].as_array().is_some_and(|ss|ss.iter().any(|s|s["id"]==seed_name)));
+                    wait!(p,w,app=>p.diagnostics_flight.diagnostics_list.is_none()&&state(&view,w,app)["sessions"].as_array().is_some_and(|ss|ss.iter().any(|s|s["id"]==seed_name)));
                     handle.update(cx,|_,_,cx|log(&view,cx,&format!("short-live-{}: explicit fixture for intrinsic shrink",width as u32)))??;
                     wait!(p,w,app=>state(&view,w,app)["copyText"].as_str().is_some_and(|s|s.contains(&format!("short-live-{}:",width as u32))));
                     measured!();let before=handle.update(cx,|_,w,cx|->anyhow::Result<f32>{draw(w,cx);let h=f32::from(view.read(cx).log_panel.read(cx).bounds("log-body").ok_or_else(||anyhow::anyhow!("Short body unmeasured"))?.size.height);anyhow::ensure!(h==238.,"Fresh short current session did not use source minimum inner height238: {h}");Ok(h)})??;
@@ -244,7 +244,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 wait!(p,w,app=>p.diagnostics_prompt_requests.len()==requests+1);
                 let collision=out.join(format!("existing-{}.txt",width as u32));std::fs::write(&collision,b"existing user export must survive")?;
                 handle.update(cx,|_,_,cx|prompt(&view,cx,Some(collision.clone())))?;press!("log-save");
-                wait!(p,w,app=>p.diagnostics_prompt_requests.len()==requests+2&&p.diagnostics_save_pending.is_none());
+                wait!(p,w,app=>p.diagnostics_prompt_requests.len()==requests+2&&p.diagnostics_flight.diagnostics_save.is_none());
                 anyhow::ensure!(std::fs::read(&collision)?==b"existing user export must survive","Unconfirmed export overwrote existing file");
                 // Actual overflowing ring rows exercise follow and manual wheel input.
                 handle.update(cx,|_,_,cx|->anyhow::Result<()>{for i in 0..160{log(&view,cx,&format!("scroll-{}-{i:03}: explicit diagnostic UI fixture",width as u32))?;}Ok(())})??;
@@ -289,17 +289,17 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let newer=out.join(format!("callback-newer-{}.txt",width as u32));
                 let _=std::fs::remove_file(&older);let _=std::fs::remove_file(&newer);gate(&save_gate)?;
                 let (older_serial,newer_serial,modal)=handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{
-                    let old_serial=p.diagnostics_save_serial+1;let new_serial=old_serial+1;let modal=p.diagnostics_session;
-                    p.diagnostics_save_serial=new_serial;
+                    let old_serial=p.diagnostics_flight.diagnostics_save_serial+1;let new_serial=old_serial+1;let modal=p.diagnostics_session;
+                    p.diagnostics_flight.diagnostics_save_serial=new_serial;
                     p.accept_diagnostics_path(new_serial,modal,Some(seed_name.clone()),Some(newer.clone()),false,cx);
                     (old_serial,new_serial,modal)
                 }))?;
-                wait!(p,w,app=>save_gate.with_extension("ready").exists()&&p.diagnostics_save_pending.as_ref().is_some_and(|(_,_,s,_)|*s==newer_serial));
-                let latest_pending=handle.update(cx,|_,_,cx|view.read(cx).diagnostics_save_pending.clone())?;
+                wait!(p,w,app=>save_gate.with_extension("ready").exists()&&p.diagnostics_flight.diagnostics_save.payload().is_some_and(|(s,_)|*s==newer_serial));
+                let latest_pending=handle.update(cx,|_,_,cx|view.read(cx).diagnostics_flight.diagnostics_save.current().map(|(e,i,(s,n))|(e,i,*s,n.clone())))?;
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.accept_diagnostics_path(older_serial,modal,Some(seed_name.clone()),Some(older.clone()),false,cx)))?;
-                handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).diagnostics_save_pending==latest_pending,"Older accepted callback stole newer pending UI receipt");Ok(())})??;
+                handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).diagnostics_flight.diagnostics_save.current().map(|(e,i,(s,n))|(e,i,*s,n.clone()))==latest_pending,"Older accepted callback stole newer pending UI receipt");Ok(())})??;
                 std::fs::remove_file(&save_gate)?;
-                wait!(p,w,app=>older.is_file()&&newer.is_file()&&p.diagnostics_save_pending.is_none()&&state(&view,w,app)["savedTo"].as_str()==newer.to_str());
+                wait!(p,w,app=>older.is_file()&&newer.is_file()&&p.diagnostics_flight.diagnostics_save.is_none()&&state(&view,w,app)["savedTo"].as_str()==newer.to_str());
                 anyhow::ensure!(std::fs::read_to_string(&older)?==seed_raw&&std::fs::read_to_string(&newer)?==seed_raw,"Out-of-order accepted prompt lost a real export");
                 // Let any late older receipt be delivered before checking UI ownership.
                 cx.background_executor().timer(Duration::from_millis(100)).await;
@@ -310,17 +310,17 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let stale=out.join(format!("closed-save-{}.txt",width as u32));let _=std::fs::remove_file(&stale);gate(&save_gate)?;
                 handle.update(cx,|_,_,cx|prompt(&view,cx,Some(stale.clone())))?;press!("log-save");wait!(p,w,app=>save_gate.with_extension("ready").exists());
                 press!("log-close");wait!(p,w,app=>p.screen!=Screen::Log);open!();
-                std::fs::remove_file(&save_gate)?;wait!(p,w,app=>p.diagnostics_save_pending.is_none()&&stale.is_file());
+                std::fs::remove_file(&save_gate)?;wait!(p,w,app=>p.diagnostics_flight.diagnostics_save.is_none()&&stale.is_file());
                 anyhow::ensure!(std::fs::read_to_string(&stale)?==seed_raw,"Accepted Save was lost when its dialog closed");
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{let s=state(&view,w,cx);anyhow::ensure!(s["selectedSession"].is_null()&&s["savedTo"].is_null(),"Closed dialog save receipt leaked into reopened current session: {s}");Ok(())})??;
                 shot!(&format!("reopened-after-save-{}",width as u32));
                 // Missing and non-file reads use the actual retained-session worker.
-                wait!(p,w,app=>p.diagnostics_list_pending.is_none()&&p.diagnostics_read_pending.is_none());
+                wait!(p,w,app=>p.diagnostics_flight.diagnostics_list.is_none()&&p.diagnostics_flight.diagnostics_read.is_none());
                 let backup=seed_path.with_extension("test-backup");std::fs::rename(&seed_path,&backup)?;
                 press!("log-session");press!(&format!("log-session-option-{index}"));selected!(&seed_name);
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{anyhow::ensure!(state(&view,w,cx)["copyText"].as_str().is_some_and(|s|s.contains("That session log is no longer kept.")),"Missing session did not display honest fallback");Ok(())})??;
                 shot!(&format!("past-missing-{}",width as u32));
-                let missing_export=out.join(format!("missing-{}.txt",width as u32));let _=std::fs::remove_file(&missing_export);handle.update(cx,|_,_,cx|prompt(&view,cx,Some(missing_export.clone())))?;press!("log-save");wait!(p,w,app=>p.diagnostics_save_pending.is_none());anyhow::ensure!(!missing_export.exists(),"Missing session Save created a fabricated export");
+                let missing_export=out.join(format!("missing-{}.txt",width as u32));let _=std::fs::remove_file(&missing_export);handle.update(cx,|_,_,cx|prompt(&view,cx,Some(missing_export.clone())))?;press!("log-save");wait!(p,w,app=>p.diagnostics_flight.diagnostics_save.is_none());anyhow::ensure!(!missing_export.exists(),"Missing session Save created a fabricated export");
                 std::fs::create_dir(&seed_path)?;press!("log-session");press!("log-session-current");press!("log-session");press!(&format!("log-session-option-{index}"));selected!(&seed_name);
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{anyhow::ensure!(state(&view,w,cx)["copyText"].as_str().is_some_and(|s|s.contains("That session log is no longer kept.")),"Non-file session read did not display honest fallback");Ok(())})??;
                 shot!(&format!("past-read-error-{}",width as u32));

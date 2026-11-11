@@ -51,7 +51,7 @@ fn describe(view: &Entity<Player>, w: &mut Window, cx: &mut App, config: &Path, 
     draw_settings(w, cx);
     anyhow::ensure!(!w.is_visible() && !w.is_window_active(), "Settings test presented or activated a window");
     let p = view.read(cx);
-    anyhow::ensure!(!p.monitor_requested && !p.mic_requested && !p.mic_permission_requested, "Settings requested hardware");
+    anyhow::ensure!(!p.monitor_flight.monitor_requested && !p.mic_requested && !p.mic_permission_requested, "Settings requested hardware");
     let settings = p.settings.read(cx);
     let (prefs, error) = settings.input_preferences_snapshot();
     let state = serde_json::json!({
@@ -62,7 +62,7 @@ fn describe(view: &Entity<Player>, w: &mut Window, cx: &mut App, config: &Path, 
             "monitorOutput": settings.field_label("settings-monitor-output"), "channel": settings.field_label("settings-channel"),
         },
         "audioJson": std::fs::read_to_string(config.join("audio.json")).ok(),
-        "monitorRequested": p.monitor_requested, "micRequested": p.mic_requested, "micPermissionRequested": p.mic_permission_requested,
+        "monitorRequested": p.monitor_flight.monitor_requested, "micRequested": p.mic_requested, "micPermissionRequested": p.mic_permission_requested,
     });
     let _ = w.render_to_image().map(|i| i.save(config.parent().unwrap().join(format!("{stage}.png"))));
     Ok(state)

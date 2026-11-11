@@ -172,7 +172,7 @@ fn capture(
         "editorOpen":p.lyrics_editor_open,"karaoke":p.karaoke,"editor":editor_state(p,window,cx),"sidebar":p.lyrics_sidebar.read(cx).state(window,cx),
         "replacementValue":p.lyrics_editor.read(cx).replacement_input().read(cx).value().to_string(),
         "focusedInputHandles":focused_inputs(p,window,cx),"position":p.playhead.position(),
-        "playing":p.playing,"countingIn":p.counting_in,"nativeSeekCount":p.playhead.seek_count(),
+        "playing":p.playing,"countingIn":p.transport_flight.counting_in,"nativeSeekCount":p.playhead.seek_count(),
         "windowPresented":window.is_visible(),"windowActive":window.is_window_active(),
         "mousePosition":[f32::from(pointer.x),f32::from(pointer.y)],
         "hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),
@@ -188,7 +188,7 @@ fn raw(path: &Path) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 fn paused_transport(player: &Player, position: f64, seeks: u64, stage: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(!player.playing&&!player.counting_in&&player.playhead.pending_seek().is_none()
+    anyhow::ensure!(!player.playing&&!player.transport_flight.counting_in&&player.playhead.pending_seek().is_none()
         && (player.playhead.position()-position).abs()<=2./44100.&&player.playhead.seek_count()==seeks,
         "Editor {stage} leaked into paused transport: position {position} -> {}, seeks {seeks} -> {}",player.playhead.position(),player.playhead.seek_count());
     Ok(())
@@ -304,7 +304,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 // Karaoke starts the real lookup for a document-less song.
                 // Its loading/consent screens intentionally have no Edit;
                 // wait for the real ready row or error write-yourself route.
-                wait!(p,w,app => p.backend.is_none()||(!p.loading&&p.lyrics_sidebar_pending.is_none()&&matches!(p.lyrics_sidebar.read(app).state(w,app)["status"].as_str(),Some("ready"|"error"))));
+                wait!(p,w,app => p.backend.is_none()||(!p.loading&&p.lyrics_flight.lyrics_sidebar.is_none()&&matches!(p.lyrics_sidebar.read(app).state(w,app)["status"].as_str(),Some("ready"|"error"))));
                 handle.update(cx,|_,w,cx|open_editor(&view,w,cx))??;
                 wait!(p,w,app => p.lyrics_editor_open&&!p.lyrics_editor.read(app).rows().is_empty());
             }};}
@@ -456,7 +456,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let deadline=Instant::now()+Duration::from_millis(1200);
                 loop {
                     cx.background_executor().timer(Duration::from_millis(20)).await;
-                    let advanced=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(!p.counting_in,"Editor audition started a count-in");Ok(p.playing&&p.playhead.position()>from+0.05)})??;
+                    let advanced=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(!p.transport_flight.counting_in,"Editor audition started a count-in");Ok(p.playing&&p.playhead.position()>from+0.05)})??;
                     if advanced {break;}
                     anyhow::ensure!(Instant::now()<deadline,"Editor play failed to advance before the gridless count-in would finish");
                 }
@@ -468,7 +468,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let deadline=Instant::now()+Duration::from_millis(1200);
                 loop {
                     cx.background_executor().timer(Duration::from_millis(20)).await;
-                    let advanced=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(!p.counting_in,"Timed-row audition started a count-in");Ok(p.playing&&p.playhead.seek_count()>seeks&&p.playhead.position()>(row_start-0.3).max(0.)+0.05)})??;
+                    let advanced=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(!p.transport_flight.counting_in,"Timed-row audition started a count-in");Ok(p.playing&&p.playhead.seek_count()>seeks&&p.playhead.position()>(row_start-0.3).max(0.)+0.05)})??;
                     if advanced {break;}
                     anyhow::ensure!(Instant::now()<deadline,"Timed-row audition did not seek and play without count-in");
                 }
@@ -576,12 +576,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             edit!();
             let target_before=std::fs::read(root.join("working-target/lyrics.json"))?;
             let private_before=std::fs::read(working.join("lyrics.json"))?;
-            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.metronome_save_requested=true;cx.notify();}))?;
+            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.metronome_flight.metronome_save_requested=true;cx.notify();}))?;
             for _ in 0..8 {
                 cx.background_executor().timer(Duration::from_millis(25)).await;
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|->anyhow::Result<()>{
                     p.flush_metronome_intents(cx);
-                    anyhow::ensure!(p.lyrics_editor_open&&p.metronome_save_requested&&p.source_job.is_none()&&!p.saving&&p.source_working,"Queued Save published while the lyric editor remained open");
+                    anyhow::ensure!(p.lyrics_editor_open&&p.metronome_flight.metronome_save_requested&&p.source_job.is_none()&&!p.saving&&p.source_working,"Queued Save published while the lyric editor remained open");
                     Ok(())
                 }))??;
                 anyhow::ensure!(std::fs::read(root.join("working-target/lyrics.json"))?==target_before&&std::fs::read(working.join("lyrics.json"))?==private_before,"Queued Save changed lyrics before editor Save");
@@ -589,7 +589,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx,|_,w,cx|type_row(&view,w,cx,0,"Working correction survives publication"))??;
             wait!(p,w,app => p.lyrics_editor.read(app).rows()[0].text=="Working correction survives publication");
             press!("lyed-save".to_owned());
-            wait!(p,w,app => !p.lyrics_editor_open&&!p.loading&&!p.saving&&p.source_job.is_none()&&!p.source_working&&!p.metronome_save_requested&&!p.metronome_save_waiting&&p.project.as_ref().is_some_and(|p|p.dir==root.join("working-target")));
+            wait!(p,w,app => !p.lyrics_editor_open&&!p.loading&&!p.saving&&p.source_job.is_none()&&!p.source_working&&!p.metronome_flight.metronome_save_requested&&!p.metronome_flight.metronome_save_waiting&&p.project.as_ref().is_some_and(|p|p.dir==root.join("working-target")));
             anyhow::ensure!(raw(&root.join("working-target/lyrics.json"))?["lines"][0]["text"]=="Working correction survives publication","Targeted publication lost edited lyrics");
             open!("working-target");edit!();
             anyhow::ensure!(handle.update(cx,|_,_,cx|rows(&view,cx)[0].text.clone())?=="Working correction survives publication","Reload lost latest lyrics from queued working-copy Save");

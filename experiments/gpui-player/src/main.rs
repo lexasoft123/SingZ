@@ -188,6 +188,11 @@ mod training_store;
 mod transport;
 mod transport_timing;
 mod transport_host;
+mod metronome_host;
+mod monitor_host;
+mod inflight;
+#[cfg(test)]
+mod inflight_tests;
 #[cfg(feature = "ui-tests")]
 mod ui_audio_settings;
 #[cfg(feature = "ui-tests")]
@@ -453,8 +458,6 @@ struct DeleteRestore {
     resume: SourceResume,
 }
 struct DeletePending {
-    serial: u64,
-    epoch: u64,
     loaded: bool,
     restore: Option<DeleteRestore>,
 }
@@ -477,27 +480,18 @@ struct Player {
     mic_permission_requested: bool,
     mic_serial: u64,
     mic_intent: Option<microphone::Intent>,
-    monitor_requested: bool,
-    monitor_parked: bool,
-    monitor_pending: Option<(u64, bool)>,
-    monitor_serial: u64,
-    monitor_publication_epoch: Option<u64>,
-    monitor_actions: std::collections::VecDeque<DeferredAudio>,
+
     native_graph: u64,
     native_lane_revision: u64,
     native_carry_revision: u64,
     carry: carry_line::Desired,
     carry_open: bool,
-    carry_save_requested: bool,
-    carry_navigation: Option<(std::path::PathBuf,bool)>,
+
     carry_popover: Entity<carry_line_popover::Popover>,
-    carry_serial: u64,
-    carry_pending: Option<carry_line_host::Pending>,
-    carry_plan: Option<carry_line::Plan>,
+
     carry_document: Option<Arc<project_lyrics::Document>>,
     carry_mask: Option<Arc<Vec<bool>>>,
-    carry_stamp: Option<carry_line_host::Stamp>,
-    carry_attempt_stamp: Option<carry_line_host::Stamp>,
+
     #[cfg(feature="ui-tests")]
     last_playback_status: Option<integration::Status>,
     #[cfg(feature="ui-tests")]
@@ -510,8 +504,7 @@ struct Player {
     notice_close_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     backend: Option<integration::Backend>,
     audio_provider: Option<integration::ProviderSnapshot>,
-    audio_provider_serial: u64,
-    audio_provider_pending: Option<u64>,
+
     native_epoch: u64,
     native_rate: f32,
     edit_seq: u64,
@@ -561,16 +554,12 @@ struct Player {
     #[cfg(feature="ui-tests")]
     drive_test_urls: Vec<String>,
     project_delete: Entity<project_delete_dialog::DeleteDialog>,
-    delete_serial: u64,
-    delete_inspect_pending: Option<(u64,std::path::PathBuf)>,
+
     delete_target: Option<project_delete::Target>,
-    delete_pending: Option<DeletePending>,
-    delete_waiting_monitor: Option<Instant>,
+
     lyrics_editor: Entity<lyrics_editor::Editor>,
     lyrics_sidebar:Entity<lyrics_sidebar::Sidebar>,
-    lyrics_sidebar_pending:Option<(u64,u64)>,
-    lyrics_search_pending:Option<(u64,u64)>,
-    lyrics_search_serial:u64,
+
     lyrics_sidebar_intent:lyrics_resolution::Intent,
     lyrics_sidebar_job:lyrics_resolution::Intent,
     lyrics_sidebar_next:Option<lyrics_resolution::Intent>,
@@ -585,19 +574,18 @@ struct Player {
     #[cfg(feature="ui-tests")]
     lyrics_sidebar_settled:Vec<(u64,u64)>,
     lyrics_editor_open: bool,
-    lyrics_editor_serial: u64,
+
     lyrics_editor_generation: u64,
     lyrics_editor_epoch: u64,
-    lyrics_editor_pending: Option<(u64,u64)>,
+
     lyrics_editor_save_revision: u64,
     lyrics_editor_credit:Option<String>,
     lyrics_edit_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     lyrics_precise_cap: bool,
-    lyrics_alignment_serial: u64,
-    lyrics_alignment_pending: Option<(u64,u64,u64,u64)>,
+
     lyrics_needs: Vec<lyrics_align::NeedModel>,
     lyrics_download_service: Option<model_service::Service>,
-    lyrics_download_pending: Option<(u64,u64,u64,lyrics_align::Tier)>,
+
     lyrics_download_started: bool,
     lyrics_envelope_cache: Option<Arc<lyrics_envelope::Envelopes>>,
     native_glows: Rc<RefCell<project_lyrics::GlowCache>>,
@@ -636,29 +624,12 @@ struct Player {
     metronome_open: bool,
     metronome: beat::Metronome,
     beats: Option<beat::Beats>,
-    metronome_serial: u64,
-    metronome_accepted: u64,
-    metronome_save_requested: bool,
-    metronome_save_waiting: bool,
-    metronome_navigation: Option<(std::path::PathBuf, bool)>,
+
     met_prefs_ready: bool,
-    metronome_pending: Option<u64>,
-    metronome_requested: Option<(u64, beat::Metronome, Option<beat::Beats>)>,
-    count_in_anchor: Option<f64>,
-    counting_in: bool,
-    timing_status: Option<integration::Status>,
-    count_in_cache: Option<transport_host::CountInCache>,
+
     analysis_progress: Option<f32>,
     analysis_job: Option<u64>,
-    native_rate_serial: u64,
-    native_rate_pending: Option<(u64,u64,f32,i32)>,
-    native_rate_queued: Option<(f32,i32)>,
-    native_rate_deferred: Option<(f32,i32)>,
-    native_play_intent: Option<(bool,u64)>,
-    native_play_serial: u64,
-    native_rate_generation_floor: u64,
-    native_rate_save_requested: bool,
-    native_rate_navigation: Option<(std::path::PathBuf,bool)>,
+
     #[cfg(feature = "ui-tests")]
     timing_analysis_override: Option<(String,f32)>,
     master_volume: f32,
@@ -706,12 +677,7 @@ struct Player {
     diagnostics:Option<diagnostics::Service>,
     diagnostics_revision:u64,
     diagnostics_session:u64,
-    diagnostics_list_pending:Option<(u64,u64)>,
-    diagnostics_read_pending:Option<(u64,u64,u64,String)>,
-    diagnostics_save_pending:Option<(u64,u64,u64,Option<String>)>,
-    diagnostics_save_serial:u64,
-    diagnostics_save_accepted_serial:u64,
-    diagnostics_save_receipts:HashMap<u64,(u64,u64,Option<String>)>,
+
     #[cfg(feature="ui-tests")]
     diagnostics_prompt_paths:std::collections::VecDeque<Option<std::path::PathBuf>>,
     #[cfg(feature="ui-tests")]
@@ -741,8 +707,7 @@ struct Player {
     playhead: transport_timing::Playhead,
     track_name_input: Entity<gpui_kit::component::input::InputState>,
     track_rename: Option<(u64,String)>,
-    tracks_pending: Option<(u64,u64)>,
-    tracks_serial: u64,
+
     tracks_audio_failed: bool,
     audio_recovery: Option<audio_recovery_host::PendingRecovery>,
     audio_recovery_serial: u64,
@@ -791,6 +756,15 @@ struct Player {
     capture_file: Option<std::path::PathBuf>,
     started: Instant,
     last: Instant,
+    transport_flight: transport_host::TransportFlight,
+    metronome_flight: metronome_host::MetronomeFlight,
+    carry_flight: carry_line_host::CarryFlight,
+    monitor_flight: monitor_host::MonitorFlight,
+    lyrics_flight: lyrics_sidebar_host::LyricsFlight,
+    tracks_flight: custom_tracks_host::TracksFlight,
+    delete_flight: project_delete_host::DeleteFlight,
+    diagnostics_flight: diagnostics_host::DiagnosticsFlight,
+    provider_flight: audio_provider_host::ProviderFlight,
 }
 impl Player {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -925,9 +899,9 @@ impl Player {
                         this.lyrics_editor.update(cx,|s,cx|s.saved(Some("The song changed. Reopen the editor before saving.".into()),cx));return;
                     }
                     if let (Some(backend),Some(project))=(&this.backend,&this.project) {
-                        this.lyrics_editor_serial+=1;let serial=this.lyrics_editor_serial;
+                        let serial=this.lyrics_flight.lyrics_editor_pending.reserve();
                         let result=serde_json::to_value(lines).map_err(|e|e.to_string()).and_then(|lines|backend.save_lyrics(this.native_epoch,serial,project,lines,this.lyrics_editor_credit.clone()).map_err(|e|e.to_string()));
-                        match result {Ok(())=>{this.lyrics_editor_pending=Some((this.native_epoch,serial));this.lyrics_editor_save_revision=*revision;},Err(e)=>this.lyrics_editor.update(cx,|s,cx|s.saved(Some(e),cx))}
+                        match result {Ok(())=>{this.lyrics_flight.lyrics_editor_pending.activate(this.native_epoch,serial,());this.lyrics_editor_save_revision=*revision;},Err(e)=>this.lyrics_editor.update(cx,|s,cx|s.saved(Some(e),cx))}
                     } else {this.lyrics_editor.update(cx,|s,cx|s.saved(Some("Open a project before saving lyrics.".into()),cx));}
                 }
                 lyrics_editor::Event::Close=>{this.lyrics_editor_open=false;this.focus_player=true;this.cancel_lyrics_alignment(cx);if let Some(backend)=&this.backend{backend.cancel_lyrics_preview();}},
@@ -965,7 +939,7 @@ impl Player {
                 }
                 metronome::Event::Redetect => this.start_beat_detection(true, cx),
                 metronome::Event::Preview(accent) => {
-                    if this.backend.is_some() && !this.monitor_requested && this.project.is_some() {
+                    if this.backend.is_some() && !this.monitor_flight.monitor_requested && this.project.is_some() {
                         this.native_command(format!("met-preview {}", u8::from(*accent)), cx);
                     }
                 }
@@ -1145,10 +1119,10 @@ impl Player {
                         || prefs.outputs != old.outputs
                     {
                         prefs.headphones = false;
-                        this.monitor_requested = false;
+                        this.monitor_flight.monitor_requested = false;
                     }
                     if !prefs.headphones {
-                        this.monitor_requested = false;
+                        this.monitor_flight.monitor_requested = false;
                     }
                     this.mic_pref_seq += 1;
                     this.mic_prefs = prefs.clone();
@@ -1168,13 +1142,13 @@ impl Player {
                     this.mic_serial += 1;
                 }
                 settings::SettingsEvent::Monitor => {
-                    if this.audio_provider_pending.is_some() {return;}
+                    if this.provider_flight.audio_provider.is_some() {return;}
                     if this.monitor_busy() {
-                        this.monitor_requested = false;
+                        this.monitor_flight.monitor_requested = false;
                     } else if !this.loading && !this.rate_busy() && this.mic_prefs_valid {
                         match this.settings.read(cx).monitor_route() {
                             Ok(()) => {
-                                this.monitor_requested = true;
+                                this.monitor_flight.monitor_requested = true;
                                 this.mic_serial += 1;
                             }
                             Err(error) => this
@@ -1201,7 +1175,7 @@ impl Player {
             if !matches!(event,header::HeaderEvent::Language){this.language_menu.update(cx,|s,cx|s.close(window,cx));}
             match event {
                 header::HeaderEvent::StopMonitor=>{
-                    this.monitor_requested=false;this.mic_prefs.headphones=false;
+                    this.monitor_flight.monitor_requested=false;this.mic_prefs.headphones=false;
                     this.settings.update(cx,|s,cx|s.set_input_prefs(this.mic_prefs.clone(),cx));
                     if this.screen==Screen::Player{this.focus_player=true;}
                 },
@@ -1378,6 +1352,15 @@ impl Player {
             }
         }
         Self {
+            transport_flight: Default::default(),
+            metronome_flight: Default::default(),
+            carry_flight: Default::default(),
+            monitor_flight: Default::default(),
+            lyrics_flight: Default::default(),
+            tracks_flight: Default::default(),
+            delete_flight: Default::default(),
+            diagnostics_flight: Default::default(),
+            provider_flight: Default::default(),
             desktop_shutdown_done:false,desktop_window_state:None,
             locale_service:locale_service::Service::new(audio_devices::directory()),locale_revision:0,language_state:None,language_menu,
             drive_service,drive_snapshot:Default::default(),drive_root_waiting:None,
@@ -1389,10 +1372,10 @@ impl Player {
             #[cfg(feature="ui-tests")]
             stem_export_finished_ids:vec![],
             stem_export_dialog,stem_export_service,stem_export_open:false,stem_export_lanes:vec![],stem_export_session:0,stem_export_prompt:false,stem_export_close_pending:false,stem_export_job:None,
-            native_carry_revision:0,carry:Default::default(),carry_open:false,carry_save_requested:false,carry_navigation:None,carry_popover,carry_serial:0,carry_pending:None,carry_plan:None,carry_document:None,carry_mask:None,carry_stamp:None,carry_attempt_stamp:None,
+            native_carry_revision:0,carry:Default::default(),carry_open:false,carry_popover,carry_document:None,carry_mask:None,
             success_toast,library_import,library_import_open:false,library_import_root:None,library_import_epoch:0,import_pending:None,
             project_picker,project_picker_open:false,project_picker_session:0,project_picker_prompt_serial:0,project_picker_prompt:None,project_library_service,project_library_pending:None,project_library_moving:false,project_library_snapshot:None,catalog_root:integration::library_root(),
-            project_delete,delete_serial:0,delete_inspect_pending:None,delete_target:None,delete_pending:None,delete_waiting_monitor:None,
+            project_delete,delete_target:None,
             microphone,
             mic_prefs: Default::default(),
             mic_prefs_valid: false,
@@ -1403,12 +1386,12 @@ impl Player {
             mic_permission_requested: false,
             mic_serial: 0,
             mic_intent: None,
-            monitor_requested: false,
-            monitor_parked: false,
-            monitor_pending: None,
-            monitor_serial: 0,
-            monitor_publication_epoch: None,
-            monitor_actions: Default::default(),
+
+
+
+
+
+
             native_graph: 0,
             native_lane_revision: 0,
             #[cfg(feature="ui-tests")]
@@ -1422,26 +1405,26 @@ impl Player {
             #[cfg(feature="ui-tests")]
             notice_close_bounds: Default::default(),
             lyric_document: Arc::new(project_lyrics::fixture()),
-            lyrics_sidebar,lyrics_sidebar_pending:None,lyrics_search_pending:None,lyrics_search_serial:0,
+            lyrics_sidebar,
             lyrics_sidebar_intent:lyrics_resolution::Intent::Auto,lyrics_sidebar_job:lyrics_resolution::Intent::Auto,lyrics_sidebar_next:None,lyrics_sidebar_editor_after:false,lyrics_sidebar_import_after:None,lyrics_sidebar_rename_after:None,lyrics_sidebar_needs:vec![],lyrics_sidebar_download:None,
             lyrics_sidebar_download_waiting:false,lyrics_sidebar_download_started:false,lyrics_sidebar_download_epoch:0,
             #[cfg(feature="ui-tests")]
             lyrics_sidebar_settled:vec![],
             lyrics_editor,
             lyrics_editor_open:false,
-            lyrics_editor_serial:0,
+
             lyrics_editor_generation:0,
             lyrics_editor_epoch:0,
-            lyrics_editor_pending:None,
+
             lyrics_editor_save_revision:0,
             lyrics_editor_credit:None,
             lyrics_edit_bounds:Default::default(),
             lyrics_precise_cap:false,
-            lyrics_alignment_serial:0,
-            lyrics_alignment_pending:None,
+
+
             lyrics_needs:vec![],
             lyrics_download_service:None,
-            lyrics_download_pending:None,
+
             lyrics_download_started:false,
             lyrics_envelope_cache:None,
             native_glows: Rc::new(RefCell::new(project_lyrics::GlowCache::default())),
@@ -1452,8 +1435,8 @@ impl Player {
             native_rate: 1.,
             backend,
             audio_provider: None,
-            audio_provider_serial: 0,
-            audio_provider_pending: None,
+
+
             native_epoch: 0,
             practice: None,
             practice_reached: None,
@@ -1500,29 +1483,29 @@ impl Player {
             metronome_open: false,
             metronome: Default::default(),
             beats: None,
-            metronome_serial: 0,
-            metronome_accepted: 0,
-            metronome_save_requested: false,
-            metronome_save_waiting: false,
-            metronome_navigation: None,
+
+
+
+
+
             met_prefs_ready: false,
-            metronome_pending: None,
-            metronome_requested: None,
-            count_in_anchor: None,
-            counting_in: false,
-            timing_status: None,
-            count_in_cache: None,
+
+
+
+
+
+
             analysis_progress: None,
             analysis_job: None,
-            native_rate_serial: 0,
-            native_rate_pending: None,
-            native_rate_queued: None,
-            native_rate_deferred: None,
-            native_play_intent: None,
-            native_play_serial: 0,
-            native_rate_generation_floor: 0,
-            native_rate_save_requested: false,
-            native_rate_navigation: None,
+
+
+
+
+
+
+
+
+
             #[cfg(feature = "ui-tests")]
             timing_analysis_override: None,
             master_volume: 1.,
@@ -1561,7 +1544,7 @@ impl Player {
             source_target: None,
             source_pending: None,
             log_panel,
-            diagnostics,diagnostics_revision:0,diagnostics_session:0,diagnostics_list_pending:None,diagnostics_read_pending:None,diagnostics_save_pending:None,diagnostics_save_serial:0,diagnostics_save_accepted_serial:0,diagnostics_save_receipts:Default::default(),
+            diagnostics,diagnostics_revision:0,diagnostics_session:0,
             #[cfg(feature="ui-tests")]
             diagnostics_prompt_paths:Default::default(),
             #[cfg(feature="ui-tests")]
@@ -1619,8 +1602,8 @@ impl Player {
             playhead: transport_timing::Playhead::new(64.),
             track_name_input,
             track_rename: None,
-            tracks_pending: None,
-            tracks_serial: 0,
+
+
             tracks_audio_failed: false,
             audio_recovery: None,
             audio_recovery_serial: 0,
@@ -1669,7 +1652,7 @@ impl Player {
         }
     }
     fn release_surface_available(&self,cx:&App)->bool {
-        if self.project_delete.read(cx).is_open() || self.delete_inspect_pending.is_some() { return false; }
+        if self.project_delete.read(cx).is_open() || self.delete_flight.delete_inspect.is_some() { return false; }
         !self.engine_setup.read(cx).is_open() && !matches!(self.screen,Screen::Settings|Screen::Log|Screen::Models)
             && self.notice.is_none() && !self.lyrics_editor_open && !self.project_picker_open && !self.drive_projects_open
             && !self.library_import_open && !self.stem_export_open && !self.loading
@@ -1798,7 +1781,7 @@ impl Player {
     fn open_source(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         if self.defer_rate_navigation(path.clone(),true,cx){return;}
         if self.defer_carry_navigation(path.clone(),true,cx){return;}
-        if self.project_delete.read(cx).is_open() || self.delete_pending.is_some() { return; }
+        if self.project_delete.read(cx).is_open() || self.delete_flight.delete.is_some() { return; }
         if self.defer_metronome_navigation(path.clone(), true, cx) {
             return;
         }
@@ -1807,7 +1790,7 @@ impl Player {
         self.detach_stem_export(cx);
         self.library_import_open=false;self.import_pending=None;
         self.cancel_sidebar_lyrics(cx);self.lyrics_sidebar_editor_after=false;self.lyrics_sidebar_import_after=None;self.lyrics_sidebar_rename_after=None;
-        self.lyrics_search_pending=None;if let Some(backend)=&self.backend{backend.cancel_lyrics_search();}
+        self.lyrics_flight.lyrics_search_pending.cancel();if let Some(backend)=&self.backend{backend.cancel_lyrics_search();}
         self.cancel_lyrics_alignment(cx);self.lyrics_editor_open=false;
         self.reset_transport_timing(cx);
         self.start_source(source_jobs::Job::Open(path), cx);
@@ -1832,7 +1815,7 @@ impl Player {
                 self.source_split_handoff = Some(handoff);
                 return;
             };
-            self.monitor_actions.retain(|a| { if let DeferredAudio::SourceOutput(output, _, _) = a { if output.working && self.project.as_ref().is_none_or(|project| project.dir != output.path) { source_jobs::discard_working_copy(&output.path); } false } else { true } });
+            self.monitor_flight.monitor_actions.retain(|a| { if let DeferredAudio::SourceOutput(output, _, _) = a { if output.working && self.project.as_ref().is_none_or(|project| project.dir != output.path) { source_jobs::discard_working_copy(&output.path); } false } else { true } });
             // Reopening the retained original revokes the pending candidate's
             // native epoch. Its late Opened/Error cannot replace this rollback.
             self.open_source_output(output, Some(resume), cx);
@@ -1855,8 +1838,8 @@ impl Player {
     }
     fn disown_source(&mut self, cx: &mut Context<Self>) {
         if self.source_job.is_some(){diagnostics::event("projects","Project operation cancelled.",diagnostics::Level::Warn);}
-        if self.metronome_save_waiting && self.source_job.is_some() {
-            self.metronome_save_waiting = false;
+        if self.metronome_flight.metronome_save_waiting && self.source_job.is_some() {
+            self.metronome_flight.metronome_save_waiting = false;
             self.notice = Some("Queued Save was cancelled before it completed.".into());
         }
         if let Some(service) = &self.source_service {
@@ -1871,13 +1854,13 @@ impl Player {
         self.source_cancelling = None;
         self.source_split_handoff = None;
         self.transport.update(cx, |t, cx| t.set_progress(None, cx));
-        self.monitor_actions
+        self.monitor_flight.monitor_actions
             .retain(|a| { if let DeferredAudio::SourceOutput(output, _, _) = a { if output.working && self.project.as_ref().is_none_or(|project| project.dir != output.path) { source_jobs::discard_working_copy(&output.path); } false } else { true } });
         cx.notify();
     }
     fn source_blocks_player(&self) -> bool { self.rate_busy() || self.source_blocks_except_rate() }
     fn source_blocks_except_rate(&self) -> bool {
-        (self.tracks_pending.is_some()||self.carry_pending.is_some()) || self.audio_recovery.is_some() || self.source_publication.is_some() || self.tracks_audio_failed || self.import_pending.is_some() || self.rename_pending.is_some() || (self.source_job.is_some() && self.source_split.is_none())
+        (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some()) || self.audio_recovery.is_some() || self.source_publication.is_some() || self.tracks_audio_failed || self.import_pending.is_some() || self.rename_pending.is_some() || (self.source_job.is_some() && self.source_split.is_none())
     }
     fn current_mix(&self, project: &integration::Project) -> project_store::Mix {
         project_store::Mix {
@@ -1905,11 +1888,11 @@ impl Player {
         self.start_split_stage(mode, false, cx);
     }
     fn start_split_stage(&mut self, mode: source_jobs::Mode, continuation: bool, cx: &mut Context<Self>) {
-        if (self.tracks_pending.is_some()||self.carry_pending.is_some()||self.rate_busy())||!self.audio_available(){return;}
+        if (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some()||self.rate_busy())||!self.audio_available(){return;}
         if self.lyrics_sidebar_editor_after||self.lyrics_sidebar_rename_after.is_some()||self.lyrics_sidebar_import_after.is_some(){return;}
-        if self.metronome_pending.is_some()
-            || (!continuation && (self.metronome_save_requested || self.metronome_save_waiting))
-            || self.counting_in
+        if self.metronome_flight.metronome.is_some()
+            || (!continuation && (self.metronome_flight.metronome_save_requested || self.metronome_flight.metronome_save_waiting))
+            || self.transport_flight.counting_in
         {
             if continuation { return; }
             self.notice = Some(
@@ -1975,7 +1958,7 @@ impl Player {
             if let Some(project) = &self.project { keep.push(project.dir.clone()); }
             if let Some((_, _, _, _, path)) = &self.source_pending { keep.push(path.clone()); }
             if let Some(handoff) = &self.source_split_handoff { keep.push(handoff.rollback.0.path.clone()); }
-            for action in &self.monitor_actions { if let DeferredAudio::SourceOutput(output, _, _) = action { keep.push(output.path.clone()); } }
+            for action in &self.monitor_flight.monitor_actions { if let DeferredAudio::SourceOutput(output, _, _) = action { keep.push(output.path.clone()); } }
             source_jobs::release_unowned_working_copies(&keep);
         }
         if !self.source_writer_busy() && !self.loading && self.project.is_none() {
@@ -2028,7 +2011,7 @@ impl Player {
         if self.source_job.is_none() && self.source_pending.is_none() {
             if let Some(output) = snapshot.result.as_ref().filter(|output| output.working
                 && self.project.as_ref().is_none_or(|project| project.dir != output.path)
-                && !self.monitor_actions.iter().any(|action| matches!(action, DeferredAudio::SourceOutput(candidate, _, _) if candidate.path == output.path)))
+                && !self.monitor_flight.monitor_actions.iter().any(|action| matches!(action, DeferredAudio::SourceOutput(candidate, _, _) if candidate.path == output.path)))
             { source_jobs::discard_working_copy(&output.path); }
         }
         if self.source_job.is_some_and(|id| id != snapshot.generation) {
@@ -2038,17 +2021,17 @@ impl Player {
         // metronome state and active audible pre-roll are ready for handoff.
         if self.source_job.is_some()
             && !snapshot.busy
-            && (self.rate_busy() || self.metronome_pending.is_some()
-                || self.project_delete.read(cx).is_open() || self.delete_pending.is_some()
+            && (self.rate_busy() || self.metronome_flight.metronome.is_some()
+                || self.project_delete.read(cx).is_open() || self.delete_flight.delete.is_some()
                 || self.library_import_open || self.stem_export_open
                 || self.import_pending.is_some()
                 || self.lyrics_editor_open
-                || self.lyrics_editor_pending.is_some()
+                || self.lyrics_flight.lyrics_editor_pending.is_some()
                 || self.lyrics_sidebar_editor_after
-                || self.lyrics_sidebar_pending.is_some()
+                || self.lyrics_flight.lyrics_sidebar.is_some()
                 || self.lyrics_sidebar_download_waiting
-                || self.counting_in
-                || (self.metronome_navigation.is_some() && self.notice.is_some()))
+                || self.transport_flight.counting_in
+                || (self.metronome_flight.metronome_navigation.is_some() && self.notice.is_some()))
         {
             return;
         }
@@ -2091,7 +2074,7 @@ impl Player {
             let resume = self.source_split.and_then(|mode| {
                 self.project.as_ref().map(|project| SourceResume {
                     restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),
-                    play_serial:self.native_play_serial,
+                    play_serial:self.transport_flight.native_play.serial(),
                     position: self.playhead.position(),
                     playing: self.playing,
                     mode: Some(mode),
@@ -2115,8 +2098,8 @@ impl Player {
                     backend.catalog();
                 }
             } else if let Some(error) = &snapshot.error {
-                if self.metronome_save_waiting {
-                    self.metronome_save_waiting = false;
+                if self.metronome_flight.metronome_save_waiting {
+                    self.metronome_flight.metronome_save_waiting = false;
                     self.notice = Some(format!("Queued Save failed: {error}"));
                 } else if error.contains("AI models") || (was_splitting&&!snapshot.engine_status.ok&&snapshot.engine_status.needs_models) {
                     self.open_models(models::Origin::Manual, cx);
@@ -2156,7 +2139,7 @@ impl Player {
                 };
                 let rollback_resume = SourceResume {
                     restart_cycle: self.restart_cycle.snapshot(self.region_target().selection, self.playing),
-                    play_serial: self.native_play_serial,
+                    play_serial: self.transport_flight.native_play.serial(),
                     position: self.playhead.position(),
                     playing: self.playing,
                     mode: None,
@@ -2182,12 +2165,12 @@ impl Player {
         // This is the completion of an owned Save/split/rename, not a new
         // user navigation. Preserve any destination waiting behind that Save.
         let overlay=resume.as_ref().and_then(|resume|self.project.as_ref().map(|project|integration::OpenCustomOverlay{source_dir:project.dir.clone(),mix:resume.mix.clone(),preserve_generated:resume.mode.is_some()}));
-        let rate_navigation=self.native_rate_navigation.take();
-        let rate_save=std::mem::take(&mut self.native_rate_save_requested);
+        let rate_navigation=self.transport_flight.native_rate_navigation.take();
+        let rate_save=std::mem::take(&mut self.transport_flight.native_rate_save_requested);
         let pending_path = output.path.clone();
         let attempt = self.open_project_with_overlay(output.path.clone(),None,overlay,cx);
-        self.native_rate_navigation=rate_navigation;
-        self.native_rate_save_requested=rate_save;
+        self.transport_flight.native_rate_navigation=rate_navigation;
+        self.transport_flight.native_rate_save_requested=rate_save;
         if self.native_epoch != epoch {
             self.source_pending = Some((self.native_epoch, output.working, output.target, resume, pending_path));
             if let Some(mut handoff) = handoff {
@@ -2196,7 +2179,7 @@ impl Player {
             }
         } else if attempt == source_jobs::OpenAttempt::Deferred {
             // No backend request was issued. Keep the output for a later poll.
-            self.monitor_actions.push_back(DeferredAudio::SourceOutput(output, resume, self.native_epoch));
+            self.monitor_flight.monitor_actions.push_back(DeferredAudio::SourceOutput(output, resume, self.native_epoch));
         } else {
             source_jobs::discard_failed_source_open(&pending_path, attempt, self.source_pending.as_ref().map(|(_, _, _, _, path)| path.as_path()), self.project.as_ref().map(|project| project.dir.as_path()));
         }
@@ -2260,7 +2243,7 @@ impl Player {
         if !seek_queued { self.playhead.seek_refused(); }
         // A newer explicit Pause (for example opening Catalog during Rename)
         // supersedes the playing intent captured before this native handoff.
-        if resume.playing && seek_queued && resume.play_serial==self.native_play_serial {
+        if resume.playing && seek_queued && resume.play_serial==self.transport_flight.native_play.serial() {
             self.native_command("play-flat".into(), cx);
         }
         if resume.mode.is_none() {
@@ -2298,21 +2281,21 @@ impl Player {
         let name = name.trim().to_owned();
         if name.is_empty()
             || name == self.song_title.as_str()
-            || (self.tracks_pending.is_some()||self.carry_pending.is_some()||self.rate_busy())
+            || (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some()||self.rate_busy())
             || self.tracks_audio_failed
             || self.loading
             || self.saving
             || self.source_job.is_some()
             || self.rename_pending.is_some()
-            || self.metronome_pending.is_some()
-            || self.metronome_save_requested
-            || self.metronome_save_waiting
-            || self.counting_in
+            || self.metronome_flight.metronome.is_some()
+            || self.metronome_flight.metronome_save_requested
+            || self.metronome_flight.metronome_save_waiting
+            || self.transport_flight.counting_in
         {
             return;
         }
-        if self.lyrics_sidebar_pending.is_some(){self.cancel_sidebar_lyrics(cx);self.lyrics_sidebar_rename_after=Some(name);cx.notify();return;}
-        self.cancel_sidebar_lyrics(cx);self.lyrics_search_pending=None;
+        if self.lyrics_flight.lyrics_sidebar.is_some(){self.cancel_sidebar_lyrics(cx);self.lyrics_sidebar_rename_after=Some(name);cx.notify();return;}
+        self.cancel_sidebar_lyrics(cx);self.lyrics_flight.lyrics_search_pending.cancel();
         if let Some(backend)=&self.backend{backend.cancel_lyrics_search();}
         let Some(project) = &mut self.project else {
             self.song_title = name.into();
@@ -2340,7 +2323,7 @@ impl Player {
         let active_dir = project.dir.clone();
         let resume = SourceResume {
             restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),
-            play_serial:self.native_play_serial,
+            play_serial:self.transport_flight.native_play.serial(),
             position: self.playhead.position(),
             playing: self.playing,
             mode: None,
@@ -2364,7 +2347,7 @@ impl Player {
         cx.notify();
     }
     fn open_library_import(&mut self,cx:&mut Context<Self>){
-        if (self.tracks_pending.is_some()||self.carry_pending.is_some()||self.rate_busy())||self.tracks_audio_failed{return;}
+        if (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some()||self.rate_busy())||self.tracks_audio_failed{return;}
         if self.backend.is_none()||self.project_picker_open||self.lyrics_editor_open||self.library_import_open||self.stem_export_open
             ||self.notice.is_some()||self.source_working||self.loading||self.import_pending.is_some()
             ||self.project_library_pending.is_some()||matches!(self.screen,Screen::Settings|Screen::Log|Screen::Models|Screen::Training)
@@ -2378,23 +2361,23 @@ impl Player {
         self.transport.update(cx,|s,cx|s.dismiss_popovers(cx));cx.notify();
     }
     fn start_library_import(&mut self,mode:project_import::Mode,cx:&mut Context<Self>){
-        if (self.tracks_pending.is_some()||self.carry_pending.is_some()||self.rate_busy())||self.tracks_audio_failed{return;}
+        if (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some()||self.rate_busy())||self.tracks_audio_failed{return;}
         if !self.library_import_open||self.import_pending.is_some(){return;}
         let error=if self.native_epoch!=self.library_import_epoch||self.loading||self.source_working {
             Some("The project changed. Reopen Add to library before continuing.")
         }else if self.monitor_busy(){
             Some("Stop microphone monitoring before adding this project to your library.")
         }else if self.saving||self.source_job.is_some()||self.rename_pending.is_some()
-            ||self.metronome_pending.is_some()||self.metronome_save_requested||self.metronome_save_waiting
-            ||self.counting_in||self.project_library_pending.is_some(){
+            ||self.metronome_flight.metronome.is_some()||self.metronome_flight.metronome_save_requested||self.metronome_flight.metronome_save_waiting
+            ||self.transport_flight.counting_in||self.project_library_pending.is_some(){
             Some("Wait for the current project operation to finish before adding it to your library.")
         }else{None};
         if let Some(error)=error {self.library_import_open=false;self.library_import.update(cx,|s,cx|s.set_busy(false,cx));self.notice=Some(error.into());cx.notify();return;}
-        if self.lyrics_sidebar_pending.is_some(){self.cancel_sidebar_lyrics(cx);self.lyrics_sidebar_import_after=Some(mode);self.library_import.update(cx,|s,cx|s.set_busy(true,cx));cx.notify();return;}
-        self.cancel_sidebar_lyrics(cx);self.lyrics_search_pending=None;
+        if self.lyrics_flight.lyrics_sidebar.is_some(){self.cancel_sidebar_lyrics(cx);self.lyrics_sidebar_import_after=Some(mode);self.library_import.update(cx,|s,cx|s.set_busy(true,cx));cx.notify();return;}
+        self.cancel_sidebar_lyrics(cx);self.lyrics_flight.lyrics_search_pending.cancel();
         if let Some(backend)=&self.backend{backend.cancel_lyrics_search();}
         let (Some(backend),Some(project),Some(root))=(&self.backend,&self.project,self.library_import_root.clone())else{return;};
-        let resume=SourceResume{restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),play_serial:self.native_play_serial,position:self.playhead.position(),playing:self.playing,mode:None,title:None,dirty:self.edit_seq!=self.saved_seq,mix:self.current_mix(project)};
+        let resume=SourceResume{restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),play_serial:self.transport_flight.native_play.serial(),position:self.playhead.position(),playing:self.playing,mode:None,title:None,dirty:self.edit_seq!=self.saved_seq,mix:self.current_mix(project)};
         match backend.import_library(project,root,mode){
             Ok(epoch)=>{self.native_epoch=epoch;self.import_pending=Some(ImportPending{epoch,resume,mode});
                 self.beat_job=None;self.beat_result=None;
@@ -2463,7 +2446,7 @@ impl Player {
     fn choose_project_root(&mut self,path:Option<std::path::PathBuf>,cx:&mut Context<Self>){
         if !self.project_picker_open||self.drive_projects_open||self.project_library_moving||self.project_picker_prompt.is_some(){return;}
         if self.saving||self.loading||self.source_job.is_some()||self.rename_pending.is_some()
-            ||self.metronome_pending.is_some()||self.metronome_save_requested||self.metronome_save_waiting{
+            ||self.metronome_flight.metronome.is_some()||self.metronome_flight.metronome_save_requested||self.metronome_flight.metronome_save_waiting{
             self.project_picker.update(cx,|s,cx|s.failure("Wait for the current project operation to finish before changing the library folder.".into(),cx));return;
         }
         if let Some(service)=&self.drive_service {
@@ -2507,7 +2490,7 @@ impl Player {
         }
     }
     fn browse(&mut self, cx: &mut Context<Self>) {
-        if self.project_delete.read(cx).is_open() || self.delete_pending.is_some() { return; }
+        if self.project_delete.read(cx).is_open() || self.delete_flight.delete.is_some() { return; }
         self.cancel_delete_inspection();
         #[cfg(feature="ui-tests")]
         if std::env::var_os("SINGZ_GPUI_WHATS_NEW_TEST").is_some(){
@@ -2537,18 +2520,18 @@ impl Player {
         .detach();
     }
     fn monitor_busy(&self) -> bool {
-        self.monitor_requested
-            || self.monitor_parked
-            || self.monitor_pending.is_some()
+        self.monitor_flight.monitor_requested
+            || self.monitor_flight.monitor_parked
+            || self.monitor_flight.monitor.is_some()
             || self.mic_intent.as_ref().is_some_and(|i| i.monitor)
     }
     fn defer_monitor(&mut self, action: DeferredAudio, cx: &mut Context<Self>) -> bool {
         if !self.monitor_busy() {
             return false;
         }
-        self.monitor_requested = false;
-        if self.monitor_actions.len() < 128 {
-            self.monitor_actions.push_back(action);
+        self.monitor_flight.monitor_requested = false;
+        if self.monitor_flight.monitor_actions.len() < 128 {
+            self.monitor_flight.monitor_actions.push_back(action);
         } else {
             self.notice = Some("Native handoff command queue is full".into());
         }
@@ -2585,13 +2568,13 @@ impl Player {
         source: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.saving||self.source_saving {self.metronome_save_waiting=true;}
-        if self.metronome_pending.is_some()
-            || self.metronome_save_requested
-            || self.metronome_save_waiting
-            || (self.metronome_navigation.is_some() && self.notice.is_some())
+        if self.saving||self.source_saving {self.metronome_flight.metronome_save_waiting=true;}
+        if self.metronome_flight.metronome.is_some()
+            || self.metronome_flight.metronome_save_requested
+            || self.metronome_flight.metronome_save_waiting
+            || (self.metronome_flight.metronome_navigation.is_some() && self.notice.is_some())
         {
-            self.metronome_navigation = Some((path, source));
+            self.metronome_flight.metronome_navigation = Some((path, source));
             cx.notify();
             return true;
         }
@@ -2616,7 +2599,7 @@ impl Player {
         self.open_project_with_overlay(path,confirmed,None,cx);
     }
     fn open_project_with_overlay(&mut self,path:std::path::PathBuf,confirmed:Option<project_delete::Target>,overlay:Option<integration::OpenCustomOverlay>,cx:&mut Context<Self>) -> source_jobs::OpenAttempt {
-        if self.project_delete.read(cx).is_open() || self.delete_pending.is_some() { return source_jobs::OpenAttempt::Deferred; }
+        if self.project_delete.read(cx).is_open() || self.delete_flight.delete.is_some() { return source_jobs::OpenAttempt::Deferred; }
         if (confirmed.is_some()||overlay.is_some()) && self.monitor_busy() {
             return source_jobs::OpenAttempt::Deferred;
         }
@@ -2627,7 +2610,7 @@ impl Player {
         self.reset_carry(cx);
         self.detach_stem_export(cx);
         self.library_import_open=false;self.import_pending=None;
-        self.cancel_sidebar_lyrics(cx);self.lyrics_sidebar_pending=None;self.lyrics_sidebar_next=None;self.lyrics_sidebar_editor_after=false;self.lyrics_sidebar_import_after=None;self.lyrics_sidebar_rename_after=None;self.lyrics_search_pending=None;self.lyrics_sidebar_intent=lyrics_resolution::Intent::Auto;
+        self.cancel_sidebar_lyrics(cx);self.lyrics_flight.lyrics_sidebar.cancel();self.lyrics_sidebar_next=None;self.lyrics_sidebar_editor_after=false;self.lyrics_sidebar_import_after=None;self.lyrics_sidebar_rename_after=None;self.lyrics_flight.lyrics_search_pending.cancel();self.lyrics_sidebar_intent=lyrics_resolution::Intent::Auto;
         if let Some(backend)=&self.backend{backend.cancel_lyrics_search();}
         self.cancel_lyrics_alignment(cx);
         self.header.update(cx, |h, cx| h.cancel_title(cx));
@@ -2709,12 +2692,13 @@ impl Player {
                 }
                 integration::Event::Parked(epoch, serial, parked, result)
                     if epoch == self.native_epoch
-                        && self.monitor_pending == Some((serial, parked)) =>
+                        && self.monitor_flight.monitor.is_current(serial)
+                        && self.monitor_flight.monitor.payload() == Some(&parked) =>
                 {
-                    self.monitor_pending = None;
+                    self.monitor_flight.monitor.settle(epoch, serial);
                     match result {
                         Ok(status) => {
-                            self.monitor_parked = parked;
+                            self.monitor_flight.monitor_parked = parked;
                             if !parked {
                                 self.mic_prefs.headphones = false;
                                 self.settings.update(cx, |settings, cx| {
@@ -2737,10 +2721,10 @@ impl Player {
                             }
                         }
                         Err(error) => {
-                            self.monitor_publication_epoch = None;
-                            self.monitor_requested = false;
-                            self.monitor_parked = false;
-                            self.monitor_actions.clear();
+                            self.monitor_flight.monitor_publication_epoch = None;
+                            self.monitor_flight.monitor_requested = false;
+                            self.monitor_flight.monitor_parked = false;
+                            self.monitor_flight.monitor_actions.clear();
                             self.cancel_deferred_rate(error, cx);
                         }
                     }
@@ -2836,7 +2820,7 @@ impl Player {
                 }
                 integration::Event::MetronomePrefsSaved(epoch, serial, error)
                     if epoch == self.native_epoch
-                        && (serial == 0 || serial == self.metronome_accepted) =>
+                        && (serial == 0 || serial == self.metronome_flight.metronome_accepted) =>
                 {
                     if let Some(e) = error {
                         self.notice = Some(e);
@@ -2865,13 +2849,13 @@ impl Player {
                         self.source_split_handoff.take()
                     } else { None };
                     diagnostics::event("projects",format!("Loaded {}",project.name),diagnostics::Level::Info);
-                    self.track_rename=None;self.tracks_pending=None;self.tracks_audio_failed=false;
+                    self.track_rename=None;self.tracks_flight.tracks_pending.cancel();self.tracks_audio_failed=false;
                     self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
                     self.native_graph=status.graph_generation;self.native_lane_revision=status.lane_revision;
                     #[cfg(feature="ui-tests")]
                     {self.last_playback_status=Some(status.clone());}
                     self.lyrics_editor_open=false;
-                    self.lyrics_editor_pending=None;
+                    self.lyrics_flight.lyrics_editor_pending.cancel();
                     self.loading = false;
                     self.loaded_song = true;
                     self.header.update(cx, |header, cx| {
@@ -2941,17 +2925,17 @@ impl Player {
                     }
                     self.beats = project.beat.clone();
                     self.paint_beats = self.beats.as_ref().map(|g| Rc::new(g.clone()));
-                    self.metronome_pending = None;
-                    self.metronome_accepted = 0;
-                    self.metronome_requested = None;
+                    self.metronome_flight.metronome.cancel();
+                    self.metronome_flight.metronome_accepted = 0;
+                    self.metronome_flight.metronome_requested = None;
                     self.beat_job = None;
                     self.beat_result = None;
                     self.beat_auto_serials.clear();
                     self.beat_auto_save = false;
                     self.beat_mutation = 0;
-                    self.count_in_anchor = None;
-                    self.counting_in = false;
-                    self.timing_status = Some(status.clone());
+                    self.transport_flight.count_in_anchor = None;
+                    self.transport_flight.counting_in = false;
+                    self.transport_flight.timing_status = Some(status.clone());
                     self.analysis_progress = project.pitch.warning.as_deref().filter(|warning|*warning=="Analyzing song…").map(|_|0.);
                     self.metronome_ui.update(cx, |s, cx| {
                         s.adopt(self.metronome.clone(), self.beats.clone(), cx)
@@ -3044,12 +3028,12 @@ impl Player {
                 integration::Event::Metronome(epoch, serial, met, beat, result)
                     if epoch == self.native_epoch =>
                 {
-                    let latest = self.metronome_pending == Some(serial);
+                    let latest = self.metronome_flight.metronome.is_current(serial);
                     let auto_save = self.beat_auto_serials.remove(&serial);
                     match result {
-                        Ok(_) if serial > self.metronome_accepted => {
+                        Ok(_) if serial > self.metronome_flight.metronome_accepted => {
                             self.beat_auto_save |= auto_save;
-                            self.metronome_accepted = serial;
+                            self.metronome_flight.metronome_accepted = serial;
                             if self.metronome != met || self.beats != beat {
                                 self.edit_seq += 1;
                             }
@@ -3063,8 +3047,8 @@ impl Player {
                     // Older successes are still the engine's accepted state. Only
                     // the latest response settles or rolls back optimistic controls.
                     if latest {
-                        self.metronome_pending = None;
-                        self.metronome_requested = None;
+                        self.metronome_flight.metronome.settle_serial(serial);
+                        self.metronome_flight.metronome_requested = None;
                         self.metronome_ui.update(cx, |s, cx| {
                             s.adopt(self.metronome.clone(), self.beats.clone(), cx)
                         });
@@ -3155,17 +3139,17 @@ impl Player {
                 integration::Event::LyricsCapabilities(caps)=>{self.lyrics_precise_cap=caps.can_precise;self.lyrics_editor.update(cx,|s,cx|s.precise_cap(caps.can_precise,cx));self.sidebar_context(cx);},
                 #[cfg(feature="ui-tests")]
                 integration::Event::LyricsJobSettled(epoch,serial)=>{self.lyrics_sidebar_settled.push((epoch,serial));if self.lyrics_sidebar_settled.len()>128{self.lyrics_sidebar_settled.remove(0);}},
-                integration::Event::LyricsSearch(epoch,serial,result) if epoch==self.native_epoch&&self.lyrics_search_pending==Some((epoch,serial))=>{
-                    self.lyrics_search_pending=None;self.lyrics_sidebar.update(cx,|s,cx|s.search_results(result.unwrap_or_else(|e|{eprintln!("Lyrics search: {e}");vec![]}),cx));
+                integration::Event::LyricsSearch(epoch,serial,result) if epoch==self.native_epoch&&self.lyrics_flight.lyrics_search_pending.settle(epoch,serial).is_some()=>{
+                    self.lyrics_flight.lyrics_search_pending.cancel();self.lyrics_sidebar.update(cx,|s,cx|s.search_results(result.unwrap_or_else(|e|{eprintln!("Lyrics search: {e}");vec![]}),cx));
                 },
-                integration::Event::LyricsResolved(epoch,serial,result) if epoch==self.native_epoch&&self.lyrics_sidebar_pending==Some((epoch,serial))=>self.sidebar_resolved(result,cx),
-                integration::Event::LyricsAlignmentProgress(epoch,serial,progress) if self.lyrics_sidebar_pending==Some((epoch,serial))=>self.sidebar_progress(epoch,serial,progress,cx),
-                integration::Event::LyricsAlignmentProgress(epoch,serial,progress) if self.lyrics_alignment_pending.is_some_and(|(e,s,g,_)|e==epoch&&s==serial&&g==self.lyrics_editor_generation)&&epoch==self.native_epoch&&self.lyrics_editor_open=>{
+                integration::Event::LyricsResolved(epoch,serial,result) if epoch==self.native_epoch&&self.lyrics_flight.lyrics_sidebar.key()==Some((epoch,serial))=>self.sidebar_resolved(result,cx),
+                integration::Event::LyricsAlignmentProgress(epoch,serial,progress) if self.lyrics_flight.lyrics_sidebar.key()==Some((epoch,serial))=>self.sidebar_progress(epoch,serial,progress,cx),
+                integration::Event::LyricsAlignmentProgress(epoch,serial,progress) if self.lyrics_flight.lyrics_alignment.current().is_some_and(|(e,s,&(g,_))|e==epoch&&s==serial&&g==self.lyrics_editor_generation)&&epoch==self.native_epoch&&self.lyrics_editor_open=>{
                     let label=lyrics_editor::copy(match progress.stage.as_str(){"downloading-model"=>"stage.downloadingModel","transcribing"=>"stage.transcribing","searching"=>"stage.searching",_=>"stage.preparing"});
                     self.lyrics_editor.update(cx,|s,cx|s.alignment_progress(label,progress.percent,cx));
                 }
-                integration::Event::LyricsAligned(epoch,serial,result) if self.lyrics_alignment_pending.is_some_and(|(e,s,g,_)|e==epoch&&s==serial&&g==self.lyrics_editor_generation)&&epoch==self.native_epoch&&self.lyrics_editor_open=>{
-                    let (_,_,_,revision)=self.lyrics_alignment_pending.take().unwrap();
+                integration::Event::LyricsAligned(epoch,serial,result) if self.lyrics_flight.lyrics_alignment.current().is_some_and(|(e,s,&(g,_))|e==epoch&&s==serial&&g==self.lyrics_editor_generation)&&epoch==self.native_epoch&&self.lyrics_editor_open=>{
+                    let (_,_,(_,revision))=self.lyrics_flight.lyrics_alignment.take().unwrap();
                     match result {
                         Ok(output)=>{
                             for warning in &output.warnings{eprintln!("Lyrics alignment: {warning}");}
@@ -3184,8 +3168,8 @@ impl Player {
                         Err(e)=>self.lyrics_editor.update(cx,|s,cx|s.aligned(None,None,Some(e.to_string()),cx)),
                     }
                 }
-                integration::Event::LyricsSaved(epoch,serial,result) if epoch==self.native_epoch && self.lyrics_editor_pending==Some((epoch,serial)) => {
-                    self.lyrics_editor_pending=None;
+                integration::Event::LyricsSaved(epoch,serial,result) if epoch==self.native_epoch && self.lyrics_flight.lyrics_editor_pending.settle(epoch,serial).is_some() => {
+                    self.lyrics_flight.lyrics_editor_pending.cancel();
                     match result {
                         Ok(saved)=>{
                             let document=saved.document;let fingerprint=saved.fingerprint;
@@ -3240,8 +3224,8 @@ impl Player {
                     if !warnings.is_empty(){self.notice=Some(warnings.join("\n"));}
                 }
                 integration::Event::Playback(epoch, serial, status) if epoch == self.native_epoch => {
-                    if self.native_play_intent.is_some_and(|(_, expected)|expected==serial) {
-                        self.native_play_intent=None;
+                    if self.transport_flight.native_play.is_current(serial) {
+                        self.transport_flight.native_play.cancel();
                     }
                     self.playback_status(epoch,status,cx);
                 }
@@ -3250,7 +3234,7 @@ impl Player {
                 integration::Event::AnalysisStopped(epoch) if epoch==self.native_epoch => {self.analysis_job=None;self.analysis_progress=None;}
                 integration::Event::AnalysisStarted(epoch,job) if epoch==self.native_epoch && self.project.is_some() => { self.analysis_job=Some(job);self.analysis_progress=Some(0.); }
                 integration::Event::AnalysisProgress(epoch,job,progress) if epoch==self.native_epoch && self.analysis_job==Some(job) && self.analysis_progress.is_some() && progress.is_finite()=> {self.analysis_progress=Some(self.analysis_progress.unwrap_or(0.).max(progress.clamp(0.,1.)));}
-                integration::Event::Analyzed(epoch, job, result) if epoch == self.native_epoch && self.analysis_job==Some(job) && self.tracks_pending.is_none() => {
+                integration::Event::Analyzed(epoch, job, result) if epoch == self.native_epoch && self.analysis_job==Some(job) && self.tracks_flight.tracks_pending.is_none() => {
                     self.analysis_progress=None;
                     self.analysis_job=None;
                     self.accept_project_analysis(result,cx);
@@ -3273,8 +3257,8 @@ impl Player {
                 integration::Event::SaveFailed(epoch, error) if epoch == self.native_epoch => {
                     diagnostics::event("projects",format!("Save failed: {error}"),diagnostics::Level::Error);
                     self.saving = false;
-                    self.notice = Some(if self.metronome_save_waiting {
-                        self.metronome_save_waiting = false;
+                    self.notice = Some(if self.metronome_flight.metronome_save_waiting {
+                        self.metronome_flight.metronome_save_waiting = false;
                         format!("Queued Save failed: {error}")
                     } else {
                         error
@@ -3301,33 +3285,33 @@ impl Player {
                         self.source_split_handoff = None;
                     }
                     if self.source_combined_next.is_some_and(|(owner, _)| owner == epoch) { self.source_combined_next = None; }
-                    let rate_save_failed=self.native_rate_save_requested;
-                    let rate_navigation=self.native_rate_navigation.take();
+                    let rate_save_failed=self.transport_flight.native_rate_save_requested;
+                    let rate_navigation=self.transport_flight.native_rate_navigation.take();
                     self.reset_transport_timing(cx);
-                    self.native_rate_navigation=rate_navigation;
+                    self.transport_flight.native_rate_navigation=rate_navigation;
                     diagnostics::event("audio",error.clone(),diagnostics::Level::Error);
                     self.beat_job = None;
                     self.beat_result = None;
                     self.beat_auto_serials.clear();
                     self.beat_auto_save = false;
-                    self.metronome_requested = None;
+                    self.metronome_flight.metronome_requested = None;
                     if let Some(backend) = &self.backend {backend.cancel_beat_detection();}
                     let error = if rate_save_failed {
                         format!("Queued Save did not run because native audio failed before the requested speed was accepted: {error}")
-                    } else if self.metronome_save_requested {
+                    } else if self.metronome_flight.metronome_save_requested {
                         format!("Queued Save could not run because native audio failed: {error}")
-                    } else if self.metronome_save_waiting {
+                    } else if self.metronome_flight.metronome_save_waiting {
                         format!(
                             "Queued Save could not be confirmed after native audio failed: {error}"
                         )
                     } else {
                         error
                     };
-                    self.metronome_pending = None;
-                    self.metronome_save_requested = false;
-                    self.metronome_save_waiting = false;
-                    self.counting_in = false;
-                    self.count_in_anchor = None;
+                    self.metronome_flight.metronome.cancel();
+                    self.metronome_flight.metronome_save_requested = false;
+                    self.metronome_flight.metronome_save_waiting = false;
+                    self.transport_flight.counting_in = false;
+                    self.transport_flight.count_in_anchor = None;
                     self.metronome_open = false;
                     // Keep deferred navigation until this failure is acknowledged.
                     if let Some(backend) = &self.backend {
@@ -3490,7 +3474,7 @@ impl Player {
     fn maybe_open_quick_start(&mut self, allowed: bool, cx: &mut Context<Self>) {
         if allowed
             && !self.project_delete.read(cx).is_open()
-            && self.delete_inspect_pending.is_none()
+            && self.delete_flight.delete_inspect.is_none()
             && self.release_startup_ready && self.release_pending.is_none() && !self.whats_new.read(cx).is_open()
             && self.model_auto_checked
             && !matches!(self.screen, Screen::Models | Screen::Settings | Screen::Log)
@@ -3524,7 +3508,7 @@ impl Player {
         // Confirmed monitoring owns its route independently of the Settings
         // preview; its persistent header Stop stays available on other screens.
         if self.notice.is_some() || self.loading {
-            self.monitor_requested = false;
+            self.monitor_flight.monitor_requested = false;
         }
         let Some(service) = &self.microphone else {
             return;
@@ -3538,23 +3522,23 @@ impl Player {
             && self.mic_requested;
         let snapshot = service.snapshot();
         let was_monitor = self.mic_intent.as_ref().is_some_and(|i| i.monitor);
-        if self.monitor_requested
+        if self.monitor_flight.monitor_requested
             && was_monitor
             && matches!(
                 snapshot.phase,
                 microphone::Phase::Error | microphone::Phase::Permission | microphone::Phase::Off
             )
         {
-            self.monitor_requested = false;
+            self.monitor_flight.monitor_requested = false;
             self.settings.update(cx, |s, cx| {
                 s.set_monitor_state(true, snapshot.error.clone(), cx)
             });
         }
         let busy = self.monitor_busy();
         let intent = if busy {
-            if self.monitor_requested
-                && self.monitor_parked
-                && self.monitor_pending.is_none()
+            if self.monitor_flight.monitor_requested
+                && self.monitor_flight.monitor_parked
+                && self.monitor_flight.monitor.is_none()
                 && (was_monitor
                     || (self.mic_intent.is_none() && snapshot.phase == microphone::Phase::Off))
             {
@@ -3624,7 +3608,7 @@ impl Player {
                 Ok(()) => self.mic_intent = intent,
                 Err(error) => {
                     if was_monitor && intent.is_none() {
-                        self.monitor_actions.clear();
+                        self.monitor_flight.monitor_actions.clear();
                         cleanup_error = Some(error.to_string());
                     } else {
                         self.notice = Some(error.to_string());
@@ -3639,22 +3623,21 @@ impl Player {
         if busy
             && self.mic_intent.is_none()
             && view.phase == microphone::Phase::Off
-            && self.monitor_pending.is_none()
+            && self.monitor_flight.monitor.is_none()
         {
-            let target = self.monitor_requested;
-            if target != self.monitor_parked {
-                self.monitor_serial += 1;
-                let serial = self.monitor_serial;
+            let target = self.monitor_flight.monitor_requested;
+            if target != self.monitor_flight.monitor_parked {
+                let serial = self.monitor_flight.monitor.reserve();
                 match self
                     .backend
                     .as_ref()
                     .unwrap()
                     .park(self.native_epoch, serial, target)
                 {
-                    Ok(()) => self.monitor_pending = Some((serial, target)),
+                    Ok(()) => self.monitor_flight.monitor.activate(self.native_epoch, serial, target),
                     Err(error) => {
-                        self.monitor_requested = false;
-                        self.monitor_actions.clear();
+                        self.monitor_flight.monitor_requested = false;
+                        self.monitor_flight.monitor_actions.clear();
                         self.cancel_deferred_rate(error.to_string(), cx);
                     }
                 }
@@ -3665,21 +3648,21 @@ impl Player {
         });
         if !self.monitor_busy() {
             self.restore_monitor_publication(cx);
-            while let Some(action) = self.monitor_actions.front() {
+            while let Some(action) = self.monitor_flight.monitor_actions.front() {
                 // Open and typed rate preparation complete asynchronously. Keep
                 // later commands until the new connection or accepted rate is
                 // ready instead of popping them into dispatch guards.
-                if self.project_delete.read(cx).is_open() || self.delete_pending.is_some() { break; }
-                if self.loading || self.audio_recovery.is_some() || self.monitor_publication_epoch.is_some() || self.notice.is_some() {
+                if self.project_delete.read(cx).is_open() || self.delete_flight.delete.is_some() { break; }
+                if self.loading || self.audio_recovery.is_some() || self.monitor_flight.monitor_publication_epoch.is_some() || self.notice.is_some() {
                     break;
                 }
                 let ready_rate = matches!(action, DeferredAudio::Rate(_, _))
-                    && self.native_rate_pending.is_none()
-                    && self.native_rate_queued.is_none();
+                    && self.transport_flight.native_rate_pending.is_none()
+                    && self.transport_flight.native_rate_queued.is_none();
                 if self.rate_busy() && !ready_rate {
                     break;
                 }
-                let action = self.monitor_actions.pop_front().unwrap();
+                let action = self.monitor_flight.monitor_actions.pop_front().unwrap();
                 match action {
                     DeferredAudio::Rate(rate, transpose) => {
                         self.dispatch_deferred_rate(rate, transpose, cx)
@@ -3734,18 +3717,18 @@ impl Player {
     fn native_command(&mut self, command: String, cx: &mut Context<Self>) {
         let play_intent = match command.as_str() {"play"|"play-flat"=>Some(true),"pause"=>Some(false),_=>None};
         if play_intent==Some(false) {self.region.play_requested=false;}
-        let serial=self.native_play_serial+1;
+        let serial=self.transport_flight.native_play.serial()+1;
         if play_intent==Some(false) && (self.rename_pending.is_some()
             || self.import_pending.as_ref().is_some_and(|pending|pending.mode==project_import::Mode::Move)) {
             // These operations already retire the old helper. Their new epoch
             // has no playback connection yet, so retain the user's Pause as
             // semantic intent rather than sending it to an unavailable graph.
-            self.native_play_serial=serial;self.native_play_intent=None;
+            self.transport_flight.native_play.retire_at(serial);
             if self.playing {self.restart_cycle.reset();}
             self.playing=false;self.playhead.stop_projection();cx.notify();return;
         }
         if self.defer_monitor(DeferredAudio::Command(command.clone()), cx) {
-            if self.notice.is_none() {if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));if self.playing!=target {self.restart_cycle.reset();}if target {self.playhead.play_intent(Instant::now());} else {self.playhead.pause_intent(Instant::now());}self.playing=target;}}
+            if self.notice.is_none() {if let Some(target)=play_intent {self.transport_flight.native_play.begin_at(self.native_epoch,serial,target);if self.playing!=target {self.restart_cycle.reset();}if target {self.playhead.play_intent(Instant::now());} else {self.playhead.pause_intent(Instant::now());}self.playing=target;}}
             return;
         }
         if !self.audio_available()&&!command.starts_with("master ")&&!command.starts_with("rate "){return;}
@@ -3761,7 +3744,7 @@ impl Player {
             let result=if play_intent.is_some(){backend.playback(self.native_epoch,serial,command)}else{backend.control(self.native_epoch,command)};
             match result {
                 Ok(()) => {
-                    if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));if self.playing!=target {self.restart_cycle.reset();}if target {self.playhead.play_intent(Instant::now());} else {self.playhead.pause_intent(Instant::now());}self.playing=target;}
+                    if let Some(target)=play_intent {self.transport_flight.native_play.begin_at(self.native_epoch,serial,target);if self.playing!=target {self.restart_cycle.reset();}if target {self.playhead.play_intent(Instant::now());} else {self.playhead.pause_intent(Instant::now());}self.playing=target;}
                     if edited {
                         self.edit_seq += 1;
                     }
@@ -4064,7 +4047,7 @@ impl Player {
     fn open_lyrics_editor(&mut self, _window:&mut Window, cx:&mut Context<Self>){self.open_lyrics_editor_intent(cx);}
     fn open_lyrics_editor_intent(&mut self,cx:&mut Context<Self>){
         if self.loading||self.source_blocks_player()||!self.audio_available()||self.project.is_none(){return;}
-        if self.lyrics_sidebar_pending.is_some(){self.cancel_sidebar_lyrics(cx);self.lyrics_sidebar_editor_after=true;cx.notify();return;}
+        if self.lyrics_flight.lyrics_sidebar.is_some(){self.cancel_sidebar_lyrics(cx);self.lyrics_sidebar_editor_after=true;cx.notify();return;}
         self.cancel_sidebar_lyrics(cx);self.cancel_lyrics_alignment(cx);self.lyrics_editor_generation+=1;
         self.lyrics_editor_epoch=self.native_epoch;
         let project=self.project.as_ref().unwrap();
@@ -4080,7 +4063,7 @@ impl Player {
         };
         let skipped=project.lyrics_raw.as_ref().and_then(|r|r["lines"].as_array()).map_or(0,|rows|rows.len().saturating_sub(lines.len()));
         let notice=(skipped>0).then(||i18n::tv("lyrics.editor.skippedRows",&[("n",skipped.to_string())]));
-        self.lyrics_editor.update(cx,|s,cx|{s.open(project.name.clone(),lines,self.duration as f64,self.lyrics_precise_cap,cx);s.set_notice(notice,cx);s.context_playback(self.playhead.position() as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.counting_in&&self.playhead.pending_seek().is_none()&&self.capture_file.is_none(){self.playhead.anchor().map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.playhead.loop_range().map(|(s,e)|(s as f64,e as f64)),cx);});
+        self.lyrics_editor.update(cx,|s,cx|{s.open(project.name.clone(),lines,self.duration as f64,self.lyrics_precise_cap,cx);s.set_notice(notice,cx);s.context_playback(self.playhead.position() as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.transport_flight.counting_in&&self.playhead.pending_seek().is_none()&&self.capture_file.is_none(){self.playhead.anchor().map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.playhead.loop_range().map(|(s,e)|(s as f64,e as f64)),cx);});
         self.lyrics_editor_open=true;self.metronome_open=false;self.transport.update(cx,|t,cx|{t.dismiss_popovers(cx);});
         if let Some((_,source))=project.lanes.iter().find(|(i,_)|*i==0){
             if let Some(cache)=self.lyrics_envelope_cache.as_ref().filter(|c|c.source==*source&&Some(c.stamp)==project.vocal_stamp) {
@@ -4093,12 +4076,12 @@ impl Player {
     fn cancel_lyrics_alignment(&mut self,cx:&mut Context<Self>){
         if let Some(backend)=&self.backend{backend.cancel_lyrics_alignment();}
         if let Some(service)=&self.lyrics_download_service{if service.is_running(){service.cancel();}}
-        self.lyrics_alignment_pending=None;self.lyrics_download_pending=None;self.lyrics_needs.clear();
+        self.lyrics_flight.lyrics_alignment.cancel();self.lyrics_flight.lyrics_download_pending=None;self.lyrics_needs.clear();
         self.lyrics_editor.update(cx,|s,cx|s.aligned(None,None,None,cx));
     }
     fn start_lyrics_alignment(&mut self,precise:bool,download:bool,cx:&mut Context<Self>){
         let tier=if precise{lyrics_align::Tier::Precise}else{lyrics_align::Tier::Align};
-        if !self.lyrics_editor_open||self.loading||self.lyrics_editor_epoch!=self.native_epoch||self.lyrics_editor_pending.is_some(){return;}
+        if !self.lyrics_editor_open||self.loading||self.lyrics_editor_epoch!=self.native_epoch||self.lyrics_flight.lyrics_editor_pending.is_some(){return;}
         let revision=self.lyrics_editor.read(cx).revision();
         if download&&!self.lyrics_needs.is_empty(){
             let mut config=model_service::configuration();if !config.fixture{config.flavor=self.lyrics_needs[0].flavor;}
@@ -4109,22 +4092,22 @@ impl Player {
             // Inventory is asynchronous. Retain the explicit download intent
             // until this service has completed its initial model check.
             self.lyrics_download_service=Some(service);
-            self.lyrics_download_pending=Some((self.native_epoch,self.lyrics_editor_generation,revision,tier));
+            self.lyrics_flight.lyrics_download_pending=Some((self.native_epoch,self.lyrics_editor_generation,revision,tier));
             self.lyrics_download_started=false;
             self.lyrics_editor.update(cx,|s,cx|s.alignment_progress(lyrics_editor::copy("stage.downloadingModel"),0.,cx));
             return;
         }
         let draft=lyrics_edit::lines_from_rows(self.lyrics_editor.read(cx).rows(),self.duration as f64);
         if let (Some(backend),Some(project))=(&self.backend,&self.project){
-            self.lyrics_alignment_serial+=1;let serial=self.lyrics_alignment_serial;
+            let serial=self.lyrics_flight.lyrics_alignment.reserve();
             match backend.align_lyrics(self.native_epoch,serial,project,draft,tier){
-                Ok(())=>{self.lyrics_alignment_pending=Some((self.native_epoch,serial,self.lyrics_editor_generation,revision));self.lyrics_editor.update(cx,|s,cx|s.alignment_progress(lyrics_editor::copy("stage.preparing"),0.,cx));}
+                Ok(())=>{self.lyrics_flight.lyrics_alignment.activate(self.native_epoch,serial,(self.lyrics_editor_generation,revision));self.lyrics_editor.update(cx,|s,cx|s.alignment_progress(lyrics_editor::copy("stage.preparing"),0.,cx));}
                 Err(e)=>self.lyrics_editor.update(cx,|s,cx|s.aligned(None,None,Some(e.to_string()),cx)),
             }
         }
     }
     fn poll_lyrics_download(&mut self,cx:&mut Context<Self>){
-        let Some((epoch,generation,revision,tier))=self.lyrics_download_pending else{return;};
+        let Some((epoch,generation,revision,tier))=self.lyrics_flight.lyrics_download_pending else{return;};
         if epoch!=self.native_epoch||generation!=self.lyrics_editor_generation||!self.lyrics_editor_open{self.cancel_lyrics_alignment(cx);return;}
         let Some(service)=&self.lyrics_download_service else{return;};let status=service.snapshot();
         if !self.lyrics_download_started {
@@ -4133,7 +4116,7 @@ impl Player {
             match service.download(Some(ids)) {
                 Ok(())=>self.lyrics_download_started=true,
                 Err(error)=>{
-                    self.lyrics_download_pending=None;
+                    self.lyrics_flight.lyrics_download_pending=None;
                     self.lyrics_editor.update(cx,|s,cx|s.aligned(None,None,Some(error.to_string()),cx));
                 }
             }
@@ -4143,20 +4126,20 @@ impl Player {
             let progress=if status.progress.is_empty(){0.}else{status.progress.values().sum::<f32>()/status.progress.len() as f32};
             self.lyrics_editor.update(cx,|s,cx|s.alignment_progress(lyrics_editor::copy("stage.downloadingModel"),progress,cx));return;
         }
-        self.lyrics_download_pending=None;
+        self.lyrics_flight.lyrics_download_pending=None;
         if let Some(error)=&status.error {self.lyrics_editor.update(cx,|s,cx|s.aligned(None,None,Some(error.clone()),cx));}
         else if self.lyrics_editor.read(cx).revision()!=revision {self.lyrics_editor.update(cx,|s,cx|s.aligned(None,None,Some("The draft changed during the download. Align again to use your latest words.".into()),cx));}
         else {self.start_lyrics_alignment(tier==lyrics_align::Tier::Precise,false,cx);}
     }
     fn restore_metronome_widget(&mut self, cx: &mut Context<Self>) {
-        let (met, grid) = self.metronome_requested.as_ref().map(|(_,m,g)|(m.clone(),g.clone())).unwrap_or_else(||(self.metronome.clone(),self.beats.clone()));
+        let (met, grid) = self.metronome_flight.metronome_requested.as_ref().map(|(_,m,g)|(m.clone(),g.clone())).unwrap_or_else(||(self.metronome.clone(),self.beats.clone()));
         self.metronome_ui.update(cx, |s,cx|s.adopt(met,grid,cx));
     }
     fn start_beat_detection(&mut self, explicit: bool, cx: &mut Context<Self>) {
         if !self.audio_available(){return;}
         let Some(project) = &self.project else {return;};
         if self.loading || self.source_blocks_player() || !project.lanes.iter().any(|(i,_)|*i == 1) {return;}
-        let desired = if self.metronome_pending.is_some() {self.metronome_ui.read(cx).grid.as_ref()} else {self.beats.as_ref()};
+        let desired = if self.metronome_flight.metronome.is_some() {self.metronome_ui.read(cx).grid.as_ref()} else {self.beats.as_ref()};
         if !explicit && !beat_analysis::needed(desired) {return;}
         if let Some(backend) = &self.backend {
             self.beat_job_serial += 1;
@@ -4169,15 +4152,15 @@ impl Player {
         cx.notify();
     }
     fn apply_beat_grid(&mut self, grid: beat::Beats, auto_save: bool, cx: &mut Context<Self>) {
-        let before = self.metronome_serial;
+        let before = self.metronome_flight.metronome.serial();
         self.apply_metronome(self.metronome.clone(), Some(grid), cx);
-        if auto_save && self.metronome_serial > before && self.metronome_pending == Some(self.metronome_serial) {
-            self.beat_auto_serials.insert(self.metronome_serial);
+        if auto_save && self.metronome_flight.metronome.serial() > before && self.metronome_flight.metronome.is_current(self.metronome_flight.metronome.serial()) {
+            self.beat_auto_serials.insert(self.metronome_flight.metronome.serial());
         }
     }
     fn flush_beat_detection(&mut self, cx: &mut Context<Self>) {
-        if (self.tracks_pending.is_some()||self.carry_pending.is_some()||self.rate_busy()||self.region_busy()){return;}
-        if self.metronome_pending.is_some() || self.loading {return;}
+        if (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some()||self.rate_busy()||self.region_busy()){return;}
+        if self.metronome_flight.metronome.is_some() || self.loading {return;}
         if let Some(output) = self.beat_result.take() {
             if let Some((serial, mutation, explicit)) = self.beat_job.take() {
                 if output.epoch == self.native_epoch && output.revision == serial && mutation == self.beat_mutation
@@ -4191,10 +4174,10 @@ impl Player {
                 }
             }
         }
-        if self.beat_auto_save && self.metronome_pending.is_none() && !self.saving && !self.source_working
-            && self.source_job.is_none() && self.rename_pending.is_none() && !self.metronome_save_requested && !self.metronome_save_waiting {
+        if self.beat_auto_save && self.metronome_flight.metronome.is_none() && !self.saving && !self.source_working
+            && self.source_job.is_none() && self.rename_pending.is_none() && !self.metronome_flight.metronome_save_requested && !self.metronome_flight.metronome_save_waiting {
             self.save_project(cx);
-            if self.saving {self.beat_auto_save = false;self.metronome_save_waiting = true;}
+            if self.saving {self.beat_auto_save = false;self.metronome_flight.metronome_save_waiting = true;}
         }
     }
     fn apply_metronome(
@@ -4207,7 +4190,7 @@ impl Player {
         if self.backend.is_some()
             && (self.loading
                 || self.source_blocks_player()
-                || self.monitor_requested
+                || self.monitor_flight.monitor_requested
                 || self.project.is_none())
         {
             self.notice =
@@ -4215,16 +4198,15 @@ impl Player {
             self.restore_metronome_widget(cx);
             return;
         }
-        if self.metronome_pending.is_none() && self.metronome == met && self.beats == beats {
+        if self.metronome_flight.metronome.is_none() && self.metronome == met && self.beats == beats {
             return;
         }
         if let Some(backend) = &self.backend {
-            self.metronome_serial += 1;
-            let serial = self.metronome_serial;
+            let serial = self.metronome_flight.metronome.reserve();
             match backend.metronome(self.native_epoch, serial, met.clone(), beats.clone()) {
                 Ok(()) => {
-                    self.metronome_pending = Some(serial);
-                    self.metronome_requested = Some((serial, met, beats));
+                    self.metronome_flight.metronome.activate(self.native_epoch, serial, ());
+                    self.metronome_flight.metronome_requested = Some((serial, met, beats));
                     self.restore_metronome_widget(cx);
                 }
                 Err(e) => {self.notice = Some(e.to_string());self.restore_metronome_widget(cx);}
@@ -4239,37 +4221,37 @@ impl Player {
     fn flush_metronome_intents(&mut self, cx: &mut Context<Self>) {
         if self.audio_recovery.is_some() || self.source_publication.is_some() { return; }
         if self.drive_capture_busy(){return;}
-        if (self.tracks_pending.is_some()||self.carry_pending.is_some()||self.rate_busy()){return;}
-        if self.metronome_pending.is_some() {
+        if (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some()||self.rate_busy()){return;}
+        if self.metronome_flight.metronome.is_some() {
             return;
         }
-        if self.metronome_save_requested {
-            if self.lyrics_sidebar_pending.is_some()||self.lyrics_sidebar_download_waiting||self.lyrics_sidebar_editor_after{return;}
+        if self.metronome_flight.metronome_save_requested {
+            if self.lyrics_flight.lyrics_sidebar.is_some()||self.lyrics_sidebar_download_waiting||self.lyrics_sidebar_editor_after{return;}
             if self.loading
                 || self.saving
                 || self.library_import_open || self.stem_export_open
                 || self.import_pending.is_some()
                 || self.lyrics_editor_open
-                || self.lyrics_editor_pending.is_some()
+                || self.lyrics_flight.lyrics_editor_pending.is_some()
                 || self.source_job.is_some()
                 || self.rename_pending.is_some()
             {
                 return;
             }
             if self.backend.is_none() || self.project.is_none() {
-                self.metronome_save_requested = false;
+                self.metronome_flight.metronome_save_requested = false;
                 self.notice = Some(
                     "Queued Save could not run because its project is no longer available.".into(),
                 );
                 cx.notify();
                 return;
             }
-            self.metronome_save_requested = false;
+            self.metronome_flight.metronome_save_requested = false;
             self.save_project(cx);
             if self.saving || self.source_job.is_some() {
                 // Wait for completion as well as dispatch. This protects the
                 // asynchronous working-copy Save from Open's cancellation path.
-                self.metronome_save_waiting = true;
+                self.metronome_flight.metronome_save_waiting = true;
             } else {
                 let error = self
                     .notice
@@ -4279,7 +4261,7 @@ impl Player {
             }
             cx.notify();
         }
-        if self.metronome_save_waiting {
+        if self.metronome_flight.metronome_save_waiting {
             if self.loading
                 || self.saving
                 || self.source_job.is_some()
@@ -4287,7 +4269,7 @@ impl Player {
             {
                 return;
             }
-            self.metronome_save_waiting = false;
+            self.metronome_flight.metronome_save_waiting = false;
         }
         // A second correction may have been accepted during the previous Save.
         // Let the next poll dispatch its Save before releasing queued navigation.
@@ -4295,7 +4277,7 @@ impl Player {
         if self.notice.is_some() {
             return;
         }
-        if let Some((path, source)) = self.metronome_navigation.take() {
+        if let Some((path, source)) = self.metronome_flight.metronome_navigation.take() {
             if source {
                 self.open_source(path, cx);
             } else {
@@ -4305,11 +4287,11 @@ impl Player {
     }
     fn save_project(&mut self, cx: &mut Context<Self>) {
         if self.audio_recovery.is_some() || self.source_publication.is_some() { return; }
-        if self.drive_capture_busy(){self.metronome_save_requested=true;cx.notify();return;}
-        if self.rate_busy(){self.native_rate_save_requested=true;cx.notify();return;}
-        if self.carry_pending.is_some(){self.carry_save_requested=true;cx.notify();return;}
-        if self.tracks_pending.is_some(){self.notice=Some("Wait for the track changes before saving.".into());cx.notify();return;}
-        if self.project_delete.read(cx).is_open() || self.delete_pending.is_some() { return; }
+        if self.drive_capture_busy(){self.metronome_flight.metronome_save_requested=true;cx.notify();return;}
+        if self.rate_busy(){self.transport_flight.native_rate_save_requested=true;cx.notify();return;}
+        if self.carry_flight.carry.is_some(){self.carry_flight.carry_save_requested=true;cx.notify();return;}
+        if self.tracks_flight.tracks_pending.is_some(){self.notice=Some("Wait for the track changes before saving.".into());cx.notify();return;}
+        if self.project_delete.read(cx).is_open() || self.delete_flight.delete.is_some() { return; }
         // Only an otherwise valid Save can become a deferred intent. A click
         // during an existing load/Save/source operation must not save a later song.
         if self.loading
@@ -4317,7 +4299,7 @@ impl Player {
             || self.library_import_open || self.stem_export_open
             || self.import_pending.is_some()
             || self.lyrics_editor_open
-            || self.lyrics_editor_pending.is_some()
+            || self.lyrics_flight.lyrics_editor_pending.is_some()
             || self.source_job.is_some()
             || self.rename_pending.is_some()
             || self.backend.is_none()
@@ -4326,11 +4308,11 @@ impl Player {
             return;
         }
         if self.defer_region_save() {cx.notify();return;}
-        if self.source_working&&(self.lyrics_sidebar_pending.is_some()||self.lyrics_sidebar_download_waiting){
-            self.metronome_save_requested=true;cx.notify();return;
+        if self.source_working&&(self.lyrics_flight.lyrics_sidebar.is_some()||self.lyrics_sidebar_download_waiting){
+            self.metronome_flight.metronome_save_requested=true;cx.notify();return;
         }
-        if self.metronome_pending.is_some() {
-            self.metronome_save_requested = true;
+        if self.metronome_flight.metronome.is_some() {
+            self.metronome_flight.metronome_save_requested = true;
             cx.notify();
             return;
         }
@@ -4371,7 +4353,7 @@ impl Player {
             self.playhead.seek_refused();
             return;
         }
-        self.count_in_anchor = None;
+        self.transport_flight.count_in_anchor = None;
         let target = requested.clamp(0., self.duration);
         if let Some(backend) = &self.backend {
             match backend.control(self.native_epoch, format!("seek {target}")) {
@@ -4390,7 +4372,7 @@ impl Player {
         cx.notify();
     }
     fn sync_lane(&mut self, i: usize, cx: &mut Context<Self>) {
-        if (self.tracks_pending.is_some()||self.carry_pending.is_some())||self.tracks_audio_failed{return;}
+        if (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some())||self.tracks_audio_failed{return;}
         if let Some(lane) = self
             .project
             .as_ref()
@@ -4417,9 +4399,9 @@ impl Player {
                 return true;
             };
         let command = format!("lane {lane} {} 1 {}", self.gain[0] as f32 / 100., u8::from(self.solo[0]));
-        let queued = self.monitor_actions.len();
+        let queued = self.monitor_flight.monitor_actions.len();
         if self.defer_monitor(DeferredAudio::Command(command.clone()), cx) {
-            if self.monitor_actions.len() == queued {
+            if self.monitor_flight.monitor_actions.len() == queued {
                 return false;
             }
             // Deferred commands receive their dirty stamp when the restored
@@ -4462,7 +4444,7 @@ impl Player {
             CancelSplit => unreachable!(),
             Split(mode) => self.split_source(mode, cx),
             Play => {
-                let playing=self.native_play_intent.map_or(self.playing,|(target,_)|target);
+                let playing=self.transport_flight.native_play.payload().map_or(self.playing,|target|*target);
                 if !playing {
                     if self.region_busy() {self.region.play_requested=!self.region.play_requested;return;}
                     if let Some((start,end))=self.region_target().selection {
@@ -4471,7 +4453,7 @@ impl Player {
                         }
                     }
                     if self.metronome.count_in_bars > 0 {
-                        self.count_in_anchor = Some(self.playhead.position());
+                        self.transport_flight.count_in_anchor = Some(self.playhead.position());
                     }
                 }
                 self.native_command(if playing { "pause" } else { "play" }.into(), cx);
@@ -4482,7 +4464,11 @@ impl Player {
             }
             Loop => {
                 let target=self.region_target();
-                self.request_region(region_gesture::Target{looping:!target.looping,..target},cx);
+                if self.rate_busy() {
+                    self.transport_flight.queued_loop.toggle(target);
+                } else {
+                    self.request_region(region_gesture::Target{looping:!target.looping,..target},cx);
+                }
             }
             Volume(value) => {
                 self.master_volume = value;
@@ -5217,7 +5203,7 @@ impl Player {
                                 self.track_probe(format!("mute-{i}"),singz_uikit::stem_chip_with_focus(("m", i), "M", self.muted[i], color, self.track_mix_focus[i][0].clone(), {
                                     let entity=cx.entity().downgrade();
                                     move |_,cx| {let _=entity.update(cx,|this,cx| {
-                                        if (this.tracks_pending.is_some()||this.carry_pending.is_some()){return;}
+                                        if (this.tracks_flight.tracks_pending.is_some()||this.carry_flight.carry.is_some()){return;}
                                         this.muted[i] = !this.muted[i];
                                         this.sync_lane(i, cx);
                                         cx.notify();
@@ -5228,7 +5214,7 @@ impl Player {
                                 self.track_probe(format!("solo-{i}"),singz_uikit::stem_chip_with_focus(("s", i), "S", self.solo[i], ACCENT, self.track_mix_focus[i][1].clone(), {
                                     let entity=cx.entity().downgrade();
                                     move |_,cx| {let _=entity.update(cx,|this,cx| {
-                                        if (this.tracks_pending.is_some()||this.carry_pending.is_some()){return;}
+                                        if (this.tracks_flight.tracks_pending.is_some()||this.carry_flight.carry.is_some()){return;}
                                         this.solo[i] = !this.solo[i];
                                         this.sync_lane(i, cx);
                                         cx.notify();
@@ -5239,7 +5225,7 @@ impl Player {
                                 let entity = cx.entity().downgrade();
                                 move |value, _, cx| {
                                     let _ = entity.update(cx, |this, cx| {
-                                        if (this.tracks_pending.is_some()||this.carry_pending.is_some()){return;}
+                                        if (this.tracks_flight.tracks_pending.is_some()||this.carry_flight.carry.is_some()){return;}
                                         this.gain[i] = (value * 100.).round() as u8;
                                         this.sync_lane(i, cx);
                                         cx.notify();
@@ -5538,7 +5524,7 @@ impl Render for Player {
             );
             transport.set_karaoke(self.karaoke, cx);
             transport.set_tempo(transport_rate.0, cx);
-            let (peak,clips)=self.timing_status.as_ref().map(|status|
+            let (peak,clips)=self.transport_flight.timing_status.as_ref().map(|status|
                 (if self.playing&&status.playing {status.output_peak}else{0.},status.output_clipped_blocks)).unwrap_or((0.,0));
             transport.set_native_peak(peak,clips,modal_open,cx);
         });
@@ -5547,29 +5533,29 @@ impl Render for Player {
                 && self.previous_screen == Screen::Library;
         let monitor_owned=self.monitor_busy();
         let monitor_attention=monitor_owned&&self.mic_view.error.is_some();
-        let monitor_stopping=monitor_owned&&!self.monitor_requested&&!monitor_attention;
+        let monitor_stopping=monitor_owned&&!self.monitor_flight.monitor_requested&&!monitor_attention;
         let monitor_label=monitor_owned.then(||if monitor_attention {"Monitor needs attention"}
             else if monitor_stopping {"Stopping monitor"}
             else if self.mic_view.phase==microphone::Phase::Monitoring {"Mic monitoring"}
             else {"Starting monitor"}.to_owned());
         self.header.update(cx, |header, cx| {
             header.set_monitor_state(monitor_label,monitor_stopping,monitor_attention,cx);
-            header.set_import_available(!self.rate_busy()&&self.tracks_pending.is_none()&&!self.tracks_audio_failed&&self.project.as_ref().is_some_and(|p|!self.source_working&&!p.dir.starts_with(&self.catalog_root)),cx);
+            header.set_import_available(!self.rate_busy()&&self.tracks_flight.tracks_pending.is_none()&&!self.tracks_audio_failed&&self.project.as_ref().is_some_and(|p|!self.source_working&&!p.dir.starts_with(&self.catalog_root)),cx);
             header.set_rename_enabled(
                 !self.rate_busy() && !self.loading
-                    && self.tracks_pending.is_none() && !self.tracks_audio_failed
+                    && self.tracks_flight.tracks_pending.is_none() && !self.tracks_audio_failed
                     && !self.saving
                     && self.source_job.is_none()
                     && self.rename_pending.is_none()
-                    && self.metronome_pending.is_none()
-                    && !self.metronome_save_requested
-                    && !self.metronome_save_waiting
-                    && !self.counting_in,
+                    && self.metronome_flight.metronome.is_none()
+                    && !self.metronome_flight.metronome_save_requested
+                    && !self.metronome_flight.metronome_save_waiting
+                    && !self.transport_flight.counting_in,
                 cx,
             );
             header.set_save_enabled(save_enabled,cx);
             header.set_save_status(
-                if self.saving || self.source_saving || self.native_rate_save_requested || self.metronome_save_requested || self.metronome_save_waiting {
+                if self.saving || self.source_saving || self.transport_flight.native_rate_save_requested || self.metronome_flight.metronome_save_requested || self.metronome_flight.metronome_save_waiting {
                     1
                 } else if self.edit_seq == self.saved_seq && !self.rate_busy() {
                     2
@@ -5621,7 +5607,7 @@ impl Render for Player {
             self.playhead.shown(now);
             // A pending receipt gets at most one second on the existing frame
             // clock, even while paused; ordinary idle schedules no extra frames.
-            if (self.playing && !self.counting_in) || self.playhead.pending_seek().is_some() { animating = true; }
+            if (self.playing && !self.transport_flight.counting_in) || self.playhead.pending_seek().is_some() { animating = true; }
         }
         if self.playing && self.backend.is_none() && self.screen == Screen::Player && !modal_open {
             self.playhead.advance_demo(dt as f64 * self.tempo as f64, self.duration, self.looping);
@@ -5646,7 +5632,7 @@ impl Render for Player {
             strip.set_position(self.display_position(), cx);
             strip.set_view(self.view_start, self.view_end, cx);
         });
-        animating |= self.playing && self.timing_status.as_ref().is_some_and(|status|status.count_in_heard.is_some());
+        animating |= self.playing && self.transport_flight.timing_status.as_ref().is_some_and(|status|status.count_in_heard.is_some());
         if animating && self.screen == Screen::Player && !modal_open {
             window.request_animation_frame();
         }
@@ -5765,7 +5751,7 @@ impl Render for Player {
             s.set_can_detect(self.project.as_ref().is_some_and(|p|p.lanes.iter().any(|(i,_)|*i == 1)),cx);
         });
         if self.lyrics_editor_open {
-            self.lyrics_editor.update(cx,|s,cx|s.context_playback(self.playhead.position() as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.counting_in&&self.playhead.pending_seek().is_none()&&self.capture_file.is_none(){self.playhead.anchor().map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.playhead.loop_range().map(|(s,e)|(s as f64,e as f64)),cx));
+            self.lyrics_editor.update(cx,|s,cx|s.context_playback(self.playhead.position() as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.transport_flight.counting_in&&self.playhead.pending_seek().is_none()&&self.capture_file.is_none(){self.playhead.anchor().map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.playhead.loop_range().map(|(s,e)|(s as f64,e as f64)),cx));
         }
         self.pitch_strip.update(cx, |s, cx| {
             s.set_beat_tempo(self.beats.as_ref().map(|g| g.bpm), cx)
@@ -5787,7 +5773,7 @@ impl Render for Player {
             self.view_end * self.duration,
         );
         self.beat_handles.update(cx, |handles, cx| handles.set_context(
-            ruler_grid.clone().filter(|_| !modal_open && self.metronome_pending.is_none() && !self.source_blocks_player()),
+            ruler_grid.clone().filter(|_| !modal_open && self.metronome_flight.metronome.is_none() && !self.source_blocks_player()),
             ruler_view.0, ruler_view.1, self.duration, cx));
         // The source zoom cluster is z=6, above the z=5 scrub/playhead layer.
         // Keep the ruler-relative geometry (4px stack inset + 3px top) while
@@ -5830,7 +5816,7 @@ impl Render for Player {
                                             let entity=cx.entity().downgrade();
                                             singz_uikit::song_button_with_focus(button,self.track_reset_focus[i].clone(),!disabled,move|_,cx| {
                                                 let _=entity.update(cx,|this,cx| {
-                                                    if (this.tracks_pending.is_some()||this.carry_pending.is_some())||this.tracks_audio_failed{return;}
+                                                    if (this.tracks_flight.tracks_pending.is_some()||this.carry_flight.carry.is_some())||this.tracks_audio_failed{return;}
                                                     if i==0 {this.muted=[false;tracks::LANE_SLOTS];}else{this.solo=[false;tracks::LANE_SLOTS];}
                                                     for lane in 0..tracks::LANE_SLOTS{this.sync_lane(lane,cx);}cx.notify();
                                                 });
@@ -5839,7 +5825,7 @@ impl Render for Player {
                                             let entity=cx.entity().downgrade();
                                             singz_uikit::song_button_with_focus(button,self.track_header_focus[1].clone(),!disabled,move|_,cx| {
                                                 let _=entity.update(cx,|this,cx| {
-                                                    if (this.tracks_pending.is_some()||this.carry_pending.is_some())||this.tracks_audio_failed{return;}
+                                                    if (this.tracks_flight.tracks_pending.is_some()||this.carry_flight.carry.is_some())||this.tracks_audio_failed{return;}
                                                     this.open_stem_export(cx);cx.notify();
                                                 });
                                             })
@@ -5869,7 +5855,7 @@ impl Render for Player {
                     .when(self.karaoke,|row|row.child(div().w(px(360.)).flex_shrink_0().border_l_1().border_color(rgba(0xfff0d614)).bg(rgba(0x1b181466)).flex().flex_col()
                         .child(div().h(px(53.)).flex_shrink_0().when(true,|d|self.quick_start.read(cx).anchors.track_box(d,"lyrics",[0.,0.,0.,1.])).px(px(18.)).pt(px(14.)).pb(px(12.)).flex().items_center().justify_between().border_b_1().border_color(rgba(0xfff0d614))
                             .child(singz_uikit::tracked_text(i18n::t("lyrics.panel.title"),"SingZ Display 800",15.,0.3,TEXT))
-                            .child(pill("guide",i18n::t("lyrics.panel.guide.label"),!self.muted[0]).h(px(26.)).rounded(px(7.)).px(px(10.)).text_size(px(11.)).shadow(vec![]).bg(if self.muted[0]{rgba(0)}else{rgba(0xffa02821)}).border_color(if self.muted[0]{rgba(0xfff0d614)}else{rgba(0xffa0288c)}).on_click(cx.listener(|this,_,_,cx| { if (this.tracks_pending.is_some()||this.carry_pending.is_some())||this.tracks_audio_failed{return;}this.muted[0]=!this.muted[0];this.sync_lane(0,cx);cx.notify(); }))))
+                            .child(pill("guide",i18n::t("lyrics.panel.guide.label"),!self.muted[0]).h(px(26.)).rounded(px(7.)).px(px(10.)).text_size(px(11.)).shadow(vec![]).bg(if self.muted[0]{rgba(0)}else{rgba(0xffa02821)}).border_color(if self.muted[0]{rgba(0xfff0d614)}else{rgba(0xffa0288c)}).on_click(cx.listener(|this,_,_,cx| { if (this.tracks_flight.tracks_pending.is_some()||this.carry_flight.carry.is_some())||this.tracks_audio_failed{return;}this.muted[0]=!this.muted[0];this.sync_lane(0,cx);cx.notify(); }))))
                         .when(self.backend.is_none(),|sidebar|sidebar.child(div().h(px(59.)).flex_shrink_0().px(px(18.)).py(px(9.)).border_b_1().border_color(rgba(0xfff0d614)).flex().flex_col().gap(px(4.))
                             .child(div().flex().items_center().gap(px(8.)).child(singz_uikit::source_badge(if self.project.is_none(){"Edited"}else{match self.lyric_document.source.as_str(){"lrclib"=>"Synced","whisper"=>"AI transcribed",_=>"Edited"}},true)).child(div().flex_1().text_size(px(11.5)).text_color(rgb(DIM)).child(if self.project.is_none(){"Demo lyrics".to_owned()}else if self.lyric_document.credit.is_empty(){"Saved lyrics".to_owned()}else{self.lyric_document.credit.clone()})).child(singz_uikit::lyrics_action("lyric-check",i18n::t("lyrics.panel.checkAlign.label"))))
                             .child(div().flex().gap(px(8.)).children([i18n::t("lyrics.panel.precise.label"),i18n::t("lyrics.panel.edit.label"),i18n::t("lyrics.panel.change.label")].into_iter().enumerate().map(|(i,label)| {
@@ -5896,7 +5882,7 @@ impl Render for Player {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 #[cfg(feature="ui-tests")]
                 if std::env::var_os("SINGZ_GPUI_EMPTY_PROJECT_TEST").is_some()&&event.keystroke.key=="s"&&(event.keystroke.modifiers.platform||event.keystroke.modifiers.control){
-                    eprintln!("EMPTY_PROJECT actual CmdS root admission: rootFocus={} headerFocus={:?} import={} rename={} source={:?} saving={} rate={} met={} metSave={} waiting={}",this.focus_handle.is_focused(window),this.header.read(cx).focused_control(window),this.library_import_open,this.track_rename.is_some(),this.source_job,this.saving,this.rate_busy(),this.metronome_pending.is_some(),this.metronome_save_requested,this.metronome_save_waiting);
+                    eprintln!("EMPTY_PROJECT actual CmdS root admission: rootFocus={} headerFocus={:?} import={} rename={} source={:?} saving={} rate={} met={} metSave={} waiting={}",this.focus_handle.is_focused(window),this.header.read(cx).focused_control(window),this.library_import_open,this.track_rename.is_some(),this.source_job,this.saving,this.rate_busy(),this.metronome_flight.metronome.is_some(),this.metronome_flight.metronome_save_requested,this.metronome_flight.metronome_save_waiting);
                 }
                 let desktop_command=(cfg!(target_os="macos")&&event.keystroke.modifiers.platform)
                     ||(!cfg!(target_os="macos")&&event.keystroke.modifiers.control);
@@ -5955,7 +5941,7 @@ impl Render for Player {
                     cx.stop_propagation();
                     return;
                 }
-                if (this.carry_pending.is_some()||this.rate_busy())&&event.keystroke.key=="s"&&((cfg!(target_os="macos")&&event.keystroke.modifiers.platform)||(!cfg!(target_os="macos")&&event.keystroke.modifiers.control)) {
+                if (this.carry_flight.carry.is_some()||this.rate_busy())&&event.keystroke.key=="s"&&((cfg!(target_os="macos")&&event.keystroke.modifiers.platform)||(!cfg!(target_os="macos")&&event.keystroke.modifiers.control)) {
                     this.save_project(cx);cx.stop_propagation();return;
                 }
                 if event.keystroke.key == "escape"

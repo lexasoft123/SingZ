@@ -54,7 +54,7 @@ impl Player {
                 log.set_live_rows(snapshot.entries.iter().map(row).collect(), cx)
             });
             match service.list() {
-                Ok(id) => self.diagnostics_list_pending = Some((id, self.diagnostics_session)),
+                Ok(id) => self.diagnostics_flight.diagnostics_list.activate(self.diagnostics_session, id, ()),
                 Err(error) => diagnostics::event(
                     "app",
                     format!("Could not list log sessions: {error}"),
@@ -66,10 +66,10 @@ impl Player {
     }
     pub(super) fn close_diagnostics(&mut self, cx: &mut Context<Self>) {
         if let Some(service) = &self.diagnostics {
-            if let Some((id, _)) = self.diagnostics_list_pending.take() {
+            if let Some((_, id, _)) = self.diagnostics_flight.diagnostics_list.take() {
                 service.cancel(id);
             }
-            if let Some((id, _, _, _)) = self.diagnostics_read_pending.take() {
+            if let Some((_, id, _)) = self.diagnostics_flight.diagnostics_read.take() {
                 service.cancel(id);
             }
         }
@@ -84,7 +84,7 @@ impl Player {
         let Some(service) = &self.diagnostics else {
             return;
         };
-        if let Some((id, _, _, _)) = self.diagnostics_read_pending.take() {
+        if let Some((_, id, _)) = self.diagnostics_flight.diagnostics_read.take() {
             service.cancel(id);
         }
         let Some(name) = selected else {
@@ -93,8 +93,7 @@ impl Player {
         let generation = self.log_panel.read(cx).selection_request();
         match service.read(name.clone()) {
             Ok(id) => {
-                self.diagnostics_read_pending =
-                    Some((id, self.diagnostics_session, generation, name))
+                self.diagnostics_flight.diagnostics_read.activate(self.diagnostics_session, id, (generation, name))
             }
             Err(_) => self.log_panel.update(cx, |log, cx| {
                 let past = diagnostics::parse_session(&crate::i18n::t("diagnostics.notice.sessionGone"));
@@ -114,8 +113,8 @@ impl Player {
             cx.notify();
             return;
         }
-        self.diagnostics_save_serial += 1;
-        let serial = self.diagnostics_save_serial;
+        self.diagnostics_flight.diagnostics_save_serial += 1;
+        let serial = self.diagnostics_flight.diagnostics_save_serial;
         let session = self.diagnostics_session;
         #[cfg(feature = "ui-tests")]
         if std::env::var_os("SINGZ_GPUI_DIAGNOSTICS_TEST").is_some() {
@@ -165,10 +164,10 @@ impl Player {
         };
         match service.export(path, selected.clone(), overwrite) {
             Ok(id) => {
-                self.diagnostics_save_receipts.insert(id,(session,serial,selected.clone()));
-                if serial>self.diagnostics_save_accepted_serial{
-                    self.diagnostics_save_accepted_serial=serial;
-                    self.diagnostics_save_pending=Some((id,session,serial,selected));
+                self.diagnostics_flight.diagnostics_save_receipts.insert(id,(session,serial,selected.clone()));
+                if serial>self.diagnostics_flight.diagnostics_save_accepted_serial{
+                    self.diagnostics_flight.diagnostics_save_accepted_serial=serial;
+                    self.diagnostics_flight.diagnostics_save.activate(session,id,(serial,selected));
                 }
             },
             Err(error) => diagnostics::event(
@@ -195,11 +194,8 @@ impl Player {
         }
         let events = service.drain();
         for event in events {
-            if self
-                .diagnostics_list_pending
-                .is_some_and(|(id, _)| id == event.id)
-            {
-                let (_, session) = self.diagnostics_list_pending.take().unwrap();
+            if self.diagnostics_flight.diagnostics_list.is_current(event.id) {
+                let (session, _, _) = self.diagnostics_flight.diagnostics_list.take().unwrap();
                 if session == self.diagnostics_session && self.screen == Screen::Log {
                     if let Ok(diagnostics::Reply::Sessions(sessions)) = event.result {
                         let sessions = sessions
@@ -216,12 +212,8 @@ impl Player {
                 }
                 continue;
             }
-            if self
-                .diagnostics_read_pending
-                .as_ref()
-                .is_some_and(|(id, _, _, _)| *id == event.id)
-            {
-                let (_, session, generation, name) = self.diagnostics_read_pending.take().unwrap();
+            if self.diagnostics_flight.diagnostics_read.is_current(event.id) {
+                let (session, _, (generation, name)) = self.diagnostics_flight.diagnostics_read.take().unwrap();
                 if session == self.diagnostics_session && self.screen == Screen::Log {
                     let past = match event.result {
                         Ok(diagnostics::Reply::Read(past)) => past,
@@ -239,12 +231,12 @@ impl Player {
                 }
                 continue;
             }
-            if let Some((session,serial,_))=self.diagnostics_save_receipts.remove(&event.id){
-                if self.diagnostics_save_pending.as_ref().is_some_and(|(id,_,_,_)|*id==event.id){self.diagnostics_save_pending=None;}
+            if let Some((session,serial,_))=self.diagnostics_flight.diagnostics_save_receipts.remove(&event.id){
+                self.diagnostics_flight.diagnostics_save.settle_serial(event.id);
                 match event.result {
                     Ok(diagnostics::Reply::Exported(path))
                         if session == self.diagnostics_session
-                            && serial == self.diagnostics_save_accepted_serial
+                            && serial == self.diagnostics_flight.diagnostics_save_accepted_serial
                             && self.screen == Screen::Log =>
                     {
                         self.log_panel
@@ -260,4 +252,14 @@ impl Player {
             }
         }
     }
+}
+
+#[derive(Default)]
+pub(super) struct DiagnosticsFlight {
+    pub(super) diagnostics_list: inflight::Inflight<()>,
+    pub(super) diagnostics_read: inflight::Inflight<(u64,String)>,
+    pub(super) diagnostics_save: inflight::Inflight<(u64,Option<String>)>,
+    pub(super) diagnostics_save_serial: u64,
+    pub(super) diagnostics_save_accepted_serial: u64,
+    pub(super) diagnostics_save_receipts: HashMap<u64,(u64,u64,Option<String>)>,
 }

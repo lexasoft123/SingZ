@@ -119,7 +119,7 @@ fn native(s: &integration::Status) -> serde_json::Value {
 fn state(p: &Player, w: &Window, cx: &App, phase: &str) -> serde_json::Value {
     serde_json::json!({"phase":phase,"hidden":!w.is_visible()&&!w.is_window_active(),"active":w.is_window_active(),"scale":w.scale_factor(),
         "viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"provider":p.settings.read(cx).provider_ui_state(w),
-        "snapshot":p.audio_provider,"providerSerial":p.audio_provider_serial,"nativeEpoch":p.native_epoch,"project":p.project.as_ref().map(|s|&s.dir),
+        "snapshot":p.audio_provider,"providerSerial":p.provider_flight.audio_provider.serial(),"nativeEpoch":p.native_epoch,"project":p.project.as_ref().map(|s|&s.dir),
         "loadedSong":p.loaded_song,"loading":p.loading,"playing":p.playing,"position":p.playhead.position(),"native":p.last_playback_status.as_ref().map(native),
         "notice":p.notice,"capture":{"phase":format!("{:?}",p.mic_view.phase),"owner":p.mic_view.owner,"fixture":p.mic_view.fixture},
         "preferences":prefs().ok().and_then(|v|serde_json::from_slice::<serde_json::Value>(&v).ok()),"liveFps":"unmeasured"})
@@ -215,7 +215,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 wait!(8,p,w,app => p.screen==Screen::Settings&&p.settings.read(app).provider_ui_state(w)["enabled"]==true);
                 shot!(format!("{}-{width:.0}",if restart{"restart"}else{"unloaded"}));
                 let same_before=prefs()?;
-                let serial_before=handle.update(cx,|_,_,cx|view.read(cx).audio_provider_serial)?;
+                let serial_before=handle.update(cx,|_,_,cx|view.read(cx).provider_flight.audio_provider.serial())?;
                 let previous=handle.update(cx,|_,_,cx|view.read(cx).audio_provider.clone().unwrap())?;
                 let changing=previous.selected!=Provider::Wasapi;
                 action!(w,app => setting(&view,w,app,"settings-provider"));
@@ -229,15 +229,15 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 shot!(format!("menu-{width:.0}"));
                 action!(w,app => provider_click(&view,w,app,Some(1)));
                 action!(w,app => {anyhow::ensure!(view.read(app).settings.read(app).provider_ui_state(w)["openField"]=="settings-provider"&&prefs()?==same_before,"Disabled ASIO pointer committed");key(w,app,"enter");Ok(())});
-                wait!(12,p,w,app => p.audio_provider_pending.is_none()&&p.audio_provider.as_ref().is_some_and(|s|s.selected==Provider::Wasapi&&(!changing||s.error.is_none())));
+                wait!(12,p,w,app => p.provider_flight.audio_provider.is_none()&&p.audio_provider.as_ref().is_some_and(|s|s.selected==Provider::Wasapi&&(!changing||s.error.is_none())));
                 let committed=prefs()?;
                 action!(w,app => {let raw:serde_json::Value=serde_json::from_slice(&committed)?;anyhow::ensure!(raw["nativeAudioProvider"]=="wasapi"&&raw["outputUid"]=="","Provider commit did not clear incompatible output");
-                    if !changing {anyhow::ensure!(committed==same_before&&view.read(app).audio_provider_serial==serial_before
+                    if !changing {anyhow::ensure!(committed==same_before&&view.read(app).provider_flight.audio_provider.serial()==serial_before
                         &&view.read(app).audio_provider.as_ref().unwrap().request==previous.request,"Same-provider keyboard choice wrote preferences/request");}Ok(())});
-                let serial=handle.update(cx,|_,_,app|view.read(app).audio_provider_serial)?;
+                let serial=handle.update(cx,|_,_,app|view.read(app).provider_flight.audio_provider.serial())?;
                 action!(w,app => {provider_click(&view,w,app,None)?;provider_click(&view,w,app,Some(0))?;Ok(())});
                 cx.background_executor().timer(Duration::from_millis(250)).await;
-                action!(w,app => {anyhow::ensure!(prefs()?==committed&&view.read(app).audio_provider_serial==serial,"Same-provider pointer wrote preferences/request");Ok(())});
+                action!(w,app => {anyhow::ensure!(prefs()?==committed&&view.read(app).provider_flight.audio_provider.serial()==serial,"Same-provider pointer wrote preferences/request");Ok(())});
                 shot!(format!("wasapi-{width:.0}"));
                 action!(w,app => setting(&view,w,app,"settings-close"));
                 if restart {continue;}
@@ -294,9 +294,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 action!(w,app => header(&view,w,app,"header-catalog"));
                 wait!(8,p,w,app => p.screen==Screen::Library);
                 action!(w,app => library(&view,w,app,&dir,true));
-                wait!(8,p,w,app => p.delete_inspect_pending.is_none()&&p.project_delete.read(app).is_open());
+                wait!(8,p,w,app => p.delete_flight.delete_inspect.is_none()&&p.project_delete.read(app).is_open());
                 action!(w,app => {draw(w,app);let b=view.read(app).project_delete.read(app).bounds("project-delete-confirm").ok_or_else(||anyhow::anyhow!("Actual Delete confirmation unmeasured"))?;click(w,app,b.center());Ok(())});
-                wait!(15,p,w,app => p.delete_pending.is_none()&&!p.project_delete.read(app).is_open()&&!dir.exists()&&p.project.is_none()&&!p.loaded_song);
+                wait!(15,p,w,app => p.delete_flight.delete.is_none()&&!p.project_delete.read(app).is_open()&&!dir.exists()&&p.project.is_none()&&!p.loaded_song);
                 wait!(12,p,w,app => p.audio_provider.as_ref().is_some_and(|s|s.can_change&&s.epoch==p.native_epoch));
                 action!(w,app => header(&view,w,app,"header-settings"));
                 wait!(8,p,w,app => p.settings.read(app).provider_ui_state(w)["enabled"]==true);

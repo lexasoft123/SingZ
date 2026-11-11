@@ -55,10 +55,9 @@ impl Player {
         error: String,
         cx: &mut Context<Self>,
     ) {
-        if self.tracks_pending != Some((epoch, serial)) || self.native_epoch != epoch {
+        if self.native_epoch != epoch || self.tracks_flight.tracks_pending.settle(epoch, serial).is_none() {
             return;
         }
-        self.tracks_pending = None;
         self.tracks_audio_failed = true;
         self.track_rename = None;
         self.playing = false;
@@ -77,10 +76,9 @@ impl Player {
         error: String,
         cx: &mut Context<Self>,
     ) {
-        if self.tracks_pending != Some((epoch, serial)) || self.native_epoch != epoch {
+        if self.native_epoch != epoch || self.tracks_flight.tracks_pending.settle(epoch, serial).is_none() {
             return;
         }
-        self.tracks_pending = None;
         self.tracks_audio_failed = true;
         self.track_rename = None;
         self.playing = false;
@@ -133,22 +131,22 @@ impl Player {
             || self.tracks_audio_failed
             || self.loading
             || self.saving
-            || self.carry_pending.is_some()
-            || self.tracks_pending.is_some()
+            || self.carry_flight.carry.is_some()
+            || self.tracks_flight.tracks_pending.is_some()
             || self.source_job.is_some()
             || self.rename_pending.is_some()
             || self.import_pending.is_some()
             || self.project_library_moving
             || self.monitor_busy()
-            || self.counting_in
-            || self.metronome_pending.is_some()
-            || self.metronome_save_requested
-            || self.metronome_save_waiting
-            || self.delete_pending.is_some()
-            || self.lyrics_editor_pending.is_some()
+            || self.transport_flight.counting_in
+            || self.metronome_flight.metronome.is_some()
+            || self.metronome_flight.metronome_save_requested
+            || self.metronome_flight.metronome_save_waiting
+            || self.delete_flight.delete.is_some()
+            || self.lyrics_flight.lyrics_editor_pending.is_some()
             || self.lyrics_editor_open
-            || self.lyrics_alignment_pending.is_some()
-            || self.lyrics_sidebar_pending.is_some()
+            || self.lyrics_flight.lyrics_alignment.is_some()
+            || self.lyrics_flight.lyrics_sidebar.is_some()
             || self.lyrics_sidebar_download_waiting
             || !self.lyrics_sidebar_needs.is_empty()
             || self.lyrics_sidebar_next.is_some()
@@ -316,18 +314,17 @@ impl Player {
         if let Some(backend) = &self.backend {
             backend.cancel_beat_detection();
             backend.cancel_lyrics_search();
-            self.tracks_serial += 1;
+            let serial = self.tracks_flight.tracks_pending.begin(self.native_epoch, ());
             let request = if paths.is_empty() {
-                backend.replace_lanes(self.native_epoch, self.tracks_serial, candidate)
+                backend.replace_lanes(self.native_epoch, serial, candidate)
             } else {
-                backend.add_tracks(self.native_epoch, self.tracks_serial, candidate, paths)
+                backend.add_tracks(self.native_epoch, serial, candidate, paths)
             };
             match request {
                 Ok(()) => {
-                    self.tracks_pending = Some((self.native_epoch, self.tracks_serial));
                     self.track_rename = None;
                 }
-                Err(error) => self.notice = Some(error.to_string()),
+                Err(error) => { self.tracks_flight.tracks_pending.cancel(); self.notice = Some(error.to_string()); },
             }
         }
         cx.notify();
@@ -339,10 +336,9 @@ impl Player {
         result: Result<(integration::Project, integration::Status, Vec<Vec<f32>>), String>,
         cx: &mut Context<Self>,
     ) {
-        if self.tracks_pending != Some((epoch, serial)) || self.native_epoch != epoch {
+        if self.native_epoch != epoch || self.tracks_flight.tracks_pending.settle(epoch, serial).is_none() {
             return;
         }
-        self.tracks_pending = None;
         match result {
             Ok((mut project, status, peaks)) => {
                 let previous = self.duration;
@@ -458,4 +454,9 @@ impl Player {
         }
         cx.notify();
     }
+}
+
+#[derive(Default)]
+pub(super) struct TracksFlight {
+    pub(super) tracks_pending: inflight::Inflight<()>,
 }
