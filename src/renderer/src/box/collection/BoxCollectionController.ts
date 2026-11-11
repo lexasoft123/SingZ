@@ -6,6 +6,7 @@ import { tCollection } from './i18n'
 import {
   driveEntryId,
   localEntryId,
+  sortEntriesByArtist,
   type BoxCollectionApi,
   type CollectionEntry,
   type CollectionPrepareResult,
@@ -90,7 +91,7 @@ export class BoxCollectionController {
       // A Drive project that cannot own a local copy stays visible as its own row.
       entries.push({ id: driveEntryId(remote.id), remoteId: remote.id, name: remote.name, local: null })
     }
-    return entries
+    return sortEntriesByArtist(entries)
   }
 
   private errorMessage(error: unknown): string {

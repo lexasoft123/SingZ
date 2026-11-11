@@ -1,6 +1,7 @@
 import type { BoxAPI } from '../../../../shared/box-contract'
 import type { DriveDeviceChallenge, DriveDeviceFailure } from '../../../../shared/drive-device'
 import type { ProjectListItem, SingzApi } from '../../../../shared/types'
+import { compareSongs, parseSongName } from '../song-identity'
 import type { BoxProjectInspection, BoxProjectMetadata } from '../project'
 
 export type BoxCollectionApi = Pick<SingzApi,
@@ -109,4 +110,13 @@ export function queueViewItem(entry: CollectionEntry): ProjectListItem {
     hasLyrics: false,
     bytes: 0
   }
+}
+
+/** Catalog order: artist, then title (locale-aware), unknown artist last.
+ *  Array.sort is stable, so equal names keep their incoming order. Selection is
+ *  by entry id, so the remembered row survives a reorder. */
+export function sortEntriesByArtist(entries: CollectionEntry[]): CollectionEntry[] {
+  const keyed = entries.map(entry => ({ entry, identity: parseSongName(entry.name) }))
+  keyed.sort((a, b) => compareSongs(a.identity, b.identity))
+  return keyed.map(item => item.entry)
 }

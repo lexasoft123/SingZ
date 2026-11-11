@@ -45,6 +45,7 @@ import { hashFile } from './separation'
 import { isIssuedLead } from './vocal-separation'
 import { readSettings, writeSettings } from './settings'
 import { AUDIO_EXT } from './source'
+import { readAudioDurationSec } from './audio-header-duration'
 import { productProfileDir } from '../shared/product-identity'
 
 function defaultProjectsRoot(): string {
@@ -904,6 +905,12 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
       if (format) stems[s] = join(dir, 'stems', `${s}.${format}`)
     }
     const coreThere = facts.playable
+    // Header-only reads (a few KiB per stem): the catalog shows a song's time
+    // without opening it in the engine. The longest lane is the song's length.
+    const lengths = coreThere
+      ? await Promise.all(Object.values(stems).map(path => readAudioDurationSec(path)))
+      : []
+    const durationSec = lengths.reduce<number>((longest, value) => value !== null && value > longest ? value : longest, 0)
     const settings = meta.settings ?? { transpose: 0, tracks: {} }
     return {
       dir,
@@ -913,6 +920,7 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
       settings: { ...settings, custom: await resolveCustom(dir, settings.custom) },
       graphHash: validGraphHash(meta.graphHash) ? { ...meta.graphHash } : undefined,
       stems: coreThere ? stems : undefined,
+      durationSec: durationSec > 0 ? durationSec : undefined,
       // named here so a truncated stem is reported as itself, rather than as
       // the decoder's "Could not decode that audio file" two layers later
       damaged: facts.damaged.length ? facts.damaged : undefined,

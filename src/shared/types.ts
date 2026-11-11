@@ -281,6 +281,9 @@ export interface ProjectInfo {
   graphHash?: ProjectGraphHash
   /** Stem files on disk (at least the core four), when the project has them. */
   stems?: Partial<Record<StemName6, string>>
+  /** Song length in seconds, read from the stem files' headers (never decoded).
+   *  Absent when no stem header could be read. */
+  durationSec?: number
   /** Files project.json names that are there at the wrong size — a half-copied
    *  folder, an interrupted cloud materialization. Named so the failure can be
    *  reported as itself instead of as a decode error. */

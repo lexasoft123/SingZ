@@ -90,6 +90,21 @@ function explicitExit(scope: HTMLElement, active: HTMLElement, targets: HTMLElem
   return direction === 'ArrowDown' ? exits[0] ?? null : nearestInDirection(active, exits, direction) ?? exits[exits.length - 1] ?? null
 }
 
+/** Explicit horizontal hand-over between a list and its side rail. A container
+ * marked `data-remote-right="<selector>"` (or `data-remote-left`) sends Right
+ * (Left) to the matching target — the one flagged `data-current="true"` when
+ * there is one — instead of the geometrically nearest control, which for a
+ * long list would be whichever rail letter happens to sit beside the row. */
+const SIDE_ATTRIBUTE: Partial<Record<RemoteDirection, string>> = { ArrowRight: 'data-remote-right', ArrowLeft: 'data-remote-left' }
+export function sideExit(scope: HTMLElement, active: HTMLElement, targets: HTMLElement[], direction: RemoteDirection): HTMLElement | null {
+  const attribute = SIDE_ATTRIBUTE[direction]
+  const group = attribute ? active.closest<HTMLElement>(`[${attribute}]`) : null
+  const selector = group?.getAttribute(attribute!)
+  if (!group || !selector || !scope.contains(group)) return null
+  const candidates = targets.filter(target => target !== active && !group.contains(target) && target.matches(selector))
+  return candidates.find(target => target.dataset.current === 'true') ?? candidates[0] ?? null
+}
+
 export function moveSpatialFocus(scope: HTMLElement, direction: RemoteDirection): boolean {
   if (scope.dataset.surface === 'mix' && (direction === 'ArrowUp' || direction === 'ArrowDown')) {
     return moveMixerChannelFocus(scope, direction)
@@ -102,7 +117,7 @@ export function moveSpatialFocus(scope: HTMLElement, direction: RemoteDirection)
     targets[0].scrollIntoView({ block: 'nearest', inline: 'nearest' })
     return true
   }
-  const next = explicitExit(scope, active, targets, direction) ?? nearestInDirection(active, targets, direction)
+  const next = sideExit(scope, active, targets, direction) ?? explicitExit(scope, active, targets, direction) ?? nearestInDirection(active, targets, direction)
   if (!next) return false
   next.focus({ preventScroll: true })
   next.scrollIntoView({ block: 'nearest', inline: 'nearest' })

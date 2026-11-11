@@ -903,7 +903,6 @@ export default function BoxApp(): React.JSX.Element {
             void hydrate(false)
             if (collection.getSnapshot().auth.signedIn) void collection.refreshRemote()
           }}
-          onAccount={() => goAccount('catalog')}
           onScroll={scrollTop => { catalogScroll.current = scrollTop }}
         />}
         {route === 'details' && selectedEntry && <SongDetails
