@@ -635,6 +635,7 @@ export class DesktopNativePlaybackClient {
     signature: string
     positionSeconds: number
     route: PreparedRoute
+    request: DesktopNativePlaybackPrepare
   } | null = null
 
   get preparedAhead(): boolean {
@@ -686,6 +687,23 @@ export class DesktopNativePlaybackClient {
     return this.last
   }
 
+  /** A retained generation adopted by a restarted renderer before its first
+   * Play is still only prepared; paused scrubs should replace it via the
+   * prepare-ahead path rather than invoking native seek(). */
+  get retainedPrepared(): boolean {
+    return this.ownsOutput && this.isPreparedStatus(this.last)
+  }
+
+  get retainedPreparedPositionSeconds(): number | null {
+    if (!this.retainedPrepared || !this.last?.format.sampleRate) return null
+    const frame = Number(this.last.renderedProjectFrame)
+    return Number.isFinite(frame) ? Math.max(0, frame) / this.last.format.sampleRate : null
+  }
+
+  get preparedAheadPositionSeconds(): number | null {
+    return this.ahead?.positionSeconds ?? null
+  }
+
   /** A transport known to be parked — paused, completed or stopped, with a
    * current status to say so. During a structural rebuild `started` is false
    * and the status is gone, and that is NOT parked: a pause issued then must
@@ -696,8 +714,10 @@ export class DesktopNativePlaybackClient {
     // out). A snapshot's 'stopped' is what a generation reads for ~80 ms
     // after its start is acknowledged, and trusting it skipped a pause
     // issued in that window as "already parked" while the core played on.
-    return this.ownsOutput && this.started && this.last !== null &&
+    const retainedPrepared = this.isPreparedStatus(this.last)
+    return this.ownsOutput && this.last !== null && (retainedPrepared || (this.started &&
       (this.transportIntent === 'paused' || state === 'completed')
+    ))
   }
 
   /** The audible position in seconds as the bar should show it: the core's
@@ -1050,7 +1070,11 @@ export class DesktopNativePlaybackClient {
     return this.serialize(async () => {
       try {
         const recovering = this.recoveryPending
-        if (this.active && !recovering) return false
+        if (this.active && !recovering) {
+          if (!this.isRetainedPrepared()) return false
+          await this.openRetainedPreparedUnlocked()
+          return true
+        }
         if (recovering &&
             (this.recoveryKind !== 'prepare-retry' ||
              this.recoveryProvider !== request.provider)) {
@@ -1173,41 +1197,120 @@ export class DesktopNativePlaybackClient {
    * or the core declines; never throws into the caller — a failed prepare
    * ahead costs nothing but the head start. */
   async prepareAhead(request: DesktopNativePlaybackPrepare): Promise<boolean> {
-    return this.serialize(async () => {
-      if (this.ownsOutput || this.generation || this.ahead || this.recoveryPending) return false
-      try {
-        const route = await this.resolveRoute(request)
-        const config = this.configFor(request, route)
-        const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
-        if (!prepared.ok || prepared.generation === '0') {
-          if (prepared.generation !== '0' && prepared.ownershipRetained === true) {
-            try { await window.singz.unloadDesktopPlayback(prepared.generation) } catch { /* nothing exists */ }
-          }
-          return false
+    return this.serialize(() => this.prepareAheadUnlocked(request))
+  }
+
+  private async prepareAheadUnlocked(
+    request: DesktopNativePlaybackPrepare,
+    route?: PreparedRoute
+  ): Promise<boolean> {
+    if (this.ownsOutput || this.generation || this.ahead || this.recoveryPending) return false
+    try {
+      const preparedRoute = route ?? await this.resolveRoute(request)
+      const config = this.configFor(request, preparedRoute)
+      const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
+      if (!prepared.ok || prepared.generation === '0') {
+        if (prepared.generation !== '0' && prepared.ownershipRetained === true) {
+          try { await window.singz.unloadDesktopPlayback(prepared.generation) } catch { /* nothing exists */ }
         }
-        this.ahead = {
-          generation: prepared.generation,
-          signature: JSON.stringify(config),
-          positionSeconds: request.positionSeconds,
-          route
-        }
-        return true
-      } catch {
         return false
       }
-    })
+      this.ahead = {
+        generation: prepared.generation,
+        signature: JSON.stringify(config),
+        positionSeconds: request.positionSeconds,
+        route: preparedRoute,
+        request
+      }
+      return true
+    } catch {
+      return false
+    }
   }
 
   /** Let a generation prepared ahead go: the song changed, the singer left
    * for monitoring or training, or the request it was prepared for is stale.
    * Chromium never lost the output, so nothing is restored. */
   async discardAhead(): Promise<void> {
+    return this.serialize(() => this.discardAheadUnlocked())
+  }
+
+  async reprepareRetainedAhead(request: DesktopNativePlaybackEngineRequest): Promise<boolean> {
     return this.serialize(async () => {
-      const ahead = this.ahead
-      if (!ahead) return
-      this.ahead = null
-      try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
+      const preparedRequest: DesktopNativePlaybackPrepare = {
+        ...request,
+        graphDocument: request.graphDocument ?? undefined,
+        lanes: request.lanes.map(lane => ({
+          id: lane.id,
+          path: lane.path ?? '',
+          gain: lane.volume,
+          muted: lane.muted,
+          solo: lane.solo
+        })),
+        provider: this.request?.provider ?? request.nativeAudioProvider
+      }
+      const generation = this.generation
+      const provider = this.request?.provider ?? preparedRequest.provider
+      if (this.ahead) {
+        const route = await this.resolveRoute(preparedRequest)
+        const config = this.configFor(preparedRequest, route)
+        if (JSON.stringify(config) === this.ahead.signature) return true
+        await this.discardAheadUnlocked()
+        return this.prepareAheadUnlocked(preparedRequest, route)
+      }
+      if (!generation || !this.retainedPrepared) return false
+      const status = await this.readStatus(generation)
+      if (!status || !commandableRetainedPlayback(status) || !this.isPreparedStatus(status)) {
+        throw this.cleanupRequired(provider, new Error('Prepared native playback status changed before re-prepare.'),
+          'Native prepared playback could not be re-prepared.')
+      }
+      const route = await this.resolveRoute(preparedRequest)
+      return this.replacePreparedRetainedWithAhead(preparedRequest, route)
     })
+  }
+
+  async prepareRetainedForPlay(request: DesktopNativePlaybackEngineRequest): Promise<void> {
+    const position = this.retainedPreparedPositionSeconds ?? this.preparedAheadPositionSeconds
+    if (position !== null && Math.abs(position - request.positionSeconds) > 0.01) {
+      await this.reprepareRetainedAhead(request)
+    }
+  }
+
+  private async discardAheadUnlocked(): Promise<void> {
+    const ahead = this.ahead
+    if (!ahead) return
+    this.ahead = null
+    try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
+  }
+
+  /** Convert a retained, never-opened generation back into the ordinary
+   * prepare-ahead lease after a scrub or structural edit. This preserves the
+   * closed host and lets later input debounce/replace the ahead graph exactly
+   * as it does before the renderer restarts. */
+  private async replacePreparedRetainedWithAhead(
+    request: DesktopNativePlaybackPrepare,
+    route: PreparedRoute
+  ): Promise<boolean> {
+    const generation = this.generation
+    const provider = this.request?.provider ?? request.provider
+    if (!generation || !this.isPreparedStatus(this.last)) return false
+    this.configFor(request, route)
+    this.stopPolling()
+    await this.requireUnloadReceipt(
+      generation,
+      provider,
+      'Native prepared playback could not be replaced.'
+    )
+    this.generation = ''
+    this.started = false
+    this.last = null
+    this.ownsOutput = false
+    this.request = null
+    this.route = null
+    this.ahead = null
+    this.forgetTransport()
+    this.onStateChange(null)
+    return this.prepareAheadUnlocked(request, route)
   }
 
   private configFor(
@@ -1499,6 +1602,19 @@ export class DesktopNativePlaybackClient {
         status.renderedProjectFrame,
         'Native rendered project frame'
       )
+      if (this.isPreparedStatus(status)) {
+        if (!commandableRetainedPlayback(status)) {
+          throw this.cleanupRequired(request.provider,
+            new Error('Prepared native playback status is no longer commandable.'),
+            'Native prepared playback could not be reconfigured.')
+        }
+        const preparedStart = Math.max(0, renderedFrame) / status.format.sampleRate
+        await this.replacePreparedRetainedWithAhead(
+          { ...request, positionSeconds: preparedStart },
+          route
+        )
+        return
+      }
       // INSIDE A COUNT-IN the rendered frame is a pre-roll frame, negative,
       // and it must not be carried into the next plan: a plan prepared at a
       // signed frame gets no anchor, so its pre-roll lands at the ENTRY — the
@@ -1818,6 +1934,10 @@ export class DesktopNativePlaybackClient {
       }
       const generation = this.generation
       const provider = this.request?.provider ?? 'coreaudio'
+      if (this.isRetainedPrepared()) {
+        await this.openRetainedPreparedUnlocked()
+        return
+      }
       // Ask before telling. Status is polled at 5 Hz, so the caller's picture
       // can be 200 ms old — old enough for a second Play inside one poll to
       // think the transport is paused when it is already running. One status
@@ -1877,11 +1997,45 @@ export class DesktopNativePlaybackClient {
     })
   }
 
+  private async openRetainedPreparedUnlocked(): Promise<void> {
+    const generation = this.generation
+    const provider = this.request?.provider ?? 'coreaudio'
+    const status = generation ? await this.readStatus(generation) : null
+    if (!generation || !status || !commandableRetainedPlayback(status) || !this.isPreparedStatus(status)) {
+      throw this.cleanupRequired(provider, new Error('Prepared native playback status changed before first Play.'),
+        'Native prepared playback could not be opened.')
+    }
+    this.run = {
+      generation,
+      floor: Math.max(0, Number(status.renderedProjectFrame)) / status.format.sampleRate,
+      lap: status.loopCount
+    }
+    try {
+      // Native open accepts the graph at its prepared start; start then opens
+      // the song transport exactly as activate() does for a first open.
+      ensure(await window.singz.openDesktopPlayback(generation), 'Native output open failed')
+      ensure(await window.singz.startDesktopPlayback(generation), 'Native playback start failed')
+      this.started = true
+      this.transportIntent = 'playing'
+      this.edgeAtMs = Date.now()
+      await this.refresh(generation)
+      this.startPolling()
+    } catch (error) {
+      throw this.cleanupRequired(provider, error, 'Native prepared playback could not be opened.')
+    }
+  }
+
   async seek(seconds: number): Promise<void> {
     return this.serialize(async () => {
       this.assertCommandableGeneration()
       if (!this.generation || !this.last?.format.sampleRate) {
         if (this.ownsOutput) throw new Error('Native playback has no current transport status.')
+        const ahead = this.ahead
+        if (ahead) {
+          const request = { ...ahead.request, positionSeconds: seconds }
+          await this.discardAheadUnlocked()
+          await this.prepareAheadUnlocked(request, ahead.route)
+        }
         return
       }
       const generation = this.generation
@@ -2042,7 +2196,7 @@ export class DesktopNativePlaybackClient {
         status.capability !== DESKTOP_PLAYBACK_CAPABILITY) {
       throw new Error('Retained native playback identity does not match its status.')
     }
-    if (status.state === 'prepared' || status.state === 'preparing') {
+    if (status.state === 'preparing') {
       throw new Error('Retained prepared-ahead playback is unsupported; use explicit Stop before reopening the song.')
     }
     if (!commandableRetainedPlayback(status)) {
@@ -2153,7 +2307,7 @@ export class DesktopNativePlaybackClient {
     this.last = status
     this.lastAtMs = Date.now()
     this.ownsOutput = true
-    this.started = true
+    this.started = !this.isPreparedStatus(status)
     this.transportIntent = status.transportState === 'playing' || status.transportState === 'pre-roll'
       ? 'playing'
       : 'paused'
@@ -2167,6 +2321,15 @@ export class DesktopNativePlaybackClient {
     this.activityAtMs = Date.now()
     this.startPolling()
     return request
+  }
+
+  private isPreparedStatus(status: DesktopPlaybackStatus | null | undefined): boolean {
+    return status?.state === 'prepared' && status.hostState === 'closed' &&
+      status.transportState === 'stopped' && status.terminalReason === 'none' && status.error === ''
+  }
+
+  private isRetainedPrepared(): boolean {
+    return this.isPreparedStatus(this.last)
   }
 
   /** Release renderer bookkeeping after queued commands, retaining the

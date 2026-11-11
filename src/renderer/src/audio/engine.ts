@@ -115,6 +115,7 @@ export class MultitrackEngine {
    * load (grid, metronome, transpose, tempo, training, region, faders) each
    * reschedule it, so the graph prepared ahead of Play is the settled one. */
   private aheadTimer: ReturnType<typeof setTimeout> | null = null
+  private nativeAheadPending: Promise<void> | null = null
   /** Bumped by every discard, song switch and load: a prepare ahead that
    * crosses one of those between its awaits finds the epoch moved and gives
    * up, instead of arriving after the discard it was meant to obey. */
@@ -413,8 +414,12 @@ export class MultitrackEngine {
         !this.aheadAllowed || this.betweenSongs || this.headphoneMonitorLease) return
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null
-      void this.prepareNativeAhead().catch((error) => {
+      const pending = this.prepareNativeAhead().catch((error) => {
         console.error('Native prepare ahead of Play failed:', error)
+      })
+      this.nativeAheadPending = pending
+      void pending.finally(() => {
+        if (this.nativeAheadPending === pending) this.nativeAheadPending = null
       })
     }, 400)
   }
@@ -430,7 +435,13 @@ export class MultitrackEngine {
       this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.teardownStarted ||
       this.betweenSongs || this.headphoneMonitorLease
     const module = await this.ensureNativePlayback()
-    if (stale() || module.client.active || module.client.recoveryPending) return
+    if (stale() || module.client.recoveryPending) return
+    if (module.client.retainedPrepared) {
+      await module.client.reprepareRetainedAhead(this.nativePlaybackRequest(true))
+      if (stale()) await module.client.discardAhead()
+      return
+    }
+    if (module.client.active) return
     if (module.client.preparedAhead) await module.client.discardAhead()
     if (stale()) return
     await module.prepareAhead(module.client, this.nativePlaybackRequest(true))
@@ -764,7 +775,7 @@ export class MultitrackEngine {
     this.desiredOutputId = deviceId
     this.outputRouteVersion++
     // Native playback owns its own endpoint, independently of Chromium's sink.
-    if (this.nativePlayback?.active) {
+    if (this.nativePlayback?.active && !this.nativePlayback.retainedPrepared) {
       try {
         await this.nativePlayback.reconfigure({ browserOutputId: deviceId }, { refreshRoute: true })
         this.confirmedOutputId = deviceId
@@ -826,7 +837,7 @@ export class MultitrackEngine {
   async releaseOutputForHeadphoneMonitor(): Promise<void> {
     this.headphoneMonitorLease = true
     const position = this.position
-    if (this.nativePlayback?.active) {
+    if (this.nativePlayback?.active && !this.nativePlayback.retainedPrepared) {
       // Unload serializes behind the coordinator's pause and stops the host;
       // do not enqueue a second pause against an already parked transport.
       this.generation++
@@ -901,6 +912,11 @@ export class MultitrackEngine {
 
   get position(): number {
     if (this.nativePlayback?.active) {
+      // A retained never-opened generation cannot advance its native clock.
+      // A paused Box scrub updates startOffset and prepares its replacement
+      // after the debounce, so keep the UI on that requested position while
+      // the old status still reports the pre-scrub frame.
+      if (this.nativePlayback.retainedPrepared) return this.startOffset
       // Projected between status polls and pre-empted by an accepted seek,
       // as the phones' clock is — the poll is 50 ms over IPC, and reading
       // the raw last status put that under every seek read-back.
@@ -1773,7 +1789,7 @@ export class MultitrackEngine {
     if (this.nativePlaybackUnload) await this.settleNativePlaybackUnload()
     if (requestGeneration !== this.generation) return
     const nativeRecoveryPending = this.nativePlayback?.recoveryPending === true
-    if (this.nativePlayback?.active && !nativeRecoveryPending) {
+    if (this.nativePlayback?.active && !this.nativePlayback.retainedPrepared && !nativeRecoveryPending) {
       // Anything fetched back since the last Play — the lyrics editor asks
       // for the vocals, a re-split asks for the full mix — has served its
       // purpose and is resident again. The core is still the one playing, so
@@ -1884,9 +1900,17 @@ export class MultitrackEngine {
     }
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
+    const pendingAhead = this.nativeAheadPending
+    if (pendingAhead) await pendingAhead
+    if (requestGeneration !== this.generation) return
+    const nativeRequest = this.nativePlaybackRequest(opts.countIn !== false)
+    if (nativeModule.client.retainedPrepared || nativeModule.client.preparedAhead) {
+      await nativeModule.client.prepareRetainedForPlay(nativeRequest)
+      if (requestGeneration !== this.generation) return
+    }
     const nativeStarted = await nativeModule.tryStart(
       nativeModule.client,
-      this.nativePlaybackRequest(opts.countIn !== false)
+      nativeRequest
     )
     if (requestGeneration !== this.generation) return
     if (nativeStarted) {
@@ -2080,7 +2104,7 @@ export class MultitrackEngine {
 
   seek(t: number): void {
     const clamped = Math.max(0, Math.min(t, this.duration))
-    if (this.nativePlayback?.active) {
+    if (this.nativePlayback?.active && !this.nativePlayback.retainedPrepared) {
       // `startOffset` moves NOW, not when the seek's receipt comes back. The
       // native client reports the target as `position` from the moment the
       // seek is issued, while this used to update `startOffset` two IPC round

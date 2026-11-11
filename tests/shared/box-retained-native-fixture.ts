@@ -115,6 +115,29 @@ export function retainedStatus(
   return { ...status, ...overrides }
 }
 
+/** Shape emitted by NativePlaybackSession::status() immediately after prepare
+ * at `frame`: native/playback/native_playback_session.cpp keeps the session
+ * Prepared and returns lastHost (Closed) until openOutput; its transport
+ * starts Stopped at preparedStartProjectFrame. Box seek-before-Play prepares
+ * a fresh generation at the new start (engine.ts seek() ->
+ * scheduleNativePrepareAhead() -> desktop client configFor()), rather than
+ * calling native seek(), which requires Running. The bridge maps these enums
+ * to the status strings below. */
+export function neverOpenedRetainedStatus(
+  generation = '7',
+  frame = '0',
+  overrides: Partial<DesktopPlaybackStatus> = {}
+): DesktopPlaybackStatus {
+  return retainedStatus(generation, 'stopped', {
+    state: 'prepared',
+    hostState: 'closed',
+    preparedStartProjectFrame: frame,
+    renderedProjectFrame: frame,
+    audibleProjectFrame: frame,
+    ...overrides
+  })
+}
+
 export function retainedRecovery(status = retainedStatus()): BoxRetainedPlaybackRecovery {
   return {
     generation: status.generation,

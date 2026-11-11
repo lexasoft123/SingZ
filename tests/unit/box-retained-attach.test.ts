@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DesktopNativePlaybackClient } from '../../src/renderer/src/audio/desktop-native-playback'
 import { MultitrackEngine } from '../../src/renderer/src/audio/engine'
-import type { DesktopPlaybackStatus, SingzApi } from '../../src/shared/types'
-import { retainedRecovery, retainedStatus } from '../shared/box-retained-native-fixture'
+import {
+  DESKTOP_PLAYBACK_CAPABILITY,
+  DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_FULL_MASK,
+  DESKTOP_PLAYBACK_CODEC_FULL_TAG,
+  DESKTOP_PLAYBACK_CODEC_PROFILE,
+  type DesktopPlaybackPrepareConfig,
+  type DesktopPlaybackStatus,
+  type SingzApi
+} from '../../src/shared/types'
+import { neverOpenedRetainedStatus, retainedRecovery, retainedStatus } from '../shared/box-retained-native-fixture'
 
 class Param {
   value = 0
@@ -63,7 +72,7 @@ const disposers: Array<() => Promise<void>> = []
 function fixture(initial = nativeStatus('7')) {
   let current = initial
   const lifecycle = {
-    prepareDesktopPlayback: vi.fn(async () => ok(current.generation)),
+    prepareDesktopPlayback: vi.fn(async (_config: DesktopPlaybackPrepareConfig) => ok(current.generation)),
     openDesktopPlayback: vi.fn(async () => ok(current.generation)),
     startDesktopPlayback: vi.fn(async () => ok(current.generation)),
     stopDesktopPlayback: vi.fn(async () => ok(current.generation)),
@@ -75,6 +84,19 @@ function fixture(initial = nativeStatus('7')) {
   const api = {
     boxAudioPersistent: true,
     ...lifecycle,
+    desktopPlaybackProviders: vi.fn(async () => [{
+      id: 'alsa', label: 'ALSA', available: true, errorCode: 'none', detail: 'ALSA ready'
+    }]),
+    audioHostDevices: vi.fn(async () => ({
+      ok: true, platform: 'linux', provider: 'alsa', defaultInputUid: '', defaultOutputUid: 'hw:Song',
+      devices: [{
+        uid: 'hw:Song', label: 'Retained output', defaultInput: false, defaultOutput: true,
+        inputChannels: 0, outputChannels: 2, inputChannelLabels: [], outputChannelLabels: ['L', 'R'],
+        nominalSampleRate: 48000, direction: 'output', accessMode: 'exclusive', transport: 'physical',
+        monitoringSuitability: 'low-latency', sampleRateRanges: [],
+        bufferFrames: { minimumFrames: 64, maximumFrames: 1024, preferredFrames: 256, fundamentalFrames: 1 }
+      }]
+    })),
     desktopPlaybackStatus: vi.fn(async () => current),
     setDesktopPlaybackMasterGain: vi.fn(async (_generation: string, gain: number) => {
       current = { ...current, masterGain: gain }
@@ -95,6 +117,7 @@ function fixture(initial = nativeStatus('7')) {
   return {
     api,
     lifecycle,
+    current: () => current,
     setCurrent: (next: DesktopPlaybackStatus) => { current = next },
     releaseLegacyOutput,
     restoreLegacyOutput,
@@ -149,8 +172,8 @@ describe('retained native renderer attach', () => {
     for (const call of Object.values(h.lifecycle)) expect(call).not.toHaveBeenCalled()
   })
 
-  it.each(['0', '144000'])('adopts a never-played stopped transport at frame %s without replaying settings', frame => {
-    const status = retainedStatus('7', 'stopped', { renderedProjectFrame: frame, audibleProjectFrame: frame, masterGain: 0.23 })
+  it.each(['0', '144000'])('adopts a prepared/closed never-played transport at frame %s without replaying settings', frame => {
+    const status = neverOpenedRetainedStatus('7', frame, { masterGain: 0.23 })
     const h = fixture(status)
     const client = h.client()
     const request = client.attachRetained(recovery(status), null)
@@ -159,6 +182,166 @@ describe('retained native renderer attach', () => {
     expect(client.transportActive).toBe(false)
     expect(request).toMatchObject({ masterGain: 0.23, playbackRate: 1.25, transpose: 2 })
     for (const call of Object.values(h.lifecycle)) expect(call).not.toHaveBeenCalled()
+  })
+
+  it('opens then starts the retained prepared generation on first Play, preserving its sought position and controls', async () => {
+    const prepared = neverOpenedRetainedStatus('7', '144000', { masterGain: 0.23 })
+    const h = fixture(prepared)
+    h.lifecycle.openDesktopPlayback.mockImplementation(async () => {
+      h.setCurrent({ ...prepared, state: 'output-open', hostState: 'open' })
+      return ok('7')
+    })
+    h.lifecycle.startDesktopPlayback.mockImplementation(async () => {
+      h.setCurrent({ ...prepared, state: 'running', hostState: 'running', transportState: 'playing' })
+      return ok('7')
+    })
+    const client = h.client()
+    const request = client.attachRetained(recovery(prepared), null)
+
+    expect(client.active).toBe(true)
+    expect(client.transportParked).toBe(true)
+    expect(client.transportActive).toBe(false)
+    expect(request).toMatchObject({ positionSeconds: 3, masterGain: 0.23, playbackRate: 1.25, transpose: 2 })
+    await client.resume()
+
+    expect(h.lifecycle.openDesktopPlayback).toHaveBeenCalledOnce()
+    expect(h.lifecycle.startDesktopPlayback).toHaveBeenCalledOnce()
+    expect(h.lifecycle.prepareDesktopPlayback).not.toHaveBeenCalled()
+    expect(client.transportActive).toBe(true)
+    expect(client.status).toMatchObject({ state: 'running', hostState: 'running', transportState: 'playing' })
+  })
+
+  it('debounces a scrub after restore into a closed prepare-ahead generation, then plays that generation', async () => {
+    const prepared = neverOpenedRetainedStatus('7', '0')
+    const h = fixture(prepared)
+    vi.mocked(h.api.desktopPlaybackCapability).mockResolvedValue({
+      available: true,
+      playbackCapability: DESKTOP_PLAYBACK_CAPABILITY,
+      mediaCodec: {
+        abiVersion: 1,
+        formatMask: DESKTOP_PLAYBACK_CODEC_FULL_MASK,
+        dynamicallyLinkedFfmpeg: true,
+        runtimeVersion: 'a'.repeat(64),
+        capabilityTag: DESKTOP_PLAYBACK_CODEC_FULL_TAG,
+        profile: DESKTOP_PLAYBACK_CODEC_PROFILE,
+        target: 'linux-x64',
+        extensions: [...DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS]
+      }
+    })
+    h.lifecycle.prepareDesktopPlayback.mockImplementation(async config => {
+      const next = neverOpenedRetainedStatus('8', String(config.preparedStartProjectFrame ?? 0), {
+        masterGain: config.masterGain,
+        playbackRate: config.playback.transport.playbackRate,
+        transposeSemitones: config.playback.transport.transposeSemitones
+      })
+      h.setCurrent(next)
+      return { ...ok('8'), format: next.format, latency: next.latency }
+    })
+    h.lifecycle.openDesktopPlayback.mockImplementation(async () => {
+      h.setCurrent({ ...h.current(), state: 'output-open', hostState: 'open' })
+      return ok('8')
+    })
+    h.lifecycle.startDesktopPlayback.mockImplementation(async () => {
+      h.setCurrent({ ...h.current(), state: 'running', hostState: 'running', transportState: 'playing' })
+      return ok('8')
+    })
+    const engine = h.engine({ playback: true })
+    await engine.attachRetained(null, async () => recovery(prepared), vi.fn())
+    expect(engine.nativeActive).toBe(true)
+    engine.seek(3)
+    expect(h.lifecycle.prepareDesktopPlayback).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(500)
+
+
+    expect(h.lifecycle.seekDesktopPlayback).not.toHaveBeenCalled()
+    expect(h.lifecycle.unloadDesktopPlayback).toHaveBeenCalledWith('7')
+    expect(h.lifecycle.prepareDesktopPlayback).toHaveBeenCalledOnce()
+    expect(h.lifecycle.prepareDesktopPlayback.mock.calls[0][0]).toMatchObject({ preparedStartProjectFrame: 144_000 })
+    expect(engine.nativeActive).toBe(false)
+
+    await engine.play({ countIn: false })
+    expect(h.lifecycle.openDesktopPlayback).toHaveBeenCalledWith('8')
+    expect(h.lifecycle.startDesktopPlayback).toHaveBeenCalledWith('8')
+    expect(h.lifecycle.prepareDesktopPlayback).toHaveBeenCalledOnce()
+    expect(engine.nativeActive).toBe(true)
+  })
+
+  it('flushes a scrub made after restore when Play arrives before the debounce', async () => {
+    const prepared = neverOpenedRetainedStatus('7', '0')
+    const h = fixture(prepared)
+    vi.mocked(h.api.desktopPlaybackCapability).mockResolvedValue({
+      available: true,
+      playbackCapability: DESKTOP_PLAYBACK_CAPABILITY,
+      mediaCodec: {
+        abiVersion: 1,
+        formatMask: DESKTOP_PLAYBACK_CODEC_FULL_MASK,
+        dynamicallyLinkedFfmpeg: true,
+        runtimeVersion: 'a'.repeat(64),
+        capabilityTag: DESKTOP_PLAYBACK_CODEC_FULL_TAG,
+        profile: DESKTOP_PLAYBACK_CODEC_PROFILE,
+        target: 'linux-x64',
+        extensions: [...DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS]
+      }
+    })
+    h.lifecycle.prepareDesktopPlayback.mockImplementation(async config => {
+      const next = neverOpenedRetainedStatus('8', String(config.preparedStartProjectFrame ?? 0), {
+        masterGain: config.masterGain,
+        playbackRate: config.playback.transport.playbackRate,
+        transposeSemitones: config.playback.transport.transposeSemitones
+      })
+      h.setCurrent(next)
+      return { ...ok('8'), format: next.format, latency: next.latency }
+    })
+    h.lifecycle.openDesktopPlayback.mockImplementation(async () => {
+      h.setCurrent({ ...h.current(), state: 'output-open', hostState: 'open' })
+      return ok('8')
+    })
+    h.lifecycle.startDesktopPlayback.mockImplementation(async () => {
+      h.setCurrent({ ...h.current(), state: 'running', hostState: 'running', transportState: 'playing' })
+      return ok('8')
+    })
+    const engine = h.engine({ playback: true })
+    await engine.attachRetained(null, async () => recovery(prepared), vi.fn())
+    engine.seek(3)
+    expect(engine.position).toBe(3)
+
+    await engine.play({ countIn: false })
+
+    expect(h.lifecycle.seekDesktopPlayback).not.toHaveBeenCalled()
+    expect(h.lifecycle.unloadDesktopPlayback).toHaveBeenCalledWith('7')
+    expect(h.lifecycle.prepareDesktopPlayback).toHaveBeenCalledOnce()
+    expect(h.lifecycle.prepareDesktopPlayback.mock.calls[0][0]).toMatchObject({ preparedStartProjectFrame: 144_000 })
+    expect(h.lifecycle.openDesktopPlayback).toHaveBeenCalledWith('8')
+    expect(h.lifecycle.startDesktopPlayback).toHaveBeenCalledWith('8')
+    expect(h.current()).toMatchObject({ generation: '8', state: 'running', renderedProjectFrame: '144000' })
+  })
+
+  it('keeps a retained prepared generation closed when a structural setting changes before Play', async () => {
+    const prepared = neverOpenedRetainedStatus('7', '144000')
+    const h = fixture(prepared)
+    h.lifecycle.prepareDesktopPlayback.mockImplementation(async config => {
+      const next = neverOpenedRetainedStatus('8', String(config.preparedStartProjectFrame ?? 0), {
+        masterGain: config.masterGain,
+        playbackRate: config.playback.transport.playbackRate,
+        transposeSemitones: config.playback.transport.transposeSemitones
+      })
+      h.setCurrent(next)
+      return { ...ok('8'), format: next.format, latency: next.latency }
+    })
+    const client = h.client()
+    client.attachRetained(recovery(prepared), null)
+
+    await client.reconfigure({ playbackRate: 1.1 })
+
+    expect(h.lifecycle.unloadDesktopPlayback).toHaveBeenCalledWith('7')
+    expect(h.lifecycle.prepareDesktopPlayback.mock.calls[0][0]).toMatchObject({
+      preparedStartProjectFrame: 144_000,
+      playback: { transport: { playbackRate: 1.1 } }
+    })
+    expect(h.lifecycle.openDesktopPlayback).not.toHaveBeenCalled()
+    expect(h.lifecycle.startDesktopPlayback).not.toHaveBeenCalled()
+    expect(client.active).toBe(false)
+    expect(client.preparedAhead).toBe(true)
   })
 
   it('rejects output-open/open/paused through a direct facade bypass before mutation or native calls', () => {
@@ -261,7 +444,8 @@ describe('retained native renderer attach', () => {
   })
 
   it.each([
-    ['prepared', { state: 'prepared' }],
+    ['prepared but host open', { state: 'prepared', hostState: 'open' }],
+    ['prepared with non-stopped transport', { state: 'prepared', hostState: 'closed', transportState: 'paused' }],
     ['preparing', { state: 'preparing' }],
     ['stopped', { state: 'stopped', transportState: 'stopped' }],
     ['terminal', { state: 'terminal' }],

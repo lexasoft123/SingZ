@@ -1376,6 +1376,38 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
+  it('opens and starts a prepared-ahead generation at a paused scrub target', async () => {
+    const h = seamHarness((generation) => playing(generation))
+    const request = {
+      provider: 'coreaudio' as const,
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: null,
+      metronome: h.metronome,
+      countIn: false,
+      positionSeconds: 3,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0.23,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    }
+
+    expect(await h.client.prepareAhead(request)).toBe(true)
+    expect(h.client.active).toBe(false)
+    expect(h.client.preparedAhead).toBe(true)
+    expect(h.prepared[0]).toMatchObject({ preparedStartProjectFrame: 144_000 })
+    expect(h.calls).toEqual(['prepare:1'])
+
+    expect(await h.client.prepareAndStart(request)).toBe(true)
+    expect(h.calls).toEqual(['prepare:1', 'open:1', 'start:1'])
+    expect(h.client.active).toBe(true)
+    expect(h.client.transportActive).toBe(true)
+    await h.client.unload()
+  })
+
   it('a graph prepared ahead for a different request is unloaded, and Play prepares afresh', async () => {
     const h = seamHarness((generation) => playing(generation))
     const request = {

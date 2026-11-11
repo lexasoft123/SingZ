@@ -100,12 +100,14 @@ async function run() {
     await page.locator('.box-navigation button').filter({ hasText: 'Queue' }).click()
     await page.locator('[data-queue-index="0"]').click()
     await page.waitForSelector('.box-player[data-active-song]', { timeout: 60000 })
-    await eventually('opened song is stopped on a running host before any Play', status, value =>
-      value.state === 'running' && value.hostState === 'running' && value.transportState === 'stopped' && value.renderedProjectFrame === '0')
+    await eventually('opened song is prepared with its output closed before any Play', status, value =>
+      value.state === 'prepared' && value.hostState === 'closed' && value.transportState === 'stopped' && value.renderedProjectFrame === '0')
     await adjustVocals(page)
+    let previousGeneration = null
     for (const frame of ['0', '144000']) {
       if (frame !== '0') {
-        // Seek through the UI while the song has still never been played.
+        // A paused scrub discards and re-prepares the unopened generation at
+        // the new start frame; the host remains closed until first Play.
         await page.locator('[data-control="seek"]').evaluate(input => {
           Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '3')
           input.dispatchEvent(new Event('input', { bubbles: true }))
@@ -113,7 +115,10 @@ async function run() {
         })
       }
       const before = await eventually(`silent transport parks at ${frame}`, status, value =>
+        value.state === 'prepared' && value.hostState === 'closed' &&
         value.transportState === 'stopped' && value.renderedProjectFrame === frame)
+      if (previousGeneration !== null) assert.notEqual(before.generation, previousGeneration)
+      previousGeneration = before.generation
       await recovered(before.generation, fixture)
       recorder.reset(); recorder.start()
       await close()
@@ -130,6 +135,21 @@ async function run() {
       assert.ok(recorder.observedRequests > 0)
       recorder.stop()
     }
+    const restored = await status()
+    await page.locator('[data-control="seek"]').evaluate(input => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '5')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const scrubbed = await eventually('scrub after restore re-prepares a closed generation', status, value =>
+      value.generation !== restored.generation && value.state === 'prepared' && value.hostState === 'closed' &&
+      value.transportState === 'stopped' && value.renderedProjectFrame === '240000')
+    await recovered(scrubbed.generation, fixture)
+    await page.locator('[data-control="play"]').click()
+    const resumed = await eventually('Play opens and starts the restored scrub target', status, value =>
+      value.generation === scrubbed.generation && value.state === 'running' && value.hostState === 'running' &&
+      value.transportState === 'playing' && BigInt(value.renderedProjectFrame) >= 240000n)
+    assert.equal(resumed.generation, scrubbed.generation)
   })
   let baseline
   await watchdog.run('real UI opens the stems-only project and associates its graph', 75, async () => {
