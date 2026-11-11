@@ -16,7 +16,7 @@ export interface BoxAudioReply {
 export const boxAudioCounter = (value: unknown): value is string =>
   typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value)
 export const boxAudioReadOnly = (target: BoxAudioTarget, method: string): boolean =>
-  target === 'service' && (method === 'reconcile' || method === 'associateRetainedProject') ||
+  target === 'service' && (method === 'reconcile' || method === 'associateRetainedProject' || method === 'microphones') ||
   target === 'routing' && method === 'capabilities' ||
   target === 'owner' && new Set(['devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus',
     'playbackProviders', 'playbackCapability', 'playbackStatus', 'state', 'stats']).has(method)
@@ -54,3 +54,47 @@ export interface BoxAudioMeasurementReply {
 }
 export const boxAudioMeasurementMethod = (target: BoxAudioTarget, method: string): boolean =>
   target === 'owner' && method === 'measurePlaybackLanes'
+
+/**
+ * Host-owned microphone analysis (always on while an input is enabled).
+ * The audio host persists the selection and runs analysis without any UI;
+ * clients only read `service.microphones` and edit the selection by revision.
+ */
+export const BOX_MICROPHONE_SELECTION_VERSION = 1
+export interface BoxMicrophoneSelection {
+  /** Active device uid; null with origin 'user' is the explicit all-inputs-off. */
+  device: string | null
+  /** Per-device enabled channel indices (unique, sorted, 0..63). Intent, not availability. */
+  channels: Record<string, number[]>
+}
+export type BoxMicrophonePhase = 'off' | 'starting' | 'running' | 'waiting' | 'error'
+export type BoxMicrophoneReason = '' | 'no-device' | 'device-offline' | 'channels-unavailable' | 'conflict' | 'unsupported' | 'internal'
+export interface BoxMicrophoneSnapshot {
+  /** Host process identity; changes only when the audio host restarts. */
+  epoch: string
+  /** UInt64 decimal; increments on every accepted selection edit. */
+  revision: string
+  origin: 'default' | 'user'
+  selection: BoxMicrophoneSelection
+  phase: BoxMicrophonePhase
+  reason: BoxMicrophoneReason
+  /** English diagnostic (<= 500 chars); never primary UI copy. */
+  detail: string
+  /** Capture generation minted by the host; '0' when none. */
+  generation: string
+  active: { device: string; label: string; deviceChannels: number; enabledChannels: number[]; analysisChannel: number } | null
+  /** Null unless the native meter is valid for `generation`. */
+  levels: { channelIndices: number[]; peak: number[]; rms: number[] } | null
+  /** Age on the host monotonic clock. */
+  pitch: { frequency: number; clarity: number; ageMs: number } | null
+}
+export interface BoxMicrophoneSelectionEdit {
+  expectedRevision: string
+  device: string | null
+  channels: Record<string, number[]>
+}
+export type BoxMicrophoneSelectionResult =
+  | { ok: true; snapshot: BoxMicrophoneSnapshot }
+  | { ok: false; code: 'stale' | 'invalid' | 'write-failed' | 'unavailable'; error: string; snapshot: BoxMicrophoneSnapshot | null }
+/** Reserved capture owner id held by the host supervisor; no socket maps to it. */
+export const BOX_HOST_ANALYSIS_OWNER = 2

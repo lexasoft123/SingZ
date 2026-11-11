@@ -114,6 +114,8 @@ let app = null
   const headers = await page.locator('.box-list-heading [role="columnheader"]').allTextContents()
   check(headers.slice(0, 6).join('|') === 'Artist|Song|Key|BPM|Vocal range|Time', 'catalog keeps artist-first compact columns')
   check(await page.locator('.box-song-row').count() === 2, 'real isolated catalog lists both projects')
+  await page.waitForFunction(() => Array.from(document.querySelectorAll('.box-song-row .box-time')).every(cell => cell.textContent === '0:30'), null, { timeout: 30000 })
+  check(true, 'catalog shows each song time (30 s fixture) from the stem headers before any song is opened')
 
   await watchdog.run('catalog Settings returns without opening a song', 60, async () => {
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
@@ -330,6 +332,19 @@ let app = null
     await page.keyboard.up('Enter')
     await page.keyboard.press('Enter')
     check(await page.locator('.box-player').getAttribute('data-playing') === 'false', 'a later distinct OK press acts normally')
+  })
+
+  await watchdog.run('mouse click reveals controls; brand and song stay visible', 60, async () => {
+    await page.locator('[data-control="play"]').click()
+    await page.waitForSelector('.box-player[data-playing="true"]')
+    await page.waitForSelector('.box-player[data-controls="hidden"]', { timeout: 15000 })
+    check(await page.locator('.player-header .box-logo').isVisible() && await page.locator('.player-song strong').isVisible(), 'logo and song name stay visible while controls are hidden')
+    check(!await page.locator('.player-header-actions').isVisible(), 'header buttons hide with the controls')
+    await page.locator('.player-wake').click()
+    await page.waitForSelector('.box-player[data-controls="visible"]')
+    check(await page.locator('.box-player').getAttribute('data-playing') === 'true', 'the waking click does not pause or seek')
+    await page.locator('[data-control="play"]').click()
+    await page.waitForSelector('.box-player[data-playing="false"]')
   })
 
   await watchdog.run('fixed UHD frame scales uniformly', 60, async () => {

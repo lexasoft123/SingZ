@@ -4,10 +4,9 @@ import { resolve } from 'node:path'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { BoxQueueRef, BoxRoutingState } from '../../src/shared/box-contract'
-import type { CaptureAnalysisWindow, CaptureStartResult, CaptureStats } from '../../src/shared/types'
 import { setLocale } from '../../src/shared/i18n/core'
 import { prepareBoxLocale } from '../../src/renderer/src/box/i18n'
-import { BoxMicrophones, MICROPHONE_IDLE_POLL_MS } from '../../src/renderer/src/box/microphones'
+import { device as micDevice, fakeHost, newStore } from './box-microphone-host-fake'
 import { PlayerMicrophoneMeters } from '../../src/renderer/src/box/Player'
 import { RoutingSettings } from '../../src/renderer/src/box/RoutingSettings'
 import { Settings } from '../../src/renderer/src/box/Settings'
@@ -140,83 +139,31 @@ describe('Box routing localization', () => {
   })
 })
 
-const device = { uid: 'alsa:usb', label: 'USB mic', channels: 2, channelLabels: ['In 1', 'In 2'], sampleRate: 48000, isDefault: false }
-function micFixture(initialDevices: typeof device[] = [device]) {
-  vi.useFakeTimers()
-  let native = { generation: '0', running: false }
-  let devices = initialDevices
-  let counter = 10
-  const stats = (): CaptureStats => ({ deliveredBlocks: '1', deliveredFrames: '256', overruns: '0', deliveryWakeups: '1', droppedEvents: '0', overwrittenWindows: '0',
-    microphoneLevels: { valid: native.running, channels: native.running ? 2 : 0, ownershipGeneration: native.generation,
-      peak: native.running ? [0.25, 0.5] : [], rms: native.running ? [0.1, 0.2] : [] } })
-  const api = {
-    askMicAccess: vi.fn(async () => true),
-    captureInputDevices: vi.fn(async () => ({ ok: true as const, devices })),
-    captureState: vi.fn(async () => ({ state: native.running ? 'running' as const : 'idle' as const, ownershipGeneration: native.generation, error: '' })),
-    captureStats: vi.fn(async () => stats()),
-    beginCapture: vi.fn(async (config: { inputChannel: number }, generation: string): Promise<CaptureStartResult> => {
-      native = { generation, running: true }
-      return { ok: true, state: 'running', deviceUid: device.uid, deviceLabel: device.label, deviceChannels: 2, inputChannel: config.inputChannel,
-        sampleRate: 48000, sampleFormat: 'float32', sharingMode: 'shared-history', performanceMode: 'default', timestampSource: 'hardware' } as CaptureStartResult
-    }),
-    cancelCapture: vi.fn(async (generation: string) => { if (generation === native.generation) native.running = false; return { ok: true as const, cancelled: true } }),
-    onCaptureWindow: vi.fn((_callback: (value: CaptureAnalysisWindow) => void) => vi.fn())
-  }
-  const storage = new Map<string, string>()
-  const controller = new BoxMicrophones(api, () => Date.now(), () => String(++counter),
-    { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) } })
-  return { api, controller, plug: () => { devices = [device] } }
-}
-
-describe('Box microphone hot-plug inventory', () => {
-  it('re-reads capture inventory when an interface appeared after boot before toggling and starting', async () => {
-    const f = micFixture([])
-    f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
-    expect(f.controller.getSnapshot().devices).toEqual([])
-    f.plug() // The routing preview now lists it; capture inventory is stale.
-    expect(await f.controller.setEnabledChannels(device.uid, [1])).toBe(true)
-    expect(f.controller.getSnapshot().selection).toEqual({ uid: device.uid, channel: 1 })
-    expect(await f.controller.start()).toBe(true)
-    expect(f.api.beginCapture).toHaveBeenCalledWith({ deviceUid: device.uid, inputChannel: 1, enabledChannels: [1] }, expect.any(String))
-    await f.controller.dispose()
-  })
-  it('refreshes inside start when the selected device vanished from a stale inventory', async () => {
-    const f = micFixture()
-    f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
-    expect(f.controller.getSnapshot().selection).toEqual({ uid: device.uid, channel: 0 })
-    f.api.captureInputDevices.mockResolvedValueOnce({ ok: true as const, devices: [] })
-    await f.controller.refreshDevices()
-    const reads = f.api.captureInputDevices.mock.calls.length
-    expect(await f.controller.start()).toBe(true)
-    expect(f.api.captureInputDevices.mock.calls.length).toBe(reads + 1)
-    expect(f.controller.getSnapshot().error).toBeNull()
-    await f.controller.dispose()
-  })
-})
-
-describe('Box microphone polling and render isolation', () => {
-  it('reads only capability slowly without a session and levels at 5 Hz while one is owned', async () => {
-    const f = micFixture()
-    f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
-    const idleStart = f.api.captureStats.mock.calls.length
-    await vi.advanceTimersByTimeAsync(4 * (MICROPHONE_IDLE_POLL_MS ?? 2000))
-    expect(f.api.captureStats.mock.calls.length - idleStart).toBeLessThanOrEqual(4)
-    expect(await f.controller.start()).toBe(true)
-    const ownedStart = f.api.captureStats.mock.calls.length
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(f.api.captureStats.mock.calls.length - ownedStart).toBeGreaterThanOrEqual(4)
-    await f.controller.dispose()
+describe('Box microphone hot-plug and render isolation', () => {
+  it('accepts a toggle for an interface plugged in after boot: the host, not the renderer, validates devices', async () => {
+    vi.useFakeTimers()
+    const host = fakeHost({ device: null, origin: 'user', channels: {} })
+    const store = newStore(host); store.connect(); await vi.advanceTimersByTimeAsync(0)
+    expect(store.getSnapshot().phase).toBe('off')
+    expect(await store.toggleChannel(micDevice.uid, 1)).toBe(true)
+    expect(host.api.setMicrophoneSelection).toHaveBeenCalledWith({ expectedRevision: '1', device: micDevice.uid, channels: { [micDevice.uid]: [1] } })
+    expect(store.getSnapshot().phase).toBe('running')
+    store.dispose()
   })
   it('lets leaf meters subscribe directly instead of BoxApp', async () => {
-    const f = micFixture()
-    f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
-    expect(await f.controller.start()).toBe(true)
-    await vi.advanceTimersByTimeAsync(200)
-    const html = renderToStaticMarkup(createElement(PlayerMicrophoneMeters, { microphones: f.controller }))
+    vi.useFakeTimers()
+    await prepareBoxLocale('en')
+    const store = newStore(fakeHost()); store.connect(); await vi.advanceTimersByTimeAsync(0)
+    const html = renderToStaticMarkup(createElement(PlayerMicrophoneMeters, { microphones: store }))
     expect(html).toContain('aria-valuenow="0.25"'); expect(html).toContain('aria-valuenow="0.5"')
     const app = source('src/renderer/src/box/App.tsx')
     expect(app).not.toMatch(/useSyncExternalStore\(microphones\.subscribe/)
     expect(app).not.toMatch(/microphoneSnapshot=/)
-    await f.controller.dispose()
+    store.dispose()
+  })
+  it('App never cancels capture when the UI unmounts or closes', () => {
+    const app = source('src/renderer/src/box/App.tsx')
+    expect(app).not.toMatch(/cancelCapture|microphones\.(start|stop|select|resetSelection)\b/)
+    expect(app).toContain('return () => microphones.dispose()')
   })
 })

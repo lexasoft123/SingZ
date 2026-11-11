@@ -1,5 +1,7 @@
 import { loadLocale, setLocale, LOCALE_VALUES, type Locale } from '../shared/i18n'
 import { CaptureOwner, loadCaptureBinding, type NativeCaptureBinding } from './capture'
+import { join } from 'node:path'
+import { boxRoutingPollTick } from './box-audio/poll'
 import { open } from 'node:fs/promises'
 import {
   AUDIO_BINDING_METHODS,
@@ -14,9 +16,31 @@ import {
 const port = process.parentPort
 if (!port || process.env.SINGZ_AUDIO_PROCESS !== '1') throw new Error('Audio service needs a parent control port')
 const epoch = process.env.SINGZ_AUDIO_EPOCH!
-const owner = new CaptureOwner()
 let binding: NativeCaptureBinding | null = null
-const native = (): NativeCaptureBinding => binding ??= loadCaptureBinding()
+let boxPoll: ReturnType<typeof setInterval> | undefined
+let boxShutdown: (() => void) | undefined
+const native = (): NativeCaptureBinding => {
+  if (binding) return binding
+  const candidate = loadCaptureBinding()
+  // Local Box has the same private LoopZ tap as the persistent host. Desktop
+  // never initializes routing here. Unsupported preview images remain explicit.
+  if (process.env.SINGZ_SURFACE === 'box' && process.env.SINGZ_AUDIO_BOX_DATA_DIR) {
+    const routing = candidate as NativeCaptureBinding & {
+      boxRoutingInitialize?: (path: string) => { ok: boolean; error?: string }
+      boxRoutingPoll(): void
+      boxRoutingShutdown(): void
+    }
+    if (routing.boxRoutingInitialize) {
+      const result = routing.boxRoutingInitialize(join(process.env.SINGZ_AUDIO_BOX_DATA_DIR, 'routing.json'))
+      if (!result.ok) throw new Error(result.error || 'Local Box routing initialization failed')
+      boxPoll = setInterval(boxRoutingPollTick(() => routing.boxRoutingPoll()), 25)
+      boxPoll.unref()
+      boxShutdown = () => routing.boxRoutingShutdown()
+    }
+  }
+  return binding = candidate
+}
+const owner = new CaptureOwner(undefined, native)
 let inFlight = 0
 let inFlightBytes = 0
 let closed = false
@@ -95,7 +119,8 @@ port.on('message', async ({ data }) => {
     closed = true
     clearInterval(timer)
     for (const job of exportJobs.keys()) cancelExport(job)
-    owner.stop()
+    clearInterval(boxPoll)
+    try { owner.stop() } finally { boxShutdown?.() }
     process.exit(0)
   }
   if (data.type !== 'request' || !Number.isSafeInteger(data.id) || data.id <= 0 || data.id <= lastRequestId) return

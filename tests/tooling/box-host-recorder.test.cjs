@@ -143,7 +143,7 @@ test('all actual public playback mutations and unknown owner methods are forbidd
   const client = await connect()
   const methods = ['preparePlayback', 'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback',
     'stopPlayback', 'seekPlayback', 'unloadPlayback', 'reanchorPlayback', 'setPlaybackLane',
-    'setPlaybackMasterGain', 'setPlaybackLoop', 'clearPlaybackLoop', 'futurePlaybackMutation']
+    'setPlaybackMasterGain', 'setPlaybackLoop', 'clearPlaybackLoop', 'begin', 'cancel', 'futurePlaybackMutation']
   recorder.start()
   for (const method of methods) {
     recorder.reset()
@@ -186,17 +186,18 @@ test('all read-only owner queries, routing state and private capture cleanup are
   const client = await connect()
   const methods = ['devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus', 'playbackProviders',
     'playbackCapability', 'playbackStatus', 'state', 'stats', 'measurePlaybackLanes',
-    'rendererDetached', 'rendererGone', 'cancel', 'endMonitor']
+    'rendererDetached', 'rendererGone', 'endMonitor']
   recorder.start()
   for (const method of methods)
     await client.call('owner', method, [{ private: 'argument-is-not-retained' }])
   await client.call('service', 'reconcile')
+  await client.call('service', 'microphones')
   await client.call('routing', 'capabilities')
   await client.call('routing', 'request', [JSON.stringify({ version: 1, operation: 'state' })])
   await client.call('binding', 'inputDevices')
   await client.call('binding', 'initializeSharedAudio')
   recorder.assertNoMutations()
-  assert.equal(recorder.observedRequests, methods.length + 5)
+  assert.equal(recorder.observedRequests, methods.length + 6)
   assert.deepEqual(recorder.mutations, [])
   await client.close()
 })

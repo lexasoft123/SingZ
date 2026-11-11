@@ -3,7 +3,8 @@ import type { TrackState } from '../audio/engine'
 import { formatSongVolume, songVolumeFromDb, songVolumeToDb } from '../../../shared/song-volume'
 import { laneLabel, stemLabel, TRACK_META } from '../model'
 import { t } from './i18n'
-import { microphoneSlotLevel, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
+import { playbackStatusKey, type PlaybackStatus } from './playback-status'
+import { microphoneSlotStatus, microphoneStatusKey, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 import { tMicrophone } from './settings-i18n'
 
 export type MixerTab = 'main' | 'stems'
@@ -40,6 +41,7 @@ export function Mixer({
   tracks,
   masterVolume,
   playing,
+  status,
   canPlay,
   onTab,
   onVolume,
@@ -55,6 +57,7 @@ export function Mixer({
   tracks: TrackState[]
   masterVolume: number
   playing: boolean
+  status: PlaybackStatus
   canPlay: boolean
   onTab: (tab: MixerTab) => void
   onVolume: (id: string, volume: number) => void
@@ -71,7 +74,7 @@ export function Mixer({
       <header className="mixer-header">
         <h2>{t('box.player.mix')}</h2>
         <SegmentedControl aria-label={t('box.mix.view')} options={[{ value: 'main', label: t('box.mix.main') }, { value: 'stems', label: t('box.mix.stems') }]} value={tab} onChange={value => onTab(value as MixerTab)} />
-        <span className="mixer-play-state">{playing ? t('box.player.playing') : t('box.player.paused')}</span>
+        <span className="mixer-play-state">{t(playbackStatusKey[status])}</span>
         <Button data-mix-play disabled={!canPlay} onClick={onToggle}>{playing ? t('box.player.pause') : t('box.player.play')}</Button>
         <Button data-mix-close onClick={onClose}>{t('box.mix.back')}</Button>
       </header>
@@ -100,7 +103,7 @@ export function Mixer({
           <small>{status}</small>
         </div>
       })}</div>
-      <footer className="mixer-footer"><span><b>↑ ↓</b>{t('box.hints.channel')}<b>← →</b>{t('box.hints.level')}<b>OK</b>{t('box.hints.select')}<b>Back</b>{t('box.mix.back')}</span><span>{t('box.mix.noMicrophones')}</span></footer>
+      <footer className="mixer-footer"><span><b>↑ ↓</b>{t('box.hints.channel')}<b>← →</b>{t('box.hints.level')}<b>OK</b>{t('box.hints.muteSolo')}<b>Back</b>{t('box.mix.back')}</span><span>{t('box.mix.noMicrophones')}</span></footer>
     </div>
   </Modal>
 }
@@ -109,11 +112,12 @@ export function Mixer({
 export function MixerMicrophoneRow({ id, microphones, snapshot: snapshotProp }: { id: 'mic1' | 'mic2'; microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
   const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
   const channel = id === 'mic1' ? 0 : 1
-  const level = microphoneSlotLevel(snapshot, channel)
+  const status = microphoneSlotStatus(snapshot, channel)
+  const level = status.kind === 'level' ? status.level : null
   const label = t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')
   return <div className={`mixer-row${level === null ? ' unavailable' : ''}`} data-mix-row={id}>
     <div className="mixer-channel"><i /><div><strong>{label}</strong><small>{t('box.mix.micBody')}</small></div></div>
-    {level === null ? <span className="mixer-unavailable">{t('box.player.unavailable')}</span> : <div className="mixer-level">
+    {level === null ? <span className="mixer-unavailable" data-mic-status={status.kind}>{t(microphoneStatusKey(status))}</span> : <div className="mixer-level">
       <span className="settings-input-meter" data-mix-meter={id} role="meter"
         aria-label={tMicrophone('box.microphones.channelLevel', { channel: channel + 1 })}
         aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.min(1, level)}

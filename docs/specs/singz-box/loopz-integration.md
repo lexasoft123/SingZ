@@ -111,7 +111,8 @@ allow that (see the opt-in drop-in in [packaging](packaging.md)).
 Song stop/change detaches or silences only the song producer. Enabled routes
 remain alive. TV renderer reload, owning-window destruction and Box main exit
 must not terminate the independently supervised host. Explicit host stop drains
-callbacks before destruction. Private analysis/recording remains client-owned.
+callbacks before destruction. Microphone analysis is host-owned (see
+"Microphone input subscriptions"); private recording remains client-owned.
 If a routed hardware input cannot be shared with the old analysis path, reject
 the competing request rather than open the PCM twice.
 
@@ -196,9 +197,20 @@ not survive a hard kill, native host restart or power cycle; see
 
 The input list uses LoopZ's physical inventory rather than the driverless song
 producer's deliberately input-free inventory. Device/channel selection changes
-only a draft. Start analysis explicitly acquires the chosen input; Stop retires
-that private reader. Hardware microphone monitoring continues independently, and
-selection/analysis never creates an audible microphone route.
+the persisted selection; there is no Start or Stop. The audio host owns microphone
+analysis: it stores the selection (`microphones.json`, revision compare-and-set,
+atomic write before apply), acquires the chosen input at host launch with no UI
+present, retries indefinitely if the device is missing or fails, and keeps it
+across UI restarts, renderer reloads and phone disconnects. Analysis is on by
+default (first interface, inputs 1 and 2). An older Box's renderer-stored channel
+choice is imported once while the host still holds that default, keeping the
+device the old UI analysed (the first interface in inventory order). A fresh host
+profile therefore opens the machine's first capture device; tests that must stay
+device-free seed an absent input in the host profile. Turning every input channel off is the
+only user-facing off; it releases the private reader and persists. Clients only
+read `service.microphones` and edit the selection by revision. Hardware
+microphone monitoring continues independently, and selection/analysis never
+creates an audible microphone route.
 
 The reusable native API is AudioRuntime::acquireInput(explicitUid, capacity),
 releaseInput(id) and inputStatus(id). A subscription borrows an AudioSource with
@@ -219,8 +231,11 @@ Metadata is explicitly estimated and does not claim a physical source-frame
 counter. Missing/offline history is unavailable rather than fabricated silence;
 stream/history boundaries reset analysis continuity. A successful start can
 report starting before sufficient history exists. The client observes the same
-generation until running, with bounded readiness/recovery deadlines and exact
-owned cancellation; uncertain replies never authorize automatic replay.
+generation until running. The host supervisor mints the generation, retries
+with bounded backoff forever, and cancels (stop, join, release) only for
+all-inputs-off, a device missing past a short grace, or shutdown. Clients never
+start or cancel the capture; after a host restart a client reads `reconcile`,
+then the snapshot, and sends nothing unless the person edits the selection.
 
 Only scalar per-channel peak/RMS snapshots and selected-channel analysis cross
 IPC. Old bindings without the optional microphoneLevels capability are shown as
@@ -228,8 +243,9 @@ unavailable. Freshness and ownership generation gate every displayed level.
 Settings, player and mixer use the same fresh, owned input levels. Mixer
 meters observe physical inputs 1/2; microphone gain and mute remain hardware
 controls unless an explicit software monitor is configured.
-Analysis survives page navigation and song changes; app closure drains its
-private capture without stopping enabled public routes. Raw microphone relay
+Analysis survives page navigation, song changes, UI closure and restart; only
+the audio service stopping (or all inputs off) ends it, and enabled public
+routes are never affected. Raw microphone relay
 through the legacy monitor path remains unavailable; create an explicit routing
 monitor only when software monitoring is intended.
 
@@ -255,7 +271,7 @@ requires proving that the previous host stopped.
   and display. Handle drift through clock mapping, and use the appropriate
   source-rate estimate for analysis; equal nominal 48 kHz rates do not establish
   a shared clock.
-- [ ] Preserve explicit start/stop, enabled-channel selection, unavailable-level
+- [ ] Preserve host-owned always-on analysis, enabled-channel selection, unavailable-level
   semantics, cancellation and teardown. Detect overwritten history, gaps and
   device restarts, and reset analysis continuity without fabricating samples.
 - [ ] Keep resampling for routes crossing independent device clocks (for example,

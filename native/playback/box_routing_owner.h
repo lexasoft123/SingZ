@@ -56,10 +56,12 @@ std::unique_ptr<AudioHostBackend> boxRoutingPlaybackBackend();
 // The routing owner retains physical inputs. Private consumers borrow history;
 // their reader must be stopped/joined before releasing this control-owner lease.
 bool boxRoutingOwnsCapture() noexcept;
+class BoxInputQueue;
 struct BoxInputTap {
   uint64_t id{};
   const loopz::AudioSource* source{};
   AudioInputDevice device;
+  std::shared_ptr<BoxInputQueue> native;
 };
 std::vector<AudioInputDevice> boxRoutingInputDevices();
 BoxInputTap acquireBoxInputTap(const std::string& uid, uint32_t channel);

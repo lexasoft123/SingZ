@@ -71,8 +71,11 @@ import { boxKioskRequested, desktopUpdaterEnabled, developmentRendererUrl, reque
 import { shouldDeferBoxApplicationQuit } from './box-close-policy'
 import { BoxQuitCoordinator, fromOwnMainFrame, settleWithin } from './box-quit-coordinator'
 import { registerBoxIpc } from './box/ipc'
+import { MicrophoneAnalysisSupervisor, disposeWithin } from './box-audio/microphones'
+import { MicrophoneSelectionStore } from './box-audio/microphone-store'
+import { randomUUID } from 'node:crypto'
 import { BoxCecService, boxCecEnabled } from './box/cec'
-import { boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
+import { boxMicrophones, boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
@@ -98,6 +101,7 @@ const laneMeasureCache = new LaneMeasureCache({
   measure: request => captureOwner.measurePlaybackLanes(request),
   onBatch: batch => log('dsp', describeLaneMeasureBatch(batch))
 })
+let localBoxMicrophones: MicrophoneAnalysisSupervisor | undefined
 let boxBackend: ReturnType<typeof registerBoxIpc> = null
 let boxBackendDisposeStarted = false
 let boxCec: BoxCecService | null = null
@@ -722,6 +726,7 @@ function registerIpc(): void {
     'capture:begin',
     async (e, config: CaptureStartConfig, generation: string) => {
       try {
+        if (process.env.SINGZ_SURFACE === 'box') throw new Error('Microphone analysis is owned by the audio host')
         bindNativeAudioCleanup(e.sender)
         const result = await captureOwner.begin(e.sender.id, config, String(generation), (window) => {
           if (!e.sender.isDestroyed()) e.sender.send('capture:window', window)
@@ -747,6 +752,7 @@ function registerIpc(): void {
   )
   ipcMain.handle('capture:cancel', async (e, generation: string) => {
     try {
+      if (process.env.SINGZ_SURFACE === 'box') throw new Error('Microphone analysis is owned by the audio host')
       return await captureOwner.cancel(e.sender.id, String(generation))
     } catch (error) {
       return { ok: false, error: String(error) }
@@ -1049,7 +1055,14 @@ app.whenReady().then(async () => {
     device: process.env.SINGZ_BOX_CEC_DEVICE
   })
   boxCec.start()
+  if (process.env.SINGZ_SURFACE === 'box' && !process.env.SINGZ_BOX_AUDIO_SOCKET) {
+    localBoxMicrophones = new MicrophoneAnalysisSupervisor({ epoch: randomUUID(), owner: captureOwner,
+      store: new MicrophoneSelectionStore(app.getPath('userData')), authorize: askMicrophoneAccess })
+    // Not awaited: the macOS permission prompt must not hold window creation.
+    // snapshot()/setSelection() wait for startup themselves.
+  }
   boxBackend = registerBoxIpc({
+    microphones: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxMicrophones : localBoxMicrophones,
     userDataDir: app.getPath('userData'),
     log: message => log('box', message, 'warn'),
     appVersion: app.isPackaged ? app.getVersion() : 'dev',
@@ -1128,6 +1141,7 @@ app.on('before-quit', event => {
   const finish = async (): Promise<void> => {
     if (finishing) return
     finishing = true
+    try { await disposeWithin(localBoxMicrophones, 3000) } catch (error) { log('mic', `Microphone shutdown failed · ${String(error)}`, 'warn') }
     await captureOwner.stop()
     await boxCec?.dispose()
     audioQuitComplete = true

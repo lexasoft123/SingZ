@@ -1,5 +1,5 @@
 #include "box_input_capture.h"
-#include "box_input_read_schedule.h"
+#include "box_input_queue.h"
 #include "box_routing_owner.h"
 #include <algorithm>
 #include <array>
@@ -10,6 +10,9 @@
 #include <loopz/audio_history.hpp>
 #include <mutex>
 #include <thread>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 
 namespace singz {
 std::optional<loopz::AudioReadResult> box_input_detail::readEnabledChannels(
@@ -20,8 +23,6 @@ std::optional<loopz::AudioReadResult> box_input_detail::readEnabledChannels(
                              std::nullopt);
 }
 namespace {
-constexpr uint32_t frames = BoxInputReadSchedule::blockFrames,
-                   rate = BoxInputReadSchedule::sampleRate;
 uint64_t nowNs() {
   return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now().time_since_epoch())
@@ -46,114 +47,97 @@ struct BoxInputCapture::Impl {
     error = std::move(text);
   }
   void run(AudioInputSink sink) noexcept {
+#if defined(__linux__)
+    (void)pthread_setname_np(pthread_self(), "box-mic-reader");
+#endif
     try {
-      std::array<std::array<float, frames>, 64> pcm{};
-      std::array<float *, 64> planes{};
-      for (uint32_t c = 0; c < enabledCount; ++c)
-        planes[c] = pcm[c].data();
-      loopz::AudioReadCursor cursor;
-      uint64_t sequence = 0, generation = 1;
+      uint64_t previousSerial = 0, previousEpoch = 0, generation = 1;
       bool gap = true;
-      BoxInputReadSchedule schedule;
       while (!stopping.load(std::memory_order_acquire)) {
-        const auto batch = schedule.step(nowNs());
-        if (!batch.plan.valid)
-          throw std::runtime_error("Microphone analysis clock is unavailable");
-        if (batch.discontinuity()) {
-          // This is a private reader discard, not a physical USB xrun. Short
-          // late wakes recover contiguous history without resetting analysis.
-          if (batch.plan.skippedFrames)
-            missed.fetch_add(1, std::memory_order_relaxed);
-          gap = true;
-        }
-        for (uint32_t index = 0; index < batch.plan.blocks &&
-                                 !stopping.load(std::memory_order_acquire);
-             ++index) {
+        for (unsigned budget = 0; budget < BoxInputQueue::capacity &&
+             !stopping.load(std::memory_order_acquire); ++budget) {
+          const auto* slot = tap.native->peek();
+          if (!slot) break;
+          const auto& bus = slot->bus;
           const uint64_t current = nowNs();
-          const uint64_t host = batch.sampleHostTimeNs(index);
-          const uint64_t previousGeneration = cursor.generation;
-          const auto read = box_input_detail::readEnabledChannels(
-              *tap.source, host, rate,
-              {std::span<float *const>(planes.data(), enabledCount), frames},
-              frames, cursor,
-              std::span<const uint32_t>(enabledChannels.data(), enabledCount));
-          if (!read) throw std::runtime_error("Microphone source does not support enabled-channel reads");
-          wakeups.fetch_add(1, std::memory_order_relaxed);
-          if (read->online && !read->missingFrames) {
-            for (uint32_t c = 0; c < enabledCount; ++c)
-              for (float value : pcm[c])
-                if (!std::isfinite(value))
-                  throw std::runtime_error(
-                      "Microphone history contains non-finite samples");
-            meterSequence.fetch_add(1, std::memory_order_acq_rel);
-            std::atomic_thread_fence(std::memory_order_release);
-            for (uint32_t c = 0; c < enabledCount; ++c) {
-              float high = 0;
-              double sum = 0;
-              for (float value : pcm[c]) {
-                high = std::max(high, std::abs(value));
-                sum += double(value) * value;
-              }
-              peak[c].store(high, std::memory_order_relaxed);
-              rms[c].store(float(std::sqrt(sum / frames)),
-                           std::memory_order_relaxed);
-            }
-            meterAt.store(current, std::memory_order_relaxed);
-            meterSequence.fetch_add(1, std::memory_order_release);
-            const bool boundary =
-                gap ||
-                (previousGeneration && previousGeneration != cursor.generation);
-            if (boundary)
-              ++generation;
-            AudioInputBlockView block;
-            block.capture.clockDomainId = tap.id;
-            block.capture.streamGeneration = generation;
-            block.capture.sequence = ++sequence;
-            block.capture.sampleHostTimeNs = host;
-            block.capture.callbackHostTimeNs = current;
-            block.capture.timestampQuality =
-                AudioInputTimestampQuality::CallbackEstimate;
-            block.capture.flags = AudioInputSampleHostTimeValid |
-                                  AudioInputCallbackHostTimeValid |
-                                  AudioInputTimestampQualityValid;
-            if (boundary) {
-              block.capture.discontinuity =
-                  AudioInputDiscontinuityReason::StreamGenerationChanged;
-              block.capture.flags |= AudioInputDiscontinuous;
-            }
-            // sourceFrame remains unavailable: these are resampled private
-            // reads, not a new claim about the physical USB frame counter.
-            block.sequence = sequence;
-            block.sampleHostTimeNs = host;
-            block.callbackHostTimeNs = current;
-            block.timestampQuality =
-                AudioInputTimestampQuality::CallbackEstimate;
-            block.sampleRate = rate;
-            block.mono = pcm[analysisIndex].data();
-            block.frames = frames;
-            state.store(AudioInputState::Running, std::memory_order_release);
-            if (gap)
-              message({});
-            gap = false;
-            sink(block);
-            blocks.fetch_add(1, std::memory_order_relaxed);
-            delivered.fetch_add(frames, std::memory_order_relaxed);
-          } else {
-            // Missing/offline history is unavailable, never synthetic silence
-            // passed off as a microphone level or pitch observation.
-            if (!gap)
-              missed.fetch_add(1, std::memory_order_relaxed);
+          bool valid = tap.native->online.load(std::memory_order_acquire) &&
+              bus.firstNs && bus.quality != AudioInputTimestampQuality::Unknown &&
+              current >= bus.deliveryNs && current - bus.deliveryNs < 100000000 &&
+              std::isfinite(slot->rate) && slot->rate >= 8000 && slot->rate <= 192000;
+          for (uint32_t c = 0; c < enabledCount; ++c)
+            valid = valid && enabledChannels[c] < bus.channelCount;
+          if (!valid) {
+            tap.native->consume();
             gap = true;
-            state.store(AudioInputState::Starting, std::memory_order_release);
-            message("Waiting for microphone input history");
+            continue;
           }
+          const bool boundary = gap || previousEpoch != slot->epoch ||
+              previousSerial + 1 != slot->serial ||
+              bus.capture.discontinuity != AudioInputDiscontinuityReason::None ||
+              (bus.capture.flags & AudioInputDiscontinuous);
+          if (boundary) {
+            ++generation;
+            if (!gap) missed.fetch_add(1, std::memory_order_relaxed);
+          }
+          previousEpoch = slot->epoch; previousSerial = slot->serial;
+          meterSequence.fetch_add(1, std::memory_order_acq_rel);
+          std::atomic_thread_fence(std::memory_order_release);
+          for (uint32_t c = 0; c < enabledCount; ++c) {
+            float high = 0;
+            double sum = 0;
+            const auto* pcm = slot->pcm.get() + enabledChannels[c] * BoxInputQueue::maximumFrames;
+            for (uint32_t f = 0; f < bus.frames; ++f) {
+              const float value = pcm[f];
+              if (!std::isfinite(value))
+                throw std::runtime_error("Microphone capture contains non-finite samples");
+              high = std::max(high, std::abs(value));
+              sum += double(value) * value;
+            }
+            peak[c].store(high, std::memory_order_relaxed);
+            rms[c].store(float(std::sqrt(sum / bus.frames)), std::memory_order_relaxed);
+          }
+          meterAt.store(current, std::memory_order_relaxed);
+          meterSequence.fetch_add(1, std::memory_order_release);
+          AudioInputBlockView block;
+          block.capture = bus.capture;
+          block.capture.clockDomainId = tap.id;
+          block.capture.streamGeneration = generation;
+          block.capture.sequence = slot->serial;
+          block.capture.sampleHostTimeNs = bus.firstNs;
+          block.capture.callbackHostTimeNs = bus.deliveryNs;
+          block.capture.timestampQuality = bus.quality;
+          block.capture.flags |= AudioInputSampleHostTimeValid |
+              AudioInputCallbackHostTimeValid | AudioInputTimestampQualityValid;
+          if (boundary) {
+            block.capture.discontinuity = AudioInputDiscontinuityReason::StreamGenerationChanged;
+            block.capture.flags |= AudioInputDiscontinuous;
+          }
+          block.sequence = slot->serial;
+          block.sampleHostTimeNs = bus.firstNs;
+          block.callbackHostTimeNs = bus.deliveryNs;
+          block.timestampQuality = bus.quality;
+          block.sampleRate = slot->rate;
+          block.mono = slot->pcm.get() + enabledChannels[analysisIndex] * BoxInputQueue::maximumFrames;
+          block.frames = bus.frames;
+          state.store(AudioInputState::Running, std::memory_order_release);
+          if (gap) message({});
+          gap = false;
+          sink(block);
+          blocks.fetch_add(1, std::memory_order_relaxed);
+          delivered.fetch_add(bus.frames, std::memory_order_relaxed);
+          wakeups.fetch_add(1, std::memory_order_relaxed);
+          tap.native->consume();
         }
-        // An already-due wake requests another bounded catch-up batch. Keep the
-        // sample grid intact instead of rebasing it to inference completion.
+        // No synthetic silence when a physical owner stops delivering. A new
+        // native epoch or dropped queue slot resets the analysis adapter.
+        if (!tap.native->online.load(std::memory_order_acquire) ||
+            !meterAt.load() || nowNs() - meterAt.load() >= 100000000) {
+          gap = true;
+          state.store(AudioInputState::Starting, std::memory_order_release);
+          message("Waiting for microphone input");
+        }
         std::unique_lock lock(mutex);
-        const auto next = std::chrono::steady_clock::time_point(
-            std::chrono::nanoseconds(batch.plan.nextWakeNs));
-        changed.wait_until(lock, next, [&] {
+        changed.wait_for(lock, std::chrono::milliseconds(5), [&] {
           return stopping.load(std::memory_order_acquire);
         });
       }
@@ -209,15 +193,16 @@ AudioInputResult BoxInputCapture::start(const AudioInputConfig &config,
     impl_->wakeups = 0;
     impl_->stopping = false;
     impl_->meterAt = 0;
+    impl_->meterSequence = 0;
     impl_->message({});
     impl_->state = AudioInputState::Starting;
-    auto result = AudioInputResult::success(AudioInputState::Starting, rate,
+    auto result = AudioInputResult::success(AudioInputState::Starting, impl_->tap.native->rate.load(),
                                             config.channel);
     result.deviceUid = impl_->tap.device.uid;
     result.deviceChannels = impl_->tap.device.channels;
-    result.sampleFormat = "Float32 shared history";
+    result.sampleFormat = "Float32 native capture";
     result.sharingMode = "loopz-shared";
-    result.timestampSource = "loopz-estimated-history";
+    result.timestampSource = "loopz-native-capture";
     // Finish allocating the response before publishing the borrowed source to
     // its worker; a preparation exception can then release the lease safely.
     impl_->worker = std::thread(
@@ -226,6 +211,7 @@ AudioInputResult BoxInputCapture::start(const AudioInputConfig &config,
         });
     return result;
   } catch (const std::exception &e) {
+    if (impl_->tap.native) impl_->tap.native->releaseReader();
     if (impl_->tap.id)
       releaseBoxInputTap(impl_->tap.id);
     impl_->tap = {};
@@ -245,6 +231,7 @@ void BoxInputCapture::stop(bool) {
   impl_->changed.notify_all();
   if (impl_->worker.joinable())
     impl_->worker.join();
+  if (impl_->tap.native) impl_->tap.native->releaseReader();
   if (impl_->tap.id)
     releaseBoxInputTap(impl_->tap.id);
   impl_->tap = {};

@@ -7,6 +7,7 @@ import { BoxRoutingService } from './routing'
 import { BoxStateService } from './state'
 import { BoxStorageService } from './storage'
 import type { BoxPreferences, BoxQueueRef, BoxResult, BoxRetainedPlaybackRestore, BoxRetainedPlaybackSnapshot, BoxCecStatus } from '../../shared/box-contract'
+import type { BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from '../../shared/box-audio'
 import { retainedPlaybackSnapshot } from '../../shared/box-retained-playback'
 
 export type BoxBackend = ReturnType<typeof registerBoxIpc> extends infer T ? Exclude<T, null> : never
@@ -15,6 +16,7 @@ type BoxIpcOptions = {
   appVersion: string
   rendererURL: string
   socketPath?: string
+  microphones?: { snapshot(): Promise<BoxMicrophoneSnapshot>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
   audioInputs: () => unknown
   audioHost: () => unknown
   cecStatus?: () => BoxCecStatus
@@ -120,6 +122,8 @@ export function registerBoxIpc(options: BoxIpcOptions) {
       if (typeof value.epoch !== 'string' || !value.epoch || value.epoch.length > 128 || typeof value.generation !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value.generation)) return failure('Invalid retained song identity.', 'invalid-command')
       return retainedResult(() => options.restoreRetainedPlayback!(value))
     },
+    'box:microphones': () => options.microphones ? retainedResult(() => options.microphones!.snapshot()) : failure('Microphone analysis unavailable.', 'unavailable'),
+    'box:microphone-selection-set': (_event, [edit]) => options.microphones ? retainedResult(() => options.microphones!.setSelection(edit as BoxMicrophoneSelectionEdit)) : failure('Microphone analysis unavailable.', 'unavailable'),
     'box:routing-snapshot': () => routing.snapshot(),
     'box:routing-edit': (_event, [value]) => routing.edit(value),
     'box:state-get': () => state.getState(),

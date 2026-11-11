@@ -13,8 +13,9 @@ For relocatable/AppImage installs, adjust the unit ExecStart to the absolute
 installed executable; do not use shell expansion in ExecStart.
 
 The service uses an isolated `SingZ Box Audio` data profile and a private runtime
-socket. Closing the UI disconnects controls and releases private microphone
-analysis/monitoring; public playback and routing remain in the service.
+socket. Closing the UI only disconnects controls. Microphone analysis, public playback
+and routing remain in the service; analysis restarts from its saved input
+selection whenever the service starts and stops only when every input is off.
 `systemctl --user stop singz-box-audio` explicitly drains the audio owners.
 The unit uses `RuntimeDirectoryPreserve=no`, so systemd removes the service's
 runtime directory when it stops, including during supervised restart. Startup

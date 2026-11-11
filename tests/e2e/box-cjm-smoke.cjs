@@ -589,7 +589,7 @@ async function cloudJourney(localProject, cloudProject) {
   })
 
   await watchdog.run('cancel retry and approve real Drive device authorization', 90, async () => {
-    await tvEnter('[data-focus="catalog-account"]')
+    await tvEnter('[data-focus="account"]')
     await page.waitForSelector('.box-tv[data-route="account"] [data-surface="account"]')
     check((await driveStatus()).signedIn === false, 'real Drive API begins signed out')
     await tvEnter('[data-account-primary]')
