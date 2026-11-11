@@ -27,7 +27,7 @@ esac
 cmake -S "$ROOT" -B "$BUILD"
 # Four fixed edges is the measured ceiling for these ordinary CMake targets:
 # never multiply by the machine's logical CPU count. The machine-wide lock
-# prevents a sibling worktree from adding another compiler family beside it.
+# admits at most four such builds at once (sixteen compile edges in total).
 cmake --build "$BUILD" --target core_host_tests flac_roundtrip --parallel 4
 
 "$BUILD/core_host_tests"

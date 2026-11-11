@@ -29,9 +29,9 @@ fi
 node "$ROOT/scripts/engine-artifact.cjs" assert-build-target "$TARGET"
 if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
   exec node "$ROOT/scripts/with-native-build-lock.mjs" \
-    --owner vendor-crispasr -- bash "$ROOT/scripts/vendor-crispasr.sh" "$@"
+    --owner vendor-crispasr --exclusive -- bash "$ROOT/scripts/vendor-crispasr.sh" "$@"
 fi
-node "$ROOT/scripts/assert-native-build-lock.cjs"
+node "$ROOT/scripts/assert-native-build-lock.cjs" --exclusive
 JOBS=${SINGZ_NATIVE_JOBS:-4}
 case "$JOBS" in 1|2|3|4) ;; *) echo "SINGZ_NATIVE_JOBS must be an integer from 1 through 4" >&2; exit 1 ;; esac
 

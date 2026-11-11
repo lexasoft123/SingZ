@@ -576,26 +576,64 @@ packaging snapshots to `build/capture-package/`; build it with
 
 ### Shared native build lock
 
-The lock is `<git-common-dir>/singz-native-build.lock` for every worktree of a
-repository, independent of `TMPDIR`, `TEMP`, and task scratch directories.
-Exported trees without Git use `<root>/.singz-native-build.lock`. Producers
-validate inherited lock tokens rather than acquiring a second lock. Direct
-native commands (including Gradle and Xcode) must use the same wrapper:
+The lock is a counting lock with up to four slots (default four). Slot `n` is
+the directory `<git-common-dir>/singz-native-build.lock.d/slot-<n>`, created
+with `mkdir` for every worktree of a repository, independent of `TMPDIR`,
+`TEMP`, and task scratch directories. Exported trees without Git use
+`<root>/.singz-native-build.lock.d/`. `SINGZ_NATIVE_BUILD_SLOTS` (1-4) lowers the
+count for a machine; every user of one repository must use the same value.
+Each slot holds an `owner.json` (token, wrapper pid, host, child pid and
+process group). A build that finds all slots busy waits and reports the holders
+on stderr. Producers validate inherited lock tokens rather than acquiring a
+second lock; the assertion accepts a token from any slot. Direct native
+commands (including Gradle and Xcode) must use the same wrapper:
 
 ```bash
 node scripts/with-native-build-lock.mjs --owner android-feature -- bash -c 'cd mobile/android && ./gradlew :app:assembleDebug'
 ```
 
-Ordinary core/engine producers accept at most four compile edges; capture and
-codec producers retain their stricter limits. Compiler-cache settings stay
-per build as described above. A busy or interrupted lock fails with owner
-information; confirm that owner and its children have stopped before removing
-it. On Windows, interrupted builds retain the lock even after `taskkill /T`
-so the recorded owner/tree can be inspected. Normal direct commands must await
-all descendants before returning. On POSIX, the wrapper forwards signals to
-the complete child process group and retains the lock while that group exists.
-Stop all builds using the old temporary-directory lock scheme before switching
-versions. Never remove a live lock to make a second build start.
+**Exclusive mode.** `--exclusive` (checked by
+`assert-native-build-lock.cjs --exclusive`) claims the legacy path
+`<git-common-dir>/singz-native-build.lock`, which stops new slots and old
+scripts, waits for the running slots to finish, and then runs alone. Use it for
+producers that write a location other checkouts read or share:
+
+- `vendor-llama.sh` and `vendor-crispasr.sh` publish engine binaries that
+  `worktree-setup.sh` snapshots from the main checkout's `vendor/`;
+- `worktree-setup.sh` in full (mobile) mode restores audio-api archives into
+  the user-wide cache shared by every checkout (`--desktop-only` takes an
+  ordinary slot).
+
+Everything else writes checkout-local output (`build/`, `vendor/`, `out/`,
+promoted FFmpeg proofs, the analyzer, the capture addon) or shared caches that
+are concurrency-safe (ccache, npm, CocoaPods). Add `--exclusive` to any new
+producer that writes outside its own checkout.
+
+**Budget.** Ordinary core/engine producers accept at most four compile edges
+per build; capture and codec producers retain their stricter limits (one
+edge). Four slots give a machine-wide ceiling of sixteen process command lines
+containing `clang` (slots x four); stop above it. Compiler-cache settings stay
+per build as described above.
+
+**Stale locks.** A waiter reclaims a slot or exclusive claim only when its
+record was written by this host, the wrapper pid is gone, and no recorded child
+process group (or child pid) exists; an unrecorded directory is reclaimed after
+30 seconds. Old-format records, other hosts and Windows (where `taskkill /T`
+cannot prove the tree stopped) are never reclaimed automatically: inspect the
+recorded owner/tree, confirm it stopped, then remove that directory. On POSIX,
+the wrapper forwards signals to the complete child process group and retains
+the slot while that group exists. Normal direct commands must await all
+descendants before returning. Never remove a live lock to make another build
+start.
+
+**Rollout with old scripts.** Scripts from before slots only know
+`singz-native-build.lock` and do not see slots. New scripts treat that
+directory as occupying every slot (and wait), but an old script that starts
+while new builds hold slots proceeds beside them, so up to four new builds plus
+one old build can overlap. The mixed period lasts until every active checkout
+has the new scripts: rebase onto main before starting new native builds, and
+stop pre-slot builds before switching versions. Stop all builds using the old
+temporary-directory lock scheme before switching versions.
 
 ### Review in Claude Code and Codex
 

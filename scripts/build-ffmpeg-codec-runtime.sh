@@ -5,7 +5,7 @@ set -euo pipefail
 # matrix. This script never installs into the machine. Outputs are finalized
 # under ignored vendor/ffmpeg-codec/<target>/ only after checksum/profile
 # validation. Keep the hard eight-job ceiling in sync with the native app
-# build policy; multiple callers must still serialize native builds globally.
+# build policy; callers still share the machine-wide native build slots.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:?usage: scripts/build-ffmpeg-codec-runtime.sh <target>}"

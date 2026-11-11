@@ -29,9 +29,19 @@ if [ "$MODE" != "--desktop-only" ] && [ "$(uname)" = Darwin ]; then
   }
 fi
 if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
-  exec node "$WT/scripts/with-native-build-lock.mjs" --owner worktree-setup -- bash "$WT/scripts/worktree-setup.sh" "$@"
+  # Full setup (the macOS mobile path) restores audio-api archives into a
+  # user-wide cache shared by every checkout, so it runs exclusively;
+  # --desktop-only writes only this checkout (plus idempotent repo-wide
+  # excludes) and takes an ordinary slot.
+  EXCLUSIVE=()
+  [ "$MODE" = "--desktop-only" ] || EXCLUSIVE=(--exclusive)
+  exec node "$WT/scripts/with-native-build-lock.mjs" --owner worktree-setup ${EXCLUSIVE[@]+"${EXCLUSIVE[@]}"} -- bash "$WT/scripts/worktree-setup.sh" "$@"
 fi
-node "$WT/scripts/assert-native-build-lock.cjs"
+if [ "$MODE" = "--desktop-only" ]; then
+  node "$WT/scripts/assert-native-build-lock.cjs"
+else
+  node "$WT/scripts/assert-native-build-lock.cjs" --exclusive
+fi
 
 # The audio engine is a public, pinned git submodule. Initialize it before any
 # dependency checks, fingerprints or native mirror generation. Refuse a flat

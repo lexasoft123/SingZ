@@ -77,14 +77,18 @@ reboots, credential access or external publication.
   Share npm/CocoaPods/compiler caches. Reuse third-party binaries only as local
   snapshots with matching revision, target, producer, and checksum receipts;
   never write through or execute mutable sibling artifact links.
-- Serialize native builds/bootstrap across worktrees: use self-locking producers
-  or `node scripts/with-native-build-lock.mjs --owner <task> -- <command> <args>`.
-  Never forge tokens or split lock identity with task temp directories. Stop
-  older locking implementations before upgrading; prove the owner and its
-  descendants stopped before removing a stale lock.
-- Ordinary core/engine builds allow at most four compile edges; stricter producer
-  limits apply. Stop above the eight-clang-process ceiling. Keep compiler-cache
-  settings per build, never in machine config; see the development runbook.
+- Run at most four native builds/bootstraps at once across all worktrees (the
+  machine's decision; `SINGZ_NATIVE_BUILD_SLOTS` lowers it, 1-4): use
+  self-locking producers or
+  `node scripts/with-native-build-lock.mjs --owner <task> [--exclusive] -- <command> <args>`.
+  Producers that write shared locations run `--exclusive`; the development
+  runbook lists them. Never forge tokens or split lock identity with task temp
+  directories. Stop older locking implementations before upgrading; prove the
+  owner and its descendants stopped before removing a stale lock.
+- Ordinary core/engine builds allow at most four compile edges each; stricter
+  producer limits apply. With four slots the machine-wide ceiling is sixteen
+  clang processes (slots x four): stop above it. Keep compiler-cache settings
+  per build, never in machine config; see the development runbook.
 
 ## Verification and commits
 
