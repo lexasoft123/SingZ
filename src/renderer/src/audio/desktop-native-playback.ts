@@ -1,3 +1,4 @@
+import { commandableRetainedPlayback } from '../../../shared/box-retained-playback'
 import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
 import type {
@@ -2044,11 +2045,7 @@ export class DesktopNativePlaybackClient {
     if (status.state === 'prepared' || status.state === 'preparing') {
       throw new Error('Retained prepared-ahead playback is unsupported; use explicit Stop before reopening the song.')
     }
-    const transportCommandable = status.transportState === 'playing' || status.transportState === 'pre-roll' ||
-      status.transportState === 'paused' || status.transportState === 'completed'
-    const terminal = status.terminalReason !== 'none' && status.terminalReason !== ''
-    if (status.state !== 'running' || status.hostState !== 'running' || !transportCommandable ||
-        terminal || status.error !== '') {
+    if (!commandableRetainedPlayback(status)) {
       throw new Error('Retained native playback is not a commandable opened transport; use explicit Stop.')
     }
     const config = descriptor.config

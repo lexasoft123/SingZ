@@ -54,7 +54,7 @@ describe('retained song controls', () => {
     await controller.refresh()
     stop.mockRejectedValueOnce(new Error('outcome uncertain'))
     await controller.stop()
-    expect(controller.getSnapshot()).toMatchObject({ generation: '1', error: 'outcome uncertain' })
+    expect(controller.getSnapshot()).toMatchObject({ generation: '1', error: 'Song shutdown is uncertain. Refresh before retrying.' })
     await controller.refresh()
     expect(controller.getSnapshot().generation).toBe('1')
     read.mockResolvedValueOnce(snapshot('0'))
@@ -122,13 +122,13 @@ describe('retained recovery', () => {
       const { controller, read, stop } = fixture(restore, recoverable())
       await controller.refresh()
       expect(controller.getSnapshot()).toMatchObject({
-        generation: '1', restoring: false, error: 'No song with ready lyrics can be restored'
+        generation: '1', restoring: false, error: 'This song could not be restored. Stop it to choose another song.'
       })
       expect(route).not.toHaveBeenCalled()
       await controller.refresh()
       expect(read).toHaveBeenCalledTimes(2)
       expect(transportRestore).toHaveBeenCalledTimes(1)
-      expect(controller.getSnapshot().error).toBe('No song with ready lyrics can be restored')
+      expect(controller.getSnapshot().error).toBe('This song could not be restored. Stop it to choose another song.')
       await controller.stop()
       expect(stop).toHaveBeenCalledExactlyOnceWith({ epoch: 'epoch-a', generation: '1' })
     }

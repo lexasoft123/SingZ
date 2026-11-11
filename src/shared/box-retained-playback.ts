@@ -14,6 +14,14 @@ const text = (value: unknown, maximum = 4096): value is string =>
 const hash = (value: unknown): value is string => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value)
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 
+/** An opened, running host can hold a silent transport before its first Play,
+ * including after a seek. Explicit Stop stops the session/host; natural end
+ * keeps the host running with a completed transport, ready for replay. */
+export function commandableRetainedPlayback(status: DesktopPlaybackStatus): boolean {
+  return status.state === 'running' && status.hostState === 'running' &&
+    transports.has(status.transportState) && status.terminalReason === 'none' && status.error === ''
+}
+
 function jsonClone(value: unknown, maximum: number): unknown {
   const json = JSON.stringify(value, (_key, item) => {
     if (typeof item === 'bigint' || typeof item === 'function' || typeof item === 'symbol' ||

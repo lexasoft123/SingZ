@@ -227,7 +227,7 @@ export const box: Record<keyof typeof english, string> = {
   'box.retained.body': '请先停止这首歌曲，再打开其他歌曲。它的项目和歌词尚未恢复。',
   'box.retained.refresh': '刷新',
   'box.retained.stop': '停止歌曲',
-  'box.retained.restoreFailed': '无法恢复上一首歌曲。请刷新其状态或停止播放。',
+  'box.retained.restoreFailed': '无法恢复这首歌曲。请先停止它，再选择其他歌曲。',
   'box.retained.restoreUnavailable': '无法恢复歌曲。请刷新其状态或停止播放。',
   'box.retained.restoreTimedOut': '恢复上一首歌曲耗时过长。请刷新其状态或停止播放。',
   'box.retained.statusUnavailable': '无法获取音频状态。',

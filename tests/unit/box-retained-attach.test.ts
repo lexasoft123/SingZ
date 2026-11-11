@@ -124,7 +124,7 @@ afterEach(async () => {
 })
 
 describe('retained native renderer attach', () => {
-  it.each(['playing', 'pre-roll', 'paused', 'completed'] as const)('adopts a running/running %s generation without a lifecycle command', async transportState => {
+  it.each(['playing', 'pre-roll', 'paused', 'completed', 'stopped'] as const)('adopts a running/running %s generation without a lifecycle command', async transportState => {
     const h = fixture(nativeStatus('7', transportState))
     const client = h.client()
     const request = client.attachRetained(recovery(nativeStatus('7', transportState)), null)
@@ -146,6 +146,18 @@ describe('retained native renderer attach', () => {
     await client.updateLane('vocals', { gain: 0.5, muted: false })
     expect(h.api.setDesktopPlaybackMasterGain).toHaveBeenCalledWith('7', 0.6)
     expect(h.api.setDesktopPlaybackLane).toHaveBeenCalledWith('7', 'vocals', 0.5, false, false)
+    for (const call of Object.values(h.lifecycle)) expect(call).not.toHaveBeenCalled()
+  })
+
+  it.each(['0', '144000'])('adopts a never-played stopped transport at frame %s without replaying settings', frame => {
+    const status = retainedStatus('7', 'stopped', { renderedProjectFrame: frame, audibleProjectFrame: frame, masterGain: 0.23 })
+    const h = fixture(status)
+    const client = h.client()
+    const request = client.attachRetained(recovery(status), null)
+    expect(client.audibleSeconds()).toBe(Number(frame) / 48000)
+    expect(client.transportParked).toBe(true)
+    expect(client.transportActive).toBe(false)
+    expect(request).toMatchObject({ masterGain: 0.23, playbackRate: 1.25, transpose: 2 })
     for (const call of Object.values(h.lifecycle)) expect(call).not.toHaveBeenCalled()
   })
 

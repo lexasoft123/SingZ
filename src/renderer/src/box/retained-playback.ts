@@ -112,7 +112,8 @@ export class RetainedPlaybackController {
         this.publish(snapshot, key && this.restoreFailure?.key === key ? this.restoreFailure.message : '')
       }
     } catch (error) {
-      if (this.live(lifetime)) this.update({ restoring: false, error: error instanceof Error ? error.message : t('box.retained.statusUnavailable') })
+      console.warn('Retained playback status failed', error)
+      if (this.live(lifetime)) this.update({ restoring: false, error: t('box.retained.statusUnavailable') })
     }
   }
   /** Resolves to '' on success or the failure to show; never outlives the deadline. */
@@ -125,7 +126,10 @@ export class RetainedPlaybackController {
       .then(() => restore(expected))
       .then(
         restored => restored ? '' : t('box.retained.restoreFailed'),
-        error => error instanceof Error ? error.message : t('box.retained.restoreUnavailable')
+        error => {
+          console.warn('Retained playback restore failed', error)
+          return t('box.retained.restoreFailed')
+        }
       )
     try { return await Promise.race([attempt, deadline]) }
     finally { clearTimeout(timer) }
@@ -149,11 +153,14 @@ export class RetainedPlaybackController {
         if (!receipt.ok) throw new Error(receipt.error)
         const after = retainedPlaybackSnapshot(receipt.value)
         if (!this.live(lifetime)) return
-        if (after.epoch !== expected.epoch || generation(after.playback) === expected.generation)
-          throw new Error(t('box.retained.releaseUnconfirmed'))
+        if (after.epoch !== expected.epoch || generation(after.playback) === expected.generation) {
+          this.update({ error: t('box.retained.releaseUnconfirmed') })
+          return
+        }
         this.publish(after)
       } catch (error) {
-        if (this.live(lifetime)) this.update({ error: error instanceof Error ? error.message : t('box.retained.stopUncertain') })
+        console.warn('Retained playback stop failed', error)
+        if (this.live(lifetime)) this.update({ error: t('box.retained.stopUncertain') })
       }
     })
   }

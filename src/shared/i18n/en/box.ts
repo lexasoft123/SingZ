@@ -225,7 +225,7 @@ export const box = {
   'box.retained.body': 'Stop this song before opening another. Its project and lyrics have not been restored.',
   'box.retained.refresh': 'Refresh',
   'box.retained.stop': 'Stop song',
-  'box.retained.restoreFailed': 'The previous song could not be restored. Refresh its status or stop it.',
+  'box.retained.restoreFailed': 'This song could not be restored. Stop it to choose another song.',
   'box.retained.restoreUnavailable': 'Song restoration is unavailable. Refresh its status or stop it.',
   'box.retained.restoreTimedOut': 'Restoring the previous song took too long. Refresh its status or stop it.',
   'box.retained.statusUnavailable': 'Audio status is unavailable.',

@@ -137,7 +137,12 @@ export function moveSpatialFocus(scope: HTMLElement, direction: RemoteDirection)
   const horizontal = direction === 'ArrowLeft' || direction === 'ArrowRight'
   if (horizontal && isVerticalOnly(active)) return false
   if (horizontal) targets = targets.filter(target => !isVerticalOnly(target))
-  const next = sideExit(scope, active, targets, direction) ?? explicitExit(scope, active, targets, direction) ?? nearestInDirection(active, targets, direction)
+  // Dialog actions retain their Left/Right order even when translated labels
+  // wrap onto another row. Geometry alone cannot express that order.
+  const ordered = horizontal && scope.dataset.remoteHorizontal === 'ordered'
+    ? targets[targets.indexOf(active) + (direction === 'ArrowRight' ? 1 : -1)] ?? null
+    : undefined
+  const next = ordered !== undefined ? ordered : sideExit(scope, active, targets, direction) ?? explicitExit(scope, active, targets, direction) ?? nearestInDirection(active, targets, direction)
   if (!next) return false
   next.focus({ preventScroll: true })
   next.scrollIntoView({ block: 'nearest', inline: 'nearest' })
@@ -165,4 +170,15 @@ export function disabledFocusReplacement(group: HTMLElement, last: HTMLElement |
     if (!best || distance < best.distance) best = { element, distance }
   }
   return best?.element ?? null
+}
+
+/** Catalog return after a dialog closes prefers the remembered row, then an
+ * enabled recovery action or the active Catalog navigation button. */
+export function catalogFocusTarget(root: HTMLElement, index: number): HTMLElement | null {
+  for (const selector of [`[data-catalog-index="${index}"]`, '[data-focus="catalog-retry"]', '.box-navigation button.on']) {
+    const target = Array.from(root.querySelectorAll<HTMLElement>(selector)).find(element =>
+      !element.matches(':disabled') && element.getClientRects().length > 0 && !element.closest('[hidden], [inert]'))
+    if (target) return target
+  }
+  return null
 }

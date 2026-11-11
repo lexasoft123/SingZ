@@ -8,7 +8,7 @@ import type {
   BoxRetainedPlaybackSnapshot,
   BoxRetainedProjectDescriptor
 } from '../../shared/box-contract'
-import { retainedPlaybackSnapshot } from '../../shared/box-retained-playback'
+import { commandableRetainedPlayback, retainedPlaybackSnapshot } from '../../shared/box-retained-playback'
 import {
   GRAPH_DOCUMENT_FORMAT,
   MAX_GRAPH_DOCUMENT_TEXT_BYTES,
@@ -32,8 +32,6 @@ import { validateBoxRetainedProject } from './retained-project'
 
 const SMALL_FILE_BYTES = 4 * 1024 * 1024
 const MAX_DIRECTORY_ENTRIES = 4096
-const COMMANDABLE_STATES = new Set(['running'])
-const COMMANDABLE_TRANSPORTS = new Set(['pre-roll', 'playing', 'paused', 'completed'])
 
 type Expected = { epoch: string; generation: string }
 type SnapshotReader = () => Promise<BoxRetainedPlaybackSnapshot>
@@ -136,8 +134,7 @@ function commandableRecovery(snapshot: BoxRetainedPlaybackSnapshot, expected: Ex
   }
   const status = recovery.status
   if (snapshot.playback.state !== status.state || snapshot.playback.transportState !== status.transportState) throw stale()
-  if (!COMMANDABLE_STATES.has(status.state) || !COMMANDABLE_TRANSPORTS.has(status.transportState) ||
-      status.hostState !== 'running' || status.terminalReason !== 'none') {
+  if (!commandableRetainedPlayback(status)) {
     throw new Error('Retained native playback is not a commandable opened transport; use explicit Stop.')
   }
   return recovery
