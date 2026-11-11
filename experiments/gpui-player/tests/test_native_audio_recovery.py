@@ -309,7 +309,7 @@ def main():
         }
         (saved / "project.json").write_text(json.dumps(project, indent=2))
         lyric_document = {
-            "source": "fixture-source",
+            "source": "edited",
             "credit": "fixture-credit",
             "foreignLyrics": {"keep": "retained-lyrics"},
             "lines": [
@@ -355,7 +355,7 @@ def main():
         config = root / "preferences"
         config.mkdir()
         (config / "audio.json").write_text(
-            json.dumps({"outputUid": "", "future": "preserve-audio-preferences"}, indent=2)
+            json.dumps({"outputUid": "", "karaoke": True, "future": "preserve-audio-preferences"}, indent=2)
         )
         initial_project_hash = sha(saved / "project.json")
         initial_media_hash = sha(saved / "stems/vocals.wav")

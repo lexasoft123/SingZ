@@ -327,6 +327,19 @@ impl Playhead {
         }
         self.resume_native_position();
     }
+    /// The transport accepted a seek to `target` and later refused it (a
+    /// survivable helper refusal). Its pending acknowledgement will never
+    /// arrive, so release that hold now instead of waiting for the expiry.
+    pub fn seek_rejected(&mut self, target: f64) {
+        if self
+            .pending_seek
+            .is_some_and(|(_, pending)| (pending - target).abs() < 1e-6)
+        {
+            self.pending_seek = None;
+            self.pending_seek_at = None;
+        }
+        self.seek_refused();
+    }
     fn resume_native_position(&mut self) {
         if let Some((_, target)) = self.pending_seek {
             // Refusing a second seek must not cancel the first accepted one.

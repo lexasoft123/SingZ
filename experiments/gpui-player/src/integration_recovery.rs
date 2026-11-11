@@ -140,8 +140,7 @@ pub(super) fn prepare(
             &project.metronome,
             project.beat.as_ref(),
         )?)?;
-        if project.looping {
-            let (start, end) = project.selection.unwrap();
+        if let Some((start, end)) = effective_loop(&project, initial.duration) {
             child.command(&format!("loop {start} {end}"))?;
         }
         if let Some(plan) = open_carry_plan(&mut project, initial.duration as f64)? {
@@ -176,6 +175,12 @@ pub(super) fn prepare(
         "Output recovery superseded"
     );
     Ok((child, status, media))
+}
+
+fn effective_loop(project: &Project, duration: f64) -> Option<(f64, f64)> {
+    // None preserves the document's implicit full-song selection. Only the
+    // native command needs concrete bounds from the newly opened media.
+    project.looping.then(|| project.selection.unwrap_or((0., duration)))
 }
 
 /// A source handoff must finish the callback-applied paused seek before a
@@ -287,6 +292,22 @@ mod tests {
         assert_eq!(captured.metadata_hash, request.project.metadata_hash);
         assert_eq!(captured.raw, request.project.raw);
         assert_eq!(fs::read(fixture.0.join("project.json")).unwrap(), before);
+    }
+    #[test]
+    fn recovery_without_selection_restores_full_song_loop_without_materializing_selection() {
+        let fixture = Fixture::new();
+        let mut request = fixture.request();
+        request.mix.looping = true;
+        request.mix.selection = None;
+        let mut project = captured_project(&request).unwrap();
+        let raw = project.raw.clone();
+        assert_eq!(effective_loop(&project, 12.), Some((0., 12.)));
+        assert_eq!(project.selection, None);
+        assert_eq!(project.raw, raw);
+        project.selection = Some((1., 4.));
+        assert_eq!(effective_loop(&project, 12.), Some((1., 4.)));
+        project.looping = false;
+        assert_eq!(effective_loop(&project, 12.), None);
     }
     #[test]
     fn recovery_refuses_missing_or_changed_media_metadata_and_track_inventory() {

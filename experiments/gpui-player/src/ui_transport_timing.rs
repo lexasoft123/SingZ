@@ -238,8 +238,8 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){c
    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==project));rate!(1.25);
    handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"}))?;wait!(p,cx=>!p.saving&&p.saved_seq==p.edit_seq);
    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,"saved-final"))??;
-   // A generic native command failure can overtake the latest queued rate.
-   // The real backend FIFO receives the bad command while rateA's actual
+   // A fatal owned-helper fault can overtake the latest queued rate.
+   // The real backend FIFO receives fault injection while rateA's actual
    // accepted receipt is gated; root cannot enqueue rateB untilA is released.
    let before_failure=std::fs::read(project.join("project.json"))?;
    let _=std::fs::remove_file(&ready);std::fs::write(&gate,b"hold actual rateA before generic helper failure")?;
@@ -249,7 +249,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){c
    handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"}))?;
    queued_save_intent!("generic native failure Save/navigation");
    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(fresh.clone(),cx)))?;
-   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_rate_pending.is_some()&&p.native_rate_queued.is_some()&&p.native_rate_save_requested&&p.native_rate_navigation.as_ref().is_some_and(|(path,source)|path==&fresh&&!*source)&&!p.loading&&!p.saving,"Failed-rate regression did not actually queue latest rate/Save/navigation");p.backend.as_ref().ok_or_else(||anyhow::anyhow!("Native backend missing"))?.control(p.native_epoch,"invalid-rate-test-command".into())?;Ok(())})??;
+   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.native_rate_pending.is_some()&&p.native_rate_queued.is_some()&&p.native_rate_save_requested&&p.native_rate_navigation.as_ref().is_some_and(|(path,source)|path==&fresh&&!*source)&&!p.loading&&!p.saving,"Failed-rate regression did not actually queue latest rate/Save/navigation");p.backend.as_ref().ok_or_else(||anyhow::anyhow!("Native backend missing"))?.fail_owned_audio(p.native_epoch)?;Ok(())})??;
    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,"rate-failure-queued"))??;std::fs::remove_file(&gate)?;
    wait!(p,cx=>p.notice.is_some()&&p.native_rate_pending.is_none()&&p.native_rate_queued.is_none());
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.notice.as_deref().is_some_and(|text|text.contains("The queued Save did not run"))&&!p.native_rate_save_requested&&!p.saving&&p.native_rate_navigation.as_ref().is_some_and(|(path,source)|path==&fresh&&!*source)&&p.project.as_ref().is_some_and(|retained|retained.dir==project)&&p.tracks_audio_failed&&!p.playing&&p.playhead.anchor().is_none()&&p.last_playback_status.is_none(),"Generic helper failure lost queued navigation or falsely completed Save: {:?}",p.notice);shot(&view,w,cx,&out,"rate-failure-notice")})??;

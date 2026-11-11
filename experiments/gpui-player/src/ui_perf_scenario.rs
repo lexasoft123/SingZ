@@ -131,6 +131,67 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                             }
                             Ok(serde_json::json!({"cycles": cycles, "closed": null, "closeReason": "catalog navigation retains the active project until the next open"}))
                         }
+                        "seek-refusal" | "invalid-control-refusal" => {
+                            // This existing harness is ui-tests-only, hidden and muted.
+                            // Exercise the real Control -> helper -> UI event path.
+                            let (before, probe) = handle.update(cx, |_, _, app| -> anyhow::Result<_> {
+                                let p=view.read(app);
+                                anyhow::ensure!(p.loaded_song && p.project.is_some() && p.notice.is_none() && !p.tracks_audio_failed, "refusal test requires a loaded song");
+                                let state=serde_json::json!({
+                                    "project":p.project.as_ref().map(|p|&p.dir), "loadedSong":p.loaded_song,
+                                    "epoch":p.native_epoch, "tracksAudioFailed":p.tracks_audio_failed, "laneRevision":p.native_lane_revision,
+                                    "carryRevision":p.native_carry_revision,
+                                    "route":p.last_playback_status.as_ref().map(|s|&s.output_uid),
+                                });
+                                let backend=p.backend.as_ref().ok_or_else(||anyhow::anyhow!("missing backend"))?;
+                                Ok((state,backend.probe_owned_audio(p.native_epoch)?))
+                            })??;
+                            macro_rules! read_probe { ($receiver:expr) => {{
+                                let receiver=$receiver;
+                                let deadline=Instant::now()+Duration::from_secs_f64(deadline_secs);
+                                loop {
+                                    match receiver.try_recv() {
+                                        Ok(value)=>break value.map_err(|e|anyhow::anyhow!(e))?,
+                                        Err(std::sync::mpsc::TryRecvError::Empty)=>{},
+                                        Err(error)=>anyhow::bail!("probe disconnected: {error}"),
+                                    }
+                                    anyhow::ensure!(Instant::now()<deadline,"native refusal probe timed out");
+                                    cx.background_executor().timer(Duration::from_millis(5)).await;
+                                }
+                            }}; }
+                            let old=read_probe!(probe);
+                            handle.update(cx, |_,_,app|->anyhow::Result<()> {
+                                let p=view.read(app);
+                                let command=if action=="invalid-control-refusal" {"invalid-control-test-command".into()} else {format!("seek {}",p.duration+10.)};
+                                p.backend.as_ref().unwrap().control(p.native_epoch,command)
+                            })??;
+                            let deadline=Instant::now()+Duration::from_secs_f64(deadline_secs);
+                            let (after,probe)=loop {
+                                let state=handle.update(cx,|_,window,app|->anyhow::Result<_> {
+                                    anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"refusal test activated its window");
+                                    let p=view.read(app);
+                                    if p.notice.is_none() {return Ok(None);}
+                                    let state=serde_json::json!({
+                                        "project":p.project.as_ref().map(|p|&p.dir), "loadedSong":p.loaded_song,
+                                        "epoch":p.native_epoch, "tracksAudioFailed":p.tracks_audio_failed, "laneRevision":p.native_lane_revision,
+                                        "carryRevision":p.native_carry_revision,
+                                        "route":p.last_playback_status.as_ref().map(|s|&s.output_uid),
+                                    });
+                                    anyhow::ensure!(state==before,"Control refusal discarded loaded song or route: before={before} after={state}");
+                                    Ok(Some((state,p.backend.as_ref().unwrap().probe_owned_audio(p.native_epoch)?)))
+                                })??;
+                                if let Some(state)=state {break state;}
+                                anyhow::ensure!(Instant::now()<deadline,"Control refusal notice did not arrive");
+                                cx.background_executor().timer(Duration::from_millis(5)).await;
+                            };
+                            let retained=read_probe!(probe);
+                            anyhow::ensure!(old.helper_pid==retained.helper_pid && old.status.output_uid==retained.status.output_uid
+                                && old.status.lane_revision==retained.status.lane_revision && old.status.carry_revision==retained.status.carry_revision,
+                                "refusal changed native ownership");
+                            // Clear only the test notice so Quit can use the normal path.
+                            handle.update(cx,|_,_,app|view.update(app,|p,app| {p.notice=None;app.notify();}))?;
+                            Ok(serde_json::json!({"before":before,"after":after,"helperPid":retained.helper_pid,"statusSucceeded":true}))
+                        }
                         "quit" => Ok(serde_json::json!({"quit": true})),
                         _ => anyhow::bail!("unknown scenario action {action}"),
                     }

@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
@@ -19,6 +19,9 @@ use std::{
 mod save_worker;
 #[path = "integration_recovery.rs"]
 mod recovery;
+#[path = "integration_helper.rs"]
+mod helper;
+use helper::Helper;
 pub use recovery::{AudioRecovery, RecoveredAudio, Publication};
 
 pub const STEMS: [&str; 7] = [
@@ -562,7 +565,7 @@ fn publish_playback_receipt(events:&mpsc::Sender<Event>,telemetry:&Mutex<Option<
     let _=events.send(Event::Playback(epoch,serial,status));
 }
 #[derive(Debug)]
-enum PlaybackReceipt {Applied(Status),Cancelled}
+enum PlaybackReceipt {Applied(Status), Refused {error:String,retained:Status}, Cancelled}
 fn settle_playback_receipt(
     mut reply:Value, timeout:Duration,
     current:impl Fn()->bool, mut poll:impl FnMut()->Result<Value>,
@@ -589,8 +592,14 @@ fn settle_playback_receipt(
 }
 
 enum RateFailure{Refused(String),Transport(String)}
+const RETAINED_OWNERSHIP_KEYS: &[&str] = &[
+    "graphGeneration", "laneSetRevision", "carryRevision", "laneIds", "lanes",
+    "masterGain", "referenceGain", "outputUid", "trainingOnly", "emptyProject",
+    "duration", "playbackRate", "transpose", "looping", "loopStart", "loopEnd",
+    "regionEnabled", "regionStart", "regionEnd", "parked", "physicalOutputReleased",
+];
 fn same_rate_ownership(before:&Value,after:&Value)->Result<()> {
-    for key in ["graphGeneration","laneSetRevision","carryRevision","laneIds","lanes","masterGain","referenceGain","outputUid","trainingOnly","emptyProject","duration","looping","loopStart","loopEnd","regionEnabled","regionStart","regionEnd","parked","physicalOutputReleased"]{
+    for &key in RETAINED_OWNERSHIP_KEYS {
         anyhow::ensure!(before[key]==after[key],"Native playback {key} changed");
     }Ok(())
 }
@@ -682,6 +691,10 @@ fn publish_resolved_lyrics(project:&Project,mut proposal:crate::lyrics_resolutio
     })();
     if cancel()&&!result.as_ref().is_ok_and(|r|r.written){Err(Failure::Cancelled)}else{result.map_err(|e|Failure::Error(format!("{e:#}")))}
 }
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub enum RefusedCommand { Seek { target:f64 }, Other }
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub enum Severity { Fatal, Refused(RefusedCommand) }
 pub enum Event {
     Provider(ProviderSnapshot),
     Region(u64,u64,std::result::Result<Status,String>),
@@ -728,7 +741,7 @@ pub enum Event {
     Catalog(u64,PathBuf,Vec<Project>),
     Opened(u64, Project, Status, Vec<Vec<f32>>),
     Status(u64, Status),
-    Error(u64, String),
+    Error(u64, String, Severity),
     TransportFailed(u64, String),
     #[cfg(feature="ui-tests")]
     SourceSeekRestored(u64,Status),
@@ -1691,28 +1704,40 @@ struct PendingInventory {
     output_uid: String,
     reply: Value,
 }
+enum CommandOutcome {
+    Applied(Status),
+    Refused { error:String, retained:Status },
+    Fault(anyhow::Error),
+}
+#[derive(Debug)]
+struct ReadCancelled;
+impl std::fmt::Display for ReadCancelled {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("Project load superseded")}
+}
+impl std::error::Error for ReadCancelled {}
+fn retire_failed_connection(connection:&mut Option<Connection>,error:&anyhow::Error) {
+    if error.is::<ReadCancelled>() {retire_connection(connection);} else {drop(connection.take());}
+}
+fn retire_connection(connection:&mut Option<Connection>) {
+    // At transport/cue teardown sites the actor is the retiring thread; a
+    // helper that ignores quit can occupy it for the 750 ms quit bound.
+    if let Some(child)=connection.take() {child.retire();}
+}
 struct Connection {
     provider:crate::audio_devices::Provider,
-    provider_retired:Arc<AtomicU64>,
     pending_inventory: Option<PendingInventory>,
     carry_revision:u64,
     lane_revision:u64,
     loaded_lanes:Vec<crate::tracks::Lane>,
     loaded_stamps:Vec<(u64,std::time::SystemTime)>,
     project_dir: Option<PathBuf>,
-    child: Child,
-    input: ChildStdin,
+    helper: Helper,
+    ownership: Value,
     replies: Receiver<Result<Value>>,
     epoch: u64,
     latest: Arc<AtomicU64>,
     alive: Arc<AtomicBool>,
     copy_handoff: Arc<AtomicU64>,
-}
-impl Drop for Connection {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        if self.child.wait().is_ok(){self.provider_retired.fetch_sub(1,Ordering::AcqRel);}
-    }
 }
 impl Connection {
     fn open(
@@ -1762,18 +1787,8 @@ impl Connection {
         for (id,path) in project.map(native_lane_sources).transpose()?.unwrap_or_default() {
             command.arg(id).arg(path);
         }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
+        let (helper, output) = Helper::spawn(&mut command, provider_retired)
             .context("Native audio helper is missing; build with scripts/build-gpui-audio.sh")?;
-        provider_retired.fetch_add(1,Ordering::AcqRel);
-        let pipes=child.stdin.take().zip(child.stdout.take());
-        let (input,output)=match pipes {Some(pipes)=>pipes,None=>{
-            let _=child.kill();if child.wait().is_ok(){provider_retired.fetch_sub(1,Ordering::AcqRel);}
-            bail!("Missing native helper pipes");
-        }};
         let (tx, rx) = mpsc::sync_channel(4);
         thread::spawn(move || {
             let mut reader = BufReader::new(output);
@@ -1798,15 +1813,15 @@ impl Connection {
             }
         });
         let mut connection = Self {
-            provider,provider_retired,
+            provider,
             pending_inventory:None,
             carry_revision:0,
             lane_revision:0,
             loaded_lanes: project.map(|p|p.lanes.iter().filter_map(|(slot,_)|p.lane_specs.iter().find(|lane|lane.slot==*slot).cloned()).collect()).unwrap_or_default(),
             loaded_stamps:project.map(|p|p.lane_stamps.clone()).unwrap_or_default(),
             project_dir: project.map(|p|p.dir.clone()),
-            child,
-            input,
+            helper,
+            ownership:Value::Null,
             replies: rx,
             epoch,
             latest,
@@ -1831,8 +1846,67 @@ impl Connection {
     }
     fn read(&mut self, timeout: Duration) -> Result<Value> {
         let provider=self.provider;
-        let value=read_provider_inventory_reply(&self.replies,self.epoch,&self.latest,&self.alive,&self.copy_handoff,timeout,&mut self.pending_inventory,provider,|reply,kind,current|crate::audio_devices::remember_native_inventory(reply,kind,current))?;
-        crate::audio_devices::verify_provider_receipt(&value,self.provider)?;Ok(value)
+        let value=match read_provider_inventory_reply(&self.replies,self.epoch,&self.latest,&self.alive,&self.copy_handoff,timeout,&mut self.pending_inventory,provider,|reply,kind,current|crate::audio_devices::remember_native_inventory(reply,kind,current)) {
+            Ok(value)=>value,
+            Err(error)=>{
+                // Navigation/quit interrupts a wait without faulting the pipe.
+                // Cover preparation paths too, whose temporary Connection is
+                // otherwise dropped by `?` before the actor sees the error.
+                if error.is::<ReadCancelled>() {self.retire_now();}
+                return Err(error);
+            },
+        };
+        crate::audio_devices::verify_provider_receipt(&value,self.provider)?;
+        if value["ok"]==true {self.ownership=value.clone();}
+        Ok(value)
+    }
+    fn retire(mut self) {self.retire_now();}
+    fn retire_now(&mut self) {
+        if !self.helper.is_live() {return;}
+        let started=Instant::now();
+        let outcome=self.helper.retire();
+        crate::diagnostics::event("audio",format!("Helper retirement: {outcome:?}, elapsed_ms={:.3}",started.elapsed().as_secs_f64()*1000.),crate::diagnostics::Level::Info);
+    }
+    fn classified_command(&mut self, command:&str) -> CommandOutcome {
+        let before=self.ownership.clone();
+        let result=(||->Result<(Status,Value,bool)> {
+            let reply=self.raw_command_for(command,Duration::from_secs(10))?;
+            if reply["ok"]==true {
+                let status=Status::parse(&reply)?;
+                admit_lane_revision(&mut self.lane_revision,&status)?;
+                admit_carry_revision(&mut self.carry_revision,&status)?;
+                return Ok((status,reply,false));
+            }
+            Status::reported(&reply)?;
+            anyhow::ensure!(reply["ok"]==false && reply["state"].as_u64().is_some_and(|state|state<=5),"Native audio failed");
+            let after=self.raw_command_for("status",Duration::from_secs(10))?;
+            let retained=Status::parse(&after)?;
+            for &key in RETAINED_OWNERSHIP_KEYS {
+                anyhow::ensure!(before[key]==reply[key] && before[key]==after[key],"Native audio failed");
+            }
+            admit_lane_revision(&mut self.lane_revision,&retained)?;
+            admit_carry_revision(&mut self.carry_revision,&retained)?;
+            Ok((retained,reply,true))
+        })();
+        match result {
+            Ok((retained,reply,true)) => CommandOutcome::Refused {error:reply["error"].as_str().unwrap_or("Native audio failed").into(),retained},
+            Ok((status,_reply,false)) => CommandOutcome::Applied(status),
+            Err(error) => CommandOutcome::Fault(error),
+        }
+    }
+    fn classified_metronome(&mut self, commands:&[String]) -> CommandOutcome {
+        let mut last=None;
+        for command in commands {
+            match self.classified_command(command) {
+                CommandOutcome::Applied(status)=>last=Some(status),
+                // The native protocol has no met-cancel. After staging begins,
+                // retain neither a partial draft nor an unproved active plan.
+                CommandOutcome::Refused {error,..} if last.is_some()=>
+                    return CommandOutcome::Fault(anyhow::anyhow!(error)),
+                outcome=>return outcome,
+            }
+        }
+        last.map(CommandOutcome::Applied).unwrap_or_else(||CommandOutcome::Fault(anyhow::anyhow!("Empty metronome transaction")))
     }
     fn metronome(&mut self, commands: &[String]) -> Result<Status> {
         let mut status = None;
@@ -1842,8 +1916,8 @@ impl Connection {
         status.context("Empty metronome transaction")
     }
     fn command(&mut self, command: &str) -> Result<Status> {
-        writeln!(self.input, "{command}")?;
-        self.input.flush()?;
+        writeln!(self.helper.input()?, "{command}")?;
+        self.helper.input()?.flush()?;
         #[cfg(feature="ui-tests")]
         if command=="status" {self.old_status_test_gate()?;}
         let value=self.read(Duration::from_secs(if command.starts_with("output "){120}else{10}))?;
@@ -1871,14 +1945,14 @@ impl Connection {
     fn replace_lanes(&mut self,candidate:&Project)->std::result::Result<(Status,Vec<Vec<f32>>,Option<f64>),LaneReplaceFailure> {
         let commands=lane_transaction(candidate).map_err(|e|LaneReplaceFailure::Refused(e.to_string()))?;
         for command in commands {
-            let packet=(||->Result<Value>{writeln!(self.input,"{command}")?;self.input.flush()?;self.read(Duration::from_secs(10))})();
+            let packet=(||->Result<Value>{writeln!(self.helper.input()?,"{command}")?;self.helper.input()?.flush()?;self.read(Duration::from_secs(10))})();
             match packet.map_err(|e|LaneReplaceFailure::Disconnected(format!("Native playback connection failed before applying tracks: {e:#}"))).and_then(lane_stage_reply) {
                 Ok(())=>{},
                 Err(LaneReplaceFailure::Refused(error))=>{if let Err(sync_error)=self.command("lanes-cancel"){return Err(LaneReplaceFailure::Disconnected(format!("Track staging was refused, but native playback could not be resynchronized: {sync_error:#}")));}return Err(LaneReplaceFailure::Refused(error));},
                 Err(other)=>return Err(other),
             }
         }
-        if let Err(error)=writeln!(self.input,"lanes-apply").and_then(|_|self.input.flush()){
+        if let Err(error)=self.helper.input().and_then(|input| {writeln!(input,"lanes-apply")?;input.flush()}){
             return Err(LaneReplaceFailure::Committed(format!("Could not confirm track replacement: {error}. Playback was stopped; requested tracks were retained. Save and reopen.")));
         }
         match self.read(Duration::from_secs(55)) {
@@ -1935,17 +2009,17 @@ impl Connection {
         Err(RateFailure::Refused(reply["error"].as_str().unwrap_or("Tempo or transpose was refused").to_owned()))
     }
     fn raw_command(&mut self,command:&str)->Result<Value>{self.raw_command_for(command,Duration::from_secs(55))}
-    fn raw_command_for(&mut self,command:&str,timeout:Duration)->Result<Value>{writeln!(self.input,"{command}")?;self.input.flush()?;self.read(timeout)}
+    fn raw_command_for(&mut self,command:&str,timeout:Duration)->Result<Value>{writeln!(self.helper.input()?,"{command}")?;self.helper.input()?.flush()?;self.read(timeout)}
     fn carry(&mut self,plan:&crate::carry_line::Plan)->std::result::Result<Status,LaneReplaceFailure>{self.carry_with_arming(plan,true)}
     fn carry_with_arming(&mut self,plan:&crate::carry_line::Plan,arm:bool)->std::result::Result<Status,LaneReplaceFailure>{
         let commands=if arm{plan.commands()}else{plan.restore_commands()}.map_err(|e|LaneReplaceFailure::Refused(e.to_string()))?;
         for command in commands.iter().take(commands.len()-1){
-            let reply=(||->Result<Value>{writeln!(self.input,"{command}")?;self.input.flush()?;self.read(Duration::from_secs(10))})();
+            let reply=(||->Result<Value>{writeln!(self.helper.input()?,"{command}")?;self.helper.input()?.flush()?;self.read(Duration::from_secs(10))})();
             match reply.map_err(|e|LaneReplaceFailure::Disconnected(format!("Native Carry the line connection failed before apply: {e:#}"))).and_then(lane_stage_reply){
                 Ok(())=>{},Err(LaneReplaceFailure::Refused(error))=>{self.command("carry-cancel").map_err(|e|LaneReplaceFailure::Disconnected(e.to_string()))?;return Err(LaneReplaceFailure::Refused(error));},Err(error)=>return Err(error)
             }
         }
-        if let Err(error)=writeln!(self.input,"carry-apply").and_then(|_|self.input.flush()){return Err(LaneReplaceFailure::Committed(format!("Could not confirm Carry the line apply: {error}. Reopen the project.")));}
+        if let Err(error)=self.helper.input().and_then(|input| {writeln!(input,"carry-apply")?;input.flush()}){return Err(LaneReplaceFailure::Committed(format!("Could not confirm Carry the line apply: {error}. Reopen the project.")));}
         let value=self.read(Duration::from_secs(55)).map_err(|e|LaneReplaceFailure::Committed(format!("Could not confirm Carry the line apply: {e:#}. Reopen the project.")))?;
         let status=carry_reply(value,plan)?;
         admit_lane_revision(&mut self.lane_revision,&status).map_err(|e|LaneReplaceFailure::Committed(e.to_string()))?;
@@ -1957,7 +2031,7 @@ impl Connection {
             fs::write(path.with_extension("ready"),self.epoch.to_string())?;
             let deadline=Instant::now()+Duration::from_secs(15);
             while path.exists(){
-                anyhow::ensure!(connection_read_allowed(self.epoch,&self.latest,&self.alive,&self.copy_handoff),"Project load superseded");
+                if !connection_read_allowed(self.epoch,&self.latest,&self.alive,&self.copy_handoff) {return Err(ReadCancelled.into());}
                 anyhow::ensure!(Instant::now()<deadline,"Old status test gate timed out");
                 thread::sleep(Duration::from_millis(5));
             }
@@ -1978,9 +2052,9 @@ fn connection_read_allowed(epoch:u64,latest:&AtomicU64,alive:&AtomicBool,handoff
 fn read_connection_reply(replies:&Receiver<Result<Value>>,epoch:u64,latest:&AtomicU64,alive:&AtomicBool,handoff:&AtomicU64,timeout:Duration)->Result<Value>{
     let deadline=Instant::now()+timeout;
     loop{
-        anyhow::ensure!(connection_read_allowed(epoch,latest,alive,handoff),"Project load superseded");
+        if !connection_read_allowed(epoch,latest,alive,handoff) {return Err(ReadCancelled.into());}
         match replies.recv_timeout(Duration::from_millis(20)){
-            Ok(reply)=>{anyhow::ensure!(connection_read_allowed(epoch,latest,alive,handoff),"Project load superseded");return reply;},
+            Ok(reply)=>{if !connection_read_allowed(epoch,latest,alive,handoff) {return Err(ReadCancelled.into());}return reply;},
             Err(mpsc::RecvTimeoutError::Disconnected)=>bail!("Native audio process disconnected"),Err(_)=>{},
         }
         anyhow::ensure!(Instant::now()<deadline,"Native audio command timed out");

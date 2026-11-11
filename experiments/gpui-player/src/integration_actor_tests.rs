@@ -3,6 +3,9 @@
 use super::*;
 
 fn fixture_connection(backend: &Backend, log: Option<&Path>) -> Connection {
+    fixture_connection_mode(backend, log, "")
+}
+fn fixture_connection_mode(backend: &Backend, log: Option<&Path>, mode: &str) -> Connection {
     #[cfg(feature = "ui-tests")]
     if std::env::var_os("SINGZ_C17_NATIVE_LATENCY").is_some() && log.is_none() {
         let root = crate::audio_devices::directory().join("native-latency");
@@ -51,32 +54,43 @@ fn fixture_connection(backend: &Backend, log: Option<&Path>) -> Connection {
         .unwrap()
         .0;
     }
-    let script = r#"import sys,json
+    let script = r#"import sys,json,time
 v={"protocol":1,"provider":"coreaudio","backendProvider":"fake","fixture":True,"ok":True,"state":3,"duration":600,"position":2,"playing":False,"graphGeneration":1,"laneSetRevision":1,"carryRevision":1,"transportGeneration":1,"transportCommandsQueued":0,"transportCommandsApplied":0,"cueGeneration":0,"cueStartHostNs":"0","cueEndHostNs":"0","cueNowHostNs":"0","cueActive":False,"cueOutputLatencyMs":0,"cueNotes":[]}
 v['provider']=sys.argv[1]
+mode=sys.argv[3] if len(sys.argv)>3 else ''
 for line in sys.stdin:
  c=line.strip()
- if len(sys.argv)>2:
-  with open(sys.argv[2],"a") as log:print(c,file=log)
- if c in ('play','pause'):
-  v['playing']=c=='play';v['transportCommandsQueued']+=1;v['transportCommandsApplied']=v['transportCommandsQueued']
- if c.startswith('seek '):v['position']=float(c.split()[1]);v['seekCount']=v.get('seekCount',0)+1
- print(json.dumps(v),flush=True)
+ if len(sys.argv)>2 and sys.argv[2]!='-':
+  with open(sys.argv[2],"a") as log:print(c,file=log,flush=True)
+ if c=='quit':sys.exit(0)
+ if mode=='stall-status' and c=='status':time.sleep(.1)
+ if not mode or mode=='stall-status':
+  if c in ('play','pause'):
+   v['playing']=c=='play';v['transportCommandsQueued']+=1;v['transportCommandsApplied']=v['transportCommandsQueued']
+  if c.startswith('seek '):v['position']=float(c.split()[1]);v['seekCount']=v.get('seekCount',0)+1
+ reply=v.copy()
+ if mode and mode!='stall-status' and (c.startswith(('seek ','cue ','cue-timed ')) or c in ('play','met-apply') or (mode=='met-first' and c.startswith('met-begin '))):
+  reply['ok']=False;reply['error']='scripted command refusal'
+  if c=='met-apply':reply['error']='Metronome count-in exceeds the cue event limit'
+  if c.startswith(('cue ','cue-timed ')):reply['error']='Native training cue capacity exceeded'
+  if mode=='malformed':print('{',flush=True);continue
+  if mode in ('6','7'):reply['state']=int(mode)
+  if mode=='ownership':v['graphGeneration']+=1
+  if mode=='loop-drift':reply.update(looping=True,loopStart=1,loopEnd=4)
+  if mode=='region-drift':v.update(regionEnabled=True,regionStart=1,regionEnd=4)
+ print(json.dumps(reply),flush=True)
 "#;
     let mut command = Command::new("python3");
     command
         .args(["-u", "-c", script])
         .arg(crate::audio_devices::Provider::platform_default().as_str());
-    if let Some(log) = log {
-        command.arg(log);
-    }
-    let mut child = command
+    command.arg(log.unwrap_or_else(||Path::new("-"))).arg(mode);
+    let child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let input = child.stdin.take().unwrap();
-    let output = child.stdout.take().unwrap();
+    let (helper, output) = Helper::adopt(child, backend.provider_retired.clone()).unwrap();
     let (tx, replies) = mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(output).lines() {
@@ -88,18 +102,16 @@ for line in sys.stdin:
             }
         }
     });
-    backend.provider_retired.fetch_add(1, Ordering::AcqRel);
     Connection {
         provider: crate::audio_devices::Provider::platform_default(),
-        provider_retired: backend.provider_retired.clone(),
         pending_inventory: None,
         carry_revision: 0,
         lane_revision: 0,
         loaded_lanes: vec![],
         loaded_stamps: vec![],
         project_dir: None,
-        child,
-        input,
+        helper,
+        ownership: serde_json::json!({"graphGeneration":1,"laneSetRevision":1,"carryRevision":1}),
         replies,
         epoch: 1,
         latest: backend.epoch.clone(),
@@ -702,7 +714,7 @@ fn wait_open(backend: &Backend, epoch: u64) -> Project {
         for event in backend.drain() {
             match event {
                 Event::Opened(e, project, _, _) if e == epoch => return project,
-                Event::Error(e, message) | Event::TransportFailed(e, message) if e == epoch => {
+                Event::Error(e, message, _) | Event::TransportFailed(e, message) if e == epoch => {
                     panic!("Open failed: {message}")
                 }
                 _ => {}
@@ -1248,7 +1260,7 @@ fn superseded_open_rejects_each_queued_operation() {
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e, Event::Error(e,_) if *e==epoch))
+            .filter(|e| matches!(e, Event::Error(e,_,_) if *e==epoch))
             .count(),
         1,
         "one superseded Open produced duplicate playback/seek notices"
@@ -1486,7 +1498,7 @@ fn failed_open_notice(name: &str, monitoring: bool) {
     loop {
         for event in backend.drain() {
             match event {
-                Event::Error(e, message) if e == epoch => messages.push(message),
+                Event::Error(e, message, _) if e == epoch => messages.push(message),
                 Event::Rate(e, 2, Err(message)) if e == epoch => rate_errors.push(message),
                 Event::TransportFailed(_, error) => {
                     panic!("readiness failure killed transport: {error}")
@@ -1506,7 +1518,7 @@ fn failed_open_notice(name: &str, monitoring: bool) {
     actor_barrier(&backend);
     for event in backend.drain() {
         match event {
-            Event::Error(e, message) if e == epoch => messages.push(message),
+            Event::Error(e, message, _) if e == epoch => messages.push(message),
             Event::Rate(e, 2, Err(message)) if e == epoch => rate_errors.push(message),
             _ => {}
         }
@@ -1539,4 +1551,373 @@ fn failed_open_reports_one_notice_for_all_deferred_commands() {
 #[ignore = "requires real muted native helpers; run explicitly with SINGZ_C17_NATIVE_LATENCY=1"]
 fn monitor_refused_open_reports_the_real_error_once() {
     failed_open_notice("monitor_refused_open_reports_the_real_error_once", true);
+}
+
+
+fn c18_refusal_row(name: &str, row: &str) {
+    let Some(_root) = isolated(name) else {
+        return;
+    };
+    {
+        let cx = gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(440), None);
+        let backend = Backend::new(cx.text_system().clone());
+        backend.epoch.store(1, Ordering::Release);
+        let child = fixture_connection_mode(&backend, None, if row == "metronome" {"met-first"} else {"refusal"});
+        let pid = child.helper.id().unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        backend
+            .requests
+            .send(Request::InstallTestConnection(child, tx))
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        backend.control(1, "status".into()).unwrap();
+        actor_barrier(&backend);
+        backend.drain();
+        match row {
+            "seek" => backend.control(1, "seek 999999".into()).unwrap(),
+            "play" => backend.playback(1, 1, "play".into()).unwrap(),
+            "metronome" => backend
+                .metronome(1, 1, crate::beat::Metronome::default(), None)
+                .unwrap(),
+            "cue" => {
+                backend.training_intent.store(1, Ordering::Release);
+                backend
+                    .requests
+                    .send(Request::Training(
+                        1,
+                        crate::training_audio::Phrase {
+                            generation: 1,
+                            instrument: crate::training_audio::Instrument::Piano,
+                            gain: 0.,
+                            timing: Some(crate::training_audio::Timing {
+                                note_duration: 10.,
+                                ..Default::default()
+                            }),
+                            cues: vec![
+                                crate::training_audio::Cue {
+                                    purpose: crate::training_audio::Purpose::Question,
+                                    together: false,
+                                    notes: vec![60; 32]
+                                };
+                                8
+                            ],
+                        },
+                    ))
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        actor_barrier(&backend);
+        let events = backend.drain();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::TransportFailed(..))),
+            "{row}: refusal killed helper"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::Error(..)
+                    | Event::Metronome(_, _, _, _, Err(_))
+                    | Event::Training(_, _, Err(_))
+            )),
+            "{row}: refusal was not reported"
+        );
+        assert_eq!(
+            backend.provider_retired.load(Ordering::Acquire),
+            1,
+            "{row}: helper retired"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            unsafe { libc::kill(pid as libc::pid_t, 0) },
+            0,
+            "{row}: original PID changed"
+        );
+        #[cfg(not(unix))]
+        let _ = pid;
+        if row == "play" {
+            assert!(
+                events.iter().any(|e| matches!(e, Event::Playback(1, 1, _))),
+                "refused Play did not settle its intent"
+            );
+        }
+        backend.control(1, "status".into()).unwrap();
+        actor_barrier(&backend);
+        let telemetry = backend.telemetry.lock().unwrap();
+        let status = &telemetry.as_ref().expect("next status failed").1;
+        assert_eq!(
+            (status.lane_revision, status.carry_revision),
+            (1, 1),
+            "{row}: revisions changed"
+        );
+    }
+}
+
+#[test]
+fn c18_refused_seek_survives() {
+    c18_refusal_row("c18_refused_seek_survives", "seek");
+}
+#[test]
+fn c18_refused_metronome_survives() {
+    c18_refusal_row("c18_refused_metronome_survives", "metronome");
+}
+#[test]
+fn c18_refused_cue_survives() {
+    c18_refusal_row("c18_refused_cue_survives", "cue");
+}
+#[test]
+fn c18_refused_play_survives() {
+    c18_refusal_row("c18_refused_play_survives", "play");
+}
+
+#[test]
+fn c18_fault_table_retires_and_publishes() {
+    let Some(_root) = isolated("c18_fault_table_retires_and_publishes") else {
+        return;
+    };
+    for mode in ["malformed", "6", "7", "ownership"] {
+        let cx = gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(441), None);
+        let backend = Backend::new(cx.text_system().clone());
+        backend.epoch.store(1, Ordering::Release);
+        let child = fixture_connection_mode(&backend, None, mode);
+        let (tx, rx) = mpsc::sync_channel(1);
+        backend
+            .requests
+            .send(Request::InstallTestConnection(child, tx))
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        backend.control(1, "status".into()).unwrap();
+        actor_barrier(&backend);
+        backend.drain();
+        backend.control(1, "seek 999999".into()).unwrap();
+        actor_barrier(&backend);
+        assert!(
+            backend
+                .drain()
+                .iter()
+                .any(|e| matches!(e, Event::TransportFailed(1, _))),
+            "{mode}: fault not published"
+        );
+        assert_eq!(
+            backend.provider_retired.load(Ordering::Acquire),
+            0,
+            "{mode}: helper not reaped"
+        );
+    }
+}
+
+#[cfg(all(unix, feature = "ui-tests"))]
+fn c18_retirement_case(name: &str, mode: &str, expected: helper::Retirement) {
+    let Some(root) = isolated(name) else {
+        return;
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let script = root.join("fake-helper");
+    let receipt = root.join("quit.receipt");
+    let python = Command::new("which").arg("python3").output().unwrap();
+    let python = String::from_utf8(python.stdout).unwrap();
+    fs::write(&script,format!(r#"#!{}
+import sys,json,time
+v={{"protocol":1,"provider":"coreaudio","fixture":True,"backendProvider":"fake","ok":True,"state":0,"duration":0,"position":0,"playing":False,"trainingOnly":True,"cueGeneration":0,"cueStartHostNs":"0","cueEndHostNs":"0","cueNowHostNs":"0","cueActive":False,"cueOutputLatencyMs":0,"cueNotes":[]}}
+print(json.dumps(v),flush=True)
+for line in sys.stdin:
+ if line.strip()=='quit':
+  open({:?},'w').write('quit')
+  if {:?}=='ignore':
+   while True:time.sleep(60)
+  sys.exit(1 if {:?}=='unclean' else 0)
+"#,python.trim(),receipt.to_str().unwrap(),mode,mode)).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    unsafe {
+        std::env::set_var("SINGZ_GPUI_AUDIO_HELPER", &script);
+    }
+    let retired = Arc::new(AtomicU64::new(0));
+    let (mut child, _) = Connection::open(
+        None,
+        1,
+        Arc::new(AtomicU64::new(1)),
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicU64::new(0)),
+        "",
+        crate::audio_devices::Provider::platform_default(),
+        retired.clone(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(retired.load(Ordering::Acquire), 1);
+    let started = Instant::now();
+    assert_eq!(child.helper.retire().unwrap(), expected);
+    let elapsed = started.elapsed();
+    if expected == helper::Retirement::Killed {
+        assert!(elapsed >= helper::QUIT_BOUND);
+        assert!(
+            elapsed <= helper::QUIT_BOUND + Duration::from_millis(100),
+            "kill fallback took {elapsed:?}"
+        );
+    } else {
+        assert!(elapsed < helper::QUIT_BOUND);
+    }
+    assert!(receipt.exists(), "quit was not written");
+    assert_eq!(
+        retired.load(Ordering::Acquire),
+        0,
+        "provider released before reaping"
+    );
+    drop(child);
+    assert_eq!(
+        retired.load(Ordering::Acquire),
+        0,
+        "Drop decremented retirement twice"
+    );
+}
+#[cfg(all(unix, feature = "ui-tests"))]
+#[test]
+fn c18_clean_retirement() {
+    c18_retirement_case("c18_clean_retirement", "clean", helper::Retirement::Clean);
+}
+#[cfg(all(unix, feature = "ui-tests"))]
+#[test]
+fn c18_unclean_retirement() {
+    c18_retirement_case(
+        "c18_unclean_retirement",
+        "unclean",
+        helper::Retirement::Unclean,
+    );
+}
+#[cfg(all(unix, feature = "ui-tests"))]
+#[test]
+fn c18_killed_retirement() {
+    c18_retirement_case(
+        "c18_killed_retirement",
+        "ignore",
+        helper::Retirement::Killed,
+    );
+}
+
+#[test]
+fn c18_quit_during_status_read_is_graceful() {
+    let name = "c18_quit_during_status_read_is_graceful";
+    let Some(root) = isolated(name) else {
+        return;
+    };
+    let cx = gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(442), None);
+    let backend = Backend::new(cx.text_system().clone());
+    backend.epoch.store(1, Ordering::Release);
+    let log = root.join("commands.log");
+    let child = fixture_connection_mode(&backend, Some(&log), "stall-status");
+    let retired = backend.provider_retired.clone();
+    let (tx, rx) = mpsc::sync_channel(1);
+    backend
+        .requests
+        .send(Request::InstallTestConnection(child, tx))
+        .unwrap();
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    backend.control(1, "status".into()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("status")
+    {
+        assert!(Instant::now() < deadline, "helper never received status");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let started = Instant::now();
+    drop(backend);
+    assert!(started.elapsed() < helper::QUIT_BOUND);
+    assert_eq!(retired.load(Ordering::Acquire), 0);
+    assert!(
+        fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .any(|line| line == "quit"),
+        "quit during read force-killed helper"
+    );
+}
+
+
+fn c18_v01_backend(mode: &str, log: Option<&Path>) -> (gpui_kit::TestAppContext, Backend) {
+    let cx = gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(445), None);
+    let backend = Backend::new(cx.text_system().clone());
+    backend.epoch.store(1, Ordering::Release);
+    let child = fixture_connection_mode(&backend, log, mode);
+    let (tx, rx) = mpsc::sync_channel(1);
+    backend.requests.send(Request::InstallTestConnection(child, tx)).unwrap();
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    backend.control(1, "status".into()).unwrap();
+    actor_barrier(&backend);
+    backend.drain();
+    (cx, backend)
+}
+
+#[test]
+fn c18_v01_control_refusal_identifies_seek_target() {
+    let Some(_root) = isolated("c18_v01_control_refusal_identifies_seek_target") else { return; };
+    let (_cx, backend) = c18_v01_backend("refusal", None);
+    backend.control(1, "seek 999999.125".into()).unwrap();
+    actor_barrier(&backend);
+    let events = backend.drain();
+    assert!(events.iter().any(|event| matches!(event,
+        Event::Error(1, _, Severity::Refused(RefusedCommand::Seek { target })) if *target == 999999.125)),
+        "seek refusal did not identify the requested target");
+    backend.control(1, "play".into()).unwrap();
+    actor_barrier(&backend);
+    assert!(backend.drain().iter().any(|event| matches!(event,
+        Event::Error(1, _, Severity::Refused(RefusedCommand::Other)))),
+        "non-seek Control refusal was mislabeled");
+    assert_eq!(backend.provider_retired.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn c18_v01_second_metronome_refusal_is_fatal() {
+    let Some(root) = isolated("c18_v01_second_metronome_refusal_is_fatal") else { return; };
+    let log = root.join("metronome.log");
+    let (_cx, backend) = c18_v01_backend("met-second", Some(&log));
+    backend.metronome(1, 1, crate::beat::Metronome::default(), None).unwrap();
+    actor_barrier(&backend);
+    let commands = fs::read_to_string(log).unwrap();
+    let commands: Vec<_> = commands.lines().filter(|line| line.starts_with("met-")).collect();
+    assert_eq!(commands.len(), 2);
+    assert!(commands[0].starts_with("met-begin "));
+    assert_eq!(commands[1], "met-apply");
+    assert!(backend.drain().iter().any(|event| matches!(event, Event::TransportFailed(1, _))),
+        "mid-transaction metronome refusal retained the helper");
+    assert_eq!(backend.provider_retired.load(Ordering::Acquire), 0);
+}
+
+fn c18_v01_ownership_fault(name: &str, mode: &str) {
+    let Some(_root) = isolated(name) else { return; };
+    let (_cx, backend) = c18_v01_backend(mode, None);
+    backend.control(1, "seek 999999".into()).unwrap();
+    actor_barrier(&backend);
+    assert!(backend.drain().iter().any(|event| matches!(event, Event::TransportFailed(1, _))),
+        "{mode}: changed loop or region survived a refusal");
+    assert_eq!(backend.provider_retired.load(Ordering::Acquire), 0);
+}
+#[test]
+fn c18_v01_loop_ownership_refusal_fault() {
+    c18_v01_ownership_fault("c18_v01_loop_ownership_refusal_fault", "loop-drift");
+}
+#[test]
+fn c18_v01_region_ownership_refusal_fault() {
+    c18_v01_ownership_fault("c18_v01_region_ownership_refusal_fault", "region-drift");
+}
+
+#[test]
+fn c18_v01_command_after_read_cancel_returns_error() {
+    let Some(_root) = isolated("c18_v01_command_after_read_cancel_returns_error") else { return; };
+    let cx = gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(446), None);
+    let backend = Backend::new(cx.text_system().clone());
+    backend.epoch.store(1, Ordering::Release);
+    let mut child = fixture_connection(&backend, None);
+    backend.epoch.store(2, Ordering::Release);
+    assert!(child.command("status").unwrap_err().is::<ReadCancelled>());
+    assert_eq!(backend.provider_retired.load(Ordering::Acquire), 0);
+    let followup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child.command("lanes-cancel")));
+    assert!(followup.is_ok(), "post-cancel command panicked");
+    let error = followup.unwrap().unwrap_err();
+    assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::BrokenPipe);
+    assert_eq!(child.helper.id().unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    assert_eq!(child.helper.kill().unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
 }

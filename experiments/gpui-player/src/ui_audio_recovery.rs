@@ -655,6 +655,19 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     wait!(30, player, window, app => !player.loading
                         && player.project.as_ref().is_some_and(|project| project.dir == saved)
                         && player.last_playback_status.as_ref().is_some_and(|status| !status.playing && status.duration >= 10.));
+                    // A fresh profile opens What's New automatically as soon as
+                    // the project finishes loading; its backdrop would swallow
+                    // the first transport click. Settle startup, then close it.
+                    wait!(30, player, window, app => player.release_startup_ready && player.model_auto_checked);
+                    if handle.update(cx, |_, _, cx| view.read(cx).whats_new.read(cx).is_open())? {
+                        // The hidden window gives the modal no keyboard focus, so
+                        // close it the way its own close control does.
+                        handle.update(cx, |_, _, cx| {
+                            let notes = view.read(cx).whats_new.clone();
+                            notes.update(cx, |notes, cx| notes.close(cx));
+                        })?;
+                        wait!(5, player, window, app => !player.whats_new.read(app).is_open());
+                    }
                     let target_uid = handle.update(cx, |_, _, cx| -> anyhow::Result<String> {
                         let player = view.read(cx);
                         anyhow::ensure!(player.notice.is_none(), "Initial project notice: {:?}", player.notice);
@@ -958,6 +971,13 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         player.native_transport(transport::TransportEvent::Volume(0.62), cx);
                         player.native_transport(transport::TransportEvent::Tempo(0.9), cx);
                         player.native_transport(transport::TransportEvent::Transpose(-2), cx);
+                    }))?;
+                    // Region editing is unavailable while a native rate receipt is pending.
+                    wait!(15, player, window, app => player.native_rate_pending.is_none()
+                        && player.native_rate_queued.is_none()
+                        && player.last_playback_status.as_ref().is_some_and(|status|
+                            (status.rate - 0.9).abs() < 0.0001 && status.transpose == -2));
+                    handle.update(cx, |_, _, cx| view.update(cx, |player, cx| {
                         player.native_transport(transport::TransportEvent::Loop, cx);
                         player.playhead.seek(2.);
                         player.seek_native(cx);
@@ -969,7 +989,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         && player.last_playback_status.as_ref().is_some_and(|status| !status.playing
                             && (status.rate - 0.9).abs() < 0.0001
                             && status.transpose == -2
-                            && status.loop_range.is_some()
+                            && status.loop_range.is_some_and(|(start, end)|
+                                start == 0. && (end - status.duration).abs() < 0.03)
                             && (status.position - 2.).abs() < 0.03)
                         && original_lane_accepted(player, 1.));
                     if !handle.update(cx, |_, _, cx| view.read(cx).karaoke)? {
@@ -1069,12 +1090,11 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         anyhow::ensure!(!recovered.status.playing&&recovered.helper_pid!=initial.helper_pid&&(recovered.status.position-failed.position).abs()<0.03,"Retry did not replace the old helper with paused retained transport");
                         probes.push(probe_value(&recovered,"repaired-replacement-paused",0));
                         let adopted=handle.update(cx,|_,_,app|retained(&view,app))?;
-                        // Save materializes the implicit full-song loop selection.
-                        // Require the exact native bounds, rather than treating
-                        // that source-format canonicalization as lost loop state.
-                        let expected_selection=failed.selection.or(Some((0.,failed.duration)));
-                        anyhow::ensure!(initial.status.loop_range==expected_selection&&adopted.selection==expected_selection&&recovered.status.loop_range==expected_selection,"Publication changed the effective loop selection");
-                        let expected=Retained{dir:adopted.dir.clone(),metadata_hash:adopted.metadata_hash.clone(),saved_seq:adopted.saved_seq,selection:expected_selection,screen:Screen::Settings as u8,..failed.clone()};
+                        // An absent selection means the whole song while Loop is enabled.
+                        // Preserve that optional selection and the effective native bounds.
+                        let expected_loop=Some((0.,failed.duration));
+                        anyhow::ensure!(failed.looping&&adopted.looping&&initial.status.loop_range==expected_loop&&adopted.selection==failed.selection&&recovered.status.loop_range==expected_loop,"Publication changed selection or the effective full-song loop");
+                        let expected=Retained{dir:adopted.dir.clone(),metadata_hash:adopted.metadata_hash.clone(),saved_seq:adopted.saved_seq,screen:Screen::Settings as u8,..failed.clone()};
                         ensure_retained(&expected,&adopted,"Healthy live publication repair")?;
                         let published=adopted.dir.clone();
                         anyhow::ensure!(published!=working&&published.starts_with(&library),"Live repair did not adopt library publication");
@@ -1231,13 +1251,16 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         dir: adopted.dir.clone(),
                         metadata_hash: adopted.metadata_hash.clone(),
                         saved_seq: adopted.saved_seq,
-                        selection: adopted.selection,
                         screen: if publication_fault { Screen::Settings as u8 } else { publication_baseline.screen },
                         ..publication_baseline.clone()
                     };
                     ensure_retained(&adoption_expected, &adopted, "Offline publication adoption")?;
                     anyhow::ensure!((adopted.position - publication_baseline.position).abs() < 0.0001, "Publication adoption moved the stopped clock");
-                    anyhow::ensure!(adopted.selection.is_some_and(|(start, end)| start == 0. && (end - adopted.duration).abs() < 0.03), "Publication changed the full-length loop selection: {:?}", adopted.selection);
+                    let expected_loop = Some((0., publication_baseline.duration));
+                    anyhow::ensure!(publication_baseline.looping && adopted.looping
+                        && adopted.selection == publication_baseline.selection
+                        && adopted.selection.or(Some((0., adopted.duration))) == expected_loop,
+                        "Publication changed selection or the effective full-song loop: {:?}", adopted.selection);
                     let published_metadata = std::fs::read(published.join("project.json"))?;
                     let published_project: Value = serde_json::from_slice(&published_metadata)?;
                     anyhow::ensure!(adopted.metadata_hash == hash(&published_metadata), "Adopted project hash differs from writer's publication bytes");
@@ -1273,7 +1296,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         settings!("settings-retry");
                     }
                     wait!(20, player, window, app => native_paused(player, &target_uid, 2., 0.9, -2, true)
-                        && player.playhead.loop_range() == adopted.selection
+                        && player.playhead.loop_range() == expected_loop
+                        && player.last_playback_status.as_ref().is_some_and(|status| status.loop_range == expected_loop)
                         && original_lane_accepted(player, 1.)
                         && player.notice.is_none()
                         && !player.source_working

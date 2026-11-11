@@ -546,6 +546,26 @@ fn playhead_refused_seek_rejoins_native_clock_and_preserves_earlier_queued_seek(
     assert_eq!(no_clock.position(), 7., "no native clock must keep the pre-seek drawing");
 }
 #[test]
+fn playhead_queued_seek_later_refused_by_the_helper_rejoins_the_native_clock_at_once() {
+    let t = Instant::now();
+    let mut p = Playhead::new(10.);
+    p.admit(clock_sample(t, 10.), t);
+    // The transport accepted the command, so the playhead holds the target ...
+    p.seek(40.);
+    p.seek_queued(t + Duration::from_millis(1));
+    assert_eq!(p.shown(t + Duration::from_millis(5)), 40.);
+    // ... until the helper refuses it; no acknowledgement will ever come.
+    p.seek_rejected(40.);
+    assert_eq!(p.pending_seek(), None);
+    let next = clock_sample(t + Duration::from_millis(20), 10.02);
+    p.admit(next, next.sampled_at);
+    assert_eq!(
+        p.position(),
+        10.02,
+        "a refused queued seek must not hold the bar at its target until expiry"
+    );
+}
+#[test]
 fn playhead_seek_hold_expires_after_one_second_even_across_a_graph_receipt() {
     let t = Instant::now();
     let mut p = Playhead::new(10.);

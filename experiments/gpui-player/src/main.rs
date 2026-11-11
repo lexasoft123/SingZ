@@ -3280,7 +3280,16 @@ impl Player {
                         error
                     });
                 }
-                integration::Event::Error(epoch, error) if epoch == self.native_epoch => {
+                integration::Event::Error(epoch, error, severity) if epoch == self.native_epoch => {
+                    if let integration::Severity::Refused(command) = &severity {
+                        if let integration::RefusedCommand::Seek { target } = command {
+                            self.playhead.seek_rejected(*target);
+                        }
+                        diagnostics::event("audio", error.clone(), diagnostics::Level::Error);
+                        self.notice = Some(error);
+                        cx.notify();
+                        continue;
+                    }
                     if self.source_split_handoff.as_ref().is_some_and(|handoff| handoff.epoch == epoch && !handoff.cancelling) {
                         diagnostics::event("audio", error.clone(), diagnostics::Level::Error);
                         self.cancel_source(cx);

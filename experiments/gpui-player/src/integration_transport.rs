@@ -87,7 +87,7 @@ pub(super) fn run(
             .as_ref()
             .is_some_and(|(epoch, ..)| *epoch != current_epoch)
         {
-            drop(pending_recovery.take());
+            if let Some((_,_,child,_))=pending_recovery.take() {child.retire();}
             recovery_inflight = None;
         }
         owner_busy.store(
@@ -118,9 +118,9 @@ pub(super) fn run(
                                 && (training_intent.load(Ordering::Acquire) == 0
                                     || latest.load(Ordering::Acquire) != epoch) =>
                         {
-                            drop(connection.take())
+                            retire_connection(&mut connection)
                         }
-                        Err(_) => drop(connection.take()),
+                        Err(error) => retire_failed_connection(&mut connection,&error),
                         _ => {}
                     }
                 }
@@ -206,7 +206,7 @@ pub(super) fn run(
                         &error,
                         true,
                     );
-                    let _ = events.send(Event::Error(epoch, error));
+                    let _ = events.send(Event::Error(epoch, error, Severity::Fatal));
                 }
             }
             Ok(Request::LanePreparationFailed(epoch, serial, error, refused)) => {
@@ -229,7 +229,7 @@ pub(super) fn run(
                 if !adopt_current(epoch, None, &latest, &alive) {
                     continue;
                 }
-                pending_recovery.take();
+                if let Some((_,_,child,_))=pending_recovery.take() {child.retire();}
                 recovery_inflight = None;
                 if pending_adoption.is_none_or(|pending| pending.epoch() != epoch) {
                     reject_deferred(
@@ -281,6 +281,7 @@ pub(super) fn run(
                 {
                     continue;
                 }
+                let mut refused=false;
                 let result = (|| -> Result<Option<Status>> {
                     anyhow::ensure!(
                         !monitor_lease,
@@ -306,7 +307,15 @@ pub(super) fn run(
                         .as_mut()
                         .filter(|c| c.epoch == epoch)
                         .context("Training audio project changed")?;
-                    let status = child.command(&phrase.command()?)?;
+                    let status = match child.classified_command(&phrase.command()?) {
+                        CommandOutcome::Applied(status)=>status,
+                        CommandOutcome::Refused {error,retained}=>{
+                            refused=true;
+                            *telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,retained));
+                            bail!("{error}");
+                        },
+                        CommandOutcome::Fault(error)=>return Err(error),
+                    };
                     if training_intent.load(Ordering::Acquire) != generation
                         || epoch != latest.load(Ordering::Acquire)
                     {
@@ -315,14 +324,14 @@ pub(super) fn run(
                             && (training_intent.load(Ordering::Acquire) == 0
                                 || latest.load(Ordering::Acquire) != epoch)
                         {
-                            drop(connection.take());
+                            retire_connection(&mut connection);
                         }
                         return Ok(None);
                     }
                     Ok(Some(status))
                 })();
-                if let Err(error) = &result {
-                    drop(connection.take());
+                if let Err(error) = &result && !refused {
+                    retire_failed_connection(&mut connection,error);
                     *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     let _ = events.send(Event::TransportFailed(epoch, format!("{error:#}")));
                 }
@@ -348,7 +357,7 @@ pub(super) fn run(
                             && !status.cue.active
                             && status.cue.start_host_ns == 0
                         {
-                            drop(connection.take());
+                            retire_connection(&mut connection);
                             return Ok(None);
                         }
                         return Ok(Some(status));
@@ -356,7 +365,7 @@ pub(super) fn run(
                     Ok(None)
                 })();
                 if let Err(error) = &result {
-                    drop(connection.take());
+                    retire_failed_connection(&mut connection,error);
                     *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     let _ = events.send(Event::TransportFailed(epoch, format!("{error:#}")));
                 }
@@ -411,10 +420,14 @@ pub(super) fn run(
                     && std::env::var("SINGZ_MUTE").as_deref() == Ok("1")
                 {
                     if let Some(child) = connection.as_mut().filter(|c| c.epoch == epoch) {
-                        // Only the Child handle owned by this backend may be faulted.
-                        // The ordinary status reader detects the broken transport.
-                        let _ = child.child.kill();
-                        let _ = child.child.wait();
+                        // Fault only this backend's child, and reap/publish before
+                        // a queued command can misclassify its resulting broken pipe.
+                        let _ = child.helper.kill();
+                        drop(connection.take());
+                        *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        training_intent.store(0, Ordering::Release);
+                        active_training = None;
+                        let _ = events.send(Event::TransportFailed(epoch, "Native audio process exited".into()));
                     }
                 }
             }
@@ -429,7 +442,7 @@ pub(super) fn run(
                         .as_mut()
                         .filter(|c| c.epoch == epoch)
                         .context("No matching owned helper for native probe")?;
-                    let helper_pid = child.child.id();
+                    let helper_pid = child.helper.id()?;
                     let status = child.command("status")?;
                     anyhow::ensure!(
                         alive.load(Ordering::Acquire) && latest.load(Ordering::Acquire) == epoch,
@@ -591,6 +604,7 @@ pub(super) fn run(
                         continue;
                     }
                 };
+                let mut refused=false;
                 let result = (|| -> Result<Status> {
                     anyhow::ensure!(
                         !monitor_lease,
@@ -600,10 +614,18 @@ pub(super) fn run(
                         .as_mut()
                         .filter(|c| c.epoch == epoch)
                         .context("Metronome project changed")?;
-                    child.metronome(&commands)
+                    match child.classified_metronome(&commands) {
+                        CommandOutcome::Applied(status)=>Ok(status),
+                        CommandOutcome::Refused {error,retained}=>{
+                            refused=true;
+                            *telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,retained));
+                            bail!("{error}");
+                        },
+                        CommandOutcome::Fault(error)=>Err(error),
+                    }
                 })();
-                if result.is_err() && !monitor_lease {
-                    drop(connection.take());
+                if result.is_err() && !monitor_lease && !refused {
+                    retire_failed_connection(&mut connection,result.as_ref().unwrap_err());
                     *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     let _ = events.send(Event::TransportFailed(
                         epoch,
@@ -648,7 +670,12 @@ pub(super) fn run(
                         .as_mut()
                         .filter(|child| child.epoch == epoch)
                         .context("Native playback project is unavailable")?;
-                    let reply = child.raw_command_for(&command, Duration::from_secs(10))?;
+                    match child.classified_command(&command) {
+                        CommandOutcome::Applied(_)=>{},
+                        CommandOutcome::Refused {error,retained}=>return Ok(PlaybackReceipt::Refused {error,retained}),
+                        CommandOutcome::Fault(error)=>return Err(error),
+                    }
+                    let reply=child.ownership.clone();
                     let receipt =
                         settle_playback_receipt(reply, Duration::from_secs(2), current, || {
                             child.raw_command_for("status", Duration::from_secs(10))
@@ -663,11 +690,17 @@ pub(super) fn run(
                     Ok(PlaybackReceipt::Applied(status)) if current() => {
                         publish_playback_receipt(&events, &telemetry, epoch, serial, status)
                     }
+                    Ok(PlaybackReceipt::Refused {error,retained})=>{
+                        if current() {
+                            publish_playback_receipt(&events,&telemetry,epoch,serial,retained);
+                            let _=events.send(Event::Error(epoch,error,Severity::Refused(RefusedCommand::Other)));
+                        }
+                    }
                     Ok(_) => {} // Fully drained clean cancellation; keep the helper for Pause.
                     Err(error) => {
                         // A failed read may leave a late reply in the stream.
-                        // Supersession cannot make that connection safe to reuse.
-                        drop(connection.take());
+                        // Supersession cannot make a faulted connection safe to reuse.
+                        retire_failed_connection(&mut connection,&error);
                         training_intent.store(0, Ordering::Release);
                         active_training = None;
                         *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -739,12 +772,24 @@ pub(super) fn run(
                     continue;
                 }
                 if let Some(child) = connection.as_mut().filter(|c| c.epoch == epoch) {
-                    match child.command(&command) {
-                        Ok(s) => {
+                    match child.classified_command(&command) {
+                        CommandOutcome::Applied(s) => {
                             *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = Some((epoch, s));
                         }
-                        Err(e) => {
-                            drop(connection.take());
+                        CommandOutcome::Refused {error,retained}=>{
+                            *telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,retained));
+                            let mut words=command.split_whitespace();
+                            let refused=match (words.next(),words.next(),words.next()) {
+                                (Some("seek"),Some(target),None)=>target.parse::<f64>().ok()
+                                    .filter(|target|target.is_finite())
+                                    .map(|target|RefusedCommand::Seek {target})
+                                    .unwrap_or(RefusedCommand::Other),
+                                _=>RefusedCommand::Other,
+                            };
+                            let _=events.send(Event::Error(epoch,error,Severity::Refused(refused)));
+                        }
+                        CommandOutcome::Fault(e) => {
+                            retire_failed_connection(&mut connection,&e);
                             *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                             training_intent.store(0, Ordering::Release);
                             active_training = None;
@@ -768,6 +813,7 @@ pub(super) fn run(
                     let _ = events.send(Event::Error(
                         epoch,
                         "Stop microphone monitoring before opening a project".into(),
+                        Severity::Fatal,
                     ));
                     if pending_adoption == Some(PendingAdoption::Open(epoch)) {
                         reject_deferred_with_error(
@@ -785,11 +831,11 @@ pub(super) fn run(
                     continue;
                 }
                 let result = (|| -> Result<(Connection, Project, Status, Vec<Vec<f32>>)> {
-                    // Validate before retiring the previous output. Kill/wait proves the old process can no longer own a device.
+                    // Validate before retiring the previous output. Reaping proves it no longer owns a device.
                     if let Some(target) = confirmed.as_ref() {
                         verify_delete_recovery_path(&path, target)?;
                     }
-                    drop(connection.take());
+                    retire_connection(&mut connection);
                     let prepared = Connection::open(
                         Some(&project),
                         epoch,
@@ -888,8 +934,11 @@ pub(super) fn run(
                                 true,
                             );
                         }
-                        drop(connection.take());
-                        let _ = events.send(Event::Error(epoch, error));
+                        // A remaining connection is the previous healthy owner:
+                        // a failed prepared child was local to the closure and
+                        // has already taken the fault Drop path.
+                        retire_connection(&mut connection);
+                        let _ = events.send(Event::Error(epoch, error, Severity::Fatal));
                     }
                 }
             }
@@ -1103,7 +1152,7 @@ pub(super) fn run(
                         child.epoch = epoch;
                     }
                 } else {
-                    drop(connection.take());
+                    retire_connection(&mut connection);
                 }
                 let _ =
                     copy_handoff.compare_exchange(epoch, 0, Ordering::AcqRel, Ordering::Acquire);
@@ -1125,7 +1174,7 @@ pub(super) fn run(
                 if !adopt_current(epoch, None, &latest, &alive) {
                     continue;
                 }
-                drop(connection.take());
+                retire_connection(&mut connection);
                 *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 let _ = jobs.send(jobs::Job::Rename(
                     epoch,
@@ -1150,7 +1199,7 @@ pub(super) fn run(
                             "Project changed before deletion could start"
                         );
                         active_training = None;
-                        drop(connection.take());
+                        retire_connection(&mut connection);
                         copy_handoff.store(0, Ordering::Release);
                         *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     } else {
@@ -1375,7 +1424,7 @@ pub(super) fn run(
                         };
                         (status, None, None)
                     } else {
-                        drop(connection.take());
+                        retire_connection(&mut connection);
                         *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         active_training = None;
                         training_intent.store(0, Ordering::Release);
@@ -1520,7 +1569,7 @@ pub(super) fn run(
                         *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = Some((epoch, s));
                     }
                     Err(e) => {
-                        drop(connection.take());
+                        retire_failed_connection(&mut connection,&e);
                         *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         training_intent.store(0, Ordering::Release);
                         active_training = None;
@@ -1536,7 +1585,8 @@ pub(super) fn run(
             }
         }
     }
-    drop(connection);
+    retire_connection(&mut connection);
+    if let Some((_,_,child,_))=pending_recovery.take() {child.retire();}
     // Preserve all admitted visible preferences when Drop races recv_timeout.
     for request in requests.try_iter() {
         let request = match request {
@@ -1601,7 +1651,7 @@ fn reject_deferred_with_error(
                     Some(PendingAdoption::Lanes(_, serial)) => {
                         Event::LanesReplaced(e, serial, Err(error))
                     }
-                    _ => Event::Error(e, error),
+                    _ => Event::Error(e, error, Severity::Fatal),
                 }
             }
             _ => unreachable!("only helper-affecting requests are held for adoption"),
