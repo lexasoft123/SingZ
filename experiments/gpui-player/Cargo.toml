@@ -19,6 +19,17 @@ getrandom = "=0.3.4"
 libc = "=0.2.191"
 md-5 = "=0.10.6"
 url = "=2.5.8"
+# Platform trust (Secure Transport / SChannel / system OpenSSL), no bundled roots.
+ureq = { version = "=3.5.1", default-features = false, features = ["native-tls-no-default"] }
+native-tls = "=0.2.18"
+# ureq-proto TRACE dumps raw HTTP bytes, including OAuth headers. Keep DEBUG
+# diagnostics, but compile out TRACE even when a runtime logger requests it.
+log = { version = "=0.4.35", features = ["max_level_debug"] }
+# Reuse GPUI's reactor for cancellable waits beneath ureq's blocking API.
+async-io = "=2.6.0"
+async-net = "=2.0.0"
+futures-lite = "=2.6.1"
+scoped-tls-hkt = "=0.1.5"
 dirs = "=6.0.0"
 lofty = "=0.25.2"
 regex = "1"
@@ -30,6 +41,10 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std", "cl
 sha2 = "=0.11.1"
 resvg = "=0.46.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Generate current, short-lived localhost TLS identities only in tests.
+[dev-dependencies]
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
 
 [build-dependencies]
 serde_json = "1"

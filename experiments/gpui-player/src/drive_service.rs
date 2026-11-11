@@ -143,7 +143,9 @@ impl Service {
         }
         let invalidate = matches!(action, Action::SignIn | Action::SignOut | Action::Cancel);
         let epoch = if invalidate {
-            self.epoch.fetch_add(1, Ordering::AcqRel) + 1
+            let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            crate::drive_http::wake_cancelled_requests();
+            epoch
         } else {
             self.epoch.load(Ordering::Acquire)
         };
@@ -166,12 +168,14 @@ impl Service {
     }
     pub fn suspend(&self) -> Result<()> {
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        crate::drive_http::wake_cancelled_requests();
         self.commands
             .try_send(Command::Suspend(epoch))
             .context("Google Drive command queue is full")
     }
     pub fn set_root(&self, root: PathBuf) -> Result<()> {
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        crate::drive_http::wake_cancelled_requests();
         self.commands
             .try_send(Command::Root(epoch, root))
             .context("Google Drive command queue is full")
@@ -181,6 +185,7 @@ impl Drop for Service {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Release);
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        crate::drive_http::wake_cancelled_requests();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -376,6 +381,60 @@ fn snapshot_conflicts() -> &'static Mutex<BTreeMap<PathBuf, usize>> {
     CONFLICTS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReceiptRead {
+    Startup,
+    RunStart,
+    RunFinish,
+}
+#[cfg(test)]
+struct ReceiptReadFault {
+    point: ReceiptRead,
+    finished: Arc<AtomicBool>,
+}
+#[cfg(test)]
+fn receipt_read_faults() -> &'static Mutex<BTreeMap<PathBuf, ReceiptReadFault>> {
+    static FAULTS: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, ReceiptReadFault>>> =
+        std::sync::OnceLock::new();
+    FAULTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+fn receipt_generation(store: &TokenStore, _config_dir: &Path, _point: ReceiptRead) -> Result<u64> {
+    #[cfg(test)]
+    let fault = {
+        let mut faults = receipt_read_faults().lock().unwrap();
+        if faults
+            .get(_config_dir)
+            .is_some_and(|fault| fault.point == _point)
+        {
+            faults.remove(_config_dir)
+        } else {
+            None
+        }
+    };
+    #[cfg(test)]
+    let held = fault.as_ref().map(|_| {
+        // Hold an independent, real lease across the production read. Each
+        // path-scoped fault fires once; no callback replaces its result.
+        crate::file_lease::Lease::acquire(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(_config_dir.join("gdrive/session.lock"))
+                .unwrap(),
+        )
+        .unwrap()
+    });
+    let result = store.persisted_generation();
+    #[cfg(test)]
+    {
+        drop(held);
+        if let Some(fault) = fault {
+            fault.finished.store(true, Ordering::Release);
+        }
+    }
+    result
+}
+
 fn worker(
     config_dir: PathBuf,
     mut root: PathBuf,
@@ -422,7 +481,9 @@ fn worker(
     let store = TokenStore::new(&config_dir)?;
     let ledger = crate::sync_dirty::Store::new(config_dir.clone());
     let mut receipt = read_receipt(&config_dir);
-    if receipt.token_generation != store.generation() {
+    if !receipt_generation(&store, &config_dir, ReceiptRead::Startup)
+        .is_ok_and(|generation| receipt.token_generation == generation)
+    {
         receipt = Receipt::default();
     }
     let mut verify_pending = true;
@@ -616,11 +677,26 @@ fn worker(
                 }
                 active_run = Some(run);
                 let generation = applied_epoch;
-                let token_generation = store.generation();
+                let cancellation_generation = store.generation();
+                let token_generation = match receipt_generation(&store, &config_dir, ReceiptRead::RunStart) {
+                    Ok(generation) => generation,
+                    Err(error) => {
+                        // A session read is advisory here, not a permanent local
+                        // ledger failure. Retain intent and retry from a fresh run.
+                        scheduler.cancel();
+                        active_run = None;
+                        ledger.mark_library_preserving_projects(&error.to_string())?;
+                        let pending = read_dirty(&ledger, &config_dir)?;
+                        last_dirty = pending.clone();
+                        scheduler.observe_dirty(now(), pending.seq, count(&pending));
+                        refresh_state(shared, &scheduler, &store, &root, &pending, &receipt, running);
+                        return Ok(());
+                    }
+                };
                 let cancel = || {
                     !alive.load(Ordering::Acquire)
                         || epoch.load(Ordering::Acquire) != generation
-                        || store.generation() != token_generation
+                        || store.generation() != cancellation_generation
                 };
                 running.store(true, Ordering::Release);
                 publish(shared, |s| {
@@ -695,7 +771,9 @@ fn worker(
                         for path in outstanding {
                             ledger.mark_project(&path, "not reached by Drive sync")?;
                         }
-                        if cancel() {
+                        if cancel() || !receipt_generation(&store, &config_dir, ReceiptRead::RunFinish)
+                            .is_ok_and(|generation| generation == token_generation)
+                        {
                             ledger.mark_library_preserving_projects(
                                 "Drive account changed during cleanup",
                             )?;
@@ -886,5 +964,251 @@ fn worker(
 }
 
 #[cfg(test)]
-#[path = "drive_service_tests.rs"]
-mod tests;
+mod tests {
+    include!("drive_service_tests.rs");
+
+    fn hold_next_receipt_read(f: &Fixture, point: ReceiptRead) -> Arc<AtomicBool> {
+        let finished = Arc::new(AtomicBool::new(false));
+        receipt_read_faults().lock().unwrap().insert(
+            f.config.clone(),
+            ReceiptReadFault {
+                point,
+                finished: finished.clone(),
+            },
+        );
+        finished
+    }
+    fn wait_for_receipt_read(finished: &AtomicBool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !finished.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "receipt read never timed out under the held lease"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn assert_next_run_proceeds(service: &Service, previous: Option<u64>) {
+        wait(service, |s| {
+            assert_ne!(
+                s.scheduler.phase,
+                Phase::Blocked,
+                "a transient receipt read permanently blocked the worker: {s:?}"
+            );
+            s.is_up_to_date() && s.scheduler.last_sync > previous
+        });
+    }
+    #[test]
+    fn startup_receipt_lease_timeout_keeps_the_worker_alive() {
+        let f = Fixture::new();
+        let initial = f.service();
+        f.login(&initial);
+        drop(initial);
+        let finished = hold_next_receipt_read(&f, ReceiptRead::Startup);
+        let service = f.service();
+        wait_for_receipt_read(&finished);
+        wait(&service, |s| {
+            assert_ne!(
+                s.scheduler.phase,
+                Phase::Blocked,
+                "startup receipt contention killed the worker: {s:?}"
+            );
+            s.configured
+        });
+        assert_eq!(service.snapshot().scheduler.last_sync, None);
+        service.action(Action::SyncNow).unwrap();
+        assert_next_run_proceeds(&service, None);
+    }
+    #[test]
+    fn run_start_receipt_lease_timeout_reschedules_without_manual_retry() {
+        let f = Fixture::new();
+        let service = f.service();
+        f.login(&service);
+        let previous = service.snapshot().scheduler.last_sync;
+        let finished = hold_next_receipt_read(&f, ReceiptRead::RunStart);
+        f.edit(42);
+        service.action(Action::SyncNow).unwrap();
+        wait_for_receipt_read(&finished);
+        assert_next_run_proceeds(&service, previous);
+        assert_eq!(f.remote_doc()["foreign"], 42);
+    }
+    #[test]
+    fn run_finish_receipt_lease_timeout_rechecks_without_manual_retry() {
+        let f = Fixture::new();
+        let service = f.service();
+        f.login(&service);
+        let previous = service.snapshot().scheduler.last_sync;
+        let finished = hold_next_receipt_read(&f, ReceiptRead::RunFinish);
+        f.edit(43);
+        service.action(Action::SyncNow).unwrap();
+        wait_for_receipt_read(&finished);
+        wait(&service, |s| {
+            assert_ne!(
+                s.scheduler.phase,
+                Phase::Blocked,
+                "completed run receipt contention permanently blocked the worker: {s:?}"
+            );
+            !s.busy
+        });
+        assert_eq!(service.snapshot().scheduler.last_sync, previous);
+        assert!(
+            crate::sync_dirty::Store::new(f.config.clone())
+                .snapshot()
+                .unwrap()
+                .all_seq
+                > 0,
+            "a completed run lost its recheck intent after receipt contention"
+        );
+        assert_next_run_proceeds(&service, previous);
+        assert_eq!(f.remote_doc()["foreign"], 43);
+    }
+}
+
+#[cfg(test)]
+mod receipt_generation_tests {
+    use super::*;
+    #[test]
+    fn receipt_matches_restart_after_lock_timeout_and_transient_observation_fault() {
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(format!(
+            "singz-receipt-generation-{}",
+            crate::drive_http::random_id().unwrap()
+        )));
+        fs::create_dir(&directory.0).unwrap();
+        let store = TokenStore::new(&directory.0).unwrap();
+        store.sign_out().unwrap();
+        let persisted = store.persisted_generation().unwrap();
+        let epoch = store.generation();
+        let session = directory.0.join("gdrive/session.json");
+        let held = crate::file_lease::Lease::acquire(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(session.with_extension("lock"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(store.signed_in_checked().is_err());
+        drop(held);
+        assert_eq!(
+            store.generation(),
+            epoch,
+            "plain contention retired the session"
+        );
+        // An independent transient observation fault can retire only the
+        // cancellation epoch. It must never become the durable receipt version.
+        let bytes = fs::read(&session).unwrap();
+        fs::write(&session, b"{").unwrap();
+        assert!(store.signed_in_checked().is_err());
+        fs::write(&session, &bytes).unwrap();
+        store.signed_in_checked().unwrap();
+        assert_ne!(store.generation(), epoch);
+        let receipt = Receipt {
+            token_generation: store.persisted_generation().unwrap(),
+            last_sync: Some(123),
+            ..Receipt::default()
+        };
+        save_receipt(&directory.0, &receipt).unwrap();
+        drop(store);
+        let restarted = TokenStore::new(&directory.0).unwrap();
+        let saved = read_receipt(&directory.0);
+        assert_eq!(saved.token_generation, persisted);
+        assert_eq!(
+            saved.token_generation,
+            restarted.persisted_generation().unwrap()
+        );
+        assert_eq!(saved.last_sync, Some(123));
+    }
+}
+
+#[cfg(test)]
+mod host_cancel_tests {
+    use super::*;
+    #[test]
+    fn signout_host_epoch_wakes_an_inflight_wait_without_fallback_polling() {
+        use std::{
+            io::{BufRead, BufReader},
+            net::TcpListener,
+            time::Instant,
+        };
+        let (commands, _receiver) = mpsc::sync_channel(8);
+        let (_sender, events) = mpsc::channel();
+        let service = Service {
+            commands,
+            events,
+            snapshot: Arc::new(Mutex::new(Snapshot::default())),
+            epoch: Arc::new(AtomicU64::new(1)),
+            alive: Arc::new(AtomicBool::new(true)),
+            running: Arc::new(AtomicBool::new(true)),
+            worker: None,
+        };
+        let epoch = service.epoch.clone();
+        let waiting = Arc::new(AtomicBool::new(false));
+        let client_waiting = waiting.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/held", listener.local_addr().unwrap());
+        let (ready, read) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(socket);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            ready.send(()).unwrap();
+            let _ = released.recv_timeout(Duration::from_secs(2));
+        });
+        let (done, finished) = mpsc::channel();
+        let transfer = thread::spawn(move || {
+            let result = crate::drive_http::with_test_network_wait(
+                Duration::from_secs(60),
+                client_waiting,
+                || {
+                    crate::drive_http::request(
+                        crate::drive_http::Request {
+                            method: "GET",
+                            url: &url,
+                            headers: &[],
+                            body: crate::drive_http::Body::Empty,
+                            destination: crate::drive_http::Destination::Bytes(512),
+                            upload: false,
+                            allow_loopback_http: true,
+                        },
+                        &|| epoch.load(Ordering::Acquire) != 1,
+                    )
+                },
+            );
+            done.send((result.is_err(), Instant::now())).unwrap();
+        });
+        read.recv_timeout(Duration::from_secs(1)).unwrap();
+        let until = Instant::now() + Duration::from_secs(1);
+        while !waiting.load(Ordering::Acquire) {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(1));
+        }
+        let started = Instant::now();
+        service.action(Action::SignOut).unwrap();
+        let result = finished.recv_timeout(Duration::from_millis(250));
+        release.send(()).ok();
+        server.join().unwrap();
+        transfer.join().unwrap();
+        let (cancelled, ended) =
+            result.expect("host sign-out waited for the closure polling fallback");
+        assert!(cancelled);
+        let elapsed = ended.duration_since(started);
+        assert!(
+            elapsed <= Duration::from_millis(250),
+            "host sign-out took {elapsed:?}"
+        );
+        eprintln!("C12T_R2 host_signout_cancel_us={}", elapsed.as_micros());
+    }
+}
