@@ -306,6 +306,18 @@ mod ui_carry_line;
 mod ui_transport_timing;
 #[cfg(feature="ui-tests")]
 mod ui_stem_export;
+#[cfg(feature = "ui-tests")]
+mod ui_open_steps;
+#[cfg(feature = "ui-tests")]
+mod ui_bar_edit;
+#[cfg(feature = "ui-tests")]
+mod ui_first_run;
+#[cfg(feature = "ui-tests")]
+mod ui_space_focus;
+#[cfg(feature = "ui-tests")]
+mod ui_played_edge;
+#[cfg(feature = "ui-tests")]
+mod ui_settings_relaunch;
 mod waveform;
 mod window_chrome;
 use gpui_kit::prelude::FluentBuilder;
@@ -6387,6 +6399,36 @@ fn main() {
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_LYRICS_ALIGN_TEST"){
             assert!(background&&std::env::var_os("SINGZ_MUTE").is_some());
             ui_lyrics_align::run(window_handle,view.clone(),directory.into(),cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_OPEN_STEPS_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
+            ui_open_steps::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_BAR_EDIT_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
+            ui_bar_edit::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_FIRST_RUN_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
+            ui_first_run::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_SPACE_FOCUS_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
+            ui_space_focus::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_PLAYED_EDGE_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
+            ui_played_edge::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_SETTINGS_RELAUNCH_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"));
+            ui_settings_relaunch::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_BEAT_DETECTION_TEST") {
