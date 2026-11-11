@@ -27,6 +27,7 @@ pub struct RetiredLineage {
 }
 #[derive(Default, Debug)]
 pub struct Report {
+    pub made_request: bool,
     pub changed: bool,
     pub follow_up: bool,
     pub retired: Vec<RetiredLineage>,
@@ -851,6 +852,7 @@ pub fn run_authorized(
     cancel: &impl Fn() -> bool,
     progress: &impl Fn(String, f32),
 ) -> Result<Report> {
+    let requests_before = remote.request_count();
     let _lease = lock(storage)?;
     binding_current(remote, binding, cancel)?;
     ensure!(
@@ -1156,27 +1158,14 @@ pub fn run_authorized(
         }
     }
     ensure!(!stop(), "Retirement cancelled or account changed");
+    report.made_request = remote.request_count() != requests_before;
     Ok(report)
 }
 
-/// Fresh publication admission for ordinary and empty writers. Caller supplies
-/// the actual leased capture and the exact intended EXISTING folder, or None
-/// for a newly reserved ID. A retired name never permits adoption by name.
-pub fn admit_destination(
-    remote: &Remote,
-    storage: &Path,
-    binding: &Binding,
-    project: &str,
-    capture: &LocalCapture,
-    existing_folder_id: Option<&str>,
-    cancel: &impl Fn() -> bool,
-) -> Result<()> {
-    ensure!(
-        drive_plan::plain_name(project) && capture.root_identity == binding.root_identity,
-        "Invalid destination capture"
-    );
-    let _lease = lock(storage)?;
-    binding_current(remote, binding, cancel)?;
+fn admission_local(storage: &Path, binding: &Binding, project: &str,
+    capture: &LocalCapture) -> Result<Vec<Journal>> {
+    ensure!(drive_plan::plain_name(project) && capture.root_identity == binding.root_identity,
+        "Invalid destination capture");
     let journals = load(storage, binding)?;
     let config = storage
         .parent()
@@ -1197,6 +1186,40 @@ pub fn admit_destination(
             bail!("Destination {project} has an unfinished local retirement intent");
         }
     }
+    Ok(journals)
+}
+
+/// Local admission plus the run's existing observation. A guarded name always
+/// takes live admission, including terminal history and restored retired IDs.
+pub fn quiet_destination(storage: &Path, binding: &Binding, project: &str,
+    capture: &LocalCapture, folder: &RemoteEntry, root: &[RemoteEntry]) -> Result<bool> {
+    let _lease = lock(storage)?;
+    let journals = admission_local(storage, binding, project, capture)?;
+    Ok(!journals.iter().any(|j| j.guarded_names.contains(project))
+        && !terminal_ids(&journals).contains(&folder.id)
+        && root.iter().filter(|m| m.name == project).count() == 1
+        && root.iter().any(|m| m == folder && m.parents == vec![binding.singz_root.clone()]))
+}
+
+/// Fresh publication admission for ordinary and empty writers. Caller supplies
+/// the actual leased capture and the exact intended EXISTING folder, or None
+/// for a newly reserved ID. A retired name never permits adoption by name.
+pub fn admit_destination(
+    remote: &Remote,
+    storage: &Path,
+    binding: &Binding,
+    project: &str,
+    capture: &LocalCapture,
+    existing_folder_id: Option<&str>,
+    cancel: &impl Fn() -> bool,
+) -> Result<()> {
+    ensure!(
+        drive_plan::plain_name(project) && capture.root_identity == binding.root_identity,
+        "Invalid destination capture"
+    );
+    let _lease = lock(storage)?;
+    binding_current(remote, binding, cancel)?;
+    let journals = admission_local(storage, binding, project, capture)?;
     let relevant = journals
         .iter()
         .filter(|j| j.guarded_names.contains(project))

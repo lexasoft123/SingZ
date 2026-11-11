@@ -52,6 +52,28 @@ fn catalog_manifest(mut document: Value, projects: Vec<Value>) -> Result<Vec<u8>
     document["projects"] = json!(projects);
     Ok(serde_json::to_vec(&document)?)
 }
+// Preserve unknown fields on rows we publish, and retirement-protected rows,
+// while retaining the writer's existing pruning of unchanged nonlocal rows.
+fn cleanup_manifest(document: &Value, mut catalog: Vec<Value>,
+    protected_names: &BTreeSet<String>) -> Result<Vec<u8>> {
+    for row in &mut catalog {
+        if let Some(mut current) = crate::drive_publication::catalog_project_row(
+            document, row["dir"].as_str().context("Invalid planned catalog name")?)? {
+            ensure!(crate::drive_publication::catalog_row_equal(&current, row)?,
+                "A published catalog row changed during sync; cleanup deferred");
+            current["files"] = row["files"].clone();
+            *row = current;
+        }
+    }
+    for name in protected_names {
+        if !catalog.iter().any(|row| row["dir"].as_str() == Some(name.as_str())) {
+            if let Some(row) = crate::drive_publication::catalog_project_row(document, name)? {
+                catalog.push(row);
+            }
+        }
+    }
+    catalog_manifest(document.clone(), catalog)
+}
 fn remember_publication(
     remote: &Remote, storage: &Path, binding: &crate::drive_retirement::Binding,
     plan: &crate::drive_retirement::PublicationPlan, cancel: &impl Fn() -> bool,
@@ -78,6 +100,10 @@ pub fn run(
     progress: &impl Fn(String, f32),
     capturing: &impl Fn(Option<PathBuf>),
 ) -> Result<Report> {
+    let remote = remote.for_run();
+    let remote = &remote;
+    let generation = remote.auth.store.generation();
+    let cancel = &|| cancel() || remote.auth.store.generation() != generation;
     ensure!(!cancel(), "Drive sync cancelled");
     let root = root.canonicalize()?;
     let config_dir = temporary_root.parent().and_then(Path::parent)
@@ -104,7 +130,8 @@ pub fn run(
     let binding = crate::drive_retirement::bind(remote, &retirement_root, &root, &singz, cancel)?;
     // Finish accepted immutable upload generations before interpreting later
     // local Delete/Rename receipts. Their source paths may already be gone.
-    let resumed = crate::drive_publication::resume_pending(remote, &retirement_root,
+    let publication_index = crate::drive_publication::JournalIndex::load(&retirement_root)?;
+    let resumed = crate::drive_publication::resume_indexed(remote, &publication_index,
         &binding, cancel, progress)?;
     if !resumed.is_empty() {
         let mut report = Report { projects: initial.len(), follow_up: true,
@@ -139,7 +166,7 @@ pub fn run(
     // Retirement acknowledges exact ledger references and therefore changes
     // the operation epoch. Only this refreshed guard can fence later cleanup.
     let operation_guard = local_operations.snapshot(&root)?;
-    remote_top = remote.children(&singz, cancel)?;
+    if retirement.made_request { remote_top = remote.children(&singz, cancel)?; }
     let retired_ids = retirement.retired.iter().map(|record| record.source.folder.entry.id.as_str())
         .collect::<BTreeSet<_>>();
     for restored in remote_top.iter().filter(|entry| retired_ids.contains(entry.id.as_str())) {
@@ -233,6 +260,9 @@ pub fn run(
         synced: empty.synced,
         ..Default::default()
     };
+    let catalog_cache = crate::drive_publication::CatalogCache::new(config_dir, &binding);
+    let (listed_catalog, cache_healthy) = crate::drive_publication::read_catalog_listed(
+        remote, &singz, &remote_top, &catalog_cache, &spool.0, cancel)?;
     let mut catalog = Vec::<Value>::new();
     let mut ordinary_rows = BTreeMap::new();
     let mut publications = Vec::new();
@@ -315,9 +345,15 @@ pub fn run(
             stem_files: stems_id.and_then(|id| stem_children.get(id)).cloned()
                 .unwrap_or_default(),
         };
-        let handle = crate::drive_publication::prepare(remote, &retirement_root,
-            &binding, &mut capture, &mut plan, admission, cancel)?;
-        let outcome = crate::drive_publication::finish(remote, &handle, cancel, progress)?;
+        ensure!(!cancel(), "Drive sync cancelled");
+        let quiet = cache_healthy.then(|| crate::drive_publication::quiet(&publication_index,
+            &retirement_root, &binding, &capture, &plan, &admission, &remote_top, &listed_catalog)).flatten();
+        let is_quiet = quiet.is_some();
+        let outcome = if let Some(outcome) = quiet { outcome } else {
+            let handle = crate::drive_publication::prepare(remote, &retirement_root,
+                &binding, &mut capture, &mut plan, admission, cancel)?;
+            crate::drive_publication::finish(remote, &handle, cancel, progress)?
+        };
         report.uploaded += outcome.uploaded;
         report.unchanged += outcome.unchanged;
         report.trashed += outcome.trashed;
@@ -333,8 +369,10 @@ pub fn run(
             (capture.local_document.clone(), row.clone()))]);
         crate::drive_empty::acknowledge_ordinary_publication(remote, &root,
             &journal_root, &singz, &rows, &publication.expected.catalog, cancel)?;
-        publications.push((publication.capture, publication.expected.folder,
-            publication.expected.members, row.clone()));
+        if !is_quiet {
+            publications.push((publication.capture, publication.expected.folder,
+                publication.expected.members, row.clone()));
+        }
         ordinary_rows.insert(name.clone(), (capture.local_document.clone(), row.clone()));
         catalog.push(row);
         report.synced.insert(root.join(name), capture.local_document.clone());
@@ -355,27 +393,16 @@ pub fn run(
     // Ordinary projects have already committed their own rows. Refresh the
     // catalog before library-wide pruning and preserve unknown document/row
     // fields instead of replacing metadata from an earlier root listing.
-    let current_catalog = crate::drive_publication::read_catalog(remote, &singz,
-        &spool.0, cancel)?;
-    for row in &mut catalog {
-        if let Some(mut current) = crate::drive_publication::catalog_project_row(
-            &current_catalog.document, row["dir"].as_str().context("Invalid planned catalog name")?)? {
-            ensure!(crate::drive_publication::catalog_row_equal(&current, row)?,
-                "A published catalog row changed during sync; cleanup deferred");
-            current["files"] = row["files"].clone();
-            *row = current;
-        }
-    }
-    for name in &retirement.protected_names {
-        if !catalog.iter().any(|row| row["dir"].as_str() == Some(name.as_str())) {
-            if let Some(row) = crate::drive_publication::catalog_project_row(&current_catalog.document, name)? {
-                catalog.push(row);
-            }
-        }
-    }
-    let manifest = catalog_manifest(current_catalog.document, catalog)?;
-    let checksum = format!("{:x}", Md5::digest(&manifest));
-    let old = current_catalog.metadata.as_ref().map(|metadata| &metadata.entry);
+    let cleanup_observation = listed_catalog.document.clone();
+    let mut current_catalog = if publications.is_empty() && report.adopted.is_empty()
+        && !retirement.made_request && empty.publications.is_empty() {
+        listed_catalog
+    } else {
+        crate::drive_publication::read_catalog(remote, &singz, &spool.0, cancel)?
+    };
+    let mut manifest = cleanup_manifest(&current_catalog.document, catalog.clone(),
+        &retirement.protected_names)?;
+    let mut checksum = format!("{:x}", Md5::digest(&manifest));
     // Catalog reads can yield to new local operations too. Recheck the full
     // namespace and operation epoch immediately before destructive cleanup.
     ensure!(drive_snapshot::scan(&root, cancel)? == dirs
@@ -387,8 +414,37 @@ pub fn run(
         remote.trash(&orphan.id, cancel)?;
         report.trashed += 1;
     }
-    let catalog_id = if old.and_then(|f| f.md5_checksum.as_deref()) != Some(checksum.as_str()) {
+    if current_catalog.metadata.as_ref().and_then(|m| m.entry.md5_checksum.as_deref())
+        != Some(checksum.as_str()) {
         progress("Updating catalog…".into(), 0.995);
+        // A quiet project needs only the listed observation, but cleanup is a
+        // write. Reobserve after the project/orphan passes and their callbacks;
+        // another writer may have published a row in the meantime.
+        let fresh = crate::drive_publication::read_catalog(remote, &singz, &spool.0, cancel)?;
+        for row in fresh.document["projects"].as_array().context("Invalid Drive catalog projects")? {
+            let name = row["dir"].as_str().context("Invalid catalog project name")?;
+            if catalog.iter().any(|planned| planned["dir"].as_str() == Some(name))
+                || retirement.protected_names.contains(name) { continue; }
+            let previous = crate::drive_publication::catalog_project_row(&cleanup_observation, name)?;
+            if previous.as_ref() != Some(row) {
+                // New rows are concurrent publication, not stale roster rows
+                // we intended to prune. A changed prune candidate is a conflict.
+                ensure!(previous.is_none(),
+                    "A published catalog row changed during sync; cleanup deferred");
+                catalog.push(row.clone());
+            }
+        }
+        manifest = cleanup_manifest(&fresh.document, catalog, &retirement.protected_names)?;
+        checksum = format!("{:x}", Md5::digest(&manifest));
+        current_catalog = fresh;
+        // The fresh read can yield to a local rename/delete as well.
+        ensure!(drive_snapshot::scan(&root, cancel)? == dirs
+            && drive_snapshot::directory_names(&root, cancel)? == local_names,
+            "Library changed before Drive cleanup; retry required");
+        local_operations.assert_unchanged(&operation_guard)?;
+    }
+    let old = current_catalog.metadata.as_ref().map(|metadata| &metadata.entry);
+    let catalog_id = if old.and_then(|f| f.md5_checksum.as_deref()) != Some(checksum.as_str()) {
         remote.upload_bytes(
             &manifest,
             "catalog.json",
@@ -401,6 +457,7 @@ pub fn run(
         old.context("Unchanged Drive catalog has no identity")?.id.clone()
     };
     ensure!(!cancel(), "Drive sync cancelled");
+    catalog_cache.store(&manifest);
     // A prior empty journal is superseded only by this writer's durably
     // recorded nonempty intent and verified terminal document/catalog effect.
     let mut expected_catalog = old.cloned().unwrap_or_default();

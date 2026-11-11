@@ -47,6 +47,76 @@ fn read(handle:&PublicationHandle)->Result<Journal> {let j:Journal=serde_json::f
     ensure!(j.version==1&&drive_plan::plain_name(&j.project)&&j.members.len()<=4096&&j.uploads.len()<=4096&&j.trash.len()<=4096&&j.capture.root_identity==j.binding.root_identity,"Invalid publication journal");Ok(j)}
 fn handles(storage:&Path)->Result<Vec<PublicationHandle>> {let directory=storage.join("publication-transactions");if !directory.exists(){return Ok(vec![]);}ordinary_dir(&directory)?;let mut out=vec![];
     for entry in fs::read_dir(&directory)? {let entry=entry?;if entry.file_name()==".lock"{continue;}ordinary_dir(&entry.path())?;if entry.path().join("journal.json").exists(){out.push(PublicationHandle{storage:storage.into(),path:entry.path()});}}Ok(out)}
+/// One bounded read of each journal for quiet admission and pending resume.
+/// Write admission still rereads journals under its existing lease, so a new
+/// generation accepted by another process cannot be hidden by this index.
+#[derive(Default)]
+pub struct JournalIndex { projects: BTreeMap<String, Vec<(PublicationHandle, Journal)>> }
+impl JournalIndex {
+    pub fn load(storage: &Path) -> Result<Self> {
+        let mut index = Self::default();
+        for handle in handles(storage)? {
+            let journal = read(&handle)?;
+            index.projects.entry(journal.project.clone()).or_default().push((handle, journal));
+        }
+        Ok(index)
+    }
+}
+
+/// This gate has no remote capability and can never grant new retirement
+/// authority. Any uncertainty returns to the existing live protocol.
+pub(crate) fn quiet(index: &JournalIndex, storage: &Path, binding: &Binding, capture: &Capture,
+    plan: &ProjectPlan, admission: &DestinationAdmission, root: &[RemoteEntry],
+    catalog: &CatalogView) -> Option<PublicationOutcome> {
+    if !plan.upload.is_empty() || !plan.trash.is_empty() || !capture.snapshot.doc_readable
+        || !capture.snapshot.stems_readable { return None; }
+    let origin = capture.publication_capture();
+    let folder = admission.folder.as_ref()?;
+    if !crate::drive_retire_transaction::quiet_destination(storage, binding, &plan.dir,
+        &origin, folder, root).ok()? { return None; }
+    let catalog_meta = catalog.metadata.as_ref()?;
+    let catalog_row = catalog_project_row(&catalog.document, &plan.dir).ok()??;
+    for (_, journal) in index.projects.get(&plan.dir)? {
+        if journal.binding != *binding || journal.phase != Phase::Complete || journal.capture != origin
+            || journal.folder.trashed || journal.folder.entry != *folder || journal.row != catalog_row
+            || journal.catalog_reserved != catalog_meta.entry.id { continue; }
+        let members = journal.members.iter().map(|m| m.entry.clone()).collect::<Vec<_>>();
+        if journal.members.iter().any(|m| m.trashed)
+            || !drive_plan::quiet_members(&members, &admission.top, &admission.stem_files) { continue; }
+        // The planner leaves an unchanged file's existing MIME alone. Compare
+        // MIME to the journal via quiet_members, not to a newly inferred local
+        // MIME (legacy writers may have used application/octet-stream).
+        let same = |local: &crate::drive_plan::LocalEntry, parent: &str| {
+            members.iter().any(|m| m.name == local.name && m.parents == vec![parent.to_owned()]
+                && m.md5_checksum.as_deref() == Some(local.md5.as_str())
+                && m.size.as_deref().and_then(|s| s.parse::<u64>().ok()) == Some(local.size))
+        };
+        if !capture.snapshot.top.iter().all(|m| same(m, &folder.id))
+            || !capture.snapshot.stems.iter().all(|m| admission.stems.as_ref().is_some_and(|s| same(m, &s.id)))
+            || members.iter().filter(|m| m.mime_type.as_deref() != Some(FOLDER)).count()
+                != capture.snapshot.top.len() + capture.snapshot.stems.len() { continue; }
+        let persistent = origin.root_identity.persistent_eligible() && origin.local_identity.persistent_eligible();
+        let (lineage_id, lineage, eligibility_warning) = if persistent {
+            let (id, recorded) = drive_retirement::recorded_publication(storage, binding, &plan.dir, &origin).ok()??;
+            let recorded_members = recorded.members.iter().map(|m| m.entry.clone()).collect::<Vec<_>>();
+            if recorded.folder != journal.folder || recorded.catalog_row != catalog_row
+                || !drive_plan::quiet_members(&recorded_members, &admission.top, &admission.stem_files) { continue; }
+            (Some(id), Some(recorded), None)
+        } else {
+            let warning = origin.root_identity.require_persistent()
+                .and_then(|_| origin.local_identity.require_persistent()).unwrap_err().to_string();
+            (None, None, Some(warning))
+        };
+        return Some(PublicationOutcome {
+            publication: PublicationPlan { capture: origin, expected: ExpectedPublication {
+                folder: folder.clone(), members, catalog_row, catalog: catalog_meta.entry.clone() } },
+            lineage, lineage_id, eligibility_warning, changed: false, uploaded: 0,
+            unchanged: journal.unchanged, trashed: 0,
+        });
+    }
+    None
+}
+
 fn observed(remote:&Remote,expected:&Metadata,cancel:&impl Fn()->bool)->Result<()> {ensure!(remote.metadata(&expected.entry.id,cancel)?==*expected,"Publication identity/content/parent changed remotely");Ok(())}
 fn namespace(remote:&Remote,j:&Journal,allow_missing:bool,cancel:&impl Fn()->bool)->Result<()> {let root=remote.children(&j.binding.singz_root,cancel)?;let rows=root.iter().filter(|m|m.name==j.project).collect::<Vec<_>>();ensure!(rows.len()<=1&&rows.first().is_none_or(|m|m.id==j.folder.entry.id),"Foreign or duplicate destination folder; publication preserved");ensure!(allow_missing||rows.len()==1,"Publication destination is not visible yet");
     if let Some(stems)=&j.stems {if !j.create_folder||!allow_missing {let top=remote.children(&j.folder.entry.id,cancel)?;let rows=top.iter().filter(|m|m.name=="stems").collect::<Vec<_>>();ensure!(rows.len()<=1&&rows.first().is_none_or(|m|m.id==stems.entry.id),"Foreign or duplicate stems destination; publication preserved");if !allow_missing{ensure!(rows.len()==1,"Publication stems destination is not visible yet");}}}Ok(())}
@@ -57,6 +127,87 @@ pub(crate) fn catalog_row_equal(a:&Value,b:&Value)->Result<bool> {let facts=|row
 pub(crate) fn read_catalog(remote:&Remote,singz:&str,scratch:&Path,cancel:&impl Fn()->bool)->Result<CatalogView> {let root=remote.children(singz,cancel)?;let rows=root.iter().filter(|m|m.name=="catalog.json").collect::<Vec<_>>();ensure!(rows.len()<=1,"Ambiguous Drive catalog identities");let Some(row)=rows.first()else{return Ok(CatalogView{metadata:None,document:json!({"format":2,"capabilities":{"adopt":1},"projects":[]})})};
     let meta=remote.metadata(&row.id,cancel)?;ensure!(!meta.trashed&&meta.entry.parents==vec![singz.to_owned()]&&meta.entry.mime_type.as_deref()!=Some(FOLDER),"Invalid Drive catalog location");let size=meta.entry.size.as_deref().context("Catalog lacks size")?.parse::<u64>()?;ensure!(size<=LIMIT,"Catalog exceeds limit");let temporary=scratch.join(format!(".catalog-read-{}.part",crate::drive_http::random_id()?));
     let result=(||->Result<Value>{remote.download(&row.id,&temporary,LIMIT,cancel)?;let bytes=bounded(&temporary)?;ensure!(bytes.len()as u64==size&&meta.entry.md5_checksum.as_deref()==Some(md5(&bytes).as_str()),"Catalog integrity changed");let doc:Value=serde_json::from_slice(&bytes)?;catalog_project_row(&doc,"")?;Ok(doc)})();let _=fs::remove_file(temporary);Ok(CatalogView{metadata:Some(meta),document:result?})}
+/// Private optimization only. The checksum validates the exact cached bytes;
+/// it is compared to the live root listing on every run, never to a token or a
+/// persisted claim about remote currency.
+pub struct CatalogCache { path: PathBuf }
+#[derive(Serialize, Deserialize)]
+struct CachedCatalog { checksum: String, body: String }
+impl CatalogCache {
+    pub fn new(config: &Path, binding: &Binding) -> Self {
+        Self { path: config.join("gdrive/catalog-cache").join(format!("{}.json", binding.key)) }
+    }
+    pub fn store(&self, bytes: &[u8]) {
+        let save = (|| -> Result<()> {
+            let parent = self.path.parent().context("Catalog cache has no parent")?;
+            private_dir(parent)?;
+            if self.path.symlink_metadata().is_ok() {
+                let meta = fs::symlink_metadata(&self.path)?;
+                ensure!(meta.is_file() && !meta.file_type().is_symlink(), "Unsafe catalog cache");
+            }
+            let record = CachedCatalog { checksum: md5(bytes), body: String::from_utf8(bytes.to_vec())? };
+            let encoded = serde_json::to_vec(&record)?;
+            ensure!(encoded.len() as u64 <= 2 * LIMIT + 1024, "Catalog cache exceeds limit");
+            let temporary = parent.join(format!(".catalog-{}.part", crate::drive_http::random_id()?));
+            let result = (|| -> Result<()> {
+                let mut file = crate::drive_http::private_file(&temporary)?;
+                file.write_all(&encoded)?; file.sync_all()?;
+                crate::project_store::replace(&temporary, &self.path)?;
+                #[cfg(not(windows))] File::open(parent)?.sync_all()?;
+                Ok(())
+            })();
+            let _ = fs::remove_file(temporary); result
+        })();
+        if let Err(error) = save {
+            crate::diagnostics::event("sync", format!("Catalog cache not saved: {error:#}"), crate::diagnostics::Level::Warn);
+        }
+    }
+    fn load(&self) -> Result<Option<CachedCatalog>> {
+        if !self.path.try_exists()? { return Ok(None); }
+        ordinary_dir(self.path.parent().context("Catalog cache has no parent")?)?;
+        let meta = fs::symlink_metadata(&self.path)?;
+        ensure!(meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 2 * LIMIT + 1024, "Unsafe catalog cache");
+        let mut bytes = Vec::new();
+        File::open(&self.path)?.take(2 * LIMIT + 1025).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() as u64 <= 2 * LIMIT + 1024, "Catalog cache exceeds limit");
+        let cached: CachedCatalog = serde_json::from_slice(&bytes)?;
+        ensure!(cached.body.len() as u64 <= LIMIT && cached.checksum == md5(cached.body.as_bytes()), "Catalog cache integrity changed");
+        Ok(Some(cached))
+    }
+}
+
+/// Uses precisely the root observation already fetched by this run. Listing
+/// metadata and downloaded bytes carry the same integrity checks as the live
+/// slow-path read; no exact-ID GET is needed on this read-only boundary.
+/// A corrupt existing cache disables quiet admission for this run.
+pub(crate) fn read_catalog_listed(remote: &Remote, singz: &str, root: &[RemoteEntry],
+    cache: &CatalogCache, scratch: &Path, cancel: &impl Fn()->bool) -> Result<(CatalogView, bool)> {
+    let rows = root.iter().filter(|m| m.name == "catalog.json").collect::<Vec<_>>();
+    ensure!(rows.len() <= 1, "Ambiguous Drive catalog identities");
+    let Some(row) = rows.first() else { return Ok((CatalogView { metadata: None,
+        document: json!({"format":2,"capabilities":{"adopt":1},"projects":[]}) }, true)); };
+    let meta = Metadata { entry: (*row).clone(), trashed: false };
+    meta.validate(&row.id)?;
+    ensure!(meta.entry.parents == vec![singz.to_owned()] && meta.entry.mime_type.as_deref() != Some(FOLDER), "Invalid Drive catalog location");
+    let size = meta.entry.size.as_deref().context("Catalog lacks size")?.parse::<u64>()?;
+    ensure!(size <= LIMIT, "Catalog exceeds limit");
+    let cached = cache.load();
+    let healthy = cached.is_ok();
+    let bytes = match cached.ok().flatten().filter(|c| Some(&c.checksum) == meta.entry.md5_checksum.as_ref()) {
+        Some(cached) => cached.body.into_bytes(),
+        None => {
+            let temporary = scratch.join(format!(".catalog-read-{}.part",crate::drive_http::random_id()?));
+            let read = (|| -> Result<Vec<u8>> { remote.download(&row.id, &temporary, LIMIT, cancel)?; bounded(&temporary) })();
+            let _ = fs::remove_file(temporary); read?
+        }
+    };
+    ensure!(bytes.len() as u64 == size && meta.entry.md5_checksum.as_deref() == Some(md5(&bytes).as_str()), "Catalog integrity changed");
+    let document: Value = serde_json::from_slice(&bytes)?;
+    catalog_project_row(&document, "")?;
+    cache.store(&bytes);
+    Ok((CatalogView { metadata: Some(meta), document }, healthy))
+}
+
 fn payload(handle:&PublicationHandle,relative:&Path)->Result<PathBuf> {ensure!(relative.is_relative()&&relative.components().all(|c|matches!(c,Component::Normal(_))),"Unsafe publication payload path");Ok(handle.path.join(relative))}
 fn folder_properties(binding:&Binding,transaction:&str,role:&str)->BTreeMap<String,String> {BTreeMap::from([("singzPublication".into(),"1".into()),("singzBinding".into(),binding.key.clone()),("singzTransaction".into(),transaction.into()),("singzRole".into(),role.into())])}
 fn desired_folder(id:String,name:&str,parent:&str,properties:BTreeMap<String,String>)->Metadata {Metadata{entry:RemoteEntry{id,name:name.into(),mime_type:Some(FOLDER.into()),parents:vec![parent.into()],app_properties:properties,..Default::default()},trashed:false}}
@@ -165,7 +316,10 @@ pub fn finish(remote:&Remote,handle:&PublicationHandle,cancel:&impl Fn()->bool,p
     Ok(PublicationOutcome{publication,lineage,lineage_id,eligibility_warning,changed:!already_complete,uploaded:if already_complete{0}else{j.uploads.len()},unchanged:j.unchanged,trashed:if already_complete{0}else{j.trash.len()}})
 }
 pub fn resume_pending(remote:&Remote,storage:&Path,binding:&Binding,cancel:&impl Fn()->bool,progress:&impl Fn(String,f32))->Result<Vec<PublicationOutcome>>{
-    let mut outcomes=vec![];for handle in handles(storage)?{let j=read(&handle)?;if j.binding==*binding&&j.phase!=Phase::Complete{outcomes.push(finish(remote,&handle,cancel,progress)?);}}Ok(outcomes)
+    let index=JournalIndex::load(storage)?;resume_indexed(remote,&index,binding,cancel,progress)
+}
+pub fn resume_indexed(remote:&Remote,index:&JournalIndex,binding:&Binding,cancel:&impl Fn()->bool,progress:&impl Fn(String,f32))->Result<Vec<PublicationOutcome>>{
+    let mut outcomes=vec![];for (handle,j) in index.projects.values().flatten(){if j.binding==*binding&&j.phase!=Phase::Complete{outcomes.push(finish(remote,handle,cancel,progress)?);}}Ok(outcomes)
 }
 
 /// Positive prune history belongs to one captured local directory generation.

@@ -286,7 +286,8 @@ def main():
                 companion = threading.Thread(target=sidecar, args=(server, folder, role, baseline, proof, stop, errors), daemon=True)
                 companion.start()
                 try:
-                    observation = shared.run_observed(app, folder, env, args.timeout, expect_input_helper=False)
+                    observation = shared.run_observed(app, folder, env, args.timeout, expect_input_helper=False,
+                        sample_interval=.05, poll_interval=.02)
                 finally:
                     stop.set(); companion.join(timeout=10)
                     assert not companion.is_alive(), 'OAuth/proof sidecar did not retire'

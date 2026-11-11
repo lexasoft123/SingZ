@@ -45,7 +45,7 @@ def sha(path):
     return digest.hexdigest()
 
 
-def run_observed(app,folder,env,timeout,*,expect_input_helper=True):
+def run_observed(app,folder,env,timeout,*,expect_input_helper=True,sample_interval=.5,poll_interval=.2):
     """Observe owned identities and resources; screenshots do not qualify live FPS."""
     mac=platform.system()=='Darwin'
     front=lambda:foreground() if mac else {'available':False,'reason':'Foreground observation unavailable on this platform'}
@@ -72,7 +72,7 @@ def run_observed(app,folder,env,timeout,*,expect_input_helper=True):
                         except subprocess.TimeoutExpired:return False
                         return True
                     if time.monotonic()>=next_sample:
-                        next_sample=time.monotonic()+.5
+                        next_sample=time.monotonic()+sample_interval
                         raw={'pid':child.pid,'previousCpuNanoseconds':previous[0] if previous else None,'previousSampleMonotonic':previous[1] if previous else None}
                         try:
                             cpu,memory=perf.process_usage(child.pid);now=time.monotonic()
@@ -95,7 +95,7 @@ def run_observed(app,folder,env,timeout,*,expect_input_helper=True):
                             if gone and terminal:terminal_discards.append(record)
                             else:errors.append(record)
                             previous=None
-                time.sleep(.2)
+                time.sleep(poll_interval)
         finally:
             forced=child.poll() is None
             if forced:

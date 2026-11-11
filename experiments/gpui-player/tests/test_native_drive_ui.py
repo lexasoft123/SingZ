@@ -157,8 +157,8 @@ def launch(environment, folder, server, project, original):
                             continue
                         if path.stem.startswith('first-held-'):
                             width = path.stem.rsplit('-', 1)[1]
-                            private_root = (Path(environment['SINGZ_GPUI_CONFIG_DIR'])/'gdrive/spool').resolve()
-                            candidates = list(private_root.glob('sync-*/'+project.name+'/project.json'))
+                            private_root = (Path(environment['SINGZ_GPUI_CONFIG_DIR'])/'gdrive/retirements/publication-transactions').resolve()
+                            candidates = list(private_root.glob('*/payloads/project.json'))
                             assert len(candidates) == 1, 'Expected exactly one active private project spool'
                             assert not candidates[0].is_symlink(), 'Private spool must be an ordinary file'
                             spool = candidates[0].resolve()
@@ -201,7 +201,7 @@ def launch(environment, folder, server, project, original):
                             # The save during upload must earn a second metadata
                             # publication, not merely a local clean badge.
                             complete = [row for row in actual['requests']
-                                if row['operation'] == 'upload' and row['status'] in (200, 201)]
+                                if row['operation'] == 'upload-applied' and row['status'] in (200, 201)]
                             assert len(complete) >= 2
                         (folder/(path.stem+'-remote.json')).write_text(json.dumps(actual, indent=2))
                     else:

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::{Mutex, atomic::{AtomicU64, Ordering}},
 };
 
 pub const FOLDER: &str = "application/vnd.google-apps.folder";
@@ -26,7 +27,7 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    fn validate(&self, id: &str) -> Result<()> {
+    pub(crate) fn validate(&self, id: &str) -> Result<()> {
         validate_id(&self.entry.id)?;
         ensure!(
             self.entry.id == id,
@@ -68,20 +69,37 @@ impl Metadata {
 
 pub struct Remote {
     pub auth: AuthClient,
+    // Exists only on the run-owned Remote; never survives a sync invocation.
+    account_memo: Option<Mutex<Option<(u64, String)>>>,
+    requests: AtomicU64,
 }
 impl Remote {
     pub fn new(auth: AuthClient) -> Self {
-        Self { auth }
+        Self { auth, account_memo: None, requests: AtomicU64::new(0) }
     }
+    pub(crate) fn for_run(&self) -> Self {
+        Self { auth: self.auth.clone(), account_memo: Some(Mutex::new(None)),
+            requests: AtomicU64::new(0) }
+    }
+    pub(crate) fn request_count(&self) -> u64 { self.requests.load(Ordering::Relaxed) }
     /// Durable account binding without writing the raw Drive permission ID to
     /// journals. Used only by transactions that need cross-process recovery.
     pub fn account_key(&self, cancel: &impl Fn() -> bool) -> Result<String> {
         use sha2::{Digest, Sha256};
+        let generation = self.auth.store.generation();
+        let stop = || cancel() || self.auth.store.generation() != generation;
+        ensure!(!stop(), "Drive sync cancelled");
+        let mut memo = self.account_memo.as_ref().map(|m| m.lock()
+            .map_err(|_| anyhow::anyhow!("Drive sync cancelled"))).transpose()?;
+        if let Some((cached_generation, key)) = memo.as_deref().and_then(|m| m.as_ref()) {
+            if *cached_generation == generation { return Ok(key.clone()); }
+        }
+        if let Some(memo) = memo.as_deref_mut() { *memo = None; }
         let value = self.json(
             "GET",
             "/drive/v3/about?fields=user(permissionId)",
             None,
-            cancel,
+            &stop,
         )?;
         let permission = value["user"]["permissionId"]
             .as_str()
@@ -96,7 +114,10 @@ impl Remote {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
-        Ok(format!("drive-permission-sha256:{digest}"))
+        ensure!(!stop(), "Drive sync cancelled");
+        let key = format!("drive-permission-sha256:{digest}");
+        if let Some(memo) = memo.as_deref_mut() { *memo = Some((generation, key.clone())); }
+        Ok(key)
     }
     fn endpoint(&self, path: &str) -> Result<url::Url> {
         ensure!(
@@ -118,6 +139,7 @@ impl Remote {
         upload: bool,
         cancel: &impl Fn() -> bool,
     ) -> Result<Response> {
+        self.requests.fetch_add(1, Ordering::Relaxed);
         let response = self.auth.request(
             Request {
                 method,
@@ -315,6 +337,7 @@ impl Remote {
         validate_id(id)?;
         let mut url = self.endpoint(&format!("/drive/v3/files/{id}"))?;
         url.query_pairs_mut().append_pair("fields", METADATA_FIELDS);
+        self.requests.fetch_add(1, Ordering::Relaxed);
         let response = self.auth.request(
             Request {
                 method: "GET",
@@ -846,6 +869,7 @@ impl Remote {
     ) -> Result<u64> {
         validate_id(id)?;
         let url = self.endpoint(&format!("/drive/v3/files/{id}?alt=media"))?;
+        self.requests.fetch_add(1, Ordering::Relaxed);
         let response = self.auth.request_with_progress(
             Request {
                 method: "GET",

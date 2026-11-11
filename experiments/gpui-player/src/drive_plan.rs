@@ -37,6 +37,23 @@ pub struct RemoteEntry {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub app_properties: BTreeMap<String, String>,
 }
+/// A listing is sufficient only when its complete roster equals the positively
+/// published roster, including folders and every metadata field. Order is not
+/// evidence; duplicate IDs are never a complete observation.
+pub fn quiet_members(members: &[RemoteEntry], top: &[RemoteEntry], stems: &[RemoteEntry]) -> bool {
+    let by_id = |rows: Vec<&RemoteEntry>| {
+        let mut map = BTreeMap::new();
+        for entry in rows {
+            if map.insert(entry.id.clone(), entry.clone()).is_some() { return None; }
+        }
+        Some(map)
+    };
+    match (by_id(members.iter().collect()), by_id(top.iter().chain(stems).collect())) {
+        (Some(expected), Some(listed)) => expected == listed,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalEntry {
     pub name: String,
@@ -669,3 +686,40 @@ fn js_number_json(number: &serde_json::Number) -> String {
 #[cfg(test)]
 #[path = "drive_plan_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod quiet_members_tests {
+    use super::*;
+    fn member() -> RemoteEntry {
+        RemoteEntry { id: "member".into(), name: "project.json".into(),
+            parents: vec!["project".into()], mime_type: Some("application/json".into()),
+            md5_checksum: Some("0123456789abcdef0123456789abcdef".into()), size: Some("12".into()),
+            app_properties: BTreeMap::from([("writer".into(), "ours".into())]) }
+    }
+    #[test]
+    fn quiet_members_requires_exact_metadata_and_complete_unique_roster() {
+        let original = member();
+        let stem = RemoteEntry { id: "stem".into(), name: "vocals.wav".into(), parents: vec!["stems".into()], ..original.clone() };
+        assert!(quiet_members(&[original.clone(), stem.clone()], &[original.clone()], &[stem.clone()]));
+        assert!(quiet_members(&[stem.clone(), original.clone()], &[original.clone()], &[stem.clone()]));
+        let changes: Vec<Box<dyn Fn(&mut RemoteEntry)>> = vec![
+            Box::new(|m| m.id = "other".into()), Box::new(|m| m.name = "other.json".into()),
+            Box::new(|m| m.parents = vec!["other".into()]), Box::new(|m| m.parents.push("other".into())),
+            Box::new(|m| m.mime_type = Some(FOLDER_MIME.into())), Box::new(|m| m.mime_type = None),
+            Box::new(|m| m.md5_checksum = Some("ffffffffffffffffffffffffffffffff".into())),
+            Box::new(|m| m.md5_checksum = None), Box::new(|m| m.size = Some("13".into())),
+            Box::new(|m| m.size = None), Box::new(|m| m.app_properties.clear()),
+            Box::new(|m| { m.app_properties.insert("foreign".into(), "yes".into()); }),
+        ];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut changed = original.clone(); change(&mut changed);
+            assert!(!quiet_members(&[original.clone()], &[changed], &[]), "metadata field {i}");
+            let mut changed = stem.clone(); change(&mut changed);
+            assert!(!quiet_members(&[original.clone(), stem.clone()], &[original.clone()], &[changed]), "stem metadata field {i}");
+        }
+        assert!(!quiet_members(&[original.clone(), stem.clone()], &[original.clone()], &[]));
+        assert!(!quiet_members(&[original.clone()], &[original.clone()], &[stem.clone()]));
+        assert!(!quiet_members(&[original.clone()], &[original.clone(), original.clone()], &[]));
+        assert!(!quiet_members(&[original.clone(), original.clone()], &[original], &[]));
+    }
+}

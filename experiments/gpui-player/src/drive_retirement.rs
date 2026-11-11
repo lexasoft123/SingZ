@@ -238,6 +238,32 @@ pub fn latest_publication(storage:&Path,binding:&str,root:&DirectoryIdentity,pro
     let id:String=serde_json::from_slice(&bounded(&path)?)?;
     Ok(publication_candidates(storage,binding,root,project,local)?.into_iter().find(|row|row.0==id))
 }
+/// Quiet publication needs the exact captured generation, not merely the
+/// latest document in this directory. Read its content-addressed receipt
+/// directly; do not scan the entire publication history for every project.
+pub fn recorded_publication(storage: &Path, binding: &Binding, project: &str,
+    capture: &LocalCapture) -> Result<Option<(String, PublicationLineage)>> {
+    if !capture.root_identity.persistent_eligible() || !capture.local_identity.persistent_eligible() {
+        return Ok(None);
+    }
+    let latest = storage.join("latest");
+    if !latest.exists() { return Ok(None); }
+    ordinary_dir(&latest)?;
+    let key = identity_key(&binding.key, &capture.root_identity, project, &capture.local_identity)?;
+    let pointer = latest.join(format!("{key}.json"));
+    if !pointer.exists() { return Ok(None); }
+    let id: String = serde_json::from_slice(&bounded(&pointer)?)?;
+    ensure!(id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()), "Invalid publication pointer");
+    let directory = storage.join("publications"); ordinary_dir(&directory)?;
+    let bytes = bounded(&directory.join(format!("{id}.json")))?;
+    ensure!(fingerprint(&bytes) == id, "Publication lineage filename/content mismatch");
+    let lineage: PublicationLineage = serde_json::from_slice(&bytes)?;
+    ensure!(lineage.version == 1 && lineage.members.len() <= 4096
+        && lineage.capture.root_identity == lineage.binding.root_identity, "Invalid publication lineage record");
+    Ok((lineage.binding == *binding && lineage.project == project && lineage.capture == *capture)
+        .then_some((id, lineage)))
+}
+
 pub fn publications(storage: &Path, binding: &Binding) -> Result<Vec<PublicationLineage>> {
     if !storage.exists(){return Ok(vec![]);}ordinary_dir(storage)?;let directory=storage.join("publications");if !directory.exists(){return Ok(vec![]);}ordinary_dir(&directory)?;
     let mut out=vec![];for entry in fs::read_dir(&directory)? {let path=entry?.path();if path.extension().and_then(|v|v.to_str())!=Some("json"){continue;}
