@@ -130,11 +130,16 @@ impl Service {
                                     &generation,
                                     id,
                                     |percent| {
-                                        apply_mode(&config, &modes, &mut state);
-                                        state
-                                            .progress
-                                            .insert(entry.id.clone(), percent.clamp(0., 100.));
-                                        publish(&mut state, &output);
+                                        let mode_changed = apply_mode(&config, &modes, &mut state);
+                                        let percent = percent.clamp(0., 100.);
+                                        let previous = state.progress.insert(entry.id.clone(), percent);
+                                        // The installer polls the transfer every few
+                                        // milliseconds; the screen shows whole percents, so
+                                        // only a change in that text is worth a revision (and
+                                        // a redraw).
+                                        if mode_changed || displayed_progress_changed(previous, percent) {
+                                            publish(&mut state, &output);
+                                        }
                                     },
                                 )?;
                                 if entry.archive {
@@ -311,17 +316,47 @@ fn set_mode(config: &Config, cpu: bool) -> Result<()> {
     Ok(())
 }
 
-fn apply_mode(config: &Config, pending: &AtomicU8, state: &mut Snapshot) {
+/// Applies a pending CPU/GPU choice; true when the snapshot changed because of it.
+fn apply_mode(config: &Config, pending: &AtomicU8, state: &mut Snapshot) -> bool {
     let value = pending.swap(0, Ordering::AcqRel);
     if value == 0 {
-        return;
+        return false;
     }
     if let Err(error) = set_mode(config, value == 2) {
         state.error = Some(error.to_string());
-        return;
+        return true;
     }
     state.cpu_only = value == 2;
     state.mode_reason = (value == 2).then(|| "chosen in the model manager".into());
+    true
+}
+
+/// The Models screen prints `{percent:.0}%` and draws a bar a few pixels per
+/// percent wide, so progress below a whole percent is invisible.
+fn displayed_progress_changed(previous: Option<f32>, next: f32) -> bool {
+    previous.is_none_or(|before| format!("{before:.0}") != format!("{next:.0}"))
+}
+
+#[cfg(test)]
+mod progress_gate_tests {
+    use super::displayed_progress_changed;
+
+    #[test]
+    fn sub_percent_polls_do_not_publish_a_revision() {
+        // The installer reports progress at its poll cadence (~50 Hz); only
+        // a change in the displayed whole percent may publish.
+        let mut published = 0;
+        let mut previous = Some(0.);
+        for step in 1..=5000 {
+            let next = step as f32 * 0.02; // 0.02% per poll up to 100%
+            if displayed_progress_changed(previous, next) { published += 1; }
+            previous = Some(next);
+        }
+        assert!(published <= 101, "{published} publishes for 5000 polls (old behaviour: 5000)");
+        assert!(displayed_progress_changed(Some(41.4), 41.6), "41% -> 42% is visible");
+        assert!(!displayed_progress_changed(Some(41.6), 41.9));
+        assert!(displayed_progress_changed(None, 0.));
+    }
 }
 
 #[cfg(test)]

@@ -117,6 +117,28 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                             }
                             Ok(serde_json::json!({"demandedFrames": demanded, "pendingCallbacks": callbacks, "dirtyTicks": dirtied, "trace": trace}))
                         }
+                        // First-run Models screen (D-02 N5): open it, start the fixture download,
+                        // and read the service's published progress.
+                        "open-models" => {
+                            handle.update(cx, |_, _, app| view.update(app, |p, cx| p.open_models(super::models::Origin::Manual, cx)))?;
+                            Ok(serde_json::json!({"models": true}))
+                        }
+                        "models-download" => {
+                            handle.update(cx, |_, _, app| view.update(app, |p, _| match &p.model_service {
+                                Some(service) => service.download(None),
+                                None => Err(anyhow::anyhow!("no model service")),
+                            }))??;
+                            Ok(serde_json::json!({"started": true}))
+                        }
+                        "models-state" => handle.update(cx, |_, _, app| {
+                            let snapshot = view.read(app).model_service.as_ref().map(|service| service.snapshot());
+                            Ok::<_, anyhow::Error>(match snapshot {
+                                Some(s) => serde_json::json!({"busy": s.busy, "revision": s.revision, "error": s.error,
+                                    "progress": s.progress.values().copied().fold(0f32, f32::max),
+                                    "requiredDone": s.required_done()}),
+                                None => serde_json::json!({"busy": false, "missing": true}),
+                            })
+                        })?,
                         "open-modal" | "close-modal" => {
                             // A notice is a real modal: the backdrop, the Close control and the
                             // modal clock freeze all engage (`output_covered`).

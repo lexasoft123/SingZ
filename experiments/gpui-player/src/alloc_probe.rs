@@ -36,11 +36,18 @@ mod imp {
     #[global_allocator]
     static ALLOCATOR: Counting = Counting;
 
+    /// Restores the nesting depth even if the measured code panics.
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = ACTIVE.try_with(|active| active.set(active.get().saturating_sub(1)));
+        }
+    }
+
     pub fn scope<R>(f: impl FnOnce() -> R) -> R {
         ACTIVE.with(|active| active.set(active.get() + 1));
-        let result = f();
-        ACTIVE.with(|active| active.set(active.get() - 1));
-        result
+        let _guard = Guard;
+        f()
     }
 
     pub fn count() -> u64 {

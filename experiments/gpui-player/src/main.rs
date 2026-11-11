@@ -5442,6 +5442,7 @@ impl Player {
 
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        waveform::release_evicted(window);
         self.sync_audio_provider(cx);
         #[cfg(feature="ui-tests")]
         self.notice_close_bounds.set(None);

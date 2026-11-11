@@ -6,6 +6,9 @@ display link and asserts, from the app's own counters:
   * an idle library, a paused player and an open modal each demand 0 frames (2 s
     quick check and 60 s N5 runs), counted from the window's own dirty state and
     pending next-frame callbacks, so nested entities are included;
+  * the first-run Models screen is idle at 0 frames, and a slow fixture download costs
+    at most one frame per visible percent (the installer's ~50 Hz polls used to present
+    ~50 frames/s);
   * the output meter decays to rest after Pause and then demands nothing;
   * a pan/zoom/resize sweep during playback causes 0 main-thread waveform rebuilds;
   * replaced and evicted waveform textures are released and the live count stays bounded;
@@ -39,10 +42,122 @@ def write_project(root, name, seconds=40):
     return project
 
 
+def make_action(scenario, child, out):
+    def action(name, budget=40, **arguments):
+        receipt = scenario / 'receipt.json'
+        receipt.unlink(missing_ok=True)
+        temporary_request = scenario / 'request.tmp'
+        temporary_request.write_text(json.dumps({'action': name, **arguments}))
+        temporary_request.rename(scenario / 'request.json')
+        deadline = time.monotonic() + budget
+        while not receipt.exists():
+            assert child.poll() is None, f'app exited during {name}; see {out}/app.log'
+            assert time.monotonic() < deadline, f'{name} step deadline exceeded'
+            time.sleep(.005)
+        value = json.loads(receipt.read_text())
+        assert value['action'] == name and value['completed'], value
+        return value['detail']
+    return action
+
+
+def models_phase(app, helper, out, failures, report):
+    """The first-run Models screen: idle with it open, and a slow fixture download.
+
+    The installer polls the transfer every few milliseconds, so publishing every poll
+    presented ~50 frames/s for the whole download. Frames must now track visible
+    change: at most one per whole percent shown.
+    """
+    import http.server
+    import threading
+    models_out = out / 'models'
+    models_out.mkdir(parents=True, exist_ok=True)
+    child = None
+    server = None
+    try:
+        with tempfile.TemporaryDirectory(prefix='singz-c70-models-') as temporary:
+            root = Path(temporary)
+            project = write_project(root, 'Gate')
+            scenario, config = root / 'scenario', root / 'config'
+            (config / 'models').mkdir(parents=True)
+            scenario.mkdir()
+            payload = b'GGUF' + b'x' * 2_000_000
+
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def log_message(self, *args):
+                    pass
+
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(len(payload)))
+                    self.end_headers()
+                    try:
+                        for i in range(40):  # ~10 s, 2.5% per chunk
+                            self.wfile.write(payload[len(payload) * i // 40:len(payload) * (i + 1) // 40])
+                            self.wfile.flush()
+                            time.sleep(.25)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+
+            server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+            server.daemon_threads = True
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            catalog = root / 'catalog.json'
+            catalog.write_text(json.dumps({'flavor': 'windows', 'entries': [{
+                'id': 'aligner', 'label': 'Precise word aligner', 'description': 'Fixture model.', 'optional': False, 'archive': False,
+                'parts': [{'file': 'aligner.onnx', 'url': f'http://127.0.0.1:{server.server_port}/aligner', 'mb': 2, 'minBytes': 4, 'kind': 'onnx'}]}]}))
+            environment = {key: value for key, value in os.environ.items() if not key.startswith('SINGZ_')}
+            environment.update(SINGZ_MUTE='1', SINGZ_NO_SYNC='1', SINGZ_NO_SYSTEM_ENGINES='1', SINGZ_GPUI_BACKGROUND='1',
+                SINGZ_GPUI_TEST_NO_CAPTURE='1', SINGZ_GPUI_CONFIG_DIR=str(config),
+                SINGZ_GPUI_PROJECTS_ROOT=str(root / 'library'), SINGZ_GPUI_TEST_PROJECT=str(project),
+                SINGZ_GPUI_PERF_SCENARIO=str(scenario), SINGZ_GPUI_AUDIO_HELPER=str(helper),
+                SINGZ_GPUI_MODEL_FIXTURE=str(catalog), SINGZ_MODELS_DIR=str(config / 'models'),
+                SINGZ_PACK_DIR=str(config / 'gpu-splitter'), SINGZ_PERF_STEP_TIMEOUT='30')
+            with (models_out / 'app.log').open('w') as log:
+                child = subprocess.Popen([str(app)], env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                action = make_action(scenario, child, models_out)
+                action('launch')
+                action('open-models')
+                idle = action('idle-window', settleSeconds=2, seconds=10)
+                report['modelsIdle'] = idle
+                if idle['demandedFrames'] != 0:
+                    failures.append(f'Models screen open and idle demanded {idle["demandedFrames"]} frames in 10 s (want 0)')
+                action('models-download')
+                deadline = time.monotonic() + 20
+                while not action('models-state')['busy']:
+                    assert time.monotonic() < deadline, 'fixture download never started'
+                    time.sleep(.05)
+                before = action('models-state')
+                window = action('idle-window', settleSeconds=0, seconds=5)
+                after = action('models-state')
+                visible_steps = round(after['progress']) - round(before['progress'])
+                report['modelsDownload'] = {'before': before, 'after': after, 'window': window, 'visiblePercentSteps': visible_steps}
+                if not after['busy'] or visible_steps < 1:
+                    failures.append(f'precondition: the download did not progress visibly in the window: {before} -> {after}')
+                if window['demandedFrames'] > visible_steps + 3:
+                    failures.append(f'Models screen demanded {window["demandedFrames"]} frames in 5 s for {visible_steps} visible percent steps (want at most steps + 3)')
+                deadline = time.monotonic() + 30
+                while action('models-state')['busy']:
+                    assert time.monotonic() < deadline, 'fixture download never finished'
+                    time.sleep(.1)
+                settled = action('idle-window', settleSeconds=2, seconds=10)
+                report['modelsAfterDownload'] = settled
+                if settled['demandedFrames'] != 0:
+                    failures.append(f'Models screen after the download demanded {settled["demandedFrames"]} frames in 10 s (want 0)')
+                action('quit')
+                child.wait(timeout=30)
+                child = None
+    finally:
+        if server is not None:
+            server.shutdown()
+        if child is not None and child.poll() is None:
+            os.killpg(child.pid, 9)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('app', type=Path)
     parser.add_argument('out', type=Path)
+    parser.add_argument('--only-models', action='store_true', help='run just the Models-screen phase')
     args = parser.parse_args()
     app, out = args.app.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -52,6 +167,12 @@ def main():
     child = None
     failures = []
     report = {}
+    if args.only_models:
+        models_phase(app, helper, out, failures, report)
+        (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+        assert not failures, '; '.join(failures)
+        print('OK', out / 'report.json')
+        return
     try:
         with tempfile.TemporaryDirectory(prefix='singz-c70-idle-') as temporary:
             root = Path(temporary)
@@ -170,6 +291,7 @@ def main():
     finally:
         if child is not None and child.poll() is None:
             os.killpg(child.pid, 9)
+    models_phase(app, helper, out, failures, report)
     report['failures'] = failures
     (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     assert not failures, '; '.join(failures)

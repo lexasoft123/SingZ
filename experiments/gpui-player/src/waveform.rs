@@ -102,12 +102,30 @@ fn queue_release(layers: Layers) {
     RELEASE_QUEUE.with_borrow_mut(|queue| queue.extend(layers.textures()));
 }
 
-fn drain_releases(window: &mut Window) {
+/// Hand every queued texture to `release`; returns how many there were.
+fn drain_with(mut release: impl FnMut(Arc<RenderImage>)) -> usize {
     let queued = RELEASE_QUEUE.with_borrow_mut(std::mem::take);
+    let count = queued.len();
     for image in queued {
+        release(image);
+    }
+    count
+}
+
+fn drain_releases(window: &mut Window) {
+    drain_with(|image| {
         let _ = window.drop_image(image);
         #[cfg(feature = "ui-tests")]
         TEXTURE_RELEASES.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Release textures evicted by a project change from any paint, not only a
+/// lane's: with no song painting (library, deleted project) nothing else would
+/// return them to the atlas. Cheap when the queue is empty.
+pub fn release_evicted(window: &mut Window) {
+    if RELEASE_QUEUE.with_borrow(|queue| !queue.is_empty()) {
+        drain_releases(window);
     }
 }
 
@@ -582,7 +600,7 @@ fn ensure_raster(lane: &Lane, view: (f64, f64), bounds: Bounds<Pixels>, dpr: f32
 
 #[cfg(test)]
 mod tests {
-    use super::{Layers, PAD, Raster, WaveformKey, RELEASE_QUEUE, accept_landed, mask, needs_raster, opacities, plan_raster, queue_release, usable};
+    use super::{drain_with, Layers, LAYERS, PAD, Raster, WaveformKey, RELEASE_QUEUE, accept_landed, mask, needs_raster, opacities, plan_raster, queue_release, usable};
     use gpui_kit::RenderImage;
     use image::RgbaImage;
     use std::sync::Arc;
@@ -714,6 +732,20 @@ mod tests {
         assert_eq!(opacities(1.0), (1.0, 0.0, 1.0));
         let muted = opacities(0.16);
         assert!((muted.0 - 0.1).abs() < 1e-6 && (muted.1 - 0.14).abs() < 1e-6 && muted.2 == 0.);
+    }
+
+    #[test]
+    fn evicting_a_project_releases_without_any_lane_paint() {
+        let image = || Arc::new(RenderImage::new(vec![image::Frame::new(RgbaImage::new(1, 1))]));
+        let layers = |n: u64| Layers { key: WaveformKey { project_revision: n, ..key() }, raster: plan_raster((0.4, 0.5), 800, 2.), base: image(), muted_bright: image(), audible_bright: image() };
+        LAYERS.with_borrow_mut(|cache| { cache[0] = Some(layers(1)); cache[1] = Some(layers(2)); });
+        super::set_project_peaks(std::array::from_fn(|_| vec![0.]));
+        // The old path left these queued until the next song's Base paint.
+        let mut released = 0;
+        let drained = drain_with(|_| released += 1);
+        assert_eq!((drained, released), (6, 6), "3 textures per evicted lane");
+        assert_eq!(LAYERS.with_borrow(|cache| cache.iter().filter(|slot| slot.is_some()).count()), 0);
+        assert_eq!(drain_with(|_| unreachable!()), 0, "queue is empty afterwards");
     }
 
     #[test]
