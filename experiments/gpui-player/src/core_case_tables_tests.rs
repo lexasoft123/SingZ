@@ -258,7 +258,20 @@ fn remote_entries(value: &Value) -> Vec<RemoteEntry> {
 
 fn native_plan(case: &Value) -> Result<Value, String> {
     let local = &case["local"];
-    let entries = |key: &str| -> Vec<LocalEntry> { serde_json::from_value(local[key].clone()).unwrap() };
+    // The shared table spells paths POSIX-style ("/library/Song/..."), which is
+    // not absolute on Windows; give them a drive there so the planner's
+    // absolute-path check sees the same input on every platform.
+    let entries = |key: &str| -> Vec<LocalEntry> {
+        let mut entries: Vec<LocalEntry> = serde_json::from_value(local[key].clone()).unwrap();
+        if cfg!(windows) {
+            for entry in &mut entries {
+                if !entry.path.is_absolute() {
+                    entry.path = std::path::PathBuf::from(format!("C:{}", entry.path.display()));
+                }
+            }
+        }
+        entries
+    };
     let snapshot = ProjectSnapshot {
         dir: local["dir"].as_str().unwrap().to_owned(),
         top: entries("top"),
@@ -275,9 +288,19 @@ fn native_plan(case: &Value) -> Result<Value, String> {
         stems: remote_entries(&remote["stems"]),
     };
     let plan = plan_project(&snapshot, &remote).map_err(|error| error.to_string())?;
+    let mut upload = serde_json::to_value(&plan.upload).unwrap();
+    if cfg!(windows) {
+        // Undo the drive prefix added above so the output compares against the
+        // table's POSIX spelling. Separators are untouched: the input kept "/".
+        for step in upload.as_array_mut().into_iter().flatten() {
+            if let Some(path) = step["path"].as_str().and_then(|p| p.strip_prefix("C:")) {
+                step["path"] = json!(path);
+            }
+        }
+    }
     Ok(json!({
         "dir": plan.dir,
-        "upload": serde_json::to_value(&plan.upload).unwrap(),
+        "upload": upload,
         "unchanged": plan.unchanged,
         "trash": serde_json::to_value(&plan.trash).unwrap(),
         "rows": serde_json::to_value(&plan.rows).unwrap(),
