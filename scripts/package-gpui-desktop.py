@@ -533,6 +533,9 @@ def build_installer(payload: Path, output: Path, *, runner=subprocess.run, env=N
         ordinary(staged)
         if config:
             sign_file(staged, config, runner)
+        # The private staging directory's protected DACL would otherwise travel with the
+        # file and lock the installer away from the non-elevated desktop session.
+        prepare_permissions(staged, output.parent)
         rename_exclusive(staged, output)
     return output
 

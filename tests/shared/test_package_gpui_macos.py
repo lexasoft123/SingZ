@@ -340,6 +340,149 @@ class AssemblyTests(unittest.TestCase):
         with package.ENTITLEMENTS.open('rb') as stream:
             self.assertEqual(plistlib.load(stream), {'com.apple.security.device.audio-input': True})
 
+    P12_ENV = {'SINGZ_SIGNING_KEYCHAIN_PATH': '/wrapper.keychain', 'SINGZ_ASC_KEY_PATH': '/key.p8',
+               'APP_STORE_CONNECT_API_KEY_ID': 'key-id', 'APP_STORE_CONNECT_API_ISSUER_ID': 'issuer',
+               'SINGZ_MAC_P12': '/secret/dev-id.p12', 'SINGZ_MAC_P12_PASSWORD': 'p12-secret-pw'}
+
+    def p12_runner(self, calls, fail_on=None):
+        fingerprint = 'B' * 40
+        def run(argv):
+            calls.append(list(argv))
+            verb = argv[1]
+            if fail_on and verb == fail_on:
+                raise package.PackageError('security failed; sensitive command details suppressed')
+            if verb == 'find-identity':
+                if argv[-1] == '/wrapper.keychain':
+                    return f'  1) {"C" * 40} "Apple Distribution: Example"'
+                return f'  1) {fingerprint} "Developer ID Application: Example (TEAM)"'
+            if verb == 'list-keychains' and '-s' not in argv:
+                return '    "/Users/x/Library/Keychains/login.keychain-db"\n    "/Library/Keychains/System.keychain"\n'
+            return ''
+        return run
+
+    def test_p12_import_into_temporary_keychain_then_cleanup(self):
+        import contextlib
+        calls = []
+        with contextlib.ExitStack() as stack:
+            identity, credentials = package.signing_configuration(self.P12_ENV, self.p12_runner(calls), stack)
+            self.assertEqual(identity, 'B' * 40)
+            temporary = credentials['keychain']
+            self.assertNotEqual(temporary, '/wrapper.keychain')
+            self.assertTrue(Path(temporary).parent.is_dir())
+            self.assertEqual(stat.S_IMODE(Path(temporary).parent.stat().st_mode), 0o700)
+            verbs = [c[1] for c in calls]
+            for step in ('create-keychain', 'unlock-keychain', 'import', 'set-key-partition-list'):
+                self.assertIn(step, verbs)
+            self.assertLess(verbs.index('import'), verbs.index('set-key-partition-list'))
+            imported = next(c for c in calls if c[1] == 'import')
+            self.assertEqual(imported[2], '/secret/dev-id.p12')
+            self.assertEqual(imported[imported.index('-k') + 1], temporary)
+            self.assertNotIn('/wrapper.keychain', imported)
+            self.assertFalse(any(c[1] in ('create-keychain', 'import', 'delete-keychain') and '/wrapper.keychain' in c for c in calls))
+            # Search list gained the temporary keychain in front of the originals.
+            added = next(c for c in calls if c[1:4] == ['list-keychains', '-d', 'user'] and '-s' in c and temporary in c)
+            self.assertEqual(added[added.index('-s') + 1], temporary)
+        # Context closed: search list restored without the temporary keychain, keychain deleted, directory gone.
+        restore = [c for c in calls if c[1] == 'list-keychains' and '-s' in c][-1]
+        self.assertNotIn(temporary, restore)
+        self.assertEqual(restore[restore.index('-s') + 1:], ['/Users/x/Library/Keychains/login.keychain-db', '/Library/Keychains/System.keychain'])
+        self.assertEqual([c for c in calls if c[1] == 'delete-keychain'], [['/usr/bin/security', 'delete-keychain', temporary]])
+        self.assertFalse(Path(temporary).parent.exists())
+
+    def test_p12_path_not_used_when_wrapper_keychain_has_developer_id(self):
+        import contextlib
+        calls = []
+        def run(argv):
+            calls.append(argv)
+            return f'  1) {"D" * 40} "Developer ID Application: Example"'
+        with contextlib.ExitStack() as stack:
+            identity, credentials = package.signing_configuration(self.P12_ENV, run, stack)
+        self.assertEqual((identity, credentials['keychain']), ('D' * 40, '/wrapper.keychain'))
+        self.assertEqual([c[1] for c in calls], ['find-identity'])
+
+    def test_p12_requires_password_and_stack(self):
+        import contextlib
+        calls = []
+        env = dict(self.P12_ENV)
+        with contextlib.ExitStack() as stack:
+            self.assertEqual(package.signing_configuration(env, self.p12_runner(calls)), ('-', None))
+            del env['SINGZ_MAC_P12_PASSWORD']
+            self.assertEqual(package.signing_configuration(env, self.p12_runner(calls), stack), ('-', None))
+        self.assertFalse(any(c[1] in ('create-keychain', 'import') for c in calls))
+
+    def test_p12_cleanup_runs_when_import_or_later_signing_fails(self):
+        import contextlib
+        for fail_on in ('import', 'set-key-partition-list'):
+            calls = []
+            before = set(Path(tempfile.gettempdir()).glob('singz-signing-*'))
+            with self.assertRaises(package.PackageError):
+                with contextlib.ExitStack() as stack:
+                    package.signing_configuration(self.P12_ENV, self.p12_runner(calls, fail_on), stack)
+            self.assertEqual(len([c for c in calls if c[1] == 'delete-keychain']), 1, fail_on)
+            self.assertEqual(set(Path(tempfile.gettempdir()).glob('singz-signing-*')), before)
+        # A failure after a successful import (e.g. signing) also cleans up.
+        calls = []
+        with self.assertRaises(RuntimeError):
+            with contextlib.ExitStack() as stack:
+                package.signing_configuration(self.P12_ENV, self.p12_runner(calls), stack)
+                raise RuntimeError('signing blew up')
+        self.assertEqual(len([c for c in calls if c[1] == 'delete-keychain']), 1)
+        self.assertTrue([c for c in calls if c[1] == 'list-keychains' and '-s' in c][-1][-2:] == ['/Users/x/Library/Keychains/login.keychain-db', '/Library/Keychains/System.keychain'])
+
+    def test_p12_cleanup_failure_does_not_mask_error_or_skip_steps(self):
+        import contextlib
+        calls = []
+        base = self.p12_runner(calls)
+        def run(argv):
+            if argv[1] == 'delete-keychain' or (argv[1] == 'list-keychains' and '-s' in argv and 'singz-signing' not in ' '.join(argv)):
+                calls.append(list(argv))
+                raise package.PackageError('security failed')
+            return base(argv)
+        with self.assertRaises(ValueError):
+            with contextlib.ExitStack() as stack:
+                package.signing_configuration(self.P12_ENV, run, stack)
+                raise ValueError('original')
+        self.assertTrue(any(c[1] == 'delete-keychain' for c in calls))
+
+    def test_p12_redaction(self):
+        import contextlib, io
+        from unittest.mock import patch
+        import subprocess
+        # Real `command` with a failing security: nothing sensitive in the error.
+        with patch.object(package.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, [], stderr='p12-secret-pw Developer ID Application: Example')):
+            with self.assertRaises(package.PackageError) as error:
+                with contextlib.ExitStack() as stack:
+                    package.signing_configuration(self.P12_ENV, package.command, stack)
+        for text in ('p12-secret-pw', 'Developer ID', '/secret/dev-id.p12'):
+            self.assertNotIn(text, str(error.exception))
+        # Non-PackageError runner failures are replaced by a generic message.
+        def exploding(argv):
+            if argv[1] == 'import':
+                raise OSError('p12-secret-pw leaked')
+            return self.p12_runner([])(argv)
+        with self.assertRaises(package.PackageError) as error:
+            with contextlib.ExitStack() as stack:
+                package.signing_configuration(self.P12_ENV, exploding, stack)
+        self.assertNotIn('p12-secret-pw', str(error.exception))
+        # Identity names and passwords never reach stdout/stderr.
+        out, err = io.StringIO(), io.StringIO()
+        with patch('sys.stdout', out), patch('sys.stderr', err):
+            with contextlib.ExitStack() as stack:
+                package.signing_configuration(self.P12_ENV, self.p12_runner([]), stack)
+        self.assertNotIn('p12-secret-pw', out.getvalue() + err.getvalue())
+        self.assertNotIn('Developer ID', out.getvalue() + err.getvalue())
+
+    def test_p12_refuses_unreadable_search_list(self):
+        import contextlib
+        calls = []
+        def run(argv):
+            calls.append(list(argv))
+            return ''
+        with self.assertRaises(package.PackageError):
+            with contextlib.ExitStack() as stack:
+                package.signing_configuration(self.P12_ENV, run, stack)
+        self.assertFalse(any(c[1] in ('create-keychain', 'delete-keychain') or (c[1] == 'list-keychains' and '-s' in c) for c in calls))
+
     def test_release_notary_and_dmg_commands_and_redaction(self):
         credentials = {'key': '/secret/key.p8', 'key_id': 'secret-key-id', 'issuer': 'secret-issuer', 'keychain': '/secret/keychain'}
         package.release_artifacts(self.output, self.base / 'out.dmg', 'Developer ID', credentials, run=lambda a: self.commands.append(a) or ('{"status":"Accepted"}' if 'submit' in a else ''))

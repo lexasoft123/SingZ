@@ -6,6 +6,7 @@ so that recording hashes cannot invalidate the bundle signature).
 """
 from __future__ import annotations
 import argparse
+import contextlib
 import ctypes
 import hashlib
 import importlib.util
@@ -15,6 +16,8 @@ from pathlib import Path
 import plistlib
 import posixpath
 import re
+import secrets
+import shutil
 import stat
 import subprocess
 import sys
@@ -215,20 +218,92 @@ def command(argv: list[str]) -> str:
 ENTITLEMENTS = ROOT / 'experiments/gpui-player/packaging/macos/audio-input.plist'
 
 
-def signing_configuration(env: dict, run=command) -> tuple[str, dict | None]:
-    # Only the wrapper-provided keychain is searched. It must already contain
-    # an unlocked Developer ID identity; importing a p12 requires a password.
+DEVELOPER_ID = re.compile(r'\b([0-9A-Fa-f]{40})\s+"Developer ID Application: [^"\n]+"')
+
+
+@contextlib.contextmanager
+def temporary_p12_keychain(p12: str, password: str, run=command):
+    """Import a Developer ID p12 into a throwaway keychain; yield its path.
+
+    The keychain lives in a private temp directory under a random password and
+    is searched by this process's signing commands only for as long as the
+    context lasts. The user's login keychain and the wrapper keychain are never
+    modified, apart from the user keychain search list, which is restored (the
+    temporary entry removed) on every exit path. Nothing here prints a password
+    or an identity name, and `command` suppresses argv/stderr for `security`.
+    `security import` has no file/stdin form for its passphrase, so -P puts the
+    p12 password in the argv of that one short-lived child.
+    """
+    directory = Path(tempfile.mkdtemp(prefix='singz-signing-'))
+    keychain = str(directory / 'signing.keychain-db')
+    local_password = secrets.token_urlsafe(32)
+    original: list[str] | None = None
+    created = False
+    try:
+        try:
+            os.chmod(directory, 0o700)
+            listing = run(['/usr/bin/security', 'list-keychains', '-d', 'user'])
+            listed = re.findall(r'^\s*"([^"\n]+)"\s*$', listing, re.M)
+            if not listed:
+                raise PackageError('Cannot read the user keychain search list; refusing to change it')
+            original = listed
+            run(['/usr/bin/security', 'create-keychain', '-p', local_password, keychain])
+            created = True
+            run(['/usr/bin/security', 'set-keychain-settings', '-lut', '7200', keychain])
+            run(['/usr/bin/security', 'unlock-keychain', '-p', local_password, keychain])
+            run(['/usr/bin/security', 'import', p12, '-k', keychain, '-f', 'pkcs12', '-P', password,
+                 '-T', '/usr/bin/codesign'])
+            run(['/usr/bin/security', 'set-key-partition-list', '-S', 'apple-tool:,apple:',
+                 '-s', '-k', local_password, keychain])
+            run(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', keychain, *original])
+        except PackageError:
+            raise
+        except Exception:
+            raise PackageError('Temporary signing keychain setup failed; sensitive details suppressed') from None
+        yield keychain
+    finally:
+        # Each cleanup step is independent so one failure cannot skip the rest,
+        # and none may mask the original error.
+        failed = False
+        if original is not None:
+            try:
+                run(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', *original])
+            except Exception:
+                failed = True
+        if created:
+            try:
+                run(['/usr/bin/security', 'delete-keychain', keychain])
+            except Exception:
+                failed = True
+        shutil.rmtree(directory, ignore_errors=True)
+        if failed:
+            print('Warning: temporary signing keychain cleanup did not complete; check `security list-keychains -d user`.', file=sys.stderr)
+
+
+def signing_configuration(env: dict, run=command, stack: contextlib.ExitStack | None = None) -> tuple[str, dict | None]:
+    # The wrapper keychain is searched first and must already be unlocked. If it
+    # holds no Developer ID Application identity but the wrapper provided the
+    # p12 and its password, import them into a temporary keychain whose cleanup
+    # is registered on `stack` (the caller keeps it open until signing is done).
     keychain = env.get('SINGZ_SIGNING_KEYCHAIN_PATH')
     names = ('SINGZ_ASC_KEY_PATH', 'APP_STORE_CONNECT_API_KEY_ID', 'APP_STORE_CONNECT_API_ISSUER_ID')
-    if not keychain or not all(env.get(name) for name in names):
+    if not all(env.get(name) for name in names):
         return '-', None
-    identities = run(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning', keychain])
-    matches = re.findall(r'\b([0-9A-Fa-f]{40})\s+"Developer ID Application: [^"\n]+"', identities)
-    if not matches:
+    credentials = {'key': env[names[0]], 'key_id': env[names[1]], 'issuer': env[names[2]]}
+    if keychain:
+        matches = DEVELOPER_ID.findall(run(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning', keychain]))
+        if len(matches) > 1:
+            raise PackageError('Expected exactly one Developer ID Application identity in the signing keychain')
+        if matches:
+            return matches[0], {**credentials, 'keychain': keychain}
+    p12, password = env.get('SINGZ_MAC_P12'), env.get('SINGZ_MAC_P12_PASSWORD')
+    if not (p12 and password and stack is not None):
         return '-', None
+    temporary = stack.enter_context(temporary_p12_keychain(p12, password, run))
+    matches = DEVELOPER_ID.findall(run(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning', temporary]))
     if len(matches) != 1:
-        raise PackageError('Expected exactly one Developer ID Application identity in the signing keychain')
-    return matches[0], {'key': env[names[0]], 'key_id': env[names[1]], 'issuer': env[names[2]], 'keychain': keychain}
+        raise PackageError('Expected exactly one Developer ID Application identity in the p12')
+    return matches[0], {**credentials, 'keychain': temporary}
 
 
 def sign_bundle(bundle: Path, dependencies: list[dict], identity: str, run=command, keychain: str | None = None) -> None:
@@ -611,11 +686,12 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
             if reported_arch not in app_image['architectures']:
                 raise PackageError('Native build-info architecture does not match payload')
         if release:
-            identity, credentials = ('-', None) if ad_hoc_sign else signing_configuration(os.environ if env is None else env, run)
-            if identity == '-':
-                print('Developer ID identity or notary credentials unavailable; using ad-hoc signing (not notarized).', file=sys.stderr)
-            sign_bundle(bundle, dependencies, identity, run, credentials.get('keychain') if credentials else None)
-            release_artifacts(bundle, staging / dmg_path.name, identity, credentials, run)
+            with contextlib.ExitStack() as signing_stack:
+                identity, credentials = ('-', None) if ad_hoc_sign else signing_configuration(os.environ if env is None else env, run, signing_stack)
+                if identity == '-':
+                    print('Developer ID identity or notary credentials unavailable; using ad-hoc signing (not notarized).', file=sys.stderr)
+                sign_bundle(bundle, dependencies, identity, run, credentials.get('keychain') if credentials else None)
+                release_artifacts(bundle, staging / dmg_path.name, identity, credentials, run)
             ad_hoc_sign = identity == '-'
         elif ad_hoc_sign:
             sign_bundle(bundle, dependencies, '-', run)

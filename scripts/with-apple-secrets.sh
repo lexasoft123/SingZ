@@ -178,6 +178,13 @@ done
 if [ -n "${SINGZ_MAC_P12_PASSWORD:-}" ]; then
   export SINGZ_MAC_P12_PASSWORD
 fi
+# The Developer ID .p12 itself sits beside the store. The native macOS
+# packager imports it into a temporary keychain when the signing keychain has
+# no Developer ID Application identity. A path, not a secret.
+if [ -z "${SINGZ_MAC_P12:-}" ] && [ -f "$(dirname "$store")/singz-mac-sign.p12" ]; then
+  SINGZ_MAC_P12="$(dirname "$store")/singz-mac-sign.p12"
+  export SINGZ_MAC_P12
+fi
 
 # The Apple ID login, when the store carries it. Two decisions:
 #
