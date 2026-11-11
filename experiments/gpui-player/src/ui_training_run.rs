@@ -8,6 +8,26 @@ pub(super) fn draw(window: &mut Window, cx: &mut App) {
         let _ = window.draw(cx);
     }
 }
+/// A fresh profile opens What's New once a project loads and its backdrop swallows
+/// the first click. Wait for startup to settle, then close it the way its own close
+/// control does (the hidden window gives the modal no keyboard focus).
+pub(super) async fn settle_whats_new(handle: AnyWindowHandle, view: &Entity<Player>, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if handle.update(cx, |_, _, cx| { let p = view.read(cx); p.release_startup_ready && p.model_auto_checked })? { break; }
+        anyhow::ensure!(std::time::Instant::now() < deadline, "Startup did not settle (release_startup_ready && model_auto_checked)");
+        cx.background_executor().timer(Duration::from_millis(20)).await;
+    }
+    if handle.update(cx, |_, _, cx| view.read(cx).whats_new.read(cx).is_open())? {
+        handle.update(cx, |_, _, cx| { let notes = view.read(cx).whats_new.clone(); notes.update(cx, |notes, cx| notes.close(cx)); })?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while handle.update(cx, |_, _, cx| view.read(cx).whats_new.read(cx).is_open())? {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "What's New did not close");
+            cx.background_executor().timer(Duration::from_millis(20)).await;
+        }
+    }
+    Ok(())
+}
 pub(super) fn click(window: &mut Window, cx: &mut App, position: Point<Pixels>) {
     window.dispatch_event(
         PlatformInput::MouseMove(MouseMoveEvent {

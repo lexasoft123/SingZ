@@ -138,6 +138,8 @@ http.server.HTTPServer(('127.0.0.1', port), Handler).serve_forever()
     original_project = {'version': 2, 'name': 'project-1280', 'songFile': 'song.wav', 'foreignProject': {'keep': True}, 'settings': {'transpose': 2, 'tempo': 1, 'masterVolume': .7,
         'metronome': {'grid': False, 'click': False, 'countInBars': 0, 'volume': .7, 'accent': True}, 'melody': {'detVersion': 4, 'hopSec': .025, 'f0': 'x480'}}}
     original_lyrics = {'source': 'lrclib', 'credit': 'keep-credit', 'foreignLyrics': {'keep': True}, 'lines': lines}
+    # The lyrics sidebar (and its Edit link) only exists in Karaoke view, which is a stored preference.
+    (prefs / 'audio.json').write_text(json.dumps({'karaoke': True}))
     (project / 'project.json').write_text(json.dumps(original_project))
     (project / 'lyrics.json').write_text(json.dumps(original_lyrics))
     shutil.copyfile(vocals, project / 'song.wav')

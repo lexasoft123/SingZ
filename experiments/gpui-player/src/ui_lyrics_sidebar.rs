@@ -226,6 +226,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             macro_rules! press {($id:expr)=>{handle.update(cx,|_,w,cx|press(&view,w,cx,$id))??;};}
             macro_rules! open {($name:expr)=>{{let path=root.join($name);handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(path.clone(),cx)))?;
                 wait!(p,w,app=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==path)&&state(p,w,app)["status"]=="ready"&&state(p,w,app)["showsLyrics"]==true);
+                super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
             }};}
             macro_rules! shot {($name:expr,$expected:expr)=>{handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&$name,$expected))??;};}
             macro_rules! both {($name:expr)=>{{for(width,height)in[(1280.,800.),(1060.,640.)]{handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;wait!(p,w,app=>w.viewport_size()==size(px(width),px(height)));shot!(format!("{}-{}",$name,width as i32),Some((width,height)));}}};}

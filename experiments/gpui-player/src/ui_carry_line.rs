@@ -68,7 +68,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   macro_rules! wait{($p:ident,$app:ident=>$condition:expr)=>{{let deadline=Instant::now()+Duration::from_secs(30);loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,$app|{let $p=view.read($app);$condition})?{break;}anyhow::ensure!(Instant::now()<deadline,"Carry timeout: {}",stringify!($condition));}}};}
   macro_rules! action{($id:expr)=>{{handle.update(cx,|_,w,cx|press(&view,w,cx,$id))??;wait!(p,cx=>p.carry_flight.carry.is_none()&&p.last_playback_status.as_ref().is_some_and(|s|s.carry_revision==p.native_carry_revision));}};}
   if stage=="restart"{
-   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;wait!(p,cx=>!p.loading&&p.project.is_some()&&p.native_carry_revision>0);
+   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;wait!(p,cx=>!p.loading&&p.project.is_some()&&p.native_carry_revision>0);super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.carry.enabled&&p.carry.config.mode==carry_line::Mode::Lines&&p.carry.config.hear==2&&p.carry.config.sing==1&&p.carry.config.stems==["custom-harmony-0"]&&p.muted[2],"Restart lost Carry or independent manual mute");toggle(&view,w,cx)})??;wait!(p,cx=>p.carry_open);handle.update(cx,|_,w,cx|snapshot(&view,w,cx,&out,"saved-restart"))??;
    let fresh=PathBuf::from(std::env::var_os("SINGZ_GPUI_CARRY_FRESH_PROJECT").unwrap());handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(fresh.clone(),cx)))?;wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|s|s.dir==fresh));
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(!p.carry.enabled&&p.carry.config.mode==carry_line::Mode::Lines&&p.carry.config.hear==2&&p.carry.config.sing==1,"Global fallback enabled a fresh project or lost config");toggle(&view,w,cx)})??;wait!(p,cx=>p.carry_open);handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let state=view.read(cx).carry_popover.read(cx).state(w,cx);anyhow::ensure!(state["caption"]=="No synced lyrics yet — alternating by time until they load.","Missing lyric caption changed");snapshot(&view,w,cx,&out,"global-fallback-disabled")})??;
@@ -76,7 +76,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    let crowded=PathBuf::from(std::env::var_os("SINGZ_GPUI_CARRY_CROWDED").unwrap());
    for(width,height)in[(1280.,800.),(1060.,640.)]{
     handle.update(cx,|_,w,cx|{w.resize(size(px(width),px(height)));view.update(cx,|p,cx|p.open_project(crowded.clone(),cx));})?;
-    wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==crowded&&p.lane_specs.len()==16));
+    wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==crowded&&p.lane_specs.len()==16));super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
     handle.update(cx,|_,w,cx|toggle(&view,w,cx))??;wait!(p,cx=>p.carry_open);
     let order=handle.update(cx,|_,w,cx|->anyhow::Result<Vec<String>>{draw(w,cx);let ui=view.read(cx).carry_popover.clone();let card=ui.read(cx).bounds("carry-card").unwrap();anyhow::ensure!(card.top()>=px(52.)&&card.bottom()<=w.viewport_size().height&&card.left()>=px(0.)&&card.right()<=w.viewport_size().width,"Maximum-lane card escaped viewport: {card:?}");snapshot(&view,w,cx,&out,&format!("crowded-top-{}",width as u32))?;Ok(ui.read(cx).state(w,cx)["focusOrder"].as_array().unwrap().iter().map(|v|v.as_str().unwrap().to_owned()).collect())})??;
     let mut reached=std::collections::BTreeSet::new();
@@ -99,7 +99,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    let (_,fingerprint)=project_store::read(&target_dir,"project.json")?;
    let target=source_jobs::Target{dir:target_dir.clone(),fingerprint,lyrics_fingerprint:lyrics_store::identity(&target_dir)?};
    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_source_output(source_jobs::Output{publication_hash:None,path:working.clone(),working:true,target:Some(target)},None,cx)))?;
-   wait!(p,cx=>!p.loading&&p.source_working&&p.project.as_ref().is_some_and(|p|p.dir==working)&&p.lyric_document.lines.len()==6);
+   wait!(p,cx=>!p.loading&&p.source_working&&p.project.as_ref().is_some_and(|p|p.dir==working)&&p.lyric_document.lines.len()==6);super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
    handle.update(cx,|_,w,cx|toggle(&view,w,cx))??;wait!(p,cx=>p.carry_open);
    action!("carry-on");
    let gate=PathBuf::from(std::env::var_os("SINGZ_GPUI_CARRY_GATE").unwrap());let ready=gate.with_extension("ready");let _=std::fs::remove_file(&ready);
@@ -122,8 +122,16 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    for(width,height)in[(1280.,800.),(1060.,640.)]{
     handle.update(cx,|_,w,cx|{w.resize(size(px(width),px(height)));view.update(cx,|p,cx|{p.notice=None;p.open_project(project.clone(),cx);});})?;
     let deadline=Instant::now()+Duration::from_secs(5);loop{if handle.update(cx,|_,w,_|w.viewport_size()==size(px(width),px(height)))?{break;}cx.background_executor().timer(Duration::from_millis(20)).await;anyhow::ensure!(Instant::now()<deadline,"Carry viewport resize did not settle");}
-    wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|p|p.lane_specs.len()==6)&&p.lyric_document.lines.len()==6&&p.last_playback_status.is_some());
+    wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|p|p.lane_specs.len()==6)&&p.lyric_document.lines.len()==6&&p.last_playback_status.is_some());super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
     let(epoch,old_status)=handle.update(cx,|_,w,cx|->anyhow::Result<_>{let p=view.read(cx);let old=p.last_playback_status.clone().unwrap();let epoch=p.native_epoch;anyhow::ensure!(!p.carry.enabled&&p.muted[2],"Fixture disabled/manual mute state changed");toggle(&view,w,cx)?;Ok((epoch,old))})??;wait!(p,cx=>p.carry_open);
+    // The popover registers its focusable controls while painting; Tab-test only once the order is non-empty.
+    let deadline=Instant::now()+Duration::from_secs(30);
+    loop{
+     let ready=handle.update(cx,|_,w,cx|{draw(w,cx);let ui=view.read(cx).carry_popover.clone();let state=ui.read(cx).state(w,cx);state["focusOrder"].as_array().is_some_and(|order|!order.is_empty())})?;
+     if ready{break;}
+     anyhow::ensure!(Instant::now()<deadline,"Carry timeout: popover never exposed a focusable control");
+     cx.background_executor().timer(Duration::from_millis(20)).await;
+    }
     handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let ui=view.read(cx).carry_popover.clone();let before=ui.read(cx).state(w,cx);anyhow::ensure!(before["caption"]=="Guide plays 10 s, then you take the next 10 s.","Default time caption changed");anyhow::ensure!(ui.read(cx).state(w,cx)["scrollMax"]==serde_json::json!([0.0,0.0]),"Ordinary Carry layout has spurious scroll overflow");snapshot(&view,w,cx,&out,&format!("off-{}",width as u32))?;let order=before["focusOrder"].as_array().unwrap();for _ in 0..order.len()+2{let before=ui.read(cx).state(w,cx);let expected=&order[(order.iter().position(|v|v==&before["focusedControl"]).map(|i|i+1).unwrap_or(0))%order.len()];key(w,cx,"tab");let after=ui.read(cx).state(w,cx);anyhow::ensure!(after["focusInside"]==true&&after["focusedControl"]==*expected&&after["keyboardFocus"]==true,"Carry Tab skipped/escaped actual control");}key(w,cx,"shift-tab");Ok(())})??;
     // Last selected lane is guarded by the real button, not only validation.
     let serial=handle.update(cx,|_,_,cx|view.read(cx).carry_flight.carry.serial())?;action!("carry-lane-0");anyhow::ensure!(handle.update(cx,|_,_,cx|{let p=view.read(cx);p.carry_flight.carry.serial()==serial&&p.carry.config.stems==["vocals"]})?,"Last selected stem was removed");

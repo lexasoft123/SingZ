@@ -147,7 +147,10 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 edit!();
             }};}
             handle.update(cx,|_,w,cx|{w.resize(size(px(1280.),px(800.)));view.update(cx,|p,cx|p.open_project(project.clone(),cx));})?;
-            wait!(p,w,app => !p.loading&&p.project.as_ref().is_some_and(|p|p.dir==project));edit!();
+            wait!(p,w,app => !p.loading&&p.project.as_ref().is_some_and(|p|p.dir==project));
+            super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
+            // The sidebar job must settle before Edit is clickable.
+            wait!(p,w,app => p.karaoke&&p.lyrics_flight.lyrics_sidebar.is_none()&&p.lyrics_sidebar.read(app).is_ready());edit!();
 
             press!("lyed-align");wait!(p,w,app => state(p,w,app)["consent"].is_array());
             handle.update(cx,|_,w,cx|->anyhow::Result<()>{let s=state(view.read(cx),w,cx);anyhow::ensure!(s["consent"][0]==false&&s["consent"][2]==false,"Wrong missing speech model consent");Ok(())})??;

@@ -113,6 +113,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx, |_, w, _| w.resize(size(px(1280.), px(800.))))?;
             handle.update(cx, |_, _, cx| view.update(cx, |p, cx| p.open_project(project.clone(), cx)))?;
             wait!("open", |p: &Player| !p.loading && p.project.as_ref().is_some_and(|v| v.dir == project) && p.last_playback_status.is_some());
+            super::ui_training_run::settle_whats_new(handle, &view, cx).await?;
             let duration = handle.update(cx, |_, _, cx| view.read(cx).duration)?;
             anyhow::ensure!(duration > 40., "Fixture song is too short for the zoomed view: {duration}");
             let (start, span) = (10., 8.);

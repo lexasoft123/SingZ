@@ -11,7 +11,16 @@ fn settle(w: &mut Window, cx: &mut App) {
     for _ in 0..100 { w.simulate_next_frame(cx); w.refresh(); let _ = w.draw(cx); }
 }
 fn fixture(p: &mut Player, text: &str, position: f64, cx: &mut Context<Player>) -> anyhow::Result<()> {
-    let lines: Vec<_> = (0..24).map(|i| serde_json::json!({"text":text,"start":60.+i as f32*8.,"end":66.+i as f32*8.})).collect();
+    // Saved text-only lines intentionally carry no words until the editor opens them
+    // (project_lyrics tests), and the wrap/overflow layout is built from words: give
+    // each line explicit evenly timed words so the fixture exercises real wrapping.
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let lines: Vec<_> = (0..24).map(|i| {
+        let (start, end) = (60.+i as f32*8., 66.+i as f32*8.);
+        let step = (end - start) / tokens.len() as f32;
+        let words: Vec<_> = tokens.iter().enumerate().map(|(j, w)| serde_json::json!({"w":w,"s":start+j as f32*step,"e":start+(j+1) as f32*step})).collect();
+        serde_json::json!({"text":text,"start":start,"end":end,"words":words})
+    }).collect();
     p.lyric_document = Arc::new(project_lyrics::from_value(&serde_json::json!({"source":"edited","credit":"Horizontal scrolling fixture","lines":lines}))?.ok_or_else(||anyhow::anyhow!("Empty fixture"))?);
     p.shape_cache.borrow_mut().clear();
     *p.layout_cache.borrow_mut() = None;

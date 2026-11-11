@@ -32,7 +32,10 @@ with tempfile.TemporaryDirectory(prefix='singz-export-ui-') as tmp:
   label='Backing vocals' if i==0 else f'Custom {i} — long stored harmony label 🎤'
   relative=f'stems/{id}.wav';tone(project/relative,800+100*i)
   custom.append({'id':id,'label':label,'color':'#a98cff','file':relative});sources.append({'id':id,'frequency':800+100*i,'path':str(project/relative)})
- raw={'version':2,'name':'Export originals','settings':{'custom':custom,'masterVolume':0,'transpose':7,'tempo':1.25,'tracks':{id:{'volume':0,'muted':True} for id,_ in builtin}},'foreign':{'preserve':'metadata and source ownership'}}
+ raw={'version':2,'name':'Export originals','settings':{'custom':custom,'masterVolume':0,'transpose':7,'tempo':1.25,'tracks':{id:{'volume':0,'muted':True} for id,_ in builtin},
+  # Current-stamp analysis so opening the project does not auto-analyse and auto-save over the source.
+  'beat':{'beats':[0,.5],'bpm':120,'beatsPerBar':4,'downbeat':0,'downbeats':[0],'autoDownbeats':[0],'source':'auto','detVersion':23},
+  'melody':{'detVersion':4,'hopSec':.01,'f0':' '.join(['2400']*30)}},'foreign':{'preserve':'metadata and source ownership'}}
  (project/'project.json').write_text(json.dumps(raw));(project/'lyrics.json').write_text('{"source":"edited","lines":[],"credit":"Keep"}');(project/'foreign.txt').write_text('Never modify source project for export.')
  before=tree(project);helper=app.with_name('singz-gpui-audio.exe' if os.name=='nt' else 'singz-gpui-audio')
  env={k:v for k,v in os.environ.items() if not k.startswith('SINGZ_GPUI_') and k not in ['SINGZ_PACK_DIR','SINGZ_MODELS_DIR','SINGZ_DEMUCS']}

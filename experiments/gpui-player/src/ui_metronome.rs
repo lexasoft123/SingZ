@@ -204,6 +204,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let height=if width==1280. {800.}else{640.};
                 handle.update(cx,|_,w,cx|{w.resize(size(px(width),px(height)));view.update(cx,|p,cx|p.open_project(original.clone(),cx));})?;
                 wait!(|p:&Player|!p.loading&&p.project.is_some()&&p.song_title.as_str()=="Metronome fixture");
+                super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
                 handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.metronome.click&&p.metronome.count_in_bars==1&&(p.metronome.volume-0.3).abs()<1e-8&&!p.metronome.accent&&p.beats.as_ref().is_some_and(|g|(g.bpm-300.).abs()<1e-6&&g.source=="auto"),"Saved metronome was not restored: {:?} {:?}",p.metronome,p.beats);Ok(())})??;
                 let (paused_position,paused_seeks,closed_graph,closed_edit_seq)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);anyhow::ensure!(!p.playing&&p.playhead.pending_seek().is_none()&&p.playhead.position().abs()<=2.0/44_100.0,"Paused source fixture did not open at zero");Ok((p.playhead.position(),p.playhead.seek_count(),p.native_graph,p.edit_seq))})??;
                 macro_rules! paused_check {($stage:expr)=>{{handle.update(cx,|_,_,cx|paused_unchanged(&view,cx,paused_position,paused_seeks,$stage))??;}};}

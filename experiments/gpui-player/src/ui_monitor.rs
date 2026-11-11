@@ -59,6 +59,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(path.clone(),cx)))?;
             let deadline=Instant::now()+Duration::from_secs(30);
             loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|view.read(cx).project.is_some()&&view.read(cx).mic_prefs_valid)?{break;}anyhow::ensure!(Instant::now()<deadline,"Project did not load");}
+            super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.request_tempo(0.8,cx);p.request_transpose(-2,cx);p.native_command("loop 0 10".into(),cx);p.native_command("lane 0 0.37 0 1".into(),cx);p.native_transport(transport::TransportEvent::Play,cx);} ))?;
             let deadline=Instant::now()+Duration::from_secs(5);
             loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|view.read(cx).playing&&view.read(cx).playhead.position()>0.2&&!view.read(cx).rate_busy()&&view.read(cx).tempo==0.8&&view.read(cx).transpose==-2)?{break;}anyhow::ensure!(Instant::now()<deadline,"Playback did not advance");}
@@ -96,9 +97,20 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             // the persistent header owns the only Stop action outside the modal.
             handle.update(cx,|_,_,cx|{let settings=view.read(cx).settings.clone();let mut prefs=view.read(cx).mic_prefs.clone();prefs.headphones=true;settings.update(cx,|_,cx|cx.emit(settings::SettingsEvent::InputPrefs(prefs)));})?;
             cx.background_executor().timer(Duration::from_millis(30)).await;
-            handle.update(cx,|_,window,cx|->anyhow::Result<()>{draw(window,cx);let bounds=view.read(cx).settings.read(cx).field_bounds("settings-monitor-start").ok_or_else(||anyhow::anyhow!("Monitor retry button not measured"))?;click(window,cx,bounds.center());Ok(())})??;
+            // Playback grows the runtime-graph card, so the Settings page is no longer at the offset
+            // the first Start used. Scroll the measured button into view like a person would.
+            handle.update(cx,|_,window,cx|->anyhow::Result<()>{
+                let mut bounds=None;
+                for _ in 0..4{
+                    draw(window,cx);
+                    let b=view.read(cx).settings.read(cx).field_bounds("settings-monitor-start").ok_or_else(||anyhow::anyhow!("Monitor retry button not measured"))?;
+                    if b.top()>=px(160.)&&b.bottom()<=px(700.){bounds=Some(b);break;}
+                    window.dispatch_event(PlatformInput::Scroll(ScrollEvent{position:point(px(800.),px(450.)),delta:ScrollDelta::Pixels(point(px(0.),px(430.)-b.center().y)),..Default::default()}),cx);
+                }
+                let bounds=bounds.ok_or_else(||anyhow::anyhow!("Monitor retry button could not be scrolled into view"))?;
+                click(window,cx,bounds.center());Ok(())})??;
             let deadline=Instant::now()+Duration::from_secs(10);
-            loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|{let p=view.read(cx);p.monitor_flight.monitor_parked&&p.mic_view.phase==microphone::Phase::Monitoring&&p.mic_view.owner==3})?{break;}anyhow::ensure!(Instant::now()<deadline,"Header Stop fixture did not acquire monitor");}
+            loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|{let p=view.read(cx);p.monitor_flight.monitor_parked&&p.mic_view.phase==microphone::Phase::Monitoring&&p.mic_view.owner==3})?{break;}if Instant::now()>=deadline{let detail=handle.update(cx,|_,_,cx|{let p=view.read(cx);format!("phase={:?} owner={} parked={} requested={} busy={} notice={:?} error={:?} headphones={} screen={:?} playing={} valid={} rate_busy={} loading={} provider={} route={:?} channel={} serial={} nativephase={:?}",p.mic_view.phase,p.mic_view.owner,p.monitor_flight.monitor_parked,p.monitor_flight.monitor_requested,p.monitor_busy(),p.notice,p.settings.read(cx).monitor_error(),p.mic_prefs.headphones,p.screen==Screen::Settings,p.playing,p.mic_prefs_valid,p.rate_busy(),p.loading,p.provider_flight.audio_provider.is_some(),p.settings.read(cx).monitor_route(),p.mic_prefs.channel,p.mic_serial,p.mic_view.phase)})?;handle.update(cx,|_,window,cx|{draw(window,cx);if let Ok(image)=window.render_to_image(){let _=image.save(out.join("monitor-start-failure.png"));}})?;anyhow::bail!("Header Stop fixture did not acquire monitor: {detail}");}}
             handle.update(cx,|_,window,cx|{draw(window,cx);window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent{keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),cx);})?;
             let deadline=Instant::now()+Duration::from_secs(5);
             loop{cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|view.read(cx).screen==Screen::Player)?{break;}anyhow::ensure!(Instant::now()<deadline,"Settings Escape did not restore player");}

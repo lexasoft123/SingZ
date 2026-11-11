@@ -302,9 +302,12 @@ impl MetPopover {
         self.reset_input(w, cx);
     }
     fn finish_draft(&mut self, w: &mut Window, cx: &mut Context<Self>) {
-        if self.focused(w, cx) {
+        let focused = self.focused(w, cx);
+        if finish_commits(focused, self.draft) {
             self.commit(w, cx);
-            cx.emit(Event::FocusPlayer);
+            if focused {
+                cx.emit(Event::FocusPlayer);
+            }
         }
     }
     fn emit(&self, cx: &mut Context<Self>) {
@@ -426,9 +429,24 @@ impl MetPopover {
     }
 }
 
+/// A button click finishes the BPM draft whether or not the input still holds focus:
+/// the mouse-down that precedes the click may already have moved focus, and the Blur
+/// that would commit the draft is only delivered to an active window.
+fn finish_commits(focused: bool, draft: bool) -> bool {
+    focused || draft
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TapSession;
+    use super::{finish_commits, TapSession};
+
+    #[test]
+    fn click_commits_a_pending_draft_after_focus_already_moved() {
+        assert!(finish_commits(false, true), "unfocused pending draft must still commit");
+        assert!(finish_commits(true, false));
+        assert!(finish_commits(true, true));
+        assert!(!finish_commits(false, false), "nothing pending, nothing to commit");
+    }
 
     #[test]
     fn reopened_popover_needs_three_fresh_taps() {
