@@ -12,6 +12,8 @@ export const confirmationSafeChoice = (confirmation: Confirmation): 'keep' | 'ca
 export interface JourneyState {
   page: JourneyPage
   setupStage: SetupStage
+  /** Stage where Settings opened setup; Back from it returns to Settings instead of an earlier step. */
+  setupEntry: SetupStage | null
   networkReturn: 'home' | 'setup'
   confirmation: PendingConfirmation | null
   committed: 'installing' | 'rollback' | null
@@ -27,7 +29,7 @@ export type JourneyAction =
   | { type: 'platform'; snapshot: BoxPlatformSnapshot }
 export const setupStages: readonly SetupStage[] = ['boot', 'welcome', 'remote', 'network', 'audio', 'account', 'done']
 export const initialJourney = (page: JourneyPage = 'home'): JourneyState => ({
-  page, setupStage: 'boot', networkReturn: page === 'setup' ? 'setup' : 'home',
+  page, setupStage: 'boot', setupEntry: null, networkReturn: page === 'setup' ? 'setup' : 'home',
   confirmation: null, committed: null, focusRevision: 0
 })
 const focus = (state: JourneyState, patch: Partial<JourneyState>): JourneyState =>
@@ -41,7 +43,7 @@ export function journeyReducer(state: JourneyState, action: JourneyAction): Jour
       const networkReturn = action.page === 'network' ? (state.page === 'setup' ? 'setup' : 'home') : state.networkReturn
       return focus(state, { page: action.page, confirmation: null, networkReturn })
     }
-    case 'open-setup': return focus(state, { page: 'setup', setupStage: action.stage ?? state.setupStage, confirmation: null })
+    case 'open-setup': return focus(state, { page: 'setup', setupStage: action.stage ?? state.setupStage, setupEntry: action.stage ?? null, confirmation: null })
     case 'setup-stage': return focus(state, { page: 'setup', setupStage: action.stage, confirmation: null })
     case 'setup-step': {
       const index = setupStages.indexOf(state.setupStage)
@@ -70,6 +72,9 @@ export function journeyBack(state: JourneyState): { state: JourneyState; effect:
   if (state.committed) return { state, effect: 'locked' }
   if (state.page === 'network' && state.networkReturn === 'setup') {
     return { state: focus(state, { page: 'setup', setupStage: 'network' }), effect: 'consumed' }
+  }
+  if (state.page === 'setup' && state.setupEntry === state.setupStage) {
+    return { state: focus(state, { page: 'home', setupEntry: null }), effect: 'consumed' }
   }
   if (state.page === 'setup' && state.setupStage !== 'boot') {
     const index = setupStages.indexOf(state.setupStage)

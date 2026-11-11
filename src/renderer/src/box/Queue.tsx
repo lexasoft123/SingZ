@@ -1,6 +1,7 @@
 import { Button } from '@singz/ui'
 import type { ProjectListItem } from '../../../shared/types'
 import { t, tn } from './i18n'
+import { playbackStatusKey, type PlaybackStatus } from './playback-status'
 import type { CatalogRow } from './Catalog'
 import { catalogState } from './catalog-state'
 import { StateBadge } from './StateBadge'
@@ -15,6 +16,7 @@ export function Queue({
   active,
   position,
   playing,
+  status,
   canPlay = true,
   onRemember,
   onChoose,
@@ -30,6 +32,7 @@ export function Queue({
   active: BoxActiveSong | null
   position: number
   playing: boolean
+  status: PlaybackStatus
   canPlay?: boolean
   onRemember: (dir: string | null) => void
   onChoose: (item: ProjectListItem) => void
@@ -45,7 +48,7 @@ export function Queue({
   return <main className="queue-main" data-surface="queue" aria-label={t('box.queue.label')}>
     <div className="queue-heading"><h1>{t('box.navigation.queue')}</h1><span>{tn('box.catalog.songs', items.length, { count: items.length })}</span><span className="queue-policy">{t('box.queue.policy')}</span></div>
     <div className="queue-current">
-      <span>{active ? playing ? t('box.player.playing') : t('box.player.paused') : t('box.queue.noCurrent')}</span>
+      <span>{active ? t(playbackStatusKey[status]) : t('box.queue.noCurrent')}</span>
       <strong>{active ? parseSongName(active.item.name).title : '—'}</strong>
       <span className="queue-time">{active ? `${timeText(position)} / ${timeText(active.metadata.duration ?? 0)}` : '—'}</span>
       {active && <Button data-queue-toggle disabled={!canPlay} onClick={onToggle}>{playing ? t('box.player.pause') : t('box.player.play')}</Button>}

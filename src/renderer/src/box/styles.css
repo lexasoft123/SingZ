@@ -49,8 +49,10 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .box-navigation button.on { color: var(--sz-text); background: color-mix(in srgb, var(--sz-line-strong) 52%, transparent); }
 .box-utilities { margin-left: auto; display: flex; align-items: center; gap: 24px; }
 .box-utilities .pill { font-size: 17px; padding: 8px 16px; }
-.box-connection { display: flex; gap: 9px; align-items: center; font-size: 15px; color: var(--sz-dim); }
-.connection-dot { width: 7px; height: 7px; background: var(--sz-success); border-radius: 50%; }
+.box-utilities button[data-here="true"] { color: var(--sz-accent); border-color: var(--sz-accent); box-shadow: inset 0 -3px 0 var(--sz-accent); font-weight: 700; }
+.box-utilities button[data-here="true"]::before { content: "▸ "; }
+.box-current-song { display: inline-flex; align-items: center; gap: 8px; max-width: 320px; }
+.box-current-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .box-main { height: 836px; padding: var(--box-page-top) var(--box-page-x) var(--box-page-bottom); display: grid; grid-template-rows: 64px 48px 56px minmax(0, 1fr) 44px; min-height: 0; }
 .box-heading { display: flex; gap: 18px; align-items: baseline; }
 .box-heading h1, .queue-heading h1 { font-size: var(--box-title-size); letter-spacing: -.025em; line-height: var(--box-title-line); font-weight: 700; margin: 0; }

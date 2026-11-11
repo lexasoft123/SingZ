@@ -5,7 +5,7 @@ import { tSettings } from './settings-i18n'
 export function BoxNavigation({
   section,
   queueCount,
-  hasCurrent,
+  currentName,
   onCatalog,
   onQueue,
   onCurrent,
@@ -14,7 +14,7 @@ export function BoxNavigation({
 }: {
   section: 'catalog' | 'queue' | 'settings' | 'account'
   queueCount: number
-  hasCurrent: boolean
+  currentName: string | null
   onCatalog: () => void
   onQueue: () => void
   onCurrent: () => void
@@ -34,10 +34,9 @@ export function BoxNavigation({
       onChange={value => value === 'catalog' ? onCatalog() : value === 'queue' ? onQueue() : onSettings()}
     />
     <div className="box-utilities">
-      <span className="box-connection"><span className="connection-dot" />{t('box.navigation.local')}</span>
-      <Button data-focus="account" aria-current={section === 'account' ? 'page' : undefined} onClick={onAccount}>{t('box.navigation.account')}</Button>
-      <Button data-focus="settings" aria-current={section === 'settings' ? 'page' : undefined} onClick={onSettings}>{tSettings('box.settings.navigation')}</Button>
-      {hasCurrent && <Button data-focus="current-song" onClick={onCurrent}>{t('box.navigation.current')}</Button>}
+      <Button data-focus="account" aria-current={section === 'account' ? 'page' : undefined} data-here={section === 'account' ? 'true' : undefined} onClick={onAccount}>{t('box.navigation.account')}</Button>
+      <Button data-focus="settings" aria-current={section === 'settings' ? 'page' : undefined} data-here={section === 'settings' ? 'true' : undefined} onClick={onSettings}>{tSettings('box.settings.navigation')}</Button>
+      {currentName !== null && <Button className="box-current-song" data-focus="current-song" aria-label={t('box.navigation.currentNamed', { name: currentName })} onClick={onCurrent}><span aria-hidden="true">♪</span><span className="box-current-name">{currentName}</span></Button>}
     </div>
   </header>
 }

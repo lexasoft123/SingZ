@@ -7,7 +7,7 @@ import { prepareBoxLocale } from '../../src/renderer/src/box/i18n'
 function render(master: number, stem = 1) {
   const onMasterVolume = vi.fn(), onVolume = vi.fn(), noop = vi.fn()
   const html = renderToStaticMarkup(createElement(Mixer, { tab: 'main', tracks: [{ id: 'vocals', volume: stem, muted: false, solo: false }],
-    masterVolume: master, playing: false, canPlay: true, onMasterVolume, onVolume,
+    masterVolume: master, playing: false, status: 'paused', canPlay: true, onMasterVolume, onVolume,
     onMuted: noop, onSolo: noop, onTab: noop, onToggle: noop, onClose: noop }))
   return { html, onMasterVolume, onVolume }
 }

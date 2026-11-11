@@ -105,11 +105,28 @@ export function sideExit(scope: HTMLElement, active: HTMLElement, targets: HTMLE
   return candidates.find(target => target.dataset.current === 'true') ?? candidates[0] ?? null
 }
 
+/** Sliders that Left/Right adjust natively keep the arrow. A mixer level at its
+ * maximum has nothing left to raise, so Right moves on to that row's Mute/Solo. */
+export function rangeOwnsArrow(target: HTMLElement, key: string): boolean {
+  if (!target.matches('input[type="range"]') || (key !== 'ArrowLeft' && key !== 'ArrowRight')) return false
+  if (key === 'ArrowRight' && target.dataset.mixLevel !== undefined && Number((target as HTMLInputElement).value) >= Number((target as HTMLInputElement).max)) return false
+  return true
+}
+
+/** The mixer opens on the remembered channel when it still exists, else the first level. */
+export function pickMixerFocusId(levelIds: string[], remembered: string | null): string | null {
+  return remembered !== null && levelIds.includes(remembered) ? remembered : levelIds[0] ?? null
+}
+
+/** `data-remote-axis="vertical"` controls (the player seek bar) are not part of the
+ * Left/Right chain: they are reached with Up through a `data-remote-up` group and left with Down. */
+const isVerticalOnly = (element: HTMLElement): boolean => element.dataset.remoteAxis === 'vertical'
+
 export function moveSpatialFocus(scope: HTMLElement, direction: RemoteDirection): boolean {
   if (scope.dataset.surface === 'mix' && (direction === 'ArrowUp' || direction === 'ArrowDown')) {
     return moveMixerChannelFocus(scope, direction)
   }
-  const targets = remoteTargets(scope)
+  let targets = remoteTargets(scope)
   if (targets.length === 0) return false
   const active = document.activeElement instanceof HTMLElement ? document.activeElement : null
   if (!active || !targets.includes(active)) {
@@ -117,6 +134,9 @@ export function moveSpatialFocus(scope: HTMLElement, direction: RemoteDirection)
     targets[0].scrollIntoView({ block: 'nearest', inline: 'nearest' })
     return true
   }
+  const horizontal = direction === 'ArrowLeft' || direction === 'ArrowRight'
+  if (horizontal && isVerticalOnly(active)) return false
+  if (horizontal) targets = targets.filter(target => !isVerticalOnly(target))
   const next = sideExit(scope, active, targets, direction) ?? explicitExit(scope, active, targets, direction) ?? nearestInDirection(active, targets, direction)
   if (!next) return false
   next.focus({ preventScroll: true })
