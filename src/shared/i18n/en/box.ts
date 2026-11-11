@@ -147,6 +147,8 @@ export const box = {
   'box.switch.title': 'Switch songs?',
   'box.switch.current': '{name} will stop when the new project is ready.',
   'box.switch.next': '{name} opens paused at the beginning. Its queue entry stays in place.',
+  'box.switch.start': '{name} starts playing from the beginning.',
+  'box.switch.advance': '{name} starts playing from the beginning. The song that just played leaves the queue.',
   'box.switch.cancel': 'Keep current song',
   'box.switch.confirm': 'Switch song',
   'box.hints.browse': 'Browse',

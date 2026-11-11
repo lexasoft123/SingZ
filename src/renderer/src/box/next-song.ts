@@ -46,3 +46,9 @@ export function queueAfterAdvance<R>(refs: readonly R[], playedRef: R | null): R
 export function songLine(title: string, artist: string | null | undefined): string {
   return artist ? `${title} — ${artist}` : title
 }
+
+/** Switch-dialog wording for Next: it starts the target, and the song that just played
+ * only leaves the queue when it was queued. */
+export function nextSwitchMode(currentDir: string | null, items: readonly QueueSong[]): 'start' | 'advance' {
+  return currentDir !== null && items.some(item => item.dir === currentDir) ? 'advance' : 'start'
+}

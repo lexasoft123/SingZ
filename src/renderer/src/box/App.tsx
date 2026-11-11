@@ -25,7 +25,7 @@ import { tSettings } from './settings-i18n'
 import { BoxSettingsNavigator, accountReturnFromHub, detailsReturnRoute, overlayReturnRoute, type BoxRoute } from './settings-navigation'
 import { SongDetails } from './SongDetails'
 import { StartupOverlay } from './StartupOverlay'
-import { SwitchDialog } from './SwitchDialog'
+import { SwitchDialog, type SwitchMode } from './SwitchDialog'
 import { BoxTransport } from './transport'
 import { cancelPreviewStart } from './preview-start'
 import { BoxNavigation } from './Navigation'
@@ -40,7 +40,7 @@ import {
 } from './collection/queue'
 import { parseSongName } from './song-identity'
 import { moveQueueRefInView } from './queue-model'
-import { endedFocusControl, nextNeedsConfirmation, nextQueued, queueAfterAdvance } from './next-song'
+import { endedFocusControl, nextNeedsConfirmation, nextSwitchMode, nextQueued, queueAfterAdvance } from './next-song'
 import { resolveCollectionSelection, type CollectionEntry } from './collection/types'
 import { hydrateBoxLocally } from './collection/startup'
 import './collection/collection.css'
@@ -154,7 +154,7 @@ export default function BoxApp(): React.JSX.Element {
   const hydrationGeneration = useRef(0)
   const openIntent = useRef(new LatestOpenIntent())
   const previewStartIntent = useRef<number | null>(null)
-  const pendingSwitchStart = useRef(false)
+  const pendingSwitchMode = useRef<SwitchMode>('paused')
   /** Set by Next: when `to` opens, `from` (the song that just played) leaves the queue. */
   const advance = useRef<{ from: string; to: string } | null>(null)
   const finishAdvance = useRef<(from: string) => void>(() => undefined)
@@ -516,7 +516,7 @@ export default function BoxApp(): React.JSX.Element {
     if (metronomeBlocked.current || !entry.local) return
     const current = transport.getSnapshot()
     if (current.active && current.active.item.dir !== entry.local.dir && (current.playing || current.starting)) {
-      pendingSwitchStart.current = true
+      pendingSwitchMode.current = 'start'
       setPendingSwitch(entry)
     } else void openNow(entry, true)
   }, [openNow, transport])
@@ -560,7 +560,7 @@ export default function BoxApp(): React.JSX.Element {
       openDetails(entry)
       return
     }
-    pendingSwitchStart.current = false
+    pendingSwitchMode.current = 'paused'
     setPendingSwitch(entry)
   }, [allEntries, collectionSnapshot.rows, goCurrent, openDetails, queueRefs, snapshot.active])
 
@@ -573,7 +573,7 @@ export default function BoxApp(): React.JSX.Element {
     if (!entry.local || collectionSnapshot.rows[entry.id]?.inspection?.readiness !== 'ready') { openDetails(entry); return }
     advance.current = current ? { from: current, to: next.dir } : null
     if (nextNeedsConfirmation(playbackStatus(snapshot))) {
-      pendingSwitchStart.current = true
+      pendingSwitchMode.current = nextSwitchMode(current, queueItems)
       setPendingSwitch(entry)
     } else void openNow(entry, true)
   }, [allEntries, collectionSnapshot.rows, openDetails, openNow, queueItems, queueRefs, snapshot])
@@ -1037,7 +1037,7 @@ export default function BoxApp(): React.JSX.Element {
           onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }}
         />}
         {route === 'player' && mixOpen && <Mixer microphones={microphones} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} status={playbackStatus(snapshot)} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
-        {pendingSwitch?.local && <SwitchDialog active={active} target={pendingSwitch.local} onCancel={() => { advance.current = null; setPendingSwitch(null) }} onConfirm={() => void openNow(pendingSwitch, pendingSwitchStart.current)} />}
+        {pendingSwitch?.local && <SwitchDialog active={active} mode={pendingSwitchMode.current} target={pendingSwitch.local} onCancel={() => { advance.current = null; setPendingSwitch(null) }} onConfirm={() => void openNow(pendingSwitch, pendingSwitchMode.current !== 'paused')} />}
         {(queueError || queueSnapshot.loading) && route !== 'player' && route !== 'home' && <div className="box-state-toast" role="alert">
           <span>{queueSnapshot.loading ? t('box.queue.loading') : queueError}</span>
           {!queueSnapshot.loaded && !queueSnapshot.loading && <button type="button" onClick={() => { void hydrate(false) }}>{t('app.retry')}</button>}

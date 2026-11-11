@@ -151,6 +151,8 @@ export const box: Record<keyof typeof english | 'box.catalog.songs_few' | 'box.c
   'box.switch.title': 'Переключить песню?',
   'box.switch.current': '{name} остановится, когда новый проект будет готов.',
   'box.switch.next': '{name} откроется на паузе с начала и останется в очереди.',
+  'box.switch.start': '{name} начнёт играть с начала.',
+  'box.switch.advance': '{name} начнёт играть с начала. Только что сыгранная песня уйдёт из очереди.',
   'box.switch.cancel': 'Оставить текущую песню',
   'box.switch.confirm': 'Переключить песню',
   'box.hints.browse': 'Выбор',

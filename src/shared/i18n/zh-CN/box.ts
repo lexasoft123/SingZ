@@ -149,6 +149,8 @@ export const box: Record<keyof typeof english, string> = {
   'box.switch.title': '要切换歌曲吗？',
   'box.switch.current': '新项目准备好后，{name}将停止。',
   'box.switch.next': '{name}将从头开始并保持暂停，且仍留在队列中。',
+  'box.switch.start': '{name}将从头开始播放。',
+  'box.switch.advance': '{name}将从头开始播放，刚播完的歌曲会离开队列。',
   'box.switch.cancel': '保留当前歌曲',
   'box.switch.confirm': '切换歌曲',
   'box.hints.browse': '浏览',
