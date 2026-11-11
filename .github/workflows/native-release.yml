@@ -1,0 +1,574 @@
+name: Native Desktop Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing v* tag to build; blank uses the selected ref'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SINGZ_NATIVE_JOBS: '2'
+  SINGZ_BUILD_JOBS: '2'
+  SINGZ_MUTE: '1'
+  SINGZ_NO_SYNC: '1'
+
+jobs:
+  resolve:
+    name: Resolve native release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      channel: ${{ steps.meta.outputs.channel }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+      - id: meta
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:-${GITHUB_REF#refs/tags/}}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::Native releases require a v<semver> tag"; exit 1;
+          }
+          version="${tag#v}"
+          test "$(node -p 'require("./package.json").version')" = "${version%%-*}" || {
+            echo "::error::package.json version does not match $tag"; exit 1;
+          }
+          if [[ "$tag" == *-* ]]; then channel=beta; else channel=stable; fi
+          dry_run=false
+          if [[ "$tag" == *-test* ]]; then dry_run=true; fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "channel=$channel"
+            echo "dry_run=$dry_run"
+          } >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS native (${{ matrix.arch }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache vendored GPUI crates
+        uses: actions/cache@v4
+        with:
+          path: experiments/gpui-player/vendor
+          key: gpui-vendor-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('experiments/gpui-player/vendor-patches/**', 'scripts/gpui-vendor.py') }}
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: gpui-cargo-home-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/vendor.lock') }}
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: experiments/gpui-player/target
+          key: gpui-target-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-${{ github.sha }}
+          restore-keys: gpui-target-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-
+      - name: Materialize vendored GPUI crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/gpui-vendor.py
+          python3 scripts/gpui-vendor.py --check
+      - name: Inject Google Drive OAuth client
+        env:
+          GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$GDRIVE_CONFIG" ]]; then
+            if [[ "${{ needs.resolve.outputs.dry_run }}" != true ]]; then
+              echo "::error::GDRIVE_CONFIG is required for a non-dry-run native tag"; exit 1
+            fi
+            echo "::warning::No GDRIVE_CONFIG on the -test dry-run path; packaging without --require-drive-config"
+          else
+            mkdir -p mobile
+            printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
+            echo "SINGZ_DRIVE_CONFIGURED=1" >> "$GITHUB_ENV"
+          fi
+      - name: Cache pinned FFmpeg codec pack
+        id: codec-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/ffmpeg-codec/darwin-${{ matrix.arch }}
+          key: gpui-codec-darwin-${{ matrix.arch }}-${{ hashFiles('third_party/ffmpeg-codec/profile.json', 'scripts/gpui-codec-runtime.py') }}
+      - name: Build pinned FFmpeg codec pack
+        if: steps.codec-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/ffmpeg-8.0.1.tar.xz"
+          curl -fL --retry 3 --output "$archive" https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
+          test "$(shasum -a 256 "$archive" | awk '{print $1}')" = 05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41
+          python3 scripts/gpui-codec-runtime.py build --target darwin-${{ matrix.arch }} \
+            --pack-dir "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/darwin-${{ matrix.arch }}" \
+            --source-archive "$archive" --work-dir "$RUNNER_TEMP/gpui-codec-work" --jobs 2
+      - name: Verify pinned FFmpeg codec pack
+        shell: bash
+        run: python3 scripts/gpui-codec-runtime.py inspect --target darwin-${{ matrix.arch }} --pack-dir "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/darwin-${{ matrix.arch }}"
+      - name: Build native UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/native-build"
+          node scripts/with-native-build-lock.mjs --owner native-release-ui-${{ matrix.arch }} -- \
+            cargo build --manifest-path experiments/gpui-player/Cargo.toml --release --locked \
+            >"$RUNNER_TEMP/native-build/cargo-ui.log" 2>&1
+      - name: Build native helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/native-build"
+          node scripts/with-native-build-lock.mjs --owner native-release-helpers-${{ matrix.arch }} -- \
+            python3 scripts/build-gpui-native.py --codec-pack "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/darwin-${{ matrix.arch }}" --jobs 2 \
+            --output-dir experiments/gpui-player/target/release \
+            >"$RUNNER_TEMP/native-build/cargo-helpers.log" 2>&1
+      - name: Build native engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/vendor-llama.sh darwin-${{ matrix.arch }}
+          bash scripts/vendor-crispasr.sh darwin-${{ matrix.arch }}
+      - name: Prepare Apple signing secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$APPLE_CERTIFICATE" || -z "$APPLE_CERTIFICATE_PASSWORD" || -z "$ASC_KEY" || -z "$ASC_KEY_ID" || -z "$ASC_ISSUER" ]]; then
+            echo "::error::macOS native release requires Developer ID and notarization secrets"; exit 1
+          fi
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/native-signing.p12"
+          printf '%s' "$ASC_KEY" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/native-signing.p12" "$RUNNER_TEMP/AuthKey.p8"
+          {
+            echo "SINGZ_MAC_P12=$RUNNER_TEMP/native-signing.p12"
+            echo "SINGZ_ASC_KEY_PATH=$RUNNER_TEMP/AuthKey.p8"
+            echo "APP_STORE_CONNECT_API_KEY_ID=$ASC_KEY_ID"
+            echo "APP_STORE_CONNECT_API_ISSUER_ID=$ASC_ISSUER"
+          } >> "$GITHUB_ENV"
+      - name: Package signed and notarized DMG
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SINGZ_MAC_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          target="macos-${{ matrix.arch }}"
+          package_version="${VERSION%%-*}"
+          mkdir -p dist vendor/native-engines
+          cp "vendor/darwin-${{ matrix.arch }}/llama-server" vendor/native-engines/
+          cp "vendor/darwin-${{ matrix.arch }}/crispasr" vendor/native-engines/
+          experiments/gpui-player/target/release/singz-gpui-player --native-build-info > "$RUNNER_TEMP/native-build-info.json"
+          # Drive config is required whenever it was injected; only a -test
+          # dry run may lack it (the inject step already rejected other tags).
+          # Empty-array expansion form is safe on macOS bash 3.2 under set -u.
+          drive_args=()
+          if [[ -n "${SINGZ_DRIVE_CONFIGURED:-}" ]]; then drive_args=(--require-drive-config); fi
+          python3 scripts/package-gpui-macos.py \
+            --runtime-dir experiments/gpui-player/target/release \
+            --output "dist/SingZ-native-${VERSION}-${target}.app" \
+            --version "$package_version" --engines-dir vendor/native-engines \
+            --font-license-dir experiments/gpui-player/assets \
+            ${drive_args[@]+"${drive_args[@]}"} \
+            --build-info-file "$RUNNER_TEMP/native-build-info.json"
+          test -s "dist/SingZ-native-${VERSION}-${target}.dmg"
+      - name: Build signed update archive and manifest
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+          UPDATE_KEY: ${{ secrets.SINGZ_UPDATE_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="macos-${{ matrix.arch }}"
+          mkdir -p dist/updates
+          if [[ -n "$UPDATE_KEY" ]]; then
+            printf '%s' "$UPDATE_KEY" > "$RUNNER_TEMP/update-key.pem"
+            chmod 600 "$RUNNER_TEMP/update-key.pem"
+            SINGZ_UPDATE_PRIVATE_KEY="$RUNNER_TEMP/update-key.pem" python3 scripts/sign-gpui-update.py \
+              --payload "dist/SingZ-native-${VERSION}-${target}.app" --version "$VERSION" --target "$target" \
+              --channel "$CHANNEL" --out-dir dist/updates
+          else
+            if [[ "$DRY_RUN" != true ]]; then
+              echo "::error::SINGZ_UPDATE_PRIVATE_KEY is required for every non-test native release (stable and beta); refusing to publish an unsigned manifest"
+              exit 1
+            fi
+            echo "::warning::SINGZ_UPDATE_PRIVATE_KEY is absent; building an unsigned manifest for the -test dry run only (it is never published)"
+            python3 - "$VERSION" "$CHANNEL" "$target" "dist/SingZ-native-${VERSION}-${target}.app" dist/updates <<'PY'
+          import hashlib, importlib.util, json, pathlib, sys
+          version, channel, target, payload, out = sys.argv[1:]
+          spec = importlib.util.spec_from_file_location('sign_gpui_update', 'scripts/sign-gpui-update.py')
+          signer = importlib.util.module_from_spec(spec); spec.loader.exec_module(signer)
+          out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
+          archive = out / f"singz-native-{target}.zip"
+          # The packager's own archiver: ditto on macOS (symlinks, exec bits), one payload root.
+          signer.make_zip(pathlib.Path(payload).resolve(), archive)
+          manifest = out / f"singz-native-{target}.update.json"
+          manifest.write_text(json.dumps({'schema': 1, 'version': version, 'channel': channel, 'target': target, 'archive': {'name': archive.name, 'bytes': archive.stat().st_size, 'sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}, 'rollbackFloor': '0.26.0'}, separators=(',', ':')))
+          PY
+          fi
+      - name: Show native build log tails
+        if: failure()
+        shell: bash
+        run: |
+          for log in "$RUNNER_TEMP"/native-build/*.log "$RUNNER_TEMP"/gpui-codec-work/*/config.log; do
+            [[ -f "$log" ]] || continue
+            echo "::group::tail -n 120 $log"; tail -n 120 "$log"; echo "::endgroup::"
+          done
+      - name: Clean up signing material
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/native-signing.p12" "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/update-key.pem"
+      - name: Upload native macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: singz-native-macos-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            dist/SingZ-native-*.dmg
+            dist/updates/singz-native-*.zip
+            dist/updates/singz-native-*.update.json*
+
+  windows:
+    name: Windows native (unsigned NSIS)
+    needs: resolve
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache vendored GPUI crates
+        uses: actions/cache@v4
+        with:
+          path: experiments/gpui-player/vendor
+          key: gpui-vendor-${{ runner.os }}-x64-${{ hashFiles('experiments/gpui-player/vendor-patches/**', 'scripts/gpui-vendor.py') }}
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: gpui-cargo-home-${{ runner.os }}-x64-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/vendor.lock') }}
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: experiments/gpui-player/target
+          key: gpui-target-${{ runner.os }}-x64-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-${{ github.sha }}
+          restore-keys: gpui-target-${{ runner.os }}-x64-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-
+      - name: Materialize vendored GPUI crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/gpui-vendor.py
+          python3 scripts/gpui-vendor.py --check
+      - name: Inject Google Drive OAuth client
+        env:
+          GDRIVE_CONFIG: ${{ secrets.GDRIVE_CONFIG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$GDRIVE_CONFIG" ]]; then
+            if [[ "${{ needs.resolve.outputs.dry_run }}" != true ]]; then
+              echo "::error::GDRIVE_CONFIG is required for a non-dry-run native tag"; exit 1
+            fi
+            echo "::warning::No GDRIVE_CONFIG on the -test dry-run path; packaging without --require-drive-config"
+          else
+            mkdir -p mobile
+            printf '%s' "$GDRIVE_CONFIG" > mobile/gdrive.config.json
+            echo "SINGZ_DRIVE_CONFIGURED=1" >> "$GITHUB_ENV"
+          fi
+      - name: Cache pinned FFmpeg codec pack
+        id: codec-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/ffmpeg-codec/win32-x64
+          key: gpui-codec-win32-x64-${{ hashFiles('third_party/ffmpeg-codec/profile.json', 'scripts/gpui-codec-runtime.py') }}
+      # FFmpeg's MSVC build (scripts/build-ffmpeg-codec-runtime.sh, win32-x64) needs
+      # an MSYS2 shell that already sees cl.exe/link.exe/lib.exe from an x64 MSVC
+      # developer environment, plus make. MSVC first, then MSYS2 inheriting its PATH.
+      - name: Download pinned FFmpeg source
+        if: steps.codec-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --output "$RUNNER_TEMP/ffmpeg-8.0.1.tar.xz" https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
+          test "$(sha256sum "$RUNNER_TEMP/ffmpeg-8.0.1.tar.xz" | awk '{print $1}')" = 05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41
+      - name: Set up MSVC x64 developer environment
+        if: steps.codec-cache.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+      - name: Set up MSYS2 (make, diffutils) on top of MSVC
+        if: steps.codec-cache.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@40677d36a502eb2cf0fb808cc9dec31bf6152638 # v2.28.0
+        with:
+          msystem: MSYS
+          update: false
+          path-type: inherit
+          install: make diffutils
+      - name: Build pinned FFmpeg codec pack
+        if: steps.codec-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          # MSYS2 ships /usr/bin/link.exe (coreutils ln); it shadows MSVC's linker
+          # and breaks FFmpeg's --ld=link.exe. Disable it, then prove the MSVC one wins.
+          if [[ -e /usr/bin/link.exe ]]; then mv /usr/bin/link.exe /usr/bin/link.exe.msys-shadow; fi
+          for tool in cl.exe link.exe lib.exe make bash; do
+            command -v "$tool" || { echo "::error::$tool is not on PATH in the MSVC/MSYS2 shell"; exit 1; }
+          done
+          # link.exe without arguments prints its banner and exits non-zero, so
+          # capture the output first instead of testing a pipeline under pipefail.
+          link_banner="$(link.exe 2>&1 || true)"
+          grep -q 'Microsoft' <<<"$link_banner" || { echo "::error::link.exe is not MSVC's linker: $(command -v link.exe)"; exit 1; }
+          py="$(command -v python3 || command -v python)"
+          "$py" scripts/gpui-codec-runtime.py build --target win32-x64 \
+            --pack-dir "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/win32-x64" \
+            --source-archive "$RUNNER_TEMP/ffmpeg-8.0.1.tar.xz" --work-dir "$RUNNER_TEMP/gpui-codec-work" --jobs 2
+      - name: Verify pinned FFmpeg codec pack
+        shell: bash
+        run: python3 scripts/gpui-codec-runtime.py inspect --target win32-x64 --pack-dir "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/win32-x64"
+      - name: Build native UI and helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Git's /usr/bin/link.exe (coreutils) shadows MSVC's link.exe once an MSVC
+          # developer environment is on PATH (rustc then looks link.exe up there).
+          if [[ -e /usr/bin/link.exe ]]; then mv /usr/bin/link.exe /usr/bin/link.exe.git-shadow; fi
+          mkdir -p "$RUNNER_TEMP/native-build"
+          node scripts/with-native-build-lock.mjs --owner native-release-windows-ui -- \
+            cargo build --manifest-path experiments/gpui-player/Cargo.toml --release --locked \
+            >"$RUNNER_TEMP/native-build/cargo-ui.log" 2>&1
+          node scripts/with-native-build-lock.mjs --owner native-release-windows-helpers -- \
+            python3 scripts/build-gpui-native.py --codec-pack "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/win32-x64" --jobs 2 --output-dir experiments/gpui-player/target/release \
+            >"$RUNNER_TEMP/native-build/cargo-helpers.log" 2>&1
+      - name: Build native engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/vendor-llama.sh win32-x64
+          bash scripts/vendor-crispasr.sh win32-x64
+      - name: Locate makensis
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v makensis >/dev/null 2>&1; then
+            nsis="/c/Program Files (x86)/NSIS/makensis.exe"
+            if [[ ! -x "$nsis" ]]; then
+              choco install nsis -y --no-progress
+              nsis="/c/Program Files (x86)/NSIS/makensis.exe"
+            fi
+            test -x "$nsis" || { echo "::error::makensis not found after installing NSIS"; exit 1; }
+            # package-gpui-desktop.py honors SINGZ_MAKENSIS ahead of PATH.
+            echo "SINGZ_MAKENSIS=C:\\Program Files (x86)\\NSIS\\makensis.exe" >> "$GITHUB_ENV"
+          fi
+      - name: Package unsigned NSIS installer
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist vendor/native-engines
+          cp vendor/win32-x64/llama-server.exe vendor/native-engines/
+          cp vendor/win32-x64/crispasr.exe vendor/native-engines/
+          experiments/gpui-player/target/release/singz-gpui-player.exe --native-build-info > "$RUNNER_TEMP/native-build-info.json"
+          drive_args=()
+          if [[ -n "${SINGZ_DRIVE_CONFIGURED:-}" ]]; then drive_args=(--require-drive-config); fi
+          python3 scripts/package-gpui-desktop.py --platform windows \
+            --runtime-dir experiments/gpui-player/target/release \
+            --output-dir "dist/SingZ-native-${VERSION}-windows-x64" \
+            --engines-dir vendor/native-engines \
+            --installer "dist/SingZ-native-${VERSION}-windows-x64-setup.exe" \
+            ${drive_args[@]+"${drive_args[@]}"} --build-info-file "$RUNNER_TEMP/native-build-info.json"
+          echo "::notice::Windows NSIS installer is intentionally unsigned; no Authenticode certificate is configured."
+      - name: Build update archive and manifest
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+          UPDATE_KEY: ${{ secrets.SINGZ_UPDATE_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/updates
+          if [[ -n "$UPDATE_KEY" ]]; then
+            printf '%s' "$UPDATE_KEY" > "$RUNNER_TEMP/update-key.pem"
+            chmod 600 "$RUNNER_TEMP/update-key.pem"
+            SINGZ_UPDATE_PRIVATE_KEY="$RUNNER_TEMP/update-key.pem" python3 scripts/sign-gpui-update.py \
+              --payload "dist/SingZ-native-${VERSION}-windows-x64" --version "$VERSION" --target windows-x64 \
+              --channel "$CHANNEL" --out-dir dist/updates
+          else
+            if [[ "$DRY_RUN" != true ]]; then
+              echo "::error::SINGZ_UPDATE_PRIVATE_KEY is required for every non-test native release (stable and beta); refusing to publish an unsigned manifest"
+              exit 1
+            fi
+            echo "::warning::SINGZ_UPDATE_PRIVATE_KEY is absent; building an unsigned manifest for the -test dry run only (it is never published)"
+            python3 - "$VERSION" "$CHANNEL" windows-x64 "dist/SingZ-native-${VERSION}-windows-x64" dist/updates <<'PY'
+          import hashlib, importlib.util, json, pathlib, sys
+          version, channel, target, payload, out = sys.argv[1:]
+          spec = importlib.util.spec_from_file_location('sign_gpui_update', 'scripts/sign-gpui-update.py')
+          signer = importlib.util.module_from_spec(spec); spec.loader.exec_module(signer)
+          out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
+          archive = out / f"singz-native-{target}.zip"
+          # The packager's own archiver: ditto on macOS (symlinks, exec bits), one payload root.
+          signer.make_zip(pathlib.Path(payload).resolve(), archive)
+          manifest = out / f"singz-native-{target}.update.json"
+          manifest.write_text(json.dumps({'schema': 1, 'version': version, 'channel': channel, 'target': target, 'archive': {'name': archive.name, 'bytes': archive.stat().st_size, 'sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}, 'rollbackFloor': '0.26.0'}, separators=(',', ':')))
+          PY
+          fi
+      - name: Show native build log tails
+        if: failure()
+        shell: bash
+        run: |
+          for log in "$RUNNER_TEMP"/native-build/*.log "$RUNNER_TEMP"/gpui-codec-work/*/config.log; do
+            [[ -f "$log" ]] || continue
+            echo "::group::tail -n 120 $log"; tail -n 120 "$log"; echo "::endgroup::"
+          done
+      - name: Clean up update signing material
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/update-key.pem"
+      - name: Upload native Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: singz-native-windows-x64
+          if-no-files-found: error
+          path: |
+            dist/SingZ-native-*-windows-x64-setup.exe
+            dist/updates/singz-native-*.zip
+            dist/updates/singz-native-*.update.json*
+
+  publish:
+    name: Attach native assets to GitHub release
+    needs: [resolve, macos, windows]
+    if: needs.resolve.outputs.dry_run != 'true'
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # No checkout in this job, so gh has no git remote to infer the repository from.
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: singz-native-*
+          path: dist
+          merge-multiple: true
+      - name: Wait for release created by Build & Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build & Release (build.yml) creates the release near the end of its run.
+          # Wait for the release itself, but fail fast once that tag's build.yml run
+          # has ended failed/cancelled without creating one. ~90 minutes in total.
+          deadline=$((SECONDS + 90 * 60))
+          no_run_deadline=$((SECONDS + 15 * 60))
+          while ((SECONDS < deadline)); do
+            if gh release view "$TAG" --json tagName >/dev/null; then
+              echo "Release $TAG exists"; exit 0
+            fi
+            runs="$(gh run list --workflow build.yml --branch "$TAG" --limit 10 --json databaseId,status,conclusion,event,url)"
+            if [[ "$(jq 'length' <<<"$runs")" -eq 0 ]]; then
+              if ((SECONDS > no_run_deadline)); then
+                echo "::error::No build.yml run for $TAG and no release; dispatch Build & Release with release_tag=$TAG first"; exit 1
+              fi
+              echo "No build.yml run for $TAG yet"
+            else
+              # Newest run first. A completed run that did not succeed and left no release is final.
+              read -r status conclusion url < <(jq -r '.[0] | [.status, (.conclusion // "none"), .url] | @tsv' <<<"$runs")
+              echo "Build & Release for $TAG: status=$status conclusion=$conclusion"
+              if [[ "$status" == completed && "$conclusion" != success ]]; then
+                echo "::error::Build & Release ended $conclusion without creating $TAG: $url"; exit 1
+              fi
+              if [[ "$status" == completed && "$conclusion" == success ]]; then
+                # Finished OK; the release should be visible within moments.
+                for _ in {1..6}; do
+                  gh release view "$TAG" --json tagName >/dev/null && exit 0
+                  sleep 10
+                done
+                echo "::error::Build & Release succeeded but release $TAG does not exist"; exit 1
+              fi
+            fi
+            sleep 60
+          done
+          echo "::error::Timed out waiting for Build & Release to create $TAG"; exit 1
+      - name: Attach native assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          # upload-artifact@v4 roots each artifact at the common ancestor of its paths
+          # (dist/), so after merge-multiple the update files sit in dist/updates/.
+          # These names are deliberately outside Electron's latest*.yml,
+          # *.blockmap and gpu-splitter-* namespaces.
+          shopt -s nullglob
+          dmgs=(dist/SingZ-native-*.dmg)
+          exes=(dist/SingZ-native-*-windows-x64-setup.exe)
+          zips=(dist/updates/singz-native-*.zip)
+          manifests=(dist/updates/singz-native-*.update.json)
+          sigs=(dist/updates/singz-native-*.update.json.sig)
+          find dist -type f | sort
+          ok=true
+          check() { # name, found, expected
+            if (($2 != $3)); then echo "::error::Expected $3 $1 asset(s), found $2"; ok=false; fi
+          }
+          check "macOS dmg" "${#dmgs[@]}" 2
+          check "Windows setup exe" "${#exes[@]}" 1
+          check "update zip" "${#zips[@]}" 3
+          check "update.json" "${#manifests[@]}" 3
+          check "update.json.sig" "${#sigs[@]}" 3
+          $ok || exit 1
+          gh release upload "$TAG" "${dmgs[@]}" "${exes[@]}" "${zips[@]}" "${manifests[@]}" "${sigs[@]}" --clobber
