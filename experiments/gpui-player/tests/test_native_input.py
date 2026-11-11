@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix='singz-input-protocol-') as folder:
         f.setparams((1,2,16000,0,'NONE','not compressed'));f.writeframes(b''.join(struct.pack('<h',int(8000*math.sin(i*math.tau*220/16000))) for i in range(16000)))
     result={'nativePcmFixture':check(['--test-input',str(fixture)],False),'hardware':{'qualified':False}}
     if '--hardware' in sys.argv[3:]:
-        permission=json.loads(subprocess.check_output([str(exe),'--permission'],text=True));result['permission']=permission
+        permission=json.loads(subprocess.check_output([str(exe),'--permission'],text=True,timeout=30));result['permission']=permission
         if permission['permission']=='granted' and permission['supported']:
             # Permission was confirmed without requesting a prompt. No audio is saved.
             result['hardware']=check(['--device','','--channel','0'],True)

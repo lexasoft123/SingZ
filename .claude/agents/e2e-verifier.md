@@ -191,6 +191,192 @@ Prereq state on this machine: models under "~/Library/Application Support/SingZ/
 17b. A driver that opens a project IN PLACE from a library (the singer's, or a staged one) holds it first: `holdProjects([dirs], backups)` from `tests/e2e/mac/project-hold.cjs` BEFORE the app launches, and `putBack()` once the app has closed, failing the run on whatever could not be put back. It puts back bytes AND mtimes, to the nanosecond on macOS: project.json's `lyricsHash` and `stemHashes` record each file's mtimeMs, so a file put back with a fresh mtime makes the singer's signed-in desktop re-hash it at its next half-hourly sweep, rewrite project.json and upload it (a lyrics-edit run did exactly that on 2026-09-24). It moves a top-level file the run added into a folder under the temp dir, printing where, and names what it cannot put back (anything under stems/, a folder the run added). A run the watchdog or a signal ends is put back from the helper's exit hook. Folder times go back too, last: the project folder's, and the library root's when nothing else in it changed during the run. iCloud stamps both with a whole second 2-4 s after any change inside a project (the put-back's own writes included), so in a synced library the put-back waits for that stamp, puts the times back after it, and returns once nothing has moved for 6 s. Expect at least 6 s of teardown there, and `library folder times …` lines. A driver that edits a project ON PURPOSE (align-app, lyrics-edit) works on a `scratchClone` opened through the file input instead, because no put-back can recall what a mid-run sweep already uploaded. Every scratch copy of a library project is a `scratchClone`, never a plain `cpSync`: cpSync carries a link inside the project over as a link, and a write into the copy then lands in the library; scratchClone follows links, refuses a clone that still holds one, and keeps every time (an APFS clone on macOS). To verify a driver change, snapshot SHA-256 AND mtime of the touched projects' top-level files, and the mtimes of the library root and each project folder, before and after the run (and once more a minute later, past any late stamp): all equal is the bar, not "the bytes came back".
 18. Flake note: the first wizard click can race the engine probe (driver retries internally); a selector timeout on `.lib-card` usually means a stale app instance survived — pkill and rerun.
 
+## Platform: native-mac (GPUI native app, local Mac)
+
+Lane for `experiments/gpui-player` (`$G` below). Every driver is a Python script under
+`$G/tests/` that launches the native helper or app itself; none is run by `cargo test`.
+`tests/shared/test_native_lane_deadlines.py` fails if a `test_native_*.py` driver is missing
+from this list or has no deadline, so list a new driver here when you add it.
+
+Build (the qualify profile is `release` with a different target dir; it is the build the
+numbers are taken on). Serialize it: `node scripts/with-native-build-lock.mjs --owner <task> -- <cmd>`.
+
+```sh
+scripts/worktree-setup.sh --desktop-only          # once per fresh checkout
+cargo build --locked --profile qualify --features ui-tests --manifest-path $G/Cargo.toml
+# binaries: $G/target/qualify/singz-gpui-player (app), singz-gpui-audio, singz-gpui-input, the analyzer
+python3 $G/tests/test_native_<name>.py <args>     # one driver; the args are in the table
+```
+
+A "helper" driver takes the audio or input helper binary, an "app" driver the `ui-tests` app
+binary; use a fresh `<out>` directory per run (run_windows_ui.ps1 refuses reuse; the Python
+drivers read their config from it). All run muted (`SINGZ_MUTE=1`) and hidden unless the Window column says
+otherwise; never unmute. Drivers needing real models, a real recording or the network take
+`--source-project`, `--models`, `--pack` and similar and are skipped from a quick pass; the
+rest need only the fixtures they stage themselves.
+
+Needs a visible window or a 2x display (everything else is hidden and any display works):
+- `test_native_lyrics_scroll.py` and `test_native_locale_ui.py`: a Retina (2x) display; lyrics_scroll asserts `deviceScale == 2`.
+- `tests/perf/frames_visible.py`: a VISIBLE, unoccluded, key window, Mac on mains power, Low Power Mode off. Unfit environments are rejected, not averaged.
+- `test_native_updater.py`: on Windows only, a visible (still muted) window in the logged-in session.
+
+Expected run time: no run has been timed for this list. The "Own ceiling" column is the
+deadline the driver enforces (an upper bound, not a typical time); "unmeasured" means the
+driver sets only per-step deadlines. The Q-10 full Mac run records measured times; replace
+the ceilings with them then. `--timeout` defaults: drive_restore 240 s, empty_drive 240 s,
+drive_retirement 300 s, lyrics_live 1200 s, lyrics_real 3900 s, Qwen drivers 900 s.
+
+| Driver | Positional args | Options | Window | Own ceiling |
+|---|---|---|---|---|
+| `test_native_accessibility.py` | <app> <out> | - | hidden | 180 s (native_ui_observer.run) |
+| `test_native_accessibility_routes.py` | <app> <out> | --deadline --step --report --enforce-floor --self-test | hidden | 600 s |
+| `test_native_alsa_recovery.py` | <helper> <out> | --output-uid | hidden | unmeasured |
+| `test_native_analysis.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_analysis_lyrics_races.py` | <app> <out> | --case --tools | hidden | unmeasured |
+| `test_native_audio.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_audio_provider_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_audio_recovery.py` | <app> <out> | --publication-fault --live-publication-fault | hidden | unmeasured |
+| `test_native_bar_edit_ui.py` | <app> <out> | --sample | hidden | unmeasured |
+| `test_native_beat_detection.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_carry_line.py` | <helper> | --out | hidden | unmeasured |
+| `test_native_carry_line_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_count_in.py` | <helper> <out> | - | hidden | unmeasured |
+| `test_native_custom_tracks.py` | <helper> | --out | hidden | unmeasured |
+| `test_native_custom_tracks_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_default_route.py` | <helper> <out> | --check-real-guard | hidden | unmeasured |
+| `test_native_desktop_lifecycle_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_diagnostics.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_drive_adoption_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_drive_restore.py` | <app> <out> | --timeout | hidden | 240 s |
+| `test_native_drive_retirement.py` | <app> <out> | --timeout --width | hidden | 300 s |
+| `test_native_drive_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_empty_drive.py` | <app> <out> | --timeout | hidden | 240 s |
+| `test_native_empty_project.py` | <helper> | --out | hidden | unmeasured |
+| `test_native_empty_project_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_engine_setup.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_first_run_ui.py` | <app> <out> | --sample | hidden | unmeasured |
+| `test_native_graph.py` | <helper> <out> | - | hidden | unmeasured |
+| `test_native_graph_ui.py` | <app> <out> | --karaoke --navigation --region --output --catalog --timeline --lyrics-countdown --keyboard --footer-keyboard | hidden | unmeasured |
+| `test_native_helper_lifecycle.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_idle_redraw.py` | <app> <out> | --only-models | hidden | unmeasured |
+| `test_native_input.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_library_import.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_locale_ui.py` | <app> <out> | - | hidden; 2x display (existing 2x assertions) | unmeasured |
+| `test_native_lyrics_align.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_lyrics_editor.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_lyrics_envelope.py` | <helper> <out> | - | hidden | unmeasured |
+| `test_native_lyrics_live.py` | <app> <out> | --source-project --prior-evidence --pack --timeout --pitch-label-review | hidden | 1200 s |
+| `test_native_lyrics_qwen_auto.py` | <app> <out> | --source-project --models --llama-server --crispasr --audio-helper --timeout | hidden | 900 s |
+| `test_native_lyrics_qwen_real.py` | <app> <out> | --source-project --models --llama-server --crispasr --audio-helper --timeout | hidden | 900 s |
+| `test_native_lyrics_real.py` | <app> <out> | --source-project --qwen-models --pack --resume --timeout | hidden | 3900 s |
+| `test_native_lyrics_scroll.py` | <app> <out> | --timeout | hidden; 2x display (asserts deviceScale == 2) | 180 s |
+| `test_native_lyrics_sidebar.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_metronome.py` | <helper> <out> | --hardware | hidden | unmeasured |
+| `test_native_metronome_gain.py` | <helper> <out> | - | hidden | unmeasured |
+| `test_native_metronome_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_microphone.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_models.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_monitor.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_monitor_publication.py` | <app> <out> | --held-output-adapter | hidden | unmeasured |
+| `test_native_monitor_ui.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_open_steps_ui.py` | <app> <out> | --sample | hidden | unmeasured |
+| `test_native_playback_graph.py` | <app> <out> | --timeout | hidden | 240 s |
+| `test_native_played_edge_ui.py` | <app> <out> | --sample | hidden | unmeasured |
+| `test_native_project_delete.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_project_key_ui.py` | <app> <out> | --tools-dir | hidden | unmeasured |
+| `test_native_project_picker.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_quick_start.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_quick_start_drive.py` | <app> <out> | - | hidden | 180 s (native_ui_observer.run) |
+| `test_native_recording_publication_recovery.py` | <app> <out> | --helper-stage | hidden | unmeasured |
+| `test_native_settings.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_settings_relaunch_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_source.py` | <app> <out> | --real --phase-parity --fresh-models | hidden | unmeasured |
+| `test_native_space_focus_ui.py` | <app> <out> | --sample | hidden | unmeasured |
+| `test_native_stem_export.py` | <helper> | --out | hidden | unmeasured |
+| `test_native_stem_export_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_streaming_rss.py` | <app> <helper> <sample> <out> | --label --baseline | hidden | unmeasured |
+| `test_native_title.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_training.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_training_capture.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_training_feedback.py` | <app> <out> | --timeout | hidden | 300 s |
+| `test_native_training_input_recovery.py` | <app> <out> | --completing | hidden | unmeasured |
+| `test_native_training_keyboard.py` | <app> <out> | --timeout | hidden | 300 s |
+| `test_native_training_only.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_training_preparation.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_training_progress.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_training_recording.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_training_recording_input.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_training_recording_recovery.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_training_recovery.py` | <app> <out> | --song-backed | hidden | unmeasured |
+| `test_native_training_run.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_training_running_keyboard.py` | <app> <out> | --timeout | hidden | 300 s |
+| `test_native_training_song_keyboard.py` | <app> <out> | --timeout | hidden | 300 s |
+| `test_native_training_ui.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_transport_legs_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_transport_timing_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_updater.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | --binary --audio-helper --runtime-dir --engines-dir --uikit-dir --keep --work-dir --only | visible muted window (desktop session) | unmeasured |
+| `test_native_whats_new.py` | <app> <out> | - | hidden | unmeasured |
+
+Performance and presentation drivers (`tests/perf/`, repo root):
+
+| Driver | How to run | Window | Notes |
+|---|---|---|---|
+| `tests/perf/frames_visible.py` | `python3 tests/perf/frames_visible.py --binary $G/target/qualify/singz-gpui-player --scenario static\|stall\|idle\|notify100 --seconds 60 --out <file.json>` | visible, key, unoccluded | `--settle` 25 s + `--seconds`; `--wait-quiet`, `--attempts` for a busy Mac |
+| `tests/perf/perf_harness.py` | `--app native --command <qualify ui-tests binary> --profile release+ui-tests --display hidden --machine <id> --commit <sha> --reference-json <staged.json> --control-dir <fresh> --package <installer> --out <dir>` | hidden | `--play 180 --burst 5 --pause 60 --cycles 20` by default (about 5 min); `--deadline` 120 s per action; `--run-kind smoke` for non-baseline |
+| `tests/perf/stage_fixture.cjs` | `node tests/perf/stage_fixture.cjs <fresh-dir>` | none | Stages the isolated two-project library the harness reads |
+| `tests/perf/make_reference.cjs` | `node tests/perf/make_reference.cjs <fresh-dir>` | none | Reference library, 300 s and 720 s songs; needs `ffprobe` |
+| `tests/perf/electron_driver.cjs` | `--command 'node tests/perf/electron_driver.cjs'` with `--app electron` | hidden | Control run beside the native one; `SINGZ_USERDATA_DIR`, `SINGZ_PERF_SONGS` |
+
+Unit checks for the harness (no app needed, seconds): `python3.13 -m unittest discover -s tests/perf -p 'test_*.py'`
+(`test_frames_visible.py`, `test_perf_harness.py`, `test_reference_fixture.py`).
+
+## Platform: native-windows-field (GPUI native app, Windows field laptop)
+
+Run together with native-mac and the windows-field Electron lane. Host access, the logged-in
+session recipe and the scheduling of the laptop live in the private `singz-dev` handbook;
+read it first and coordinate the device window. Windows paints no frame for a hidden window,
+so this lane needs the logged-in desktop session (never session zero).
+
+Build on the laptop: `cargo build --locked --profile qualify --features ui-tests --manifest-path experiments/gpui-player/Cargo.toml`,
+under the native build lock. Run each case with
+`tests/run_windows_ui.ps1 -Python <python.exe> -App <ui-tests singz-gpui-player.exe> -Out <new dir> -Case <case>`
+(a new `-Out` every time). Cases: `key graph drive drive-retirement drive-empty adoption
+provider title import delete recording recording-publication recording-publication-helper
+recording-recovery training-input-cue training-input-completing training-output
+training-output-standalone training-output-song training-run`; the script maps each to a
+driver below and passes the extra flag (`--helper-stage`, `--completing`, `--song-backed`).
+Per-case workflow deadline in the script: 300 s, `drive-retirement` 660 s, `drive-empty` 1500 s.
+Also run `windows_gpu_sampler.ps1` output into `perf_harness.py --frames-json` for the
+presented-frame, GPU and DWM slots (needs a real Windows run; unit-covered only so far).
+
+Needs a visible window or 2x display: the session must be the interactive desktop; none of
+these drivers asserts a 2x scale. Expected run time: not measured on this laptop; the Own
+ceiling column is the driver's own deadline and the script deadline above bounds each case.
+
+| Driver | Positional args | Options | Window | Own ceiling |
+|---|---|---|---|---|
+| `test_native_audio_provider_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_drive_adoption_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_drive_retirement.py` | <app> <out> | --timeout --width | hidden | 300 s |
+| `test_native_drive_ui.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_empty_drive.py` | <app> <out> | --timeout | hidden | 240 s |
+| `test_native_graph_ui.py` | <app> <out> | --karaoke --navigation --region --output --catalog --timeline --lyrics-countdown --keyboard --footer-keyboard | hidden | unmeasured |
+| `test_native_library_import.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_project_delete.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_project_key_ui.py` | <app> <out> | --tools-dir | hidden | unmeasured |
+| `test_native_recording_publication_recovery.py` | <app> <out> | --helper-stage | hidden | unmeasured |
+| `test_native_title.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_training_input_recovery.py` | <app> <out> | --completing | hidden | unmeasured |
+| `test_native_training_recording.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_training_recording_recovery.py` | <app> <out> | - | hidden | unmeasured |
+| `test_native_training_recovery.py` | <app> <out> | --song-backed | hidden | unmeasured |
+| `test_native_training_run.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+
+Other drivers are macOS-only or helper-level and are listed under native-mac only.
+`test_native_updater.py` also has a Windows leg (visible muted window; flags `--binary
+--audio-helper --runtime-dir --engines-dir --uikit-dir`) that `run_windows_ui.ps1` does not
+drive: run it by hand on the laptop when the updater changes.
+
 ## Platform: simulators (ios + android)
 
 Android release layout: `ANDROID_SERIAL=emulator-5582 node mobile/tests/edge-to-edge-android.cjs`

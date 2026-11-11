@@ -19,7 +19,7 @@ class Session:
     def close(self):
         if self.child.poll() is None:self.child.stdin.write('quit\n');self.child.stdin.flush()
         try:self.child.wait(timeout=5)
-        except subprocess.TimeoutExpired:self.child.kill();self.child.wait();raise
+        except subprocess.TimeoutExpired:self.child.kill();self.child.wait(timeout=10);raise
         finally:self.selector.close();self.child.stdin.close();self.child.stdout.close()
 with tempfile.TemporaryDirectory(prefix='singz-monitor-') as folder:
     source=Path(folder)/'voice.wav'
@@ -39,8 +39,8 @@ with tempfile.TemporaryDirectory(prefix='singz-monitor-') as folder:
             rejected=playback.command(cmd,False);assert rejected['parked'] and rejected['physicalOutputReleased']
         monitor_uid='singz:fake-duplex'
         if hardware_monitor:
-            permission=json.loads(subprocess.check_output([str(capture),'--permission'],text=True));assert permission['permission']=='granted','Do not request permission in a test'
-            inventory=json.loads(subprocess.check_output([str(audio),'--devices'],text=True));monitor_uid=parked['outputUid']
+            permission=json.loads(subprocess.check_output([str(capture),'--permission'],text=True,timeout=30));assert permission['permission']=='granted','Do not request permission in a test'
+            inventory=json.loads(subprocess.check_output([str(audio),'--devices'],text=True,timeout=30));monitor_uid=parked['outputUid']
             assert any(d['uid']==monitor_uid and d['inputChannels']>0 and d['outputChannels']>=2 for d in inventory['devices']),'Playback output is not a duplex monitoring endpoint'
         monitor=Session([str(capture),*([] if hardware_monitor else ['--test-fake-host']),'--monitor','--device',monitor_uid,'--output',monitor_uid])
         try:

@@ -54,6 +54,6 @@ try:
     child.stdin.write('quit\n'); child.stdin.flush()
     assert child.wait(timeout=5) == 0
 finally:
-    if child.poll() is None: child.kill(); child.wait()
+    if child.poll() is None: child.kill(); child.wait(timeout=10)
     selector.close(); child.stdin.close(); child.stdout.close()
 print('PASS: training-only lazy output, source Test timing, transport refusal, physical Park and paused restore')

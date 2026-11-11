@@ -111,7 +111,7 @@ class Session:
                 self.child.wait(timeout=8)
             except subprocess.TimeoutExpired:
                 self.child.kill()
-                self.child.wait()
+                self.child.wait(timeout=10)
                 raise AssertionError('Empty helper did not retire within bounded shutdown')
         assert self.child.returncode == 0, self.child.stderr.read()
 

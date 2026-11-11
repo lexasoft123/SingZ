@@ -17,7 +17,7 @@ with tempfile.TemporaryDirectory(prefix='singz-custom-ui-') as tmp:
  first=root/'picked/first/Harmony_take.wav';tone(first,1.5,330)
  longwav=root/'picked/long.wav';tone(longwav,6,440);second=root/'picked/second/Harmony_take.flac';second.parent.mkdir()
  helper=app.with_name('singz-gpui-audio.exe' if os.name=='nt' else 'singz-gpui-audio')
- subprocess.run([str(helper),'--compact-stem',str(longwav),str(second)],check=True,capture_output=True)
+ subprocess.run([str(helper),'--compact-stem',str(longwav),str(second)],check=True,capture_output=True,timeout=60)
  invalid=root/'picked/broken.wav';invalid.write_bytes(b'Invalid audio file; valid selections around it must survive.')
  original={str(x):sha(x) for x in [first,second,project/'stems/vocals.wav']}
  env={k:v for k,v in os.environ.items() if not k.startswith('SINGZ_GPUI_') and k not in ['SINGZ_PACK_DIR','SINGZ_MODELS_DIR','SINGZ_DEMUCS']}

@@ -20,7 +20,7 @@ with tempfile.TemporaryDirectory(prefix='singz-empty-ui-') as tmp:
   (project/'notes.txt').write_text('Keep unrelated documents.');(project/'stems/foreign.txt').write_text('Foreign prefix survives empty Save.')
  tone(root/'short.wav',0.5,220);tone(root/'new-one.wav',5,330);tone(root/'new-two.wav',7,440);(root/'bad.wav').write_bytes(b'Not an audio stream')
  helper=app.with_name('singz-gpui-audio.exe' if os.name=='nt' else 'singz-gpui-audio')
- subprocess.run([str(helper),'--compact-stem',str(root/'new-two.wav'),str(root/'new-two.flac')],check=True,capture_output=True)
+ subprocess.run([str(helper),'--compact-stem',str(root/'new-two.wav'),str(root/'new-two.flac')],check=True,capture_output=True,timeout=60)
  original=root/'source-only';original.mkdir();shutil.copyfile(root/'new-one.wav',original/'song.wav')
  (original/'project.json').write_text(json.dumps({'version':2,'name':'Unsplit source fixture','songFile':'song.wav','settings':{}}))
  final_hash=sha(root/'new-two.flac');before=foreground();all_perf=[]

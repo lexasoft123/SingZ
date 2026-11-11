@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix='singz-native-training-') as folder:
     finally:
         if child.poll() is None:
             child.kill()
-            child.wait()
+            child.wait(timeout=10)
         selector.close()
         child.stdin.close()
         child.stdout.close()

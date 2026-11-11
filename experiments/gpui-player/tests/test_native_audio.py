@@ -15,7 +15,7 @@ import wave
 
 helper = str(Path(sys.argv[1]).resolve())
 hardware = '--hardware' in sys.argv[2:]
-inventory = json.loads(subprocess.check_output([helper, *([] if hardware else ['--test-fake-host']), '--devices'], text=True))
+inventory = json.loads(subprocess.check_output([helper, *([] if hardware else ['--test-fake-host']), '--devices'], text=True, timeout=30))
 assert inventory['protocol'] == 1 and inventory['ok']
 assert inventory['devices']
 with tempfile.TemporaryDirectory(prefix='singz-gpui-native-') as folder:

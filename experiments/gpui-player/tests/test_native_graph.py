@@ -29,7 +29,7 @@ class Session:
  def close(self):
   if self.child.poll() is None:self.child.stdin.close()
   try:self.child.wait(timeout=8)
-  except subprocess.TimeoutExpired:self.child.kill();self.child.wait();raise
+  except subprocess.TimeoutExpired:self.child.kill();self.child.wait(timeout=10);raise
   assert self.child.returncode==0,self.child.stderr.read()
 with tempfile.TemporaryDirectory(prefix='singz-native-graph-') as tmp:
  root=Path(tmp);audio=root/'voice.wav'
@@ -68,5 +68,5 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-') as tmp:
    refused=session.read(False);assert refused['error'],refused
    session.child.wait(timeout=8);assert session.child.returncode!=0
   finally:
-   if session.child.poll() is None:session.child.kill();session.child.wait()
+   if session.child.poll() is None:session.child.kill();session.child.wait(timeout=10)
 (out/'result.json').write_text(json.dumps({'passed':True,'helperSha256':hashlib.sha256(helper.read_bytes()).hexdigest(),'fakeHostOnly':True,'measurements':measurements,'malformedAndSemanticRefusals':len(invalid),'receipts':receipts},indent=2))

@@ -108,8 +108,8 @@ def openssl() -> str:
 
 
 def make_key(path: Path) -> str:
-    subprocess.run([openssl(), "genpkey", "-algorithm", "ED25519", "-out", str(path)], check=True, capture_output=True)
-    return subprocess.run([sys.executable, str(SIGNER), "--public-key-hex", str(path)], check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run([openssl(), "genpkey", "-algorithm", "ED25519", "-out", str(path)], check=True, capture_output=True, timeout=30)
+    return subprocess.run([sys.executable, str(SIGNER), "--public-key-hex", str(path)], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
 
 
 class Feed:
@@ -217,7 +217,7 @@ class MacTarget(Target):
         return self.root(dest) / "Contents/Resources"
 
     def kill(self, dest):
-        subprocess.run(["pkill", "-f", str(dest)], capture_output=True)
+        subprocess.run(["pkill", "-f", str(dest)], capture_output=True, timeout=30)
         time.sleep(0.5)
 
     def finish(self, dest):
@@ -277,7 +277,7 @@ class WindowsTarget(Target):
 
     def kill(self, dest):
         script = f"Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -like '{dest}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
-        subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True)
+        subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, timeout=30)
         time.sleep(1)
 
     def finish(self, dest):
@@ -291,7 +291,8 @@ def build_audio_helper(work: Path) -> Path:
     say("building the real audio helper (self-locking producer)")
     deadline = time.monotonic() + 3000
     while True:
-        result = subprocess.run(["bash", str(ROOT / "scripts/build-gpui-audio.sh"), str(out)], cwd=ROOT, capture_output=True, text=True)
+        result = subprocess.run(["bash", str(ROOT / "scripts/build-gpui-audio.sh"), str(out)], cwd=ROOT, capture_output=True, text=True,
+                                timeout=max(1.0, deadline - time.monotonic()))
         if result.returncode == 0 and out.is_file():
             return out
         if time.monotonic() < deadline and "lock" in (result.stdout + result.stderr).lower():
@@ -306,7 +307,7 @@ def build_test_hooks_binary() -> Path:
         result = subprocess.run(
             ["node", str(ROOT / "scripts/with-native-build-lock.mjs"), "--owner", "c33", "--", "cargo", "build", "--offline", "--locked",
              "--features", "test-hooks", "--bin", "singz-gpui-player"],
-            cwd=GPUI, capture_output=True, text=True)
+            cwd=GPUI, capture_output=True, text=True, timeout=TOTAL_DEADLINE)
         if result.returncode == 0:
             return GPUI / "target/debug/singz-gpui-player"
         if "singz-native-build.lock" in result.stderr and "owns" in result.stderr:
@@ -499,7 +500,7 @@ def main() -> int:
                 subprocess.run([str(dest / "Uninstall.exe"), "/S"], check=True, timeout=120)
                 wait_for("the uninstaller to remove the updated install", lambda: not dest.exists(), 120)
                 key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\com.lexasoft.singz.native"
-                if subprocess.run(["reg", "query", key], capture_output=True).returncode == 0:
+                if subprocess.run(["reg", "query", key], capture_output=True, timeout=30).returncode == 0:
                     fail("the uninstall registry key survived")
                 say("uninstall after the update removed every payload file, including N+1's nested addition")
 
@@ -527,7 +528,7 @@ def main() -> int:
 
             def relaunched():
                 if sys.platform == "darwin":
-                    return subprocess.run(["pgrep", "-f", str(sc.target.exe(dest))], capture_output=True).returncode == 0
+                    return subprocess.run(["pgrep", "-f", str(sc.target.exe(dest))], capture_output=True, timeout=30).returncode == 0
                 return True
             wait_for("the old version to be running again", relaunched, 30)
             time.sleep(4)  # several 300 ms checks later it must not re-offer the blocked version

@@ -122,8 +122,8 @@ def main():
             result = {'cycles': 50, 'helperQuitMs': summary(helper_ms), 'applicationQuitMs': summary(quit_ms),
                 'ownedHelpers': len(owned), 'longLivedHelpers': sum(not row['probe'] for row in rows), 'orphanHelpers': 0, 'quitBoundMs': 750,
                 'hidden': True, 'muted': True, 'profile': 'ui-tests (dev opt-level=2)', 'displayMode': 'hidden', 'platform': platform.platform(),
-                'machine': platform.machine(), 'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-                'worktreeDirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip()),
+                'machine': platform.machine(), 'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True, timeout=30).strip(),
+                'worktreeDirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True, timeout=30).strip()),
                 'appSha256': hashlib.sha256(app.read_bytes()).hexdigest(),
                 'helperSha256': hashlib.sha256(helper.read_bytes()).hexdigest(),
                 'windows': 'Human field-laptop run required'}

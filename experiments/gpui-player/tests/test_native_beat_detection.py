@@ -162,7 +162,7 @@ print(json.dumps({'beats': result}), flush=True)
         for line in calls.read_text().splitlines():
             pid = json.loads(line)['pid']
             if os.name != 'nt':
-                command = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, text=True)
+                command = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, text=True, timeout=30)
                 if str(analyzer) in command.stdout:
                     try:
                         os.kill(pid, signal.SIGKILL)

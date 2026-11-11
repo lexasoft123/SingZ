@@ -236,7 +236,7 @@ http.server.HTTPServer(('127.0.0.1', port), Handler).serve_forever()
         assert any(r['mode'] == 'truncated' for r in model_requests) and any(r['mode'] == 'slow' for r in model_requests)
         for record in records:
             if record['kind'] == 'asr-request': continue
-            process = subprocess.run(['ps', '-p', str(record['pid']), '-o', 'command='], capture_output=True, text=True)
+            process = subprocess.run(['ps', '-p', str(record['pid']), '-o', 'command='], capture_output=True, text=True, timeout=30)
             assert not any(str(path) in process.stdout for path in [crisp, python, llama]), f'Owned runtime survived cleanup: {record}'
         (out / 'fixture.json').write_text(json.dumps({'appSha256': sha(app),
             'helperSha256': sha(app.with_name('singz-gpui-audio.exe' if os.name == 'nt' else 'singz-gpui-audio')),
@@ -254,7 +254,7 @@ http.server.HTTPServer(('127.0.0.1', port), Handler).serve_forever()
             record = json.loads(line)
             if record['kind'] == 'asr-request': continue
             pid = record['pid']
-            command = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, text=True)
+            command = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, text=True, timeout=30)
             if any(str(path) in command.stdout for path in [crisp, python, llama]):
                 try: os.killpg(pid, signal.SIGKILL)
                 except ProcessLookupError: pass

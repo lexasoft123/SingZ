@@ -164,7 +164,7 @@ else:
    fields=proc.read_text().rsplit(') ',1)[1].split() if proc.exists() else None
    assert fields is None or fields[19]!=owner['startTicks'] or fields[0]=='Z','Owned vocal descendant survived quit'
   else:
-   current=subprocess.run(['ps','-p',str(pid),'-o','lstart=,comm='],capture_output=True,text=True)
+   current=subprocess.run(['ps','-p',str(pid),'-o','lstart=,comm='],capture_output=True,text=True,timeout=30)
    assert current.returncode!=0 or current.stdout.strip()!=owner['identity'],'Owned vocal descendant survived quit'
   print('PASS: split phases, live readiness, accepted stems retention and epoch-fenced loading rollback')
   sys.exit(0)
@@ -202,7 +202,7 @@ else:
     # An orphan zombie awaits container init; it is terminated, with no live
     # executable. PID reuse cannot make an unrelated process our descendant.
     return fields[19]==owner['startTicks'] and fields[0]!='Z'
-   current=subprocess.run(['ps','-p',str(pid),'-o','lstart=,comm='],capture_output=True,text=True)
+   current=subprocess.run(['ps','-p',str(pid),'-o','lstart=,comm='],capture_output=True,text=True,timeout=30)
    return current.returncode==0 and current.stdout.strip()==owner['identity']
   for _ in range(50):
    if not alive():break
