@@ -310,6 +310,8 @@ mod ui_carry_line;
 #[cfg(feature = "ui-tests")]
 mod ui_transport_timing;
 #[cfg(feature="ui-tests")]
+mod ui_transport_legs;
+#[cfg(feature="ui-tests")]
 mod ui_stem_export;
 #[cfg(feature = "ui-tests")]
 mod ui_open_steps;
@@ -494,6 +496,8 @@ struct Player {
 
     #[cfg(feature="ui-tests")]
     last_playback_status: Option<integration::Status>,
+    #[cfg(feature="ui-tests")]
+    loading_play_refusals: u64,
     #[cfg(feature="ui-tests")]
     source_resume_probe: Option<ui_source::ResumeProbe>,
     #[cfg(feature="ui-tests")]
@@ -1396,6 +1400,8 @@ impl Player {
             native_lane_revision: 0,
             #[cfg(feature="ui-tests")]
             last_playback_status: None,
+            #[cfg(feature="ui-tests")]
+            loading_play_refusals: 0,
             #[cfg(feature="ui-tests")]
             source_resume_probe: None,
             #[cfg(feature="ui-tests")]
@@ -4438,6 +4444,11 @@ impl Player {
             return;
         }
         if self.loading || self.source_blocks_except_rate() || self.project.is_none() {
+            // The refusal itself, countable by the transport legs driver.
+            #[cfg(feature="ui-tests")]
+            if self.loading && matches!(event, Play) {
+                self.loading_play_refusals += 1;
+            }
             return;
         }
         match event {
@@ -4451,6 +4462,9 @@ impl Player {
                         if self.playhead.position()<start-0.05 || self.playhead.position()>=end-0.05 {
                             self.playhead.seek(start);self.seek_native(cx);
                         }
+                    }
+                    if self.region_target().selection.is_none()&&transport_timing::play_rewinds_finished_song(self.playhead.transport_completed(),self.playhead.position(),self.duration) {
+                        self.playhead.seek(0.);self.seek_native(cx);
                     }
                     if self.metronome.count_in_bars > 0 {
                         self.transport_flight.count_in_anchor = Some(self.playhead.position());
@@ -6531,6 +6545,11 @@ fn main() {
                 && std::env::var_os("SINGZ_GPUI_CAPTURE_FIXTURE").is_some()
                 && !integration::fixture_mode());
             ui_recording_publication_recovery::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature="ui-tests")]
+        if let Some(directory)=std::env::var_os("SINGZ_GPUI_TRANSPORT_LEGS_TEST"){
+            assert!(background&&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")&&!integration::fixture_mode());
+            ui_transport_legs::run(window_handle,view.clone(),directory.into(),cx);
         }
         #[cfg(feature="ui-tests")]
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_TRANSPORT_TIMING_TEST"){

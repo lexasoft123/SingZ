@@ -252,6 +252,7 @@ fn clock_sample(at: Instant, position: f64) -> PlayheadSample {
         duration: 120.,
         graph_generation: 1,
         lane_revision: 1,
+        completed: false,
     }
 }
 fn step_clock(p: &mut Playhead, start: Instant, micros: u64, previous: &mut f64) {
@@ -645,3 +646,28 @@ fn playhead_local_seek_cannot_disable_the_retired_clock_reset() {
 }
 
 // END PLAYHEAD SAMPLING TESTS
+
+#[test]
+fn play_at_the_end_of_the_song_rewinds_it_only_when_completed_or_within_10ms() {
+    assert!(play_rewinds_finished_song(true, 30., 30.));
+    assert!(play_rewinds_finished_song(true, 12., 30.), "a Completed transport rewinds");
+    assert!(play_rewinds_finished_song(false, 30., 30.));
+    assert!(play_rewinds_finished_song(false, 29.995, 30.));
+    assert!(!play_rewinds_finished_song(false, 29.97, 30.), "a paused or sought spot near the end resumes there");
+    assert!(!play_rewinds_finished_song(false, 29.5, 30.));
+    assert!(!play_rewinds_finished_song(false, 0., 0.));
+}
+
+#[test]
+fn a_completed_transport_counts_only_until_the_singer_seeks() {
+    let now = Instant::now();
+    let mut playhead = Playhead::new(0.);
+    assert!(!playhead.transport_completed(), "no sample yet");
+    let mut sample = clock_sample(now, 120.);
+    sample.completed = true;
+    sample.playing = false;
+    playhead.admit(sample, now);
+    assert!(playhead.transport_completed());
+    playhead.seek(60.);
+    assert!(!playhead.transport_completed(), "a sought spot is the singer's choice, not a finished song");
+}

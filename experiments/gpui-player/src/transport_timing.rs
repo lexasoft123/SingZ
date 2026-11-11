@@ -93,6 +93,13 @@ fn bar_length(grid: &crate::beat::Beats, index: i64) -> usize {
     d[j + 1] - d[j]
 }
 /// The source facade's preceding beat offsets, not evenly divided runway.
+/// Play on a song whose transport has completed starts it again from the top
+/// (the same graph is seeked). Mirrors Electron's engine.ts: rewind only when
+/// the transport reports Completed, or the position is within 10 ms of the end;
+/// a paused or sought spot just before the end resumes there.
+pub fn play_rewinds_finished_song(completed: bool, position: f64, duration: f64) -> bool {
+    completed || (duration > 0. && position >= duration - 0.01)
+}
 pub fn offsets(
     landing: f64,
     grid: Option<&crate::beat::Beats>,
@@ -207,6 +214,8 @@ pub struct PlayheadSample {
     pub duration: f64,
     pub graph_generation: u64,
     pub lane_revision: u64,
+    /// The helper's transport has run to the end of the song and parked.
+    pub completed: bool,
 }
 
 /// The sole owner of displayed song time, including local seeks and test/demo
@@ -255,6 +264,11 @@ impl Playhead {
     }
     pub fn position(&self) -> f64 {
         self.position
+    }
+    /// The last admitted status says the transport completed, and no seek has
+    /// moved the playhead since (a sought spot is a position the singer chose).
+    pub fn transport_completed(&self) -> bool {
+        self.pending_seek.is_none() && self.seek_origin.is_none() && self.sample.is_some_and(|sample| sample.completed)
     }
     pub fn pending_seek(&self) -> Option<(u64, f64)> {
         self.pending_seek
@@ -542,6 +556,7 @@ impl From<&crate::integration::Status> for PlayheadSample {
             duration: s.duration,
             graph_generation: s.graph_generation,
             lane_revision: s.lane_revision,
+            completed: s.transport_state == 4,
         }
     }
 }

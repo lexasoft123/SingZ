@@ -425,7 +425,44 @@ pub struct Status {
     pub duration: f64,
     pub playing: bool,
 }
+#[cfg(feature="ui-tests")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedLaneStreaming {
+    pub id: String,
+    pub streamed: Option<bool>,
+    pub starved_blocks: Option<u64>,
+    pub staged_jumps: Option<u64>,
+}
+#[cfg(feature="ui-tests")]
+fn observed_lane_streaming(value: &Value) -> Vec<ObservedLaneStreaming> {
+    value.as_array().into_iter().flatten().filter_map(|lane| Some(ObservedLaneStreaming {
+        id: lane.get("id")?.as_str()?.to_owned(),
+        streamed: lane.get("streamed").and_then(Value::as_bool),
+        starved_blocks: lane.get("starvedBlocks").and_then(Value::as_u64),
+        staged_jumps: lane.get("stagedJumps").and_then(Value::as_u64),
+    })).collect()
+}
+#[cfg(all(test, feature="ui-tests"))]
+mod observed_lane_streaming_tests {
+    use super::*;
+
+    #[test]
+    fn reads_native_stream_counters_and_keeps_older_fields_optional() {
+        let lanes = serde_json::json!([
+            {"id":"vocals","streamed":true,"starvedBlocks":0,"stagedJumps":3},
+            {"id":"bass"}
+        ]);
+        assert_eq!(observed_lane_streaming(&lanes), vec![
+            ObservedLaneStreaming { id:"vocals".into(), streamed:Some(true), starved_blocks:Some(0), staged_jumps:Some(3) },
+            ObservedLaneStreaming { id:"bass".into(), streamed:None, starved_blocks:None, staged_jumps:None },
+        ]);
+    }
+}
 impl Status {
+    #[cfg(feature="ui-tests")]
+    pub fn observed_lane_streaming(&self) -> Vec<ObservedLaneStreaming> {
+        observed_lane_streaming(&self.observed_lanes)
+    }
     fn parse(v: &Value) -> Result<Self> {
         if v["protocol"] != 1 {
             bail!("Unsupported native audio protocol")
@@ -591,6 +628,14 @@ fn settle_playback_receipt(
     }
 }
 
+/// Per-lane live feeder counters advance on their own while playing, so an
+/// ownership comparison must look at the lane's identity and mix, not them.
+fn stable_status_value(value:&Value,key:&str)->Value{
+    if key!="lanes"{return value[key].clone();}
+    let Some(lanes)=value[key].as_array() else{return value[key].clone();};
+    Value::Array(lanes.iter().map(|lane|{let mut lane=lane.clone();if let Some(fields)=lane.as_object_mut(){for counter in ["starvedBlocks","stagedJumps"]{fields.remove(counter);}}lane}).collect())
+}
+fn same_status_value(before:&Value,after:&Value,key:&str)->bool{stable_status_value(before,key)==stable_status_value(after,key)}
 enum RateFailure{Refused(String),Transport(String)}
 const RETAINED_OWNERSHIP_KEYS: &[&str] = &[
     "graphGeneration", "laneSetRevision", "carryRevision", "laneIds", "lanes",
@@ -600,7 +645,7 @@ const RETAINED_OWNERSHIP_KEYS: &[&str] = &[
 ];
 fn same_rate_ownership(before:&Value,after:&Value)->Result<()> {
     for &key in RETAINED_OWNERSHIP_KEYS {
-        anyhow::ensure!(before[key]==after[key],"Native playback {key} changed");
+        anyhow::ensure!(same_status_value(before,after,key),"Native playback {key} changed");
     }Ok(())
 }
 fn retained_rate(before:&Value,after:&Value)->Result<Status>{let old=Status::parse(before)?;let current=Status::parse(after)?;same_rate_ownership(before,after)?;anyhow::ensure!(old.rate==current.rate&&old.transpose==current.transpose,"Native tempo or transpose changed despite refusal");Ok(current)}
@@ -620,13 +665,13 @@ fn accepted_output(before:&Value,reply:&Value,uid:&str)->Result<Status> {
     anyhow::ensure!(!status.playing&&!status.counting_in&&status.rate==old.rate&&status.transpose==old.transpose,
         "Native route did not preserve paused tempo/transpose");
     for key in ["laneIds","lanes","masterGain","referenceGain","trainingOnly","emptyProject","explicitGraph","graphNodeCount","graphConnectionCount"] {
-        anyhow::ensure!(before[key]==reply[key],"Native playback {key} changed during output selection");
+        anyhow::ensure!(same_status_value(before,reply,key),"Native playback {key} changed during output selection");
     }
     anyhow::ensure!((status.duration-old.duration).abs()<=0.001+f64::EPSILON*old.duration.abs(),"Native duration changed during output selection");
     anyhow::ensure!(status.loop_range==old.loop_range||status.loop_range.zip(old.loop_range).is_some_and(|(a,b)|(a.0-b.0).abs()<=0.001&&(a.1-b.1).abs()<=0.001),"Native loop changed during output selection");
     Ok(status)
 }
-fn accepted_rate(before:&Value,reply:&Value,rate:f32,transpose:i32)->Result<Status>{let old=Status::parse(before)?;let status=Status::parse(reply)?;anyhow::ensure!((status.rate-rate).abs()<0.00001&&status.transpose==transpose,"Native tempo or transpose differs from request");anyhow::ensure!(status.lane_revision==old.lane_revision&&status.carry_revision==old.carry_revision,"Native lane or Carry inventory changed during tempo update");for key in ["laneIds","lanes","masterGain","referenceGain","outputUid","trainingOnly","emptyProject","regionEnabled","regionStart","regionEnd"]{anyhow::ensure!(before[key]==reply[key],"Native playback {key} changed during tempo update");}Ok(status)}
+fn accepted_rate(before:&Value,reply:&Value,rate:f32,transpose:i32)->Result<Status>{let old=Status::parse(before)?;let status=Status::parse(reply)?;anyhow::ensure!((status.rate-rate).abs()<0.00001&&status.transpose==transpose,"Native tempo or transpose differs from request");anyhow::ensure!(status.lane_revision==old.lane_revision&&status.carry_revision==old.carry_revision,"Native lane or Carry inventory changed during tempo update");for key in ["laneIds","lanes","masterGain","referenceGain","outputUid","trainingOnly","emptyProject","regionEnabled","regionStart","regionEnd"]{anyhow::ensure!(same_status_value(before,reply,key),"Native playback {key} changed during tempo update");}Ok(status)}
 fn admit_carry_revision(current:&mut u64,status:&Status)->Result<()> {anyhow::ensure!(status.carry_revision>=*current,"Stale native Carry the line status");*current=status.carry_revision;Ok(())}
 fn carry_reply(value:Value,plan:&crate::carry_line::Plan)->std::result::Result<Status,LaneReplaceFailure>{
     if value["carryCommitted"]!=true{
@@ -1965,7 +2010,7 @@ impl Connection {
         let old=Status::parse(&before).map_err(|e|RateFailure::Transport(e.to_string()))?;
         let same_ownership=|after:&Value|->Result<()> {
             for key in ["graphGeneration","laneSetRevision","carryRevision","laneIds","lanes","masterGain","referenceGain","outputUid","trainingOnly","emptyProject","duration","playbackRate","transpose"] {
-                anyhow::ensure!(before[key]==after[key],"Native playback {key} changed while applying its region");
+                anyhow::ensure!(same_status_value(&before,after,key),"Native playback {key} changed while applying its region");
             }
             Ok(())
         };

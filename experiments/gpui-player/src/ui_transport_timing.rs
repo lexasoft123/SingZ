@@ -2,10 +2,10 @@
 use super::*;
 use crate::ui_training_run::{click,draw};
 use std::{path::{Path,PathBuf},time::Duration};
-fn key(w:&mut Window,cx:&mut App,value:&'static str){draw(w,cx);w.dispatch_keystroke(Keystroke::parse(value).unwrap(),cx);draw(w,cx);}
+pub(crate) fn key(w:&mut Window,cx:&mut App,value:&'static str){draw(w,cx);w.dispatch_keystroke(Keystroke::parse(value).unwrap(),cx);draw(w,cx);}
 fn printable(c:char)->&'static str{match c{'0'=>"0",'1'=>"1",'2'=>"2",'3'=>"3",'4'=>"4",'5'=>"5",'6'=>"6",'7'=>"7",'8'=>"8",'9'=>"9",'a'=>"a",'b'=>"b",'c'=>"c",_=>panic!("Unsupported test key")}}
 fn text(w:&mut Window,cx:&mut App,value:&str){for c in value.chars(){key(w,cx,printable(c));}}
-fn press(view:&Entity<Player>,w:&mut Window,cx:&mut App,id:&str)->anyhow::Result<()>{
+pub(crate) fn press(view:&Entity<Player>,w:&mut Window,cx:&mut App,id:&str)->anyhow::Result<()>{
  draw(w,cx);let ui=view.read(cx).transport.clone();let b=ui.read(cx).bounds(id).ok_or_else(||anyhow::anyhow!("Transport control missing: {id}"))?;
  anyhow::ensure!(b.left()>=px(0.)&&b.right()<=w.viewport_size().width&&b.top()>=px(52.)&&b.bottom()<=w.viewport_size().height&&b.size.width>px(0.),"Transport control outside viewport: {id} {b:?}");click(w,cx,b.center());Ok(())
 }
@@ -34,7 +34,7 @@ fn met_toggle(view:&Entity<Player>,w:&mut Window,cx:&mut App)->anyhow::Result<()
 fn state(view:&Entity<Player>,w:&Window,cx:&App)->serde_json::Value{
  let p=view.read(cx);serde_json::json!({"timing":p.transport.read(cx).timing_state(w,cx),"epoch":p.native_epoch,"project":p.project.as_ref().map(|p|&p.dir),"tempo":p.tempo,"position":p.playhead.position(),"playing":p.playing,"countingIn":p.transport_flight.counting_in,"countInAnchor":p.transport_flight.count_in_anchor,"loading":p.loading,"saving":p.saving,"notice":p.notice,"ratePending":p.transport_flight.native_rate_pending.is_some(),"rateQueued":p.transport_flight.native_rate_queued,"rateSaveRequested":p.transport_flight.native_rate_save_requested,"rateNavigation":p.transport_flight.native_rate_navigation,"beats":p.beats,"metronome":p.metronome,"selection":p.project.as_ref().and_then(|p|p.selection),"playerLoop":p.looping,"loop":p.playhead.loop_range(),"muted":p.muted.as_slice(),"gain":p.gain.as_slice(),"solo":p.solo.as_slice(),"master":p.master_volume,"transpose":p.transpose,"playIntent":p.transport_flight.native_play.payload().copied(),"playIntentSerial":p.transport_flight.native_play.current_serial(),"native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"graph":s.graph_generation,"rate":s.rate,"playing":s.playing,"position":s.position,"renderedFrame":s.rendered_frame,"countingIn":s.counting_in,"observedLanes":s.observed_lanes,"heard":s.count_in_heard,"seekCount":s.seek_count,"loop":s.loop_range})),"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),"liveFps":"unmeasured","productionParity":"unqualified native candidate"})
 }
-fn shot(view:&Entity<Player>,w:&mut Window,cx:&mut App,out:&Path,name:&str)->anyhow::Result<()>{draw(w,cx);anyhow::ensure!(!w.is_visible()&&!w.is_window_active(),"Timing test activated window");w.render_to_image()?.save(out.join(format!("{name}.png")))?;std::fs::write(out.join(format!("{name}.json")),serde_json::to_vec_pretty(&state(view,w,cx))?)?;Ok(())}
+pub(crate) fn shot(view:&Entity<Player>,w:&mut Window,cx:&mut App,out:&Path,name:&str)->anyhow::Result<()>{draw(w,cx);anyhow::ensure!(!w.is_visible()&&!w.is_window_active(),"Timing test activated window");w.render_to_image()?.save(out.join(format!("{name}.png")))?;std::fs::write(out.join(format!("{name}.json")),serde_json::to_vec_pretty(&state(view,w,cx))?)?;Ok(())}
 fn dots(total:usize,done:usize,per:usize)->String{(0..total).collect::<Vec<_>>().chunks(per).map(|group|group.iter().map(|i|if *i<done{'●'}else{'○'}).collect::<String>()).collect::<Vec<_>>().join(" ")}
 
 pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){cx.spawn(async move|cx|{

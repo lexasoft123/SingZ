@@ -25,6 +25,24 @@ fn accepted_rate_requires_actual_pair_inventory_and_mixer() {
     }
 }
 #[test]
+fn live_lane_counters_do_not_count_as_a_changed_lane_inventory() {
+    let mut before = packet();
+    before["lanes"][0]["streamed"] = json!(true);
+    before["lanes"][0]["starvedBlocks"] = json!(0);
+    before["lanes"][0]["stagedJumps"] = json!(1);
+    let mut after = before.clone();
+    after["playbackRate"] = json!(1.25);
+    after["lanes"][0]["starvedBlocks"] = json!(2);
+    after["lanes"][0]["stagedJumps"] = json!(5);
+    assert!(accepted_rate(&before, &after, 1.25, 0).is_ok());
+    assert!(retained_rate(&before, &{let mut kept = before.clone();kept["lanes"][0]["stagedJumps"] = json!(9);kept}).is_ok());
+    for (field, value) in [("gain", json!(0.4)), ("muted", json!(true)), ("streamed", json!(false)), ("id", json!("bass"))] {
+        let mut bad = after.clone();
+        bad["lanes"][0][field] = value;
+        assert!(accepted_rate(&before, &bad, 1.25, 0).is_err(), "{field}");
+    }
+}
+#[test]
 fn refusal_recovery_requires_real_success_status_and_same_owned_graph() {
     let before = packet();
     let mut after = before.clone();

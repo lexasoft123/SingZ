@@ -719,6 +719,11 @@ int run(int argc, char** argv) {
   bool emptyNeverClaimed=emptyProject;
   std::optional<NativePlaybackCleanupResult> emptyCleanup;
   NativePlaybackPrepareConfig config;
+#if defined(__APPLE__) || defined(_WIN32)
+  // Match Electron desktop: stream FLAC lanes from their files on macOS and
+  // Windows. Linux remains opt-in until its session path is qualified.
+  config.streamLanes = true;
+#endif
   config.graphDocument=std::move(graphDocument);
   const auto inventory=engine.enumerate();
   const AudioHostDeviceInfo* output=nullptr;
@@ -920,7 +925,7 @@ int run(int argc, char** argv) {
         << ",\"coordinatorState\":" << static_cast<unsigned>(proof.coordinatorState)
         << ",\"handoffLease\":" << proof.handoffLease << '}';
     }else std::cout << "null";
-    std::cout<<",\"lanes\":[";for(size_t i=0;i<s.lanes.size();++i){if(i)std::cout<<',';const auto& lane=s.lanes[i];std::cout<<"{\"id\":"<<singz::tools::jsonString(lane.id)<<",\"gain\":"<<lane.gain<<",\"muted\":"<<(lane.muted?"true":"false")<<",\"solo\":"<<(lane.solo?"true":"false")<<"}";}std::cout<<']';
+    std::cout<<",\"lanes\":[";for(size_t i=0;i<s.lanes.size();++i){if(i)std::cout<<',';const auto& lane=s.lanes[i];std::cout<<"{\"id\":"<<singz::tools::jsonString(lane.id)<<",\"gain\":"<<lane.gain<<",\"muted\":"<<(lane.muted?"true":"false")<<",\"solo\":"<<(lane.solo?"true":"false")<<",\"streamed\":"<<(lane.streamed?"true":"false")<<",\"starvedBlocks\":"<<lane.starvedBlocks<<",\"stagedJumps\":"<<lane.stagedJumps<<"}";}std::cout<<']';
     std::cout<<",\"laneIds\":[";for(size_t i=0;i<ids.size();++i){if(i)std::cout<<',';std::cout<<singz::tools::jsonString(ids[i]);}std::cout<<']';
     std::cout<<",\"laneDurations\":[";for(size_t i=0;i<laneDurations.size();++i){if(i)std::cout<<',';std::cout<<(rate>0?std::floor(laneDurations[i]*rate+0.5)/rate:laneDurations[i]);}std::cout<<']';
     std::cout<<",\"cueNotes\":[";for(size_t i=0;i<cueNotes.size();++i){if(i)std::cout<<',';const auto& note=cueNotes[i];std::cout<<"{\"midi\":"<<note.midi<<",\"cueIndex\":"<<note.cueIndex<<",\"start\":"<<note.start<<",\"end\":"<<note.end<<'}';}std::cout<<']';
