@@ -7,7 +7,7 @@
       "version": "0.3.11",
       "archive_sha256": "9303c771abf2acff2a96d706f69d9a82088c4770173a07cce88f0002431d887d",
       "patch": "gpui-pre.patch",
-      "patch_sha256": "248d1a91a5f3c2cb4f4d582e7a58362440460efceeb641a61f2faff59f6611cb"
+      "patch_sha256": "67648283a40daf8f5b06ed38c8c031e72dddd004b6623f14773f81008069e53e"
     },
     {
       "name": "gpui-pre-apple",

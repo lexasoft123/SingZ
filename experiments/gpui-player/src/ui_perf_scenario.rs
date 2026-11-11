@@ -57,6 +57,73 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                 let action = command["action"].as_str().ok_or_else(||anyhow::anyhow!("missing action"))?.to_owned();
                 let step: anyhow::Result<serde_json::Value> = async {
                     match action.as_str() {
+                        "render-metrics" => {
+                            let waveform = super::waveform::metrics();
+                            Ok(serde_json::json!({
+                                "framesRequested": super::UI_FRAME_REQUESTS.load(std::sync::atomic::Ordering::Relaxed),
+                                "frameDemandBits": super::UI_FRAME_DEMAND_BITS.load(std::sync::atomic::Ordering::Relaxed),
+                                "waveformCacheMisses": waveform.cache_misses,
+                                "textureAllocations": waveform.texture_allocations,
+                                "textureReleases": waveform.texture_releases,
+                                "liveTextures": waveform.live_textures,
+                                "mainThreadRasterizations": waveform.main_thread_rasterizations,
+                                "backgroundRasterizations": waveform.background_rasterizations,
+                                "lanePlayheadPaintAllocations": super::alloc_probe::count()}))
+                        }
+                        "seed-meter" => {
+                            let held = command["held"].as_f64().unwrap_or(1.) as f32;
+                            handle.update(cx, |_, _, app| view.read(app).transport.clone().update(app, |t, cx| t.ui_seed_meter(held, cx)))?;
+                            Ok(serde_json::json!({"seeded": held}))
+                        }
+                        "draw" => { handle.update(cx, |_, window, app| super::ui_training_run::draw(window, app))?; Ok(serde_json::json!({"drawn": true})) }
+                        "output-meter" => handle.update(cx, |_, _, app| Ok::<_, anyhow::Error>(view.read(app).transport.read(app).output_state()))?,
+                        // One simulated display link at ~120 Hz. A frame is demanded when
+                        // GPUI has a next-frame callback pending or the window is dirty
+                        // (any displayed view, nested ones included, was notified or
+                        // refreshed since the last draw): exactly what a platform frame
+                        // source acts on. Only then does the tick draw, as a real window would.
+                        "idle-window" | "steady-playback" => {
+                            let playing = action == "steady-playback";
+                            let settle = command["settleSeconds"].as_f64().unwrap_or(if playing { 0. } else { 2. });
+                            let seconds = command["seconds"].as_f64().unwrap_or(2.);
+                            anyhow::ensure!(settle >= 0. && seconds > 0. && settle.is_finite() && seconds.is_finite(), "invalid window duration");
+                            if !playing {
+                                // Draw the target state before settling, so a change made by the
+                                // previous action (still dirty or mid-animation) is on screen.
+                                handle.update(cx, |_, window, app| super::ui_training_run::draw(window, app))?;
+                            }
+                            let (mut demanded, mut callbacks, mut dirtied) = (0u64, 0u64, 0u64);
+                            let mut trace: Vec<String> = Vec::new();
+                            for (measuring, duration) in [(false, settle), (true, seconds)] {
+                                let started = Instant::now();
+                                while started.elapsed().as_secs_f64() < duration {
+                                    let (pending, dirty) = handle.update(cx, |_, window, app| -> anyhow::Result<(usize, bool)> {
+                                        anyhow::ensure!(!window.is_visible() && !window.is_window_active(), "scenario window became visible");
+                                        if playing { anyhow::ensure!(view.read(app).playing, "playback stopped during steady window"); }
+                                        let pending = window.simulate_next_frame(app);
+                                        let dirty = window.is_dirty();
+                                        if pending > 0 { window.refresh(); }
+                                        if pending > 0 || dirty { let _ = window.draw(app); }
+                                        Ok((pending, dirty))
+                                    })??;
+                                    if measuring {
+                                        if trace.len() < 24 && (pending > 0 || dirty) { trace.push(format!("{}ms pending={pending} dirty={dirty}", started.elapsed().as_millis())); }
+                                        callbacks += pending as u64;
+                                        dirtied += u64::from(dirty);
+                                        demanded += u64::from(pending > 0 || dirty);
+                                    }
+                                    cx.background_executor().timer(Duration::from_millis(8)).await;
+                                }
+                            }
+                            Ok(serde_json::json!({"demandedFrames": demanded, "pendingCallbacks": callbacks, "dirtyTicks": dirtied, "trace": trace}))
+                        }
+                        "open-modal" | "close-modal" => {
+                            // A notice is a real modal: the backdrop, the Close control and the
+                            // modal clock freeze all engage (`output_covered`).
+                            let open = action == "open-modal";
+                            handle.update(cx, |_, _, app| view.update(app, |p, cx| { p.notice = open.then(|| "Idle-redraw modal probe".to_owned()); cx.notify(); }))?;
+                            Ok(serde_json::json!({"modal": open}))
+                        }
                         "launch" => {
                             handle.update(cx, |_, window, app| { window.resize(size(px(1280.), px(800.))); super::ui_training_run::draw(window, app); })?;
                             let deadline = Instant::now() + Duration::from_secs_f64(deadline_secs);

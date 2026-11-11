@@ -25,6 +25,9 @@ mod ui_song_output;
 #[cfg(feature="ui-tests")]
 mod ui_timeline;
 mod timeline_viewport;
+mod alloc_probe;
+mod frame_demand;
+mod playhead_overlay;
 mod timeline_host;
 mod ruler_clearance;
 mod restart_cycle;
@@ -37,6 +40,10 @@ mod region_host;
 mod karaoke_host;
 mod analysis_host;
 mod backdrop_clock;
+#[cfg(feature = "ui-tests")]
+static UI_FRAME_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "ui-tests")]
+static UI_FRAME_DEMAND_BITS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 #[cfg(feature="ui-tests")]
 mod ui_modal_backdrop;
 mod analyze_provenance;
@@ -2654,11 +2661,52 @@ impl Player {
             attempt
         } else { source_jobs::OpenAttempt::Failed }
     }
+    /// A modal or full-screen overlay covers the player; the output meter freezes.
+    fn output_covered(&self, cx: &App) -> bool {
+        (self.loading && !self.source_split_loading()) || (self.source_job.is_some() && self.source_split.is_none())
+            || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
+            || self.project_delete.read(cx).is_open()
+            || self.lyrics_editor_open
+            || self.project_picker_open || self.drive_projects_open
+            || self.library_import_open || self.stem_export_open
+            || self.notice.is_some()
+            || self.engine_setup.read(cx).is_open()
+            || self.whats_new.read(cx).is_open()
+            || self.quick_start.read(cx).is_open()
+    }
+    /// Output meter telemetry runs off the poll loop, not root render, so a
+    /// paused player still lets the held level decay and clip counts land. It
+    /// only notifies while the held level or clip flag actually changes, which
+    /// ends once the level snaps to rest.
+    fn pump_output_meter(&mut self, cx: &mut Context<Self>) {
+        let covered = self.output_covered(cx);
+        let (peak, clips) = self.transport_flight.timing_status.as_ref().map(|status|
+            (if self.playing && status.playing { status.output_peak } else { 0. }, status.output_clipped_blocks)).unwrap_or((0., 0));
+        self.transport.update(cx, |transport, cx| transport.set_native_peak(peak, clips, covered, cx));
+    }
+    /// Root-visible transport state a status event can change.
+    fn telemetry_signature(&self) -> (bool, bool, bool, bool, u64, u32, u64, u64, bool) {
+        (
+            self.playing,
+            self.loading,
+            self.loaded_song,
+            self.transport_flight.counting_in,
+            self.duration.to_bits(),
+            self.native_rate.to_bits(),
+            self.native_graph as u64,
+            f64::from(self.playhead.position()).to_bits(),
+            self.playhead.pending_seek().is_some(),
+        )
+    }
     fn poll_backend(&mut self, cx: &mut Context<Self>) {
         self.sync_audio_provider(cx);
         if let Some(store)=&mut self.desktop_window_state{store.save_if_due(Instant::now());}
         let events = self.backend.as_ref().map(|b| b.drain()).unwrap_or_default();
         for event in events {
+            // Telemetry arrives ~25 Hz even while paused; it only repaints the
+            // root when something the root shows actually changed.
+            let telemetry_before = matches!(event, integration::Event::Status(..) | integration::Event::Playback(..))
+                .then(|| self.telemetry_signature());
             match event {
                 integration::Event::Provider(snapshot)=>self.adopt_audio_provider(snapshot,cx),
                 integration::Event::Training(epoch, generation, result)
@@ -3355,7 +3403,9 @@ impl Player {
                 }
                 _ => {}
             }
-            cx.notify();
+            if telemetry_before.is_none_or(|before| before != self.telemetry_signature()) {
+                cx.notify();
+            }
         }
         let song = self
             .project
@@ -3393,6 +3443,7 @@ impl Player {
         self.flush_metronome_intents(cx);
         self.flush_carry(cx);
         self.flush_carry_navigation(cx);
+        self.pump_output_meter(cx);
     }
     fn open_models(&mut self, origin: models::Origin, cx: &mut Context<Self>) {
         if self.engine_setup.read(cx).is_open(){self.close_engine_setup(cx);}
@@ -5136,6 +5187,7 @@ impl Player {
         let view_start = self.view_start;
         let view_end = self.view_end;
         let fade = self.fade[i];
+        let waveform_owner = cx.entity().downgrade();
         let ordinal=self.project.as_ref().and_then(|p|p.lanes.iter().position(|(slot,_)|*slot==i)).unwrap_or(i);
         let elapsed=lane_spec.and_then(|lane|self.lane_entered.get(&lane.id)).unwrap_or(&self.started).elapsed().as_secs_f32();
         let enter = ((elapsed - ordinal as f32 * 0.07) / 0.55).clamp(0., 1.);
@@ -5254,6 +5306,7 @@ impl Player {
                     .on_scroll(cx.listener(|this,event:&ScrollEvent,window,cx| {if let Some(bounds)=this.region.bounds.get(){this.timeline_scroll(event,bounds,window,cx);}}))
                     .on_pinch(cx.listener(|this,event:&PinchEvent,_,cx| {if let Some(bounds)=this.region.bounds.get(){this.timeline_pinch(event,bounds,cx);}}))
                     .flex_1()
+                    .relative()
                     .cursor(if self.region.resize_hover {CursorStyle::ResizeLeftRight}else{CursorStyle::IBeam})
                     .on_mouse_down(
                         MouseButton::Left,
@@ -5263,6 +5316,17 @@ impl Player {
                             }
                         }),
                     )
+                    .child(waveform::lane(waveform::Lane {
+                        index: i,
+                        color,
+                        position,
+                        duration,
+                        fade,
+                        enter,
+                        view_start,
+                        view_end,
+                        owner: waveform_owner,
+                    }))
                     .child(
                         canvas(
                             move |b, _, _| {
@@ -5270,22 +5334,6 @@ impl Player {
                                 b
                             },
                             move |_, b, w, cx| {
-                                let wave_bounds = Bounds::new(
-                                    point(b.left(), b.top() + px(7.)),
-                                    size(b.size.width, (b.size.height - px(14.)).max(px(1.))),
-                                );
-                                waveform::paint(
-                                    i,
-                                    color,
-                                    position,
-                                    duration,
-                                    fade,
-                                    wave_bounds,
-                                    w,
-                                    enter,
-                                    view_start,
-                                    view_end,
-                                );
                                 if let Some(g) = &grid {
                                     beat_grid::paint(
                                         &mut beat_cache.borrow_mut(),
@@ -5446,16 +5494,7 @@ impl Render for Player {
         // Capture before the outer modal transition moves focus to the root.
         // A notice can also appear above an already-open editor or Settings.
         let notice_focus=if notice_open&&!self.notice_was_open {window.focused(cx)}else{None};
-        let modal_open = (self.loading && !self.source_split_loading()) || (self.source_job.is_some() && self.source_split.is_none())
-            || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
-            || self.project_delete.read(cx).is_open()
-            || self.lyrics_editor_open
-            || self.project_picker_open || self.drive_projects_open
-            || self.library_import_open || self.stem_export_open
-            || self.notice.is_some()
-            || self.engine_setup.read(cx).is_open()
-            || self.whats_new.read(cx).is_open()
-            || self.quick_start.read(cx).is_open();
+        let modal_open = self.output_covered(cx);
         let backdrop_open = self.blurred_modal_open(cx);
         if backdrop_open && !self.backdrop_clock.is_open() {
             // Underlay popovers are deferred by GPUI and paint after the root.
@@ -5538,9 +5577,6 @@ impl Render for Player {
             );
             transport.set_karaoke(self.karaoke, cx);
             transport.set_tempo(transport_rate.0, cx);
-            let (peak,clips)=self.transport_flight.timing_status.as_ref().map(|status|
-                (if self.playing&&status.playing {status.output_peak}else{0.},status.output_clipped_blocks)).unwrap_or((0.,0));
-            transport.set_native_peak(peak,clips,modal_open,cx);
         });
         let base_catalog = self.screen == Screen::Library
             || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
@@ -5602,9 +5638,11 @@ impl Render for Player {
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f32();
         self.last = now;
-        let mut animating =
-            self.started.elapsed().as_secs_f32() < 1.1 || self.lyric_scroll_active.get()
-                || self.project.as_ref().is_some_and(|project|project.lane_specs.iter().enumerate().any(|(ordinal,lane)|self.lane_entered.get(&lane.id).is_some_and(|entered|entered.elapsed().as_secs_f32()<0.55+ordinal as f32*0.07)));
+        let mut demand = frame_demand::FrameDemand::default();
+        demand.set(frame_demand::Source::Startup, self.started.elapsed().as_secs_f32() < 1.1);
+        demand.set(frame_demand::Source::LyricsScroll, self.lyric_scroll_active.get());
+        demand.set(frame_demand::Source::LaneEnter,
+            self.project.as_ref().is_some_and(|project|project.lane_specs.iter().enumerate().any(|(ordinal,lane)|self.lane_entered.get(&lane.id).is_some_and(|entered|entered.elapsed().as_secs_f32()<0.55+ordinal as f32*0.07))));
         let solo = self.solo.iter().any(|s| *s);
         for i in 0..tracks::LANE_SLOTS {
             let target = if !self.muted[i] && (!solo || self.solo[i]) {
@@ -5614,19 +5652,20 @@ impl Render for Player {
             };
             if (self.fade[i] - target).abs() > 0.002 {
                 self.fade[i] += (target - self.fade[i]) * (dt / 0.15).min(1.);
-                animating = true;
+                demand.set(frame_demand::Source::LaneFade, true);
             }
         }
         if self.backend.is_some() {
             self.playhead.shown(now);
             // A pending receipt gets at most one second on the existing frame
             // clock, even while paused; ordinary idle schedules no extra frames.
-            if (self.playing && !self.transport_flight.counting_in) || self.playhead.pending_seek().is_some() { animating = true; }
+            demand.set(frame_demand::Source::Playback, self.playing && !self.transport_flight.counting_in);
+            demand.set(frame_demand::Source::PendingSeek, self.playhead.pending_seek().is_some());
         }
         if self.playing && self.backend.is_none() && self.screen == Screen::Player && !modal_open {
             self.playhead.advance_demo(dt as f64 * self.tempo as f64, self.duration, self.looping);
             if self.playhead.position() >= self.duration { self.playing = false; }
-            animating = true;
+            demand.set(frame_demand::Source::DemoPlayback, true);
         }
         // Deterministic capture only: external runner advances song time one display-frame at a time.
         if let Some(path) = self.capture_file.clone() {
@@ -5639,15 +5678,19 @@ impl Render for Player {
                     });
                 }
             }
-            animating = true;
+            demand.set(frame_demand::Source::Capture, true);
         }
-        animating |= self.advance_timeline(now,self.screen==Screen::Player&&!modal_open);
+        demand.set(frame_demand::Source::Timeline, self.advance_timeline(now,self.screen==Screen::Player&&!modal_open));
         self.pitch_strip.update(cx, |strip, cx| {
             strip.set_position(self.display_position(), cx);
             strip.set_view(self.view_start, self.view_end, cx);
         });
-        animating |= self.playing && self.transport_flight.timing_status.as_ref().is_some_and(|status|status.count_in_heard.is_some());
-        if animating && self.screen == Screen::Player && !modal_open {
+        demand.set(frame_demand::Source::CountIn, self.playing && self.transport_flight.timing_status.as_ref().is_some_and(|status|status.count_in_heard.is_some()));
+        #[cfg(feature = "ui-tests")]
+        UI_FRAME_DEMAND_BITS.store(demand.bits(), std::sync::atomic::Ordering::Relaxed);
+        if !demand.is_empty() && self.screen == Screen::Player && !modal_open {
+            #[cfg(feature = "ui-tests")]
+            UI_FRAME_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             window.request_animation_frame();
         }
 
@@ -5675,8 +5718,6 @@ impl Render for Player {
         let scrub_hit = scrub_bounds.clone();
         let head =
             if self.duration>0.&&self.view_end>self.view_start{(self.display_position()/self.duration-self.view_start)/(self.view_end-self.view_start)}else{-1.};
-        let head_pixels =
-            (head * timeline_width as f64 * window.scale_factor() as f64).round() as f32 / window.scale_factor();
         let region_owner=cx.entity().downgrade();
         let selection=self.region_target().selection.and_then(|(s,e)| {
             let span=(self.view_end-self.view_start)*self.duration;
@@ -5726,36 +5767,10 @@ impl Render for Player {
                 .left(relative(left as f32)).w(relative((right-left).max(0.) as f32))
                 .bg(rgba(0xffa02817)).border_l_1().border_r_1().border_color(rgba(0xffa02899))))
             .when((0. ..=1.).contains(&head), |overlay| {
-                overlay.child(
-                    div()
-                        .absolute()
-                        .left(px(head_pixels))
-                        .top_0()
-                        .bottom_0()
-                        .w(px(1.))
-                        .bg(rgba(0xfff4e0d9))
-                        .shadow(vec![glow(0xffc46e, 0.55, 9.)])
-                        .child(
-                            canvas(
-                                |b, _, _| b,
-                                |_, b, w, _| {
-                                    let mut path = PathBuilder::fill();
-                                    path.move_to(b.origin);
-                                    path.line_to(point(b.right(), b.top()));
-                                    path.line_to(point(b.left() + px(4.5), b.bottom()));
-                                    path.close();
-                                    if let Ok(path) = path.build() {
-                                        w.paint_path(path, rgba(0xfff4e0e6));
-                                    }
-                                },
-                            )
-                            .absolute()
-                            .top_0()
-                            .left(px(-4.))
-                            .w(px(9.))
-                            .h(px(7.)),
-                        ),
-                )
+                overlay.child(canvas(
+                    |b, _, _| b,
+                    move |_, b, w, _| alloc_probe::scope(|| playhead_overlay::paint(w, b, head)),
+                ).absolute().inset_0())
             });
         if self.screen != Screen::Player || modal_open {
             self.metronome_open = false;

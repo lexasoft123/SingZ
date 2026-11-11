@@ -105,6 +105,12 @@ fn monitor_channel_choice(mut current: [usize; 2], slot: usize, channel: usize) 
     Some(current)
 }
 
+/// Player overlays preference errors on a snapshot (or builds an error View
+/// with the default revision 0), so equality is revision plus phase and error.
+fn microphone_unchanged(old: &crate::microphone::View, new: &crate::microphone::View) -> bool {
+    old.revision == new.revision && old.phase == new.phase && old.error == new.error
+}
+
 impl SettingsScreen {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
@@ -220,14 +226,15 @@ impl SettingsScreen {
             "verticalScrollOffset":[f32::from(self.scroll.offset().x),f32::from(self.scroll.offset().y)]})
     }
     pub fn clear_input_pref_error(&mut self, cx: &mut Context<Self>) {
-        self.input_pref_error = None;
-        cx.notify();
+        if self.input_pref_error.take().is_some() { cx.notify(); }
     }
     pub fn input_pref_error(&mut self, error: String, cx: &mut Context<Self>) {
+        if self.input_pref_error.as_deref() == Some(error.as_str()) { return; }
         self.input_pref_error = Some(error);
         cx.notify();
     }
     pub fn set_input_prefs(&mut self, prefs: crate::microphone::Prefs, cx: &mut Context<Self>) {
+        if self.input_prefs == prefs { return; }
         self.channel = prefs.channel;
         self.gain = prefs.gain;
         self.headphones = prefs.headphones;
@@ -295,6 +302,9 @@ impl SettingsScreen {
         Ok(())
     }
     pub fn set_microphone(&mut self, view: crate::microphone::View, cx: &mut Context<Self>) {
+        // Player overlays preference errors on a snapshot without bumping its
+        // revision, so phase and error are part of what counts as a change.
+        if microphone_unchanged(&self.microphone, &view) { return; }
         self.microphone = view;
         cx.notify();
     }
@@ -346,7 +356,7 @@ impl SettingsScreen {
             cx.notify();
         }
     }
-    pub fn provider_failed(&mut self,error:String,cx:&mut Context<Self>) {self.provider_error=Some(error);self.provider_pending=false;cx.notify();}
+    pub fn provider_failed(&mut self,error:String,cx:&mut Context<Self>) {if self.provider_error.as_deref()==Some(error.as_str())&&!self.provider_pending{return;}self.provider_error=Some(error);self.provider_pending=false;cx.notify();}
     fn windows_provider(&self)->bool {
         cfg!(windows)||self.provider.as_ref().and_then(|s|s.availability.as_ref()).is_some_and(|p|p.platform=="win32")
     }
@@ -369,11 +379,13 @@ impl SettingsScreen {
             "options":(0..2).map(|i|serde_json::json!({"index":i,"disabled":self.option_disabled("settings-provider",i),"bounds":self.option_bounds("settings-provider",i).map(bounds)})).collect::<Vec<_>>()})
     }
     pub fn route_applying(&mut self, cx: &mut Context<Self>) {
+        if self.route_busy && self.route_error.is_none() { return; }
         self.route_busy = true;
         self.route_error = None;
         cx.notify();
     }
     pub fn route_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        if self.route_error.as_deref() == Some(error.as_str()) && !self.route_busy { return; }
         self.route_error = Some(error);
         self.route_busy = false;
         cx.notify();
@@ -402,6 +414,7 @@ impl SettingsScreen {
     #[cfg(feature = "ui-tests")]
     pub fn inventory_revision(&self) -> u64 { self.inventory_revision }
     pub fn confirm_route(&mut self, label: String, cx: &mut Context<Self>) {
+        if self.route_label.as_deref() == Some(label.as_str()) { return; }
         self.route_label = Some(label);
         cx.notify();
     }
@@ -412,6 +425,7 @@ impl SettingsScreen {
         error: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.output_uid == uid && self.route_label == label && self.route_error == error && !self.route_busy { return; }
         self.output_uid = uid;
         self.route_label = label.or_else(|| self.route_label.take());
         self.route_error = error;
@@ -2030,5 +2044,25 @@ mod tests {
         assert_eq!(monitor_channel_choice([2, 1], 1, 3), Some([2, 3]));
         assert_eq!(monitor_channel_choice([0, 1], 0, 0), Some([0, 1]));
         assert_eq!(monitor_channel_choice([0, 1], 2, 2), None);
+    }
+}
+
+#[cfg(test)]
+mod microphone_equality_tests {
+    use super::microphone_unchanged;
+    use crate::microphone::{Phase, View};
+
+    #[test]
+    fn an_error_overlay_on_an_unchanged_revision_is_a_change() {
+        let initial = View::default();
+        // Initial preference-load failure: a fresh error View, still revision 0.
+        let load_failed = View { phase: Phase::Error, error: Some("could not read input preferences".into()), ..View::default() };
+        assert_eq!(initial.revision, load_failed.revision);
+        assert!(!microphone_unchanged(&initial, &load_failed), "revision-only equality dropped this error");
+        // Error overlaid on a service snapshot whose revision did not move.
+        let snapshot = View { revision: 7, ..View::default() };
+        let overlaid = View { revision: 7, phase: Phase::Error, error: Some("preference save failed".into()), ..View::default() };
+        assert!(!microphone_unchanged(&snapshot, &overlaid));
+        assert!(microphone_unchanged(&overlaid, &overlaid.clone()));
     }
 }

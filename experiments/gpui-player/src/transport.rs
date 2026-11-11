@@ -22,11 +22,15 @@ fn song_gain_label(gain:f32)->String {
     if !db.is_finite(){"−∞ dB".into()}
     else {format!("{}{:.1} dB",if db>0.05 {"+"}else{""},if db.abs()<0.05 {0.}else{db})}
 }
+const METER_REST:f32=0.002;
 #[derive(Default)]
 struct OutputMeter {held:f32,clipped:bool,previous_count:u64}
 impl OutputMeter {
     fn sample(&mut self,peak:f32,count:u64,decay:f32){
         self.held=peak.max(self.held*decay);
+        // Below one display step the held level reads as silence; snapping there
+        // ends the decay (and its frames) instead of halving forever.
+        if self.held<METER_REST {self.held=0.;}
         self.clipped|=count!=self.previous_count&&count>0;
         self.previous_count=count;
     }
@@ -709,7 +713,9 @@ impl Transport {
     }
     pub fn set_native_peak(&mut self,peak:f32,clips:u64,covered:bool,cx:&mut Context<Self>) {
         let now=std::time::Instant::now();
+        let clips_changed=self.output_latest_clips!=clips;
         self.output_latest_clips=clips;
+        if clips_changed&&self.output_mounted&&!covered {cx.notify();}
         if covered||!self.output_mounted {self.output_meter_tick=now;return;}
         let elapsed=now.duration_since(self.output_meter_tick).as_secs_f32();
         if elapsed>=0.05 {
@@ -729,6 +735,11 @@ impl Transport {
         // A range input emits Change only when its stepped value changes.
         // In particular, touching +12 at saved native gain 4 must not narrow it.
         if db!=song_fader_db(self.volume) {self.output_gain(song_gain(db),cx);}
+    }
+    /// Test hook: leave the held meter at a loud level, as after playback.
+    #[cfg(feature="ui-tests")]
+    pub fn ui_seed_meter(&mut self,held:f32,cx:&mut Context<Self>){
+        self.output_meter.held=held;self.output_meter_tick=std::time::Instant::now();cx.notify();
     }
     #[cfg(feature="ui-tests")]
     pub fn output_state(&self)->serde_json::Value {
@@ -1100,5 +1111,33 @@ mod song_output_tests {
         meter.sample(0.,4,0.79);assert!(meter.clipped);
         meter.reset_clip(4);meter.sample(0.,0,0.79);assert!(!meter.clipped);
         meter.sample(0.,1,0.79);assert!(meter.clipped);
+    }
+}
+
+#[cfg(test)]
+mod meter_decay_tests {
+    use super::{OutputMeter, METER_REST};
+
+    #[test]
+    fn a_paused_meter_decays_to_exact_rest_in_bounded_steps() {
+        let mut meter = OutputMeter::default();
+        meter.sample(1., 0, 0.79);
+        let mut steps = 0;
+        while meter.held != 0. {
+            meter.sample(0., 0, 0.79);
+            steps += 1;
+            assert!(steps <= 40, "held level never settles: {}", meter.held);
+        }
+        // 50 ms per step: the old multiplicative decay needed ~19 s of frames.
+        assert!(steps as f32 * 0.05 < 2.5, "{steps} steps");
+        assert!(METER_REST > 0.);
+    }
+
+    #[test]
+    fn a_late_clip_after_pause_is_latched() {
+        let mut meter = OutputMeter::default();
+        meter.sample(0., 0, 0.79);
+        meter.sample(0., 3, 0.79);
+        assert!(meter.clipped);
     }
 }

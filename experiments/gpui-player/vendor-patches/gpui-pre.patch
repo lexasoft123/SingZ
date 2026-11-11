@@ -1139,7 +1139,7 @@ index 1eea420..84798c6 100644
          self.dilation.hash(state);
      }
 diff --git a/src/window.rs b/src/window.rs
-index c2ba13d..8f2f7ca 100644
+index c2ba13d..36a81c8 100644
 --- a/src/window.rs
 +++ b/src/window.rs
 @@ -13,13 +13,13 @@ use crate::{
@@ -1200,7 +1200,23 @@ index c2ba13d..8f2f7ca 100644
          &self.text_system
      }
  
-@@ -3094,6 +3101,20 @@ impl Window {
+@@ -2941,6 +2948,15 @@ impl Window {
+         self.on_next_frame(move |_, cx| cx.notify(entity));
+     }
+ 
++    /// Whether the window has been invalidated since its last draw: some view
++    /// it displays was notified, or `refresh` was called. This is the demand a
++    /// platform frame source would act on, nested entities included. Tests that
++    /// simulate the frame loop use it to count real redraw demand.
++    #[cfg(any(test, feature = "test-support"))]
++    pub fn is_dirty(&self) -> bool {
++        self.invalidator.is_dirty()
++    }
++
+     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.
+     ///
+     /// Tests have no platform frame loop, so this simulates the delivery of the
+@@ -3094,6 +3110,20 @@ impl Window {
              .render_to_image(&self.rendered_frame.scene)
      }
  
@@ -1221,7 +1237,7 @@ index c2ba13d..8f2f7ca 100644
      /// Returns the quads in the most recently rendered frame's scene, so tests can assert on
      /// painted output without rasterizing the frame. Quad bounds are in scaled pixels and are
      /// not clipped; each quad carries the content mask it will be clipped to when drawn. Quads
-@@ -3394,6 +3415,55 @@ impl Window {
+@@ -3394,6 +3424,55 @@ impl Window {
          self.text_style().line_height_in_pixels(self.rem_size())
      }
  
@@ -1277,7 +1293,7 @@ index c2ba13d..8f2f7ca 100644
      /// Rounds a logical value to the nearest device pixel.
      #[inline]
      pub fn pixel_snap(&self, value: Pixels) -> Pixels {
-@@ -3434,7 +3504,8 @@ impl Window {
+@@ -3434,7 +3513,8 @@ impl Window {
              thickness
          };
          Bounds {
@@ -1287,7 +1303,7 @@ index c2ba13d..8f2f7ca 100644
              size: size(self.snap_stroke(width), height),
          }
      }
-@@ -3514,10 +3585,20 @@ impl Window {
+@@ -3514,10 +3594,20 @@ impl Window {
      #[inline]
      fn snap_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<ScaledPixels> {
          let scale_factor = self.scale_factor();
@@ -1312,7 +1328,7 @@ index c2ba13d..8f2f7ca 100644
          Bounds::from_corners(
              point(ScaledPixels(left), ScaledPixels(top)),
              point(ScaledPixels(right), ScaledPixels(bottom)),
-@@ -3527,7 +3608,10 @@ impl Window {
+@@ -3527,7 +3617,10 @@ impl Window {
      /// Rounds half-to-zero but clamps any non-zero input up to 1 dp so thin strokes do not disappear.
      #[inline]
      fn snap_stroke(&self, value: Pixels) -> ScaledPixels {
@@ -1324,7 +1340,7 @@ index c2ba13d..8f2f7ca 100644
      }
  
      #[inline]
-@@ -5021,7 +5105,8 @@ impl Window {
+@@ -5021,7 +5114,8 @@ impl Window {
          let scale_factor = self.scale_factor();
          let height = style.thickness;
          let bounds = Bounds {
@@ -1334,7 +1350,7 @@ index c2ba13d..8f2f7ca 100644
              size: size(self.snap_stroke(width), self.snap_stroke(height)),
          };
          let opacity = self.element_opacity();
-@@ -5059,17 +5144,33 @@ impl Window {
+@@ -5059,17 +5153,33 @@ impl Window {
          let scale_factor = self.scale_factor();
          let glyph_origin = origin.scale(scale_factor);
  
@@ -1346,14 +1362,14 @@ index c2ba13d..8f2f7ca 100644
 -                / SUBPIXEL_VARIANTS_X as f32,
 -            round_half_toward_zero(glyph_origin.y.0 * SUBPIXEL_VARIANTS_Y as f32)
 -                / SUBPIXEL_VARIANTS_Y as f32,
--        );
--        let subpixel_variant = Point::new(
--            (quantized_origin.x.fract() * SUBPIXEL_VARIANTS_X as f32) as u8,
--            (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
 +            self.layout_precision.glyph_x_position(glyph_origin.x.0),
 +            self.layout_precision
 +                .glyph_y_position(glyph_origin.y.0, self.fractional_glyph_baselines),
          );
+-        let subpixel_variant = Point::new(
+-            (quantized_origin.x.fract() * SUBPIXEL_VARIANTS_X as f32) as u8,
+-            (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
+-        );
 -        let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
 +        let integer_origin = quantized_origin.map(|coordinate| {
 +            ScaledPixels(if self.layout_precision == LayoutPrecision::CssPixels {
@@ -1377,7 +1393,7 @@ index c2ba13d..8f2f7ca 100644
          let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
          let dilation = self.text_system().glyph_dilation_for_color(color);
          let params = RenderGlyphParams {
-@@ -5079,6 +5180,7 @@ impl Window {
+@@ -5079,6 +5189,7 @@ impl Window {
              subpixel_variant,
              scale_factor,
              is_emoji: false,
@@ -1385,7 +1401,7 @@ index c2ba13d..8f2f7ca 100644
              subpixel_rendering,
              dilation,
          };
-@@ -5169,6 +5271,7 @@ impl Window {
+@@ -5169,6 +5280,7 @@ impl Window {
              subpixel_variant: Default::default(),
              scale_factor,
              is_emoji: true,
@@ -1393,7 +1409,7 @@ index c2ba13d..8f2f7ca 100644
              subpixel_rendering: false,
              dilation: 0,
          };
-@@ -5509,7 +5612,9 @@ impl Window {
+@@ -5509,7 +5621,9 @@ impl Window {
              .unwrap()
              .layout_bounds(layout_id, scale_factor)
              .map(Into::into);
@@ -1404,7 +1420,7 @@ index c2ba13d..8f2f7ca 100644
          bounds.origin += snapped_offset;
          bounds
      }
-@@ -7297,6 +7402,15 @@ impl Window {
+@@ -7297,6 +7411,15 @@ impl Window {
              .push((action, Box::new(listener)));
      }
  

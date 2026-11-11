@@ -877,9 +877,9 @@ impl Render for LibraryScreen {
                 .duration_since(self.animation_epoch)
                 .as_secs_f32()
         });
-        if self.animation_time.is_none() && self.suspended_at.is_none() {
-            window.request_animation_frame();
-        }
+        // The catalog's equalizer is decorative; it has no state transition
+        // that requires a continuous display-link request. Its current phase
+        // is rendered when the catalog changes and then remains still.
         let native = self.native_catalog();
         let description = match self.open_song.as_ref() {
             Some(song)=>tv("library.dropScreen.catalogHint", &[("song",song.to_string())]),
