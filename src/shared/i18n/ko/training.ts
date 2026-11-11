@@ -142,7 +142,6 @@ export const training: Translation<typeof en> = {
   "training.exerciseCount_one": "{n} 운동",
   "training.exerciseCount_other": "{n} 운동",
   "training.nav.backToTraining": "← 훈련",
-  "training.session.aria.backToSong": "노래로 돌아가",
   "training.session.aria.endSession": "마지막 세션",
   "training.session.aria.exerciseProgress": "{total}의 {current} 운동",
   "training.session.aria.targetNotes": "목표 지표",

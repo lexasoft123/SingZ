@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "I-click ang isang naka-focus na salita sa pamamagitan ng 50 ms",
   "lyrics.editor.help.otherUndo": "Undo  magdagdag Shift upang muling gawin",
   "lyrics.editor.help.otherReplace": "I-paste ang buong kanta; panatilihin ang mga linya upang panatilihin ang kanilang oras",
-  "lyrics.editor.help.otherClose": "I-close ang editor (minong tanong muna tungkol sa hindi naka-save na mga paglipat)"
+  "lyrics.editor.help.otherClose": "I-close ang editor (minong tanong muna tungkol sa hindi naka-save na mga paglipat)",
+
 }

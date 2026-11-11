@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Google 雲端硬碟專案",
+  "library.drive.hint": "下載歌曲以便離線播放。這些本機副本不會變更你的雲端硬碟資料庫。",
+  "library.drive.search": "搜尋雲端硬碟專案",
+  "library.drive.downloading": "正在下載專案…",
+  "library.drive.cancelled": "下載已暫停。已驗證的檔案會保留。選擇這首歌即可繼續。",
+  "library.drive.loading": "正在載入你的雲端硬碟專案…",
+  "library.drive.open": "開啟",
+  "library.drive.download": "下載並開啟",
+  "library.drive.empty": "Google 雲端硬碟中沒有找到 SingZ 專案。",
+
   "library.dropScreen.syncProgress": "正在與 Google Drive 同步… {msg}",
   "library.dropScreen.cancelSync": "取消",
   "library.dropScreen.syncPaused": "同步已暫停。已完成的檔案會保留。點選立即同步以繼續。",
@@ -125,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "正在分離人聲",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "無法開始播放：{message}",
-  "library.engine.songUnreadable": "無法從磁碟重新讀取這首歌，因此沒有內容可以播放。"
+  "library.engine.songUnreadable": "無法從磁碟重新讀取這首歌，因此沒有內容可以播放。",
+
 }

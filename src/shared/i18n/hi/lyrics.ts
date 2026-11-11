@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "एक केंद्रित शब्द को 50 एमएस द्वारा नड्ग करें",
   "lyrics.editor.help.otherUndo": "हटाएँ  जोड़ें पुनरावृत्ति करने के लिए शिफ्ट",
   "lyrics.editor.help.otherReplace": "पूरे गीत को पेस्ट करें; पंक्तियों को समय पर रखें",
-  "lyrics.editor.help.otherClose": "संपादक को बंद करें (पहले सहेजे गए संपादन के बारे में पूछें)"
+  "lyrics.editor.help.otherClose": "संपादक को बंद करें (पहले सहेजे गए संपादन के बारे में पूछें)",
+
 }

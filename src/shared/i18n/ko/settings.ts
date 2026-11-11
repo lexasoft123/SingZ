@@ -193,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "마이크 접속이 차단되어 있습니다. 시스템 프라이버시 설정에서 SingZ을 허용하세요.",
   "settings.micPreview.busy": "마이크는 다른 앱에서 바쁘고 앱을 닫고 다시 입력값을 선택하세요.",
   "settings.micPreview.unavailable": "마이크가 없어 다시 연결하거나 다른 입력값을 선택하세요",
-  "settings.micPreview.unknown": "마이크가 시작되지 않았기 때문에 장치 연결을 확인하고 다시 시도하십시오."
+  "settings.micPreview.unknown": "마이크가 시작되지 않았기 때문에 장치 연결을 확인하고 다시 시도하십시오.",
+
+  "settings.mic.unavailable": "마이크를 사용할 수 없습니다",
 }

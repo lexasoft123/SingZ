@@ -1,0 +1,6 @@
+interface:
+  display_name: "Interface port review"
+  short_description: "Review port parity and preserve approved lyric glow"
+  default_prompt: "Use $interface-port-review to implement or review this interface port against the current Electron layout and controls while preserving the user-approved native lyrics highlighting standard."
+policy:
+  allow_implicit_invocation: true

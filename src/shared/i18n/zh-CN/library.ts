@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Google Drive 项目",
+  "library.drive.hint": "下载歌曲以便离线播放。这些本地副本不会更改你的 Drive 资料库。",
+  "library.drive.search": "搜索 Drive 项目",
+  "library.drive.downloading": "正在下载项目…",
+  "library.drive.cancelled": "下载已暂停。已校验的文件会保留。选择这首歌即可继续。",
+  "library.drive.loading": "正在加载你的 Drive 项目…",
+  "library.drive.open": "打开",
+  "library.drive.download": "下载并打开",
+  "library.drive.empty": "Google Drive 中没有找到 SingZ 项目。",
+
   "library.dropScreen.syncProgress": "正在与 Google Drive 同步… {msg}",
   "library.dropScreen.cancelSync": "取消",
   "library.dropScreen.syncPaused": "同步已暂停。已完成的文件会保留。点击立即同步以继续。",
@@ -170,5 +179,6 @@ export const library: Translation<typeof en> = {
   'library.playbackErrorToast.couldNotStart': '无法开始播放：{message}',
 
   // ── audio/engine (the one status genuinely shown to the singer, as this toast) ──
-  'library.engine.songUnreadable': '无法从磁盘重新读取这首歌，因此没有内容可以播放。'
+  'library.engine.songUnreadable': '无法从磁盘重新读取这首歌，因此没有内容可以播放。',
+
 }

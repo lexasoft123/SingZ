@@ -1,0 +1,245 @@
+{
+  "kind": "transparentUntransformedCssPrimitiveAtlas",
+  "electron": "43.2.0",
+  "chromium": "150.0.7871.129",
+  "dpr": 2,
+  "colorProfile": "srgb (Chromium process-startup --force-color-profile=srgb)",
+  "columns": 8,
+  "cellCssWidth": 44,
+  "cellCssHeight": 134,
+  "primitiveCssWidth": 4,
+  "primitiveCssRadius": 2,
+  "shadowCssBlur": 10,
+  "opacity": 0.85,
+  "css": ".eq span {\n  width: 4px;\n  border-radius: 2px;\n  animation: eq 1.5s ease-in-out infinite alternate;\n  box-shadow: 0 0 10px color-mix(in srgb, var(--c) 45%, transparent);\n  opacity: 0.85;\n}",
+  "cssSha256": "41fdba0930c56e3a7eb176efabee1f831d3c9dc07836cd43c5f485a280c4aef4",
+  "componentSha256": "582b2aeaf287588cf8fc40bc5ae2cc190ec4dd795a3261bd97c8f639c6548e9c",
+  "pngSha256": "ca9852361f925556da15a1a5d3b68ed9667cd3f797d271f87ce014232e70abd4",
+  "bars": [
+    {
+      "height": 46.37463070007474,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 83.33033059861215,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 63.72491549353207,
+      "color": "#527dff"
+    },
+    {
+      "height": 71.03214539449057,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 77.90609338023394,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 55.079626803715,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 87.97648288579892,
+      "color": "#527dff"
+    },
+    {
+      "height": 36.53207972653247,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 93.26737374419989,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 16.621128335303112,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 93.42743167670939,
+      "color": "#527dff"
+    },
+    {
+      "height": 35.331068222670595,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 88.44602825802485,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 53.9996119719195,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 78.65394668212846,
+      "color": "#527dff"
+    },
+    {
+      "height": 70.14484412367487,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 64.70141656247876,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 82.69466290061133,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 47.51493633519932,
+      "color": "#527dff"
+    },
+    {
+      "height": 90.81571497034011,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 28.235750413775982,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 93.96873311911862,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 23.855933565415043,
+      "color": "#527dff"
+    },
+    {
+      "height": 91.94434554420829,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 43.42595515791115,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 84.87697889842266,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 61.174794187452676,
+      "color": "#527dff"
+    },
+    {
+      "height": 73.23593187444918,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 75.923863583246,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 57.79421207521463,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 86.69377182186777,
+      "color": "#527dff"
+    },
+    {
+      "height": 39.57720551475123,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 92.76935806476723,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 19.794587280256806,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 93.74718142313712,
+      "color": "#527dff"
+    },
+    {
+      "height": 32.2400052664761,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 89.56231089130567,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 51.19620275847687,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 80.49263700022807,
+      "color": "#527dff"
+    },
+    {
+      "height": 67.81524515863569,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 67.14041888170169,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 80.9935679763843,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 50.39229208494422,
+      "color": "#527dff"
+    },
+    {
+      "height": 89.8560829390811,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 31.36039277107534,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 93.81428701662087,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 20.691492148171754,
+      "color": "#527dff"
+    },
+    {
+      "height": 92.60534114997581,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 40.431845029780646,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 86.30952371483825,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 58.5498350841761,
+      "color": "#527dff"
+    },
+    {
+      "height": 75.34489974728072,
+      "color": "#27e7bb"
+    },
+    {
+      "height": 73.8423622780897,
+      "color": "#ff5c65"
+    },
+    {
+      "height": 60.439559914123116,
+      "color": "#ffc53d"
+    },
+    {
+      "height": 85.29394752579167,
+      "color": "#527dff"
+    },
+    {
+      "height": 42.583272660720226,
+      "color": "#27e7bb"
+    }
+  ],
+  "note": "No fonts or app UI are rasterized. Native runtime applies the animated scaleY to each cached complete primitive including its shadow."
+}

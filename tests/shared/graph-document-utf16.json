@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "engine": "singz-dsp",
+  "nodes": [{
+    "id": "1",
+    "type": "11111111111111111111111111111111",
+    "typeVersion": 1,
+    "execution": "\ud800",
+    "unavailable": "silence",
+    "ports": {
+      "inputs": [{"id": "\udc00", "channels": 1}],
+      "outputs": [{"id": "\ud800", "channels": 1}]
+    },
+    "parameters": {"\ud800": 0.5, "\ufffd": 0.7},
+    "binding": {"kind": "\ud800", "laneId": "\udc00"},
+    "\udfff": {"opaque": "\ud800\ud800\udc00"}
+  }],
+  "connections": [{
+    "from": {"node": "1", "port": "\ud800"},
+    "to": {"node": "1", "port": "\udc00"}
+  }],
+  "\udfff": "opaque"
+}

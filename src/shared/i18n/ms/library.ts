@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Projek Google Drive",
+  "library.drive.hint": "Muat turun lagu untuk dimainkan di luar talian. Salinan setempat ini tidak mengubah pustaka Drive anda.",
+  "library.drive.search": "Cari projek Drive",
+  "library.drive.downloading": "Memuat turun projek…",
+  "library.drive.cancelled": "Muat turun dijeda. Fail yang telah disahkan disimpan. Pilih lagu untuk meneruskan.",
+  "library.drive.loading": "Memuatkan projek Drive anda…",
+  "library.drive.open": "Buka",
+  "library.drive.download": "Muat turun dan buka",
+  "library.drive.empty": "Tiada projek SingZ ditemui dalam Google Drive.",
+
   "library.dropScreen.syncProgress": "Menyegerakkan dengan Google Drive… {msg}",
   "library.dropScreen.cancelSync": "Batal",
   "library.dropScreen.syncPaused": "Penyegerakan dijeda. Fail yang selesai dikekalkan. Pilih Segerakkan sekarang untuk meneruskan.",
@@ -125,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Pembagian vokal",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Penggambaran tidak dapat bermula: {message}",
-  "library.engine.songUnreadable": "Lagu ini tidak dapat dibaca semula dari cakera, jadi penggambaran tidak mempunyai apa-apa untuk dimainkan."
+  "library.engine.songUnreadable": "Lagu ini tidak dapat dibaca semula dari cakera, jadi penggambaran tidak mempunyai apa-apa untuk dimainkan.",
+
 }

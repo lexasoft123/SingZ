@@ -3,6 +3,7 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+
   "main.sync.downloadDeferred": "{dir} नहीं जोड़ा गया: {reason}। गाना Drive पर है; समस्या ठीक करके फिर सिंक करें।",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/सेकंड",
@@ -155,5 +156,6 @@ export const main: Translation<typeof en> = {
   "main.sync.removing": "ड्राइव से {file} निकालने...",
   "main.sync.removingGone": "ड्राइव से {name} को हटाना (यहां नाम बदलना या हटाना)...",
   "main.sync.updatingCatalog": "फोन कैटलॉग अद्यतन ...",
-  "main.sync.upToDate": "ड्राइव अद्यतित है"
+  "main.sync.upToDate": "ड्राइव अद्यतित है",
+
 }

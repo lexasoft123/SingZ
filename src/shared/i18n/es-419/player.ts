@@ -215,5 +215,6 @@ export const player: Translation<typeof en> = {
   "player.dspGraph.transport.pre-roll": "Preentrada",
   "player.dspGraph.transport.playing": "Reproduciendo",
   "player.dspGraph.transport.paused": "pausado",
-  "player.dspGraph.transport.completed": "terminado"
+  "player.dspGraph.transport.completed": "terminado",
+
 }

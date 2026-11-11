@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "Kelimeyi 50 ms ile daha odaklı hale getirin.",
   "lyrics.editor.help.otherUndo": "Geri al; yinelemek için Shift ekleyin",
   "lyrics.editor.help.otherReplace": "Şarkıyı tam haliyle ekleyin; satırların düzeni korunacaktır.",
-  "lyrics.editor.help.otherClose": "Düzenleyiciyi kapat (kaydedilmemiş değişiklikler olup olmadığını sorar)"
+  "lyrics.editor.help.otherClose": "Düzenleyiciyi kapat (kaydedilmemiş değişiklikler olup olmadığını sorar)",
+
 }

@@ -267,5 +267,6 @@ export const player = {
   'player.dspGraph.transport.pre-roll': 'pre-roll',
   'player.dspGraph.transport.playing': 'playing',
   'player.dspGraph.transport.paused': 'paused',
-  'player.dspGraph.transport.completed': 'completed'
+  'player.dspGraph.transport.completed': 'completed',
+
 }

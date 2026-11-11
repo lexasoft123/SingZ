@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "集中した単語を 50 ms に 叩く",
   "lyrics.editor.help.otherUndo": "削除 追加 変更を再現する",
   "lyrics.editor.help.otherReplace": "曲を全部貼り付け 列を保持する",
-  "lyrics.editor.help.otherClose": "編集者を閉じる (保存されていない編集について最初に尋ねる)"
+  "lyrics.editor.help.otherClose": "編集者を閉じる (保存されていない編集について最初に尋ねる)",
+
 }

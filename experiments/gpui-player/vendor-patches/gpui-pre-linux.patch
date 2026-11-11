@@ -1,0 +1,146 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 46c121c..8ab2d61 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -43,7 +43,7 @@ screen-capture = [
+     "gpui/screen-capture",
+     "scap",
+ ]
+-test-support = ["gpui/test-support"]
++test-support = ["gpui/test-support", "gpui_wgpu/test-support", "dep:image"]
+ wayland = [
+     "dep:accesskit_unix",
+     "gpui_wgpu",
+@@ -286,3 +286,8 @@ priority = -1
+ [lints.rust.unexpected_cfgs]
+ level = "allow"
+ priority = 0
++
++[dependencies.image]
++version = "0.25"
++default-features = false
++optional = true
+diff --git a/OFFSCREEN_CAPTURE.md b/OFFSCREEN_CAPTURE.md
+new file mode 100644
+index 0000000..0696e90
+--- /dev/null
++++ b/OFFSCREEN_CAPTURE.md
+@@ -0,0 +1,37 @@
++# Linux scene capture bridge
++
++Pinned published `gpui-pre-linux` 0.3.11, crate SHA-256:
++`79cac5cbd3485c1e3db8eafd5dc69019188f5cb0a39846946af772efa386f624`.
++
++The published backend inherits the default `render_to_image not implemented`
++error. Under `test-support`, X11 and Wayland windows now delegate scene capture
++to their existing WGPU renderer. The feature also enables WGPU test support
++and the image return type. Normal drawing and text shaping are unchanged. The prototype enables this feature only for Linux UI-test builds.
++
++The corresponding pinned `gpui-pre-wgpu` 0.3.11 archive SHA-256 is:
++`211cf352de1a0b0c9bea3f105df5572ce1d2c899389b924a888e5af36b50f93d`.
++Its test-only capture method uses the real window's device, atlas, target
++format and scene pipelines. It renders into a temporary attachment and shares
++the existing bounded, padded-row readback with the headless renderer. It never
++maps, shows, activates or presents the window. The helper handles both BGRA
++target formats and retains mapping timeouts, size checks and GPU-error checks.
++
++The existing headless readback regression tests use WGPU's Naga re-export
++because the published snapshot omits the direct Naga test dependency.
++
++VM 403 verification uses a task-owned Podman container and a private Xvfb
++display with Mesa software Vulkan. This verifies the renderer path, not a
++hardware GPU or Linux presentation performance. X11 is exercised at runtime;
++the Wayland bridge compiles but requires separate runtime qualification.
++
++Opaque X11 client chrome also honors the requested decorations without GTK
++transparent-shadow frame extents. Transparent windows retain the published
++compositor/extension fallback. This prevents duplicate native and UIKit
++titlebars in Openbox while preserving transparent-surface fallback.
++
++X11 also retains `WindowParams::show`: its creation-time `map_window` hook
++does nothing for an initially hidden window. Such windows skip swapchain
++presentation and render only into the test capture attachment. The published
++implementation mapped every window regardless of `show`, letting the window
++manager activate a hidden fixture. Shown windows keep the original map/draw
++behavior. The capture runner records mapped-window samples as well as focus.
+diff --git a/src/linux/wayland/window.rs b/src/linux/wayland/window.rs
+index 6647a8e..feef07f 100644
+--- a/src/linux/wayland/window.rs
++++ b/src/linux/wayland/window.rs
+@@ -2021,6 +2021,12 @@ impl PlatformWindow for WaylandWindow {
+         self.0.callbacks.borrow_mut().button_layout_changed = Some(callback);
+     }
+ 
++    #[cfg(feature = "test-support")]
++    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
++        let mut inner = self.borrow_mut();
++        inner.renderer.as_mut().ok_or_else(|| anyhow::anyhow!("Window renderer is released"))?.render_to_image(scene)
++    }
++
+     fn draw(&self, scene: &Scene) {
+         let mut state = self.borrow_mut();
+         let state = &mut *state;
+diff --git a/src/linux/x11/window.rs b/src/linux/x11/window.rs
+index f6ee76a..cedd1c9 100644
+--- a/src/linux/x11/window.rs
++++ b/src/linux/x11/window.rs
+@@ -279,6 +279,7 @@ pub struct X11WindowState {
+     maximized_vertical: bool,
+     maximized_horizontal: bool,
+     hidden: bool,
++    show_on_open: bool,
+     active: bool,
+     /// Owned by the client's `WindowRef`, which combines the mapped state with
+     /// `VisibilityNotify`; this is the last value it reported.
+@@ -848,6 +849,7 @@ impl X11WindowState {
+                 maximized_vertical: false,
+                 maximized_horizontal: false,
+                 hidden: false,
++                show_on_open: params.show,
+                 appearance,
+                 handle,
+                 background_appearance: WindowBackgroundAppearance::Opaque,
+@@ -1615,6 +1617,7 @@ impl PlatformWindow for X11Window {
+     }
+ 
+     fn map_window(&mut self) -> anyhow::Result<()> {
++        if !self.0.state.borrow().show_on_open { return Ok(()); }
+         check_reply(
+             || "X11 MapWindow failed.",
+             self.0.xcb.map_window(self.0.x_window),
+@@ -1748,7 +1751,15 @@ impl PlatformWindow for X11Window {
+         self.0.callbacks.borrow_mut().button_layout_changed = Some(callback);
+     }
+ 
++    #[cfg(feature = "test-support")]
++    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
++        let mut inner = self.0.state.borrow_mut();
++        inner.renderer.as_mut().ok_or_else(|| anyhow::anyhow!("Window renderer is released"))?.render_to_image(scene)
++    }
++
+     fn draw(&self, scene: &Scene) {
++        // Unmapped capture windows render only through the offscreen target.
++        if !self.0.state.borrow().show_on_open { return; }
+         let mut inner = self.0.state.borrow_mut();
+         let inner = &mut *inner;
+         let Some(renderer) = &mut inner.renderer else {
+@@ -1842,8 +1853,9 @@ impl PlatformWindow for X11Window {
+     fn window_decorations(&self) -> gpui::Decorations {
+         let state = self.0.state.borrow();
+ 
+-        // Client window decorations require compositor support
+-        if !state.client_side_decorations_supported {
++        // Opaque client chrome needs no transparent shadow or GTK frame extents.
++        if !state.client_side_decorations_supported
++            && state.background_appearance != WindowBackgroundAppearance::Opaque {
+             return Decorations::Server;
+         }
+ 
+@@ -1920,6 +1932,7 @@ impl PlatformWindow for X11Window {
+ 
+         if matches!(decorations, gpui::WindowDecorations::Client)
+             && !state.client_side_decorations_supported
++            && state.background_appearance != WindowBackgroundAppearance::Opaque
+         {
+             log::info!(
+                 "x11: no compositor present, falling back to server-side window decorations"

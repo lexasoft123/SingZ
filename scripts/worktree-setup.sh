@@ -61,6 +61,9 @@ initialize_native_submodule() {
 initialize_native_submodule third_party/zcore
 initialize_native_submodule third_party/loopz
 node "$WT/scripts/install-git-hooks.cjs"
+# The patched GPUI crates are not committed: materialize experiments/gpui-player/vendor/
+# from the pinned archives + vendor-patches/ (idempotent; refuses to overwrite edits).
+python3 "$WT/scripts/gpui-vendor.py"
 MAIN="$(git -C "$WT" worktree list --porcelain | sed -n '1s/^worktree //p')"
 
 # `-e` FOLLOWS symlinks, so a link whose target moved (the main checkout

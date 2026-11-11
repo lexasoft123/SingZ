@@ -206,6 +206,10 @@ struct NativePlaybackInitialLoop {
 struct NativePlaybackInitialTransportConfig {
   bool startPaused{false};
   std::optional<NativePlaybackInitialLoop> loop;
+  // Selection remains active without repeating. Loop-only legacy callers also
+  // imply a region. Structural restores may preserve a disarmed selection.
+  std::optional<NativePlaybackInitialLoop> region;
+  std::optional<bool> regionStopArmed;
 };
 
 struct NativePlaybackPrepareConfig {
@@ -218,6 +222,9 @@ struct NativePlaybackPrepareConfig {
   uint32_t requestedBufferFrames{0};
   uint32_t maximumFrames{4096};
   float masterGain{1.0F};
+  // Optional product-level reference gain, independent of the song bus.
+  // Absent retains cuePlan.volume and the existing core contract.
+  std::optional<float> referenceGainOverride;
   // Structural tempo. Sources, transport schedules and reference cues share
   // one prepared Q32 rate; non-unity tempo also inserts the phase-coherent
   // song-bus Signalsmith correction processor. Runtime changes rebuild the
@@ -587,6 +594,10 @@ struct NativePlaybackStatus {
   uint64_t renderedFrames{0};
   uint64_t audibleFrames{0};
   uint64_t transportGeneration{0};
+  // Generation-scoped mailbox ticket and callback-published receipt. Unsigned
+  // sequence arithmetic permits wrap; at most 64 commands can be outstanding.
+  uint32_t transportCommandsQueued{0};
+  uint32_t transportCommandsApplied{0};
   /* A swap in flight. `swapPendingGeneration` names the generation still
      rendering while `generation` already names its replacement (armed, not
      yet landed); `retiringSwapGeneration` names one that has landed and whose
@@ -621,6 +632,10 @@ struct NativePlaybackStatus {
   uint64_t remainingPreRollFrames{0};
   uint32_t cueEventsCompleted{0};
   uint32_t nextCueEventIndex{0};
+  bool regionEnabled{false};
+  int64_t regionStartFrame{0};
+  int64_t regionEndFrame{0};
+  bool regionStopArmed{false};
   bool loopEnabled{false};
   int64_t loopStartFrame{0};
   int64_t loopEndFrame{0};
@@ -955,6 +970,11 @@ public:
   NativePlaybackResult pause(uint64_t generation);
   NativePlaybackResult resume(uint64_t generation);
   NativePlaybackResult seek(uint64_t generation, int64_t projectFrame);
+  // Nonrepeating selection stops at its end when the last Play/Seek began
+  // before that end (source startOffset semantics), at a callback slice edge.
+  NativePlaybackResult setRegion(uint64_t generation, int64_t startFrame,
+                                 int64_t endFrame, bool looping);
+  NativePlaybackResult clearRegion(uint64_t generation);
   NativePlaybackResult setLoop(uint64_t generation, int64_t startFrame,
                                int64_t endFrame);
   NativePlaybackResult clearLoop(uint64_t generation);
@@ -977,6 +997,9 @@ public:
                                       const std::string &laneId, float gain,
                                       bool muted, bool solo);
   NativePlaybackResult setMasterGain(uint64_t generation, float gain);
+  // Publish a product master change to both buses in one parameter batch.
+  // Does not change the legacy song-only setMasterGain contract.
+  NativePlaybackResult setSongAndReferenceGain(uint64_t generation, float songGain, float referenceGain);
   NativePlaybackResult setTrainingEnabled(uint64_t generation, bool enabled);
   // Enqueue one prepared click sound for the next graph-block boundary. From
   // Prepared/OutputOpen this acquires and starts the already-prepared host

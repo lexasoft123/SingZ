@@ -193,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "マイクロフォンアクセスがブロックされています. システムプライバシー設定では SingZ を許可してください.",
   "settings.micPreview.busy": "マイクが別のアプリで忙しくて,そのアプリを閉じて,入力を再選択します.",
   "settings.micPreview.unavailable": "マイクが利用できないので 再接続するか別の入力を選択してください.",
-  "settings.micPreview.unknown": "マイクが起動できず デバイスの接続を確認して再試してください"
+  "settings.micPreview.unknown": "マイクが起動できず デバイスの接続を確認して再試してください",
+
+  "settings.mic.unavailable": "マイクを利用できません",
 }

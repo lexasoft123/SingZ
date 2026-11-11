@@ -423,5 +423,715 @@
         }
       ]
     }
+  },
+  {
+    "name": "missing source defaults to whisper",
+    "input": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ],
+      "source": "whisper"
+    }
+  },
+  {
+    "name": "credit is kept",
+    "input": {
+      "source": "lrclib",
+      "credit": "Artist - Track",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ],
+      "source": "lrclib",
+      "credit": "Artist - Track"
+    }
+  },
+  {
+    "name": "file without a lines array",
+    "input": {
+      "source": "edited"
+    },
+    "expected": null
+  },
+  {
+    "name": "lines that is not an array",
+    "input": {
+      "source": "edited",
+      "lines": "hello"
+    },
+    "expected": null
+  },
+  {
+    "name": "line text and word text are trimmed",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "  hello  ",
+          "words": [
+            {
+              "w": "  hello ",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "line with no end takes the next line start",
+    "input": {
+      "source": "lrclib",
+      "lines": [
+        {
+          "start": 1,
+          "text": "first",
+          "words": [
+            {
+              "w": "first",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        },
+        {
+          "start": 5,
+          "end": 6,
+          "text": "second",
+          "words": [
+            {
+              "w": "second",
+              "s": 5,
+              "e": 6
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 5,
+          "text": "first",
+          "words": [
+            {
+              "w": "first",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        },
+        {
+          "start": 5,
+          "end": 6,
+          "text": "second",
+          "words": [
+            {
+              "w": "second",
+              "s": 5,
+              "e": 6
+            }
+          ]
+        }
+      ],
+      "source": "lrclib"
+    }
+  },
+  {
+    "name": "last line with no end takes its furthest word end",
+    "input": {
+      "source": "lrclib",
+      "lines": [
+        {
+          "start": 1,
+          "text": "only",
+          "words": [
+            {
+              "w": "only",
+              "s": 1.5,
+              "e": 2.5
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 2.5,
+          "text": "only",
+          "words": [
+            {
+              "w": "only",
+              "s": 1.5,
+              "e": 2.5
+            }
+          ]
+        }
+      ],
+      "source": "lrclib"
+    }
+  },
+  {
+    "name": "line with no end and no words ends at the next line",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "text": "lost"
+        },
+        {
+          "start": 3,
+          "end": 4,
+          "text": "kept",
+          "words": [
+            {
+              "w": "kept",
+              "s": 3,
+              "e": 4
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 3,
+          "text": "lost",
+          "words": []
+        },
+        {
+          "start": 3,
+          "end": 4,
+          "text": "kept",
+          "words": [
+            {
+              "w": "kept",
+              "s": 3,
+              "e": 4
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "line with a negative start is dropped",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": -1,
+          "end": 4,
+          "text": "early",
+          "words": [
+            {
+              "w": "early",
+              "s": 0,
+              "e": 1
+            }
+          ]
+        },
+        {
+          "start": 1,
+          "end": 4,
+          "text": "kept",
+          "words": [
+            {
+              "w": "kept",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "kept",
+          "words": [
+            {
+              "w": "kept",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "line with a string start is dropped",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": "1",
+          "end": 4,
+          "text": "text",
+          "words": [
+            {
+              "w": "text",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        },
+        {
+          "start": 2,
+          "end": 4,
+          "text": "kept",
+          "words": [
+            {
+              "w": "kept",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 2,
+          "end": 4,
+          "text": "kept",
+          "words": [
+            {
+              "w": "kept",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "line that ends before it starts is repaired from the next line",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 5,
+          "end": 3,
+          "text": "backwards",
+          "words": [
+            {
+              "w": "backwards",
+              "s": 5,
+              "e": 5.5
+            }
+          ]
+        },
+        {
+          "start": 8,
+          "end": 9,
+          "text": "next",
+          "words": [
+            {
+              "w": "next",
+              "s": 8,
+              "e": 9
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 5,
+          "end": 8,
+          "text": "backwards",
+          "words": [
+            {
+              "w": "backwards",
+              "s": 5,
+              "e": 5.5
+            }
+          ]
+        },
+        {
+          "start": 8,
+          "end": 9,
+          "text": "next",
+          "words": [
+            {
+              "w": "next",
+              "s": 8,
+              "e": 9
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "word with a string time is dropped, not the file",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello world",
+          "words": [
+            {
+              "w": "hello",
+              "s": "1",
+              "e": 2
+            },
+            {
+              "w": "world",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello world",
+          "words": [
+            {
+              "w": "world",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "word that is not an object is dropped",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            null,
+            7,
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "words that is not an array is treated as no words",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": "hello"
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": []
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "lines tied on start keep their file order",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "first",
+          "words": [
+            {
+              "w": "first",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        },
+        {
+          "start": 1,
+          "end": 4,
+          "text": "second",
+          "words": [
+            {
+              "w": "second",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "first",
+          "words": [
+            {
+              "w": "first",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        },
+        {
+          "start": 1,
+          "end": 4,
+          "text": "second",
+          "words": [
+            {
+              "w": "second",
+              "s": 1,
+              "e": 2
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "unknown fields are not carried over",
+    "input": {
+      "source": "edited",
+      "extra": 1,
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "mood": "sad",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3,
+              "conf": 0.9
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "word reaching past the line end is clamped to it",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 3,
+              "e": 7
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 1,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 3,
+              "e": 4
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
+  },
+  {
+    "name": "word starting before the line is clamped to its start",
+    "input": {
+      "source": "edited",
+      "lines": [
+        {
+          "start": 2,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 0.5,
+              "e": 3
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "lines": [
+        {
+          "start": 2,
+          "end": 4,
+          "text": "hello",
+          "words": [
+            {
+              "w": "hello",
+              "s": 2,
+              "e": 3
+            }
+          ]
+        }
+      ],
+      "source": "edited"
+    }
   }
 ]

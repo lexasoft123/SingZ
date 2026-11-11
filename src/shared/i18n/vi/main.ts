@@ -3,6 +3,7 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+
   "main.sync.downloadDeferred": "Chưa thêm {dir}: {reason}. Bài hát vẫn trên Drive; hãy khắc phục rồi đồng bộ lại.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/giây",
@@ -155,5 +156,6 @@ export const main: Translation<typeof en> = {
   "main.sync.removing": "Xóa {file} khỏi Drive...",
   "main.sync.removingGone": "Xóa {name} từ Drive (được đổi tên hoặc xóa ở đây)...",
   "main.sync.updatingCatalog": "Tới hạn danh mục điện thoại...",
-  "main.sync.upToDate": "Drive mới nhất"
+  "main.sync.upToDate": "Drive mới nhất",
+
 }

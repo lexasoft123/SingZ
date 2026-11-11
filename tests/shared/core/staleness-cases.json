@@ -1,0 +1,294 @@
+{
+  "detectors": {
+    "beat": 23,
+    "key": 2,
+    "pitch": 4
+  },
+  "cases": [
+    {
+      "name": "beat: missing stamp re-derives",
+      "kind": "beat",
+      "stale": true
+    },
+    {
+      "name": "beat: null stamp re-derives",
+      "kind": "beat",
+      "stamp": null,
+      "stale": true
+    },
+    {
+      "name": "beat: string stamp is nonsense",
+      "kind": "beat",
+      "stamp": "23",
+      "stale": true
+    },
+    {
+      "name": "beat: empty string is nonsense",
+      "kind": "beat",
+      "stamp": "",
+      "stale": true
+    },
+    {
+      "name": "beat: boolean is nonsense",
+      "kind": "beat",
+      "stamp": true,
+      "stale": true
+    },
+    {
+      "name": "beat: array is nonsense",
+      "kind": "beat",
+      "stamp": [
+        23
+      ],
+      "stale": true
+    },
+    {
+      "name": "beat: object is nonsense",
+      "kind": "beat",
+      "stamp": {
+        "v": 23
+      },
+      "stale": true
+    },
+    {
+      "name": "beat: negative stamp re-derives",
+      "kind": "beat",
+      "stamp": -1,
+      "stale": true
+    },
+    {
+      "name": "beat: zero stamp re-derives",
+      "kind": "beat",
+      "stamp": 0,
+      "stale": true
+    },
+    {
+      "name": "beat: one below current re-derives",
+      "kind": "beat",
+      "stamp": 22,
+      "stale": true
+    },
+    {
+      "name": "beat: fractional below current re-derives",
+      "kind": "beat",
+      "stamp": 22.5,
+      "stale": true
+    },
+    {
+      "name": "beat: equal stamp is adopted",
+      "kind": "beat",
+      "stamp": 23,
+      "stale": false
+    },
+    {
+      "name": "beat: fractional above current is adopted",
+      "kind": "beat",
+      "stamp": 23.5,
+      "stale": false
+    },
+    {
+      "name": "beat: one above current is adopted",
+      "kind": "beat",
+      "stamp": 24,
+      "stale": false
+    },
+    {
+      "name": "beat: far-future stamp is adopted",
+      "kind": "beat",
+      "stamp": 1000000,
+      "stale": false
+    },
+    {
+      "name": "key: missing stamp re-derives",
+      "kind": "key",
+      "stale": true
+    },
+    {
+      "name": "key: null stamp re-derives",
+      "kind": "key",
+      "stamp": null,
+      "stale": true
+    },
+    {
+      "name": "key: string stamp is nonsense",
+      "kind": "key",
+      "stamp": "2",
+      "stale": true
+    },
+    {
+      "name": "key: empty string is nonsense",
+      "kind": "key",
+      "stamp": "",
+      "stale": true
+    },
+    {
+      "name": "key: boolean is nonsense",
+      "kind": "key",
+      "stamp": true,
+      "stale": true
+    },
+    {
+      "name": "key: array is nonsense",
+      "kind": "key",
+      "stamp": [
+        2
+      ],
+      "stale": true
+    },
+    {
+      "name": "key: object is nonsense",
+      "kind": "key",
+      "stamp": {
+        "v": 2
+      },
+      "stale": true
+    },
+    {
+      "name": "key: negative stamp re-derives",
+      "kind": "key",
+      "stamp": -1,
+      "stale": true
+    },
+    {
+      "name": "key: zero stamp re-derives",
+      "kind": "key",
+      "stamp": 0,
+      "stale": true
+    },
+    {
+      "name": "key: one below current re-derives",
+      "kind": "key",
+      "stamp": 1,
+      "stale": true
+    },
+    {
+      "name": "key: fractional below current re-derives",
+      "kind": "key",
+      "stamp": 1.5,
+      "stale": true
+    },
+    {
+      "name": "key: equal stamp is adopted",
+      "kind": "key",
+      "stamp": 2,
+      "stale": false
+    },
+    {
+      "name": "key: fractional above current is adopted",
+      "kind": "key",
+      "stamp": 2.5,
+      "stale": false
+    },
+    {
+      "name": "key: one above current is adopted",
+      "kind": "key",
+      "stamp": 3,
+      "stale": false
+    },
+    {
+      "name": "key: far-future stamp is adopted",
+      "kind": "key",
+      "stamp": 1000000,
+      "stale": false
+    },
+    {
+      "name": "pitch: missing stamp re-derives",
+      "kind": "pitch",
+      "stale": true
+    },
+    {
+      "name": "pitch: null stamp re-derives",
+      "kind": "pitch",
+      "stamp": null,
+      "stale": true
+    },
+    {
+      "name": "pitch: string stamp is nonsense",
+      "kind": "pitch",
+      "stamp": "4",
+      "stale": true
+    },
+    {
+      "name": "pitch: empty string is nonsense",
+      "kind": "pitch",
+      "stamp": "",
+      "stale": true
+    },
+    {
+      "name": "pitch: boolean is nonsense",
+      "kind": "pitch",
+      "stamp": true,
+      "stale": true
+    },
+    {
+      "name": "pitch: array is nonsense",
+      "kind": "pitch",
+      "stamp": [
+        4
+      ],
+      "stale": true
+    },
+    {
+      "name": "pitch: object is nonsense",
+      "kind": "pitch",
+      "stamp": {
+        "v": 4
+      },
+      "stale": true
+    },
+    {
+      "name": "pitch: negative stamp re-derives",
+      "kind": "pitch",
+      "stamp": -1,
+      "stale": true
+    },
+    {
+      "name": "pitch: zero stamp re-derives",
+      "kind": "pitch",
+      "stamp": 0,
+      "stale": true
+    },
+    {
+      "name": "pitch: one below current re-derives",
+      "kind": "pitch",
+      "stamp": 3,
+      "stale": true
+    },
+    {
+      "name": "pitch: fractional below current re-derives",
+      "kind": "pitch",
+      "stamp": 3.5,
+      "stale": true
+    },
+    {
+      "name": "pitch: equal stamp is adopted",
+      "kind": "pitch",
+      "stamp": 4,
+      "stale": false
+    },
+    {
+      "name": "pitch: fractional above current is adopted",
+      "kind": "pitch",
+      "stamp": 4.5,
+      "stale": false
+    },
+    {
+      "name": "pitch: one above current is adopted",
+      "kind": "pitch",
+      "stamp": 5,
+      "stale": false
+    },
+    {
+      "name": "pitch: far-future stamp is adopted",
+      "kind": "pitch",
+      "stamp": 1000000,
+      "stale": false
+    },
+    {
+      "name": "pitch: float spelling of the current stamp (4.0) is adopted",
+      "kind": "pitch",
+      "stamp": 4.0,
+      "stale": false
+    }
+  ]
+}

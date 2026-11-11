@@ -210,3 +210,168 @@ jobs:
       # be the platform talking rather than the port.
       - name: Parity gates (TypeScript against the C++ core)
         run: scripts/run-parity-gates.sh
+
+  # The GPUI crate and its three native helpers had no CI at all (completion
+  # plan C-04): `checks` above covers the Electron app and the C++ core, and
+  # nothing built experiments/gpui-player on a push. It lives in this file, not
+  # a new workflow, so it can never drift from the `on:` block and
+  # `paths-ignore` list at the top, and shares the concurrency group.
+  #
+  # PINNED images, for the reason given on `checks`: macos-15 (arm64),
+  # windows-2022 (the helper build asks CMake for the "Visual Studio 17 2022"
+  # generator, which that image carries) and ubuntu-24.04. fail-fast is off so
+  # one platform's red does not hide the other two.
+  gpui-native:
+    name: gpui-native (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos, runner: macos-15 }
+          - { name: windows, runner: windows-2022 }
+          - { name: linux, runner: ubuntu-24.04 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        # bash on every OS: fail-fast per line, and Windows' default pwsh only
+        # reports the last command's exit code (see capture-windows).
+        shell: bash
+    env:
+      G: experiments/gpui-player
+      # No rust-toolchain file exists, so the toolchain is pinned here and in
+      # the cache keys. Edition 2024 needs >= 1.85; this is what the crate is
+      # developed against.
+      RUST_TOOLCHAIN: '1.99.1'
+      # Ordinary native builds allow at most four compile edges (AGENTS.md).
+      # cargo reads this; the helper build gets --jobs 4.
+      CARGO_BUILD_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+        timeout-minutes: 10
+      # setup-python puts `python` on PATH on every OS (no python3 on Windows),
+      # so the steps below spell it `python`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+        timeout-minutes: 5
+      # with-native-build-lock.mjs and the helper build's source hash use Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+        timeout-minutes: 5
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libasound2-dev libudev-dev \
+            libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libxcb1-dev libvulkan-dev libssl-dev libzstd-dev
+
+      - name: Rust toolchain
+        timeout-minutes: 10
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+          cargo --version
+
+      # Three caches, each keyed so that a change to the lockfile, the vendor
+      # lock or a vendor patch MISSES:
+      #  - vendor: exact key only. The tree is a build input, so a prefix
+      #    fallback could hand back one that is stale; `--check` below would
+      #    catch it, but a miss is cheaper than a failure. (Archives are also
+      #    found in the cargo registry cache restored next.)
+      #  - cargo home: the downloaded crates.
+      #  - target: per-commit key, restored only from the SAME lock/patch
+      #    hash, so cargo reuses compiled dependencies and rebuilds our crate.
+      - name: Cache vendored GPUI crates
+        uses: actions/cache@v4
+        timeout-minutes: 10
+        with:
+          path: ${{ env.G }}/vendor
+          key: gpui-vendor-${{ runner.os }}-${{ hashFiles('experiments/gpui-player/vendor-patches/**', 'scripts/gpui-vendor.py') }}
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        timeout-minutes: 10
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: gpui-cargo-home-${{ runner.os }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/vendor.lock') }}
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        timeout-minutes: 15
+        with:
+          path: ${{ env.G }}/target
+          key: gpui-target-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-${{ github.sha }}
+          restore-keys: gpui-target-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-
+
+      # The GPUI crates are not committed (AGENTS.md); this writes them to
+      # $G/vendor, and --check proves no tree is missing, stale or hand-edited.
+      - name: Materialize vendored GPUI crates
+        timeout-minutes: 15
+        run: |
+          python scripts/gpui-vendor.py
+          python scripts/gpui-vendor.py --check
+
+      - name: Build (release)
+        working-directory: ${{ env.G }}
+        timeout-minutes: 40
+        run: node ../../scripts/with-native-build-lock.mjs --owner ci-gpui-build -- cargo build --release --locked
+
+      - name: Test
+        working-directory: ${{ env.G }}
+        timeout-minutes: 40
+        run: node ../../scripts/with-native-build-lock.mjs --owner ci-gpui-test -- cargo test --locked
+
+      # REPORTED, NOT YET BLOCKING. `cargo clippy --locked -- -D warnings` is
+      # red today on all platforms checked (382 warnings in the bin plus the
+      # build script's own; mostly collapsible_if, dead code and too_many_arguments),
+      # so it runs without -D: the warnings appear in this step's log and a
+      # real compile error still fails it. Once the crate is clean, add
+      # `-- -D warnings` and this becomes a gate.
+      - name: Clippy (reported, not failing on warnings)
+        working-directory: ${{ env.G }}
+        timeout-minutes: 40
+        run: node ../../scripts/with-native-build-lock.mjs --owner ci-gpui-clippy -- cargo clippy --locked
+
+      # --basic-only, deliberately: the LGPL FFmpeg codec pack is a from-source
+      # FFmpeg build (scripts/build-ffmpeg-codec-runtime.sh, a bash/autotools
+      # build that is long on Linux and needs an MSYS2 toolchain on Windows).
+      # The helper build and the session tests below do not decode anything --
+      # the tests configure SINGZ_ENABLE_FFMPEG_CODECS=OFF and use synthesized
+      # audio -- so the pack adds minutes and a failure mode without adding
+      # coverage of the code this job is about. The pack has its own gates
+      # (prove-ffmpeg-codec-runtime.mjs, verify-ffmpeg-codec-pack.mjs). What this
+      # leaves unchecked is the codec-enabled link of the helpers (WAV/FLAC/MP3
+      # only here); that belongs to the release pipeline (C-34), which builds
+      # the pack anyway.
+      - name: Build the three native helpers (basic codecs)
+        timeout-minutes: 45
+        run: python scripts/build-gpui-native.py --basic-only --jobs 4 --output-dir "$G/target/ci-helpers"
+
+      # build-gpui-native.py configures SINGZ_CORE_TESTS=OFF, so its build tree
+      # has no ctest targets. The helpers' session tests (D-07, C-80a) are
+      # native_playback_session_tests (the playback session singz-gpui-audio
+      # drives, with its three failure-mode runs) and shared_audio_service_tests
+      # (the service singz-gpui-input shares), plus the cue-plan and contract
+      # tests that read the same session. A second, tests-on configure builds
+      # only those targets.
+      - name: Helper session tests (ctest)
+        timeout-minutes: 30
+        run: |
+          cmake -S . -B build/native/gpui-session-tests \
+            -DSINGZ_BUILD_ELECTRON_CAPTURE=OFF -DSINGZ_ENABLE_FFMPEG_CODECS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/native/gpui-session-tests --config Release --parallel 4 \
+            --target native_playback_session_tests shared_audio_service_tests \
+            playback_cue_plan_tests native_playback_contract_tests
+          ctest --test-dir build/native/gpui-session-tests -C Release --output-on-failure \
+            -R '^(native_playback_|shared_audio_service_tests|playback_cue_plan_tests)'

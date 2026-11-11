@@ -142,7 +142,6 @@ export const training: Translation<typeof en> = {
   "training.exerciseCount_one": "{n} 項練習",
   "training.exerciseCount_other": "{n} 項練習",
   "training.nav.backToTraining": "← 訓練",
-  "training.session.aria.backToSong": "返回歌曲",
   "training.session.aria.endSession": "結束練習",
   "training.session.aria.exerciseProgress": "第 {current} / {total} 項練習",
   "training.session.aria.targetNotes": "目標音",

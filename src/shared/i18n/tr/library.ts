@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Google Drive projeleri",
+  "library.drive.hint": "Şarkıları çevrimdışı çalmak için indirin. Bu yerel kopyalar Drive kitaplığınızı değiştirmez.",
+  "library.drive.search": "Drive projelerinde ara",
+  "library.drive.downloading": "Proje indiriliyor…",
+  "library.drive.cancelled": "İndirme duraklatıldı. Doğrulanmış dosyalar saklanır. Devam etmek için şarkıyı seçin.",
+  "library.drive.loading": "Drive projeleriniz yükleniyor…",
+  "library.drive.open": "Aç",
+  "library.drive.download": "İndir ve aç",
+  "library.drive.empty": "Google Drive'da SingZ projesi bulunamadı.",
+
   "library.dropScreen.syncProgress": "Google Drive ile senkronize oluyor… {msg}",
   "library.dropScreen.cancelSync": "İptal",
   "library.dropScreen.syncPaused": "Senkronizasyon durduruldu. Tamamlanmış dosyalar kaydedildi. Şimdi senkronize et seçeneğini seçerek devam edin.",
@@ -124,5 +133,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Vokal ayırma",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Çalma başlatılamadı: {message}",
-  "library.engine.songUnreadable": "Bu şarkı diski tekrar okunamadı, bu yüzden çalma özelliği hiçbir şey çalmadı."
+  "library.engine.songUnreadable": "Bu şarkı diski tekrar okunamadı, bu yüzden çalma özelliği hiçbir şey çalmadı.",
+
 }

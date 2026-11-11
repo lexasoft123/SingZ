@@ -1,0 +1,152 @@
+{
+  "kind": "Unmodified SVG vector-asset compilation; no application UI captured",
+  "generatedAt": "2026-11-06T12:47:49.426Z",
+  "source": {
+    "css": "src/renderer/src/styles.css body::after background-image",
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(#n)'/></svg>",
+    "svgSha256": "c76f67f515215625580d1c4608900a2aa8a1766a11f57fb7d3e9c9ffb1e53621",
+    "backgroundRustSvgSha256": "26d1634d0959c0ee3cc82df093c4859299337614ba947b518415ce27aa2cf834",
+    "cssMatchesRustExceptXmlQuotes": true,
+    "cssFileSha256": "41fdba0930c56e3a7eb176efabee1f831d3c9dc07836cd43c5f485a280c4aef4",
+    "productionBuildMainSha256": "f7127e0204930d212990e5325499a8de6e6d697e535d729abd9275af2e8ef398"
+  },
+  "capture": {
+    "hidden": true,
+    "focused": false,
+    "colorProfile": "srgb",
+    "svgLogicalSize": [
+      220,
+      220
+    ],
+    "background": "transparent",
+    "format": "PNG RGBA unassociated alpha",
+    "method": "Hidden Electron dedicated SVG document; CDP transparent background override and captureScreenshot, process force-device-scale-factor",
+    "foregroundBefore": "ASN:0x0-0x85a559d:",
+    "foregroundAfter": "ASN:0x0-0x85a559d:"
+  },
+  "assets": [
+    {
+      "file": "grain-1x.png",
+      "dpr": 1,
+      "forceDeviceScaleFactor": 1,
+      "pixels": [
+        220,
+        220
+      ],
+      "pngSha256": "862706650cdef7dedffb03379fe167fe9f71be79618e8434efa08b6d87c1d387",
+      "metrics": {
+        "dpr": 1,
+        "innerWidth": 220,
+        "innerHeight": 220,
+        "root": "svg",
+        "box": {
+          "x": 0,
+          "y": 0,
+          "width": 220,
+          "height": 220
+        }
+      },
+      "windows": [
+        {
+          "visible": false,
+          "focused": false
+        }
+      ]
+    },
+    {
+      "file": "grain-2x.png",
+      "dpr": 2,
+      "forceDeviceScaleFactor": 2,
+      "pixels": [
+        440,
+        440
+      ],
+      "pngSha256": "296928d7fa9661269a29060a74964ce6477d33522c1c9f99a7557e5a69beea77",
+      "metrics": {
+        "dpr": 2,
+        "innerWidth": 220,
+        "innerHeight": 220,
+        "root": "svg",
+        "box": {
+          "x": 0,
+          "y": 0,
+          "width": 220,
+          "height": 220
+        }
+      },
+      "windows": [
+        {
+          "visible": false,
+          "focused": false
+        }
+      ]
+    }
+  ],
+  "engine": {
+    "electron": "43.2.0",
+    "chromium": "150.0.7871.129",
+    "node": "24.18.0",
+    "version": "43.2.0"
+  },
+  "comparison": {
+    "resvgVersion": "0.46.0",
+    "resvgArtifact": "/Users/maxplanck/Dev/my/SingZ/experiments/gpui-player/target/debug/deps/libresvg-ba7a3e3898333fde.rlib",
+    "method": "Same unchanged SVG and scale; straight RGBA pixel comparison; no realignment, filtering, masking or thresholding",
+    "statistics": [
+      {
+        "dpr": 1,
+        "rgbaSha256": "b644e5d69b1fbf4b75e47892cd3b618a387f5dcf4a156185293f653f5ac0ec75",
+        "resvgRgbaSha256": "861ecbbb3d54e058997fb285f493733263d7605c3a0e0fc0aa7d396aaec68f62",
+        "alphaRange": [
+          22,
+          229
+        ],
+        "resvgAlphaRange": [
+          23,
+          229
+        ],
+        "comparedPixels": 48400,
+        "differentPixels": 48400,
+        "maxChannelError": [
+          133,
+          132,
+          137,
+          193
+        ],
+        "meanAbsoluteChannelError": [
+          23.771260330578514,
+          24.510971074380166,
+          24.54607438016529,
+          35.21419421487603
+        ]
+      },
+      {
+        "dpr": 2,
+        "rgbaSha256": "b9cf42fc61f330b1e8103a3c6cddf089b75d5161db87e08ade543000f676b29c",
+        "resvgRgbaSha256": "5748382d8e2c2f82693bb265251cffe8f8c494bcf1eddf0e5dc4bac2a285a2e6",
+        "alphaRange": [
+          20,
+          231
+        ],
+        "resvgAlphaRange": [
+          24,
+          229
+        ],
+        "comparedPixels": 193600,
+        "differentPixels": 193600,
+        "maxChannelError": [
+          121,
+          135,
+          141,
+          163
+        ],
+        "meanAbsoluteChannelError": [
+          21.82699896694215,
+          22.327815082644626,
+          22.132820247933886,
+          32.02270144628099
+        ]
+      }
+    ]
+  }
+}

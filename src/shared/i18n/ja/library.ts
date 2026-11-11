@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Google ドライブのプロジェクト",
+  "library.drive.hint": "曲をダウンロードしてオフラインで再生できます。ローカルのコピーはドライブのライブラリを変更しません。",
+  "library.drive.search": "ドライブのプロジェクトを検索",
+  "library.drive.downloading": "プロジェクトをダウンロード中…",
+  "library.drive.cancelled": "ダウンロードを一時停止しました。検証済みのファイルは保持されます。続けるには曲を選んでください。",
+  "library.drive.loading": "ドライブのプロジェクトを読み込み中…",
+  "library.drive.open": "開く",
+  "library.drive.download": "ダウンロードして開く",
+  "library.drive.empty": "Google ドライブに SingZ のプロジェクトが見つかりません。",
+
   "library.dropScreen.syncProgress": "Google Drive と同期中… {msg}",
   "library.dropScreen.cancelSync": "キャンセル",
   "library.dropScreen.syncPaused": "同期を一時停止しました。完了したファイルは保持されます。「今すぐ同期」で続行できます。",
@@ -125,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "声の分離",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "再生開始できなかった: {message}",
-  "library.engine.songUnreadable": "この曲はディスクから再読み取れなかったので再生は何も再生できない."
+  "library.engine.songUnreadable": "この曲はディスクから再読み取れなかったので再生は何も再生できない.",
+
 }

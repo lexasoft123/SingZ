@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Dự án trên Google Drive",
+  "library.drive.hint": "Tải bài hát về để phát khi không có mạng. Các bản sao trên máy không làm thay đổi thư viện Drive của bạn.",
+  "library.drive.search": "Tìm dự án trên Drive",
+  "library.drive.downloading": "Đang tải dự án…",
+  "library.drive.cancelled": "Đã tạm dừng tải. Các tệp đã xác minh được giữ lại. Chọn bài hát để tiếp tục.",
+  "library.drive.loading": "Đang tải các dự án trên Drive của bạn…",
+  "library.drive.open": "Mở",
+  "library.drive.download": "Tải về và mở",
+  "library.drive.empty": "Không tìm thấy dự án SingZ nào trên Google Drive.",
+
   "library.dropScreen.syncProgress": "Đang đồng bộ với Google Drive… {msg}",
   "library.dropScreen.cancelSync": "Hủy",
   "library.dropScreen.syncPaused": "Đã tạm dừng đồng bộ. Các tệp hoàn tất được giữ lại. Chọn Đồng bộ ngay để tiếp tục.",
@@ -125,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Phân biệt giọng hát",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Không thể phát lại: {message}",
-  "library.engine.songUnreadable": "Bài hát này không thể đọc lại từ đĩa, vì vậy playback không có gì để chơi."
+  "library.engine.songUnreadable": "Bài hát này không thể đọc lại từ đĩa, vì vậy playback không có gì để chơi.",
+
 }

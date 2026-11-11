@@ -1,5 +1,6 @@
 /* English strings for the `main` namespace — see ../index.ts. */
 export const main = {
+
   "main.sync.downloadDeferred": "{dir} was not added: {reason}. It remains on Drive; fix the problem and sync again.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/s",
@@ -220,5 +221,6 @@ export const main = {
   'main.sync.removing': 'Removing {file} from Drive…',
   'main.sync.removingGone': 'Removing {name} from Drive (renamed or deleted here)…',
   'main.sync.updatingCatalog': 'Updating the phone catalog…',
-  'main.sync.upToDate': 'Drive is up to date'
+  'main.sync.upToDate': 'Drive is up to date',
+
 }

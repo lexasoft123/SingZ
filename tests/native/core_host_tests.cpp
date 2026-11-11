@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <limits>
 #include <semaphore>
@@ -2047,6 +2048,60 @@ static void wavTests() {
   std::remove(path.c_str());
 }
 
+// Exercise the public UTF-8 media path contract with a real non-ACP filename,
+// not a mocked FILE opener. Universal escapes keep the source independent of
+// the compiler's own source-code page; filesystem uses native wide paths on Win.
+static void unicodeWavPathTests() {
+  namespace fs = std::filesystem;
+  std::error_code error;
+  const fs::path temporary = fs::temp_directory_path(error);
+  CHECK("Unicode WAV temporary directory available", !error);
+  if (error) return;
+  const auto sequence = std::chrono::steady_clock::now().time_since_epoch().count();
+  const fs::path directory = temporary / ("singz-unicode-wav-" + std::to_string(sequence));
+  const bool created = fs::create_directory(directory, error);
+  CHECK("Unicode WAV owns exclusive temporary directory", created && !error);
+  if (!created || error) return;  // never remove another test's directory
+  const fs::path native = directory / fs::path(u8"\u6B4C\u66F2-\U0001F3B5.wav");
+  const auto bytes = native.u8string();
+  const std::string path(bytes.begin(), bytes.end());
+  {
+    singz::WavWriter writer;
+    const bool opened = writer.open(path, 16000, 1);
+    CHECK("UTF-8 CJK/emoji WAV writer opens", opened);
+    if (opened) {
+      const float frames[] = {0.f, .5f, -.5f, .25f};
+      CHECK("UTF-8 WAV writes real PCM", writer.append(frames, 4));
+      CHECK("UTF-8 WAV finalizes", writer.finalize());
+    }
+  }
+  {
+    singz::WavWriter writer;
+    const bool opened = writer.open(path, 16000, 1, 4);
+    CHECK("UTF-8 WAV append/resume opens existing file", opened);
+    if (opened) {
+      const float tail[] = {-.25f, 0.f};
+      CHECK("UTF-8 WAV appends real PCM", writer.append(tail, 2));
+      CHECK("UTF-8 resumed WAV finalizes", writer.finalize());
+    }
+  }
+  CHECK("Native Unicode filename exists, without ACP substitution", fs::is_regular_file(native, error) && !error);
+  const auto info = singz::readWavInfo(path);
+  CHECK("UTF-8 WAV info reads original format", info.ok && info.sampleRate == 16000 && info.channels == 1 && info.frames == 6);
+  const auto mono = singz::readWavMono(path);
+  CHECK("UTF-8 WAV mono reader reads original samples", mono.ok && mono.sampleRate == 16000 &&
+        mono.samples == std::vector<float>({0.f, .5f, -.5f, .25f, -.25f, 0.f}));
+#if defined(_WIN32)
+  // Strict UTF-8 rejection must not silently fall back to the ACP filename.
+  const std::string invalid = path + std::string(1, static_cast<char>(0xff));
+  singz::WavWriter invalidWriter;
+  CHECK("Windows WAV writer rejects invalid UTF-8", !invalidWriter.open(invalid, 16000, 1));
+  CHECK("Windows WAV reader rejects invalid UTF-8", !singz::readWavInfo(invalid).ok && !singz::readWavMono(invalid).ok);
+#endif
+  fs::remove_all(directory, error);
+  CHECK("Unicode WAV fixture cleanup succeeds", !error);
+}
+
 // The melody tracker (melody.cpp) — a synthetic phrase with known pitches
 // comes back at those pitches, voiced where sung and silent in the rest,
 // and the WAV reader feeds it the same samples the raw path gets. The
@@ -2494,6 +2549,7 @@ int main() {
   audioInputTimestampTests();
   resamplerTests();
   wavTests();
+  unicodeWavPathTests();
   flacTests();
   melodyTests();
   keyTests();

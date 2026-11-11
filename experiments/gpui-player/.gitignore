@@ -1,0 +1,4 @@
+/target/
+__pycache__/
+# Materialized by scripts/gpui-vendor.py from vendor-patches/ (never committed)
+/vendor/

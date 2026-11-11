@@ -215,5 +215,6 @@ export const player: Translation<typeof en> = {
   "player.dspGraph.transport.pre-roll": "預備拍",
   "player.dspGraph.transport.playing": "播放中",
   "player.dspGraph.transport.paused": "已暫停",
-  "player.dspGraph.transport.completed": "已結束"
+  "player.dspGraph.transport.completed": "已結束",
+
 }

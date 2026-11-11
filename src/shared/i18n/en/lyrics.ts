@@ -187,5 +187,6 @@ export const lyrics = {
 
   'lyrics.editor.help.otherUndo': 'Undo — add Shift to redo',
   'lyrics.editor.help.otherReplace': 'Paste the whole song; kept lines keep their timing',
-  'lyrics.editor.help.otherClose': 'Close the editor (asks first about unsaved edits)'
+  'lyrics.editor.help.otherClose': 'Close the editor (asks first about unsaved edits)',
+
 }

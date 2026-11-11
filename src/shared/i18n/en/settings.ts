@@ -275,5 +275,7 @@ export const settings = {
   'settings.micPreview.accessBlocked': 'Microphone access is blocked. Allow SingZ in system privacy settings.',
   'settings.micPreview.busy': 'The microphone is busy in another app. Close that app, then choose the input again.',
   'settings.micPreview.unavailable': 'That microphone is not available. Reconnect it or choose another input.',
-  'settings.micPreview.unknown': 'The microphone could not start. Check the device connection and try again.'
+  'settings.micPreview.unknown': 'The microphone could not start. Check the device connection and try again.',
+
+  "settings.mic.unavailable": "Microphone unavailable",
 }

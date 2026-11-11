@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "Nhấn một từ tập trung 50 ms",
   "lyrics.editor.help.otherUndo": "Undo  thêm Shift để làm lại",
   "lyrics.editor.help.otherReplace": "Nhép toàn bộ bài hát; giữ các dòng giữ thời gian của họ",
-  "lyrics.editor.help.otherClose": "Đóng trình chỉnh sửa (hỏi trước về các chỉnh sửa chưa được lưu)"
+  "lyrics.editor.help.otherClose": "Đóng trình chỉnh sửa (hỏi trước về các chỉnh sửa chưa được lưu)",
+
 }

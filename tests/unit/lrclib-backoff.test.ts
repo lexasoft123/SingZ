@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createLrclibTransport, lrclibRetryAfter } from '../../src/shared/lrclib-transport'
 import { lookupLyrics } from '../../src/shared/lrclib-core'
-function harness(handler: (url: string, call: number) => unknown) {
+function harness(handler: (url: string, call: number, signal: AbortSignal) => unknown) {
   let time = 100_000
   const calls: { url: string; at: number }[] = [],
     waits: number[] = [],
@@ -9,9 +9,9 @@ function harness(handler: (url: string, call: number) => unknown) {
   const transport = createLrclibTransport({
     baseURL: 'https://lrclib.net/api',
     headers: { 'User-Agent': 'SingZ/test' },
-    fetch: async (url) => {
+    fetch: async (url, init) => {
       calls.push({ url, at: time })
-      return handler(url, calls.length) as never
+      return handler(url, calls.length, init.signal) as never
     },
     now: () => time,
     wait: async (ms) => {
@@ -110,5 +110,53 @@ describe('LRCLIB overload recovery', () => {
     expect(await h.transport.request('/get?track_name=Song')).toBe('down')
     expect(await h.transport.request('/search?track_name=Song')).toEqual({ json: [] })
     expect(h.calls).toHaveLength(2)
+  })
+  // A blackholed host: the fetch never answers, and only the transport's own
+  // 10 s abort timer ends it — driven here by fake timers, so the real path runs.
+  const hang = (signal: AbortSignal): Promise<never> =>
+    new Promise((_, reject) =>
+      signal.addEventListener('abort', () =>
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+      )
+    )
+  async function timedOut(h: ReturnType<typeof harness>, path: string): Promise<unknown> {
+    const pending = h.transport.request(path)
+    await vi.advanceTimersByTimeAsync(10_000)
+    return pending
+  }
+  it('a timeout holds every endpoint off, so an outage costs one wait, not one per rung', async () => {
+    vi.useFakeTimers()
+    try {
+      const h = harness((url, _n, signal) =>
+        url.includes('/get?') ? hang(signal) : response(200, [])
+      )
+      expect(await timedOut(h, '/get?track_name=Song')).toBe('down')
+      expect(await h.transport.request('/search?track_name=Song')).toBe('down')
+      expect(await h.transport.request('/get/42')).toBe('down')
+      expect(h.calls).toHaveLength(1)
+      expect(h.logs.some((l) => l.includes('host cooldown') && l.includes('timeout'))).toBe(true)
+      // A manual retry right away (the phone's next add) keeps the hold...
+      h.transport.retryNow()
+      expect(await h.transport.request('/search?track_name=Song')).toBe('down')
+      expect(h.calls).toHaveLength(1)
+      // ...one made after the floor gets a real attempt.
+      h.advance(15_000)
+      h.transport.retryNow()
+      expect(await h.transport.request('/search?track_name=Song')).toEqual({ json: [] })
+      expect(h.calls).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('a host timeout lapses on its own', async () => {
+    vi.useFakeTimers()
+    try {
+      const h = harness((_url, n, signal) => (n === 1 ? hang(signal) : response(200, [])))
+      expect(await timedOut(h, '/get?track_name=Song')).toBe('down')
+      h.advance(60_000)
+      expect(await h.transport.request('/search?track_name=Song')).toEqual({ json: [] })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

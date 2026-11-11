@@ -55,6 +55,8 @@ function fixture(t) {
   fs.copyFileSync(setupSource, path.join(root, 'scripts/worktree-setup.sh'))
   const writeScript = (file, text) => fs.writeFileSync(file, text, { mode: 0o755 })
   writeScript(path.join(root, 'scripts/analyze-source-hash.sh'), '#!/bin/sh\necho fixture-current-hash\n')
+  // Setup materializes the patched GPUI crates; the fixture records the call instead.
+  writeScript(path.join(root, 'scripts/gpui-vendor.py'), "import pathlib, sys\npathlib.Path(sys.argv[0]).with_name('gpui-vendor.ran').write_text('ran')\n")
   writeScript(path.join(root, 'scripts/vendor-analyze.sh'), `#!/bin/sh
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -139,6 +141,7 @@ test('desktop setup locks npm, installs hooks, verifies local analyzer, and snap
   assert.equal(f.git(path.join(f.root, 'third_party/zcore'), 'rev-parse', 'HEAD'), f.git(f.root, 'ls-files', '--stage', 'third_party/zcore').split(' ')[1])
   assert.equal(f.git(path.join(f.root, 'third_party/zcore'), 'status', '--porcelain', '--untracked-files=all'), '')
   assert.match(result.stdout, /Mobile was not provisioned/)
+  assert.equal(fs.readFileSync(path.join(f.root, 'scripts/gpui-vendor.ran'), 'utf8'), 'ran')
   assert.equal(f.git(f.root, 'config', '--get', 'core.hooksPath'), '.githooks')
   assert.equal(fs.lstatSync(path.join(localVendor, 'llama-server')).isSymbolicLink(), false)
   assert.equal(fs.lstatSync(path.join(localVendor, 'singz-analyze')).isSymbolicLink(), false)

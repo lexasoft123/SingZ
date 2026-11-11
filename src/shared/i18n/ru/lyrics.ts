@@ -196,5 +196,6 @@ export const lyrics: Translation<typeof en> = {
 
   'lyrics.editor.help.otherUndo': 'Отменить, Shift — повтор',
   'lyrics.editor.help.otherReplace': 'Вставить песню; сохранённые строки хранят время',
-  'lyrics.editor.help.otherClose': 'Закрыть редактор (спросит про изменения)'
+  'lyrics.editor.help.otherClose': 'Закрыть редактор (спросит про изменения)',
+
 }

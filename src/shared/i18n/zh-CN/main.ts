@@ -3,6 +3,7 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+
   "main.sync.downloadDeferred": "未添加 {dir}：{reason}。歌曲仍在 Drive 中；解决问题后请重新同步。",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/秒",
@@ -213,5 +214,6 @@ export const main: Translation<typeof en> = {
   'main.sync.removing': '正在从 Drive 删除 {file}…',
   'main.sync.removingGone': '正在从 Drive 删除 {name}（已在此处重命名或删除）…',
   'main.sync.updatingCatalog': '正在更新手机目录…',
-  'main.sync.upToDate': 'Drive 已是最新'
+  'main.sync.upToDate': 'Drive 已是最新',
+
 }

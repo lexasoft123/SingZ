@@ -142,7 +142,6 @@ export const training: Translation<typeof en> = {
   "training.exerciseCount_one": "{n}",
   "training.exerciseCount_other": "{n} bài tập",
   "training.nav.backToTraining": "← Trình huấn",
-  "training.session.aria.backToSong": "Trở lại bài hát",
   "training.session.aria.endSession": "Tiếp tục",
   "training.session.aria.exerciseProgress": "Tập thể {current} của {total}",
   "training.session.aria.targetNotes": "Các ghi chú mục tiêu",

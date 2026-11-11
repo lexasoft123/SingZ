@@ -182,5 +182,6 @@ export const lyrics: Translation<typeof en> = {
 
   'lyrics.editor.help.otherUndo': '撤销——按住 Shift 重做',
   'lyrics.editor.help.otherReplace': '粘贴整首歌的歌词；保留的行会保留其时间',
-  'lyrics.editor.help.otherClose': '关闭编辑器（如有未保存的修改会先询问）'
+  'lyrics.editor.help.otherClose': '关闭编辑器（如有未保存的修改会先询问）',
+
 }

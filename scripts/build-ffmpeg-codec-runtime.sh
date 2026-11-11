@@ -234,6 +234,8 @@ case "$TARGET/$(uname -s)/$(uname -m)" in
     proof_fixtures="$ROOT/tests/fixtures/codecs/data"
     proof_build="$WORK/proof-build"
     rm -rf "$proof_build"
+    # macOS /bin/bash is 3.2, where "${empty[@]}" under `set -u` is an unbound
+    # variable; every possibly-empty array below expands as ${a[@]+"${a[@]}"}.
     proof_launcher_args=()
     if [ -n "$CCACHE" ]; then
       proof_launcher_args=(
@@ -252,7 +254,7 @@ case "$TARGET/$(uname -s)/$(uname -m)" in
       -DSINGZ_FFMPEG_AVFORMAT_LIBRARY="$STAGE/lib/libavformat.$AVFORMAT_MAJOR.dylib" \
       -DSINGZ_FFMPEG_AVUTIL_LIBRARY="$STAGE/lib/libavutil.$AVUTIL_MAJOR.dylib" \
       -DSINGZ_FFMPEG_SWRESAMPLE_LIBRARY="$STAGE/lib/libswresample.$SWRESAMPLE_MAJOR.dylib" \
-      -DCMAKE_BUILD_TYPE=Release "${proof_launcher_args[@]}"
+      -DCMAKE_BUILD_TYPE=Release ${proof_launcher_args[@]+"${proof_launcher_args[@]}"}
     cmake --build "$proof_build" --target codec_provisioning_tests --parallel "$COMPILE_JOBS"
     node "$ROOT/scripts/prove-ffmpeg-codec-runtime.mjs" \
       --target "$TARGET" --stage "$STAGE" \
@@ -269,7 +271,7 @@ if [ "$MODE" = --prove-existing ] && [ ${#fixture_args[@]} -gt 0 ] && \
     --target "$TARGET" --receipt "$RECEIPT"
 else
   node "$ROOT/scripts/finalize-ffmpeg-codec-runtime.mjs" \
-    "$TARGET" "$STAGE" "${fixture_args[@]}"
+    "$TARGET" "$STAGE" ${fixture_args[@]+"${fixture_args[@]}"}
 fi
 node "$ROOT/scripts/verify-ffmpeg-codec-pack.mjs" \
-  --target "$TARGET" "${verify_args[@]}"
+  --target "$TARGET" ${verify_args[@]+"${verify_args[@]}"}

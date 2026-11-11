@@ -1,7 +1,17 @@
 #!/usr/bin/env node
 const { spawnSync } = require('node:child_process')
-const { accessSync, constants, readdirSync, statSync } = require('node:fs')
+const { accessSync, constants, readFileSync, readdirSync, statSync } = require('node:fs')
 const { join, resolve } = require('node:path')
+
+function sameReviewHooks(configuredDir, ownDir, names) {
+  return names.every((name) => {
+    try {
+      const theirs = join(configuredDir, name)
+      accessSync(theirs, process.platform === 'win32' ? constants.R_OK : constants.X_OK)
+      return readFileSync(theirs).equals(readFileSync(join(ownDir, name)))
+    } catch { return false }
+  })
+}
 
 function installGitHooks(root, env = process.env) {
   const git = (args, missingAllowed = false) => {
@@ -12,12 +22,17 @@ function installGitHooks(root, env = process.env) {
     return result.stdout.trim()
   }
   const configured = git(['config', '--get', 'core.hooksPath'], true)
-  if (configured && configured !== '.githooks')
-    throw new Error(`Refusing to replace existing core.hooksPath=${configured}. Integrate the SingZ review hook with that hook setup explicitly.`)
-
-  for (const name of ['pre-commit', 'prepare-commit-msg']) {
+  const hookNames = ['pre-commit', 'prepare-commit-msg']
+  for (const name of hookNames) {
     const hook = join(root, '.githooks', name)
     accessSync(hook, process.platform === 'win32' ? constants.R_OK : constants.X_OK)
+  }
+  // Linked worktrees share one config. An absolute hooksPath that already holds
+  // this checkout's exact review hooks (for example the main checkout's
+  // .githooks) runs the same gate, so keep it rather than refuse or rewrite it.
+  if (configured && configured !== '.githooks') {
+    if (sameReviewHooks(resolve(root, configured), join(root, '.githooks'), hookNames)) return configured
+    throw new Error(`Refusing to replace existing core.hooksPath=${configured}. Integrate the SingZ review hook with that hook setup explicitly.`)
   }
   accessSync(join(root, 'scripts', 'check-staged-review.cjs'), constants.R_OK)
 

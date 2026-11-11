@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "โปรเจกต์ใน Google ไดรฟ์",
+  "library.drive.hint": "ดาวน์โหลดเพลงเพื่อเล่นแบบออฟไลน์ สำเนาในเครื่องจะไม่เปลี่ยนคลังใน Drive ของคุณ",
+  "library.drive.search": "ค้นหาโปรเจกต์ใน Drive",
+  "library.drive.downloading": "กำลังดาวน์โหลดโปรเจกต์…",
+  "library.drive.cancelled": "หยุดดาวน์โหลดชั่วคราว ไฟล์ที่ตรวจสอบแล้วยังเก็บไว้ เลือกเพลงเพื่อดำเนินการต่อ",
+  "library.drive.loading": "กำลังโหลดโปรเจกต์ใน Drive ของคุณ…",
+  "library.drive.open": "เปิด",
+  "library.drive.download": "ดาวน์โหลดและเปิด",
+  "library.drive.empty": "ไม่พบโปรเจกต์ SingZ ใน Google ไดรฟ์",
+
   "library.dropScreen.syncProgress": "กำลังซิงค์กับ Google Drive… {msg}",
   "library.dropScreen.cancelSync": "ยกเลิก",
   "library.dropScreen.syncPaused": "หยุดซิงค์ชั่วคราว เก็บไฟล์ที่เสร็จแล้วไว้ เลือกซิงค์ตอนนี้เพื่อดำเนินการต่อ",
@@ -125,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "เสียงแยก",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "การเล่นไม่ได้เริ่ม: {message}",
-  "library.engine.songUnreadable": "เพลงนี้ไม่สามารถอ่านใหม่ได้จากดิสค์ ดังนั้นการเล่นไม่ได้อะไร"
+  "library.engine.songUnreadable": "เพลงนี้ไม่สามารถอ่านใหม่ได้จากดิสค์ ดังนั้นการเล่นไม่ได้อะไร",
+
 }

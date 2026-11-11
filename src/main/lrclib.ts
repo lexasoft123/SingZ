@@ -1,6 +1,5 @@
-import packageInfo from '../../package.json'
 import { createLrclibTransport } from '../shared/lrclib-transport'
-import { net } from 'electron'
+import { app, net } from 'electron'
 import {
   LRCLIB_API,
   LRCLIB_HEADERS,
@@ -17,10 +16,10 @@ import { log } from './log'
  * The desktop's LRCLIB transport. All the logic — parsing, word timing, tag
  * repair, the lookup ladder, miss-vs-down semantics — lives in
  * src/shared/lrclib-core.ts, shared verbatim with the phone; this file only
- * owns electron's net.fetch and the down-TTL memory.
+ * owns electron's net.fetch and the transport's cooldown memory.
  */
 
-const client = `SingZ/${packageInfo.version} (https://github.com/lexasoft123/SingZ)`
+const client = `SingZ/${app.getVersion()} (https://github.com/lexasoft123/SingZ)`
 const transport = createLrclibTransport({
   baseURL: LRCLIB_API,
   headers: { ...LRCLIB_HEADERS, 'User-Agent': client, 'Lrclib-Client': client },

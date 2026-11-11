@@ -193,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "Akses mikrofon diblokir. SingZ dalam pengaturan privasi sistem.",
   "settings.micPreview.busy": "Mikrofon sibuk di aplikasi lain. Tutup aplikasi itu, lalu pilih input lagi.",
   "settings.micPreview.unavailable": "Mikrofon itu tidak tersedia. sambungkannya kembali atau pilih input lain.",
-  "settings.micPreview.unknown": "Mikrofon tidak bisa dihidupkan. Periksa koneksi perangkat dan coba lagi."
+  "settings.micPreview.unknown": "Mikrofon tidak bisa dihidupkan. Periksa koneksi perangkat dan coba lagi.",
+
+  "settings.mic.unavailable": "Mikrofon tidak tersedia",
 }

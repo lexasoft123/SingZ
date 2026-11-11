@@ -1,0 +1,31 @@
+{
+  "kind": "transparentGlyphShadowOnly",
+  "text": "G#m",
+  "fontFile": "Bricolage700.ttf",
+  "fontSha256": "dc1c0b2052ec5d879a212f58628fa288ec2f7790cad93013a4bd6e6f1f07e4e5",
+  "sourceCssSha256": "41fdba0930c56e3a7eb176efabee1f831d3c9dc07836cd43c5f485a280c4aef4",
+  "sourceCss": [
+    ".psi-value {\n  font-weight: 700;\n  font-size: 14px;\n  font-variation-settings: 'wdth' 92;\n  color: var(--text);\n  white-space: nowrap;\n}",
+    ".psi-key {\n  font-size: 19px;\n  color: var(--accent);\n  text-shadow: 0 0 14px rgba(255, 160, 40, 0.35);\n}"
+  ],
+  "fontSize": 19,
+  "fontVariationSettings": "'wdth' 92",
+  "padding": 28,
+  "canvasCssSize": [
+    128,
+    80
+  ],
+  "metrics": {
+    "left": 28,
+    "top": 28,
+    "width": 43.96875,
+    "height": 22.5,
+    "baseline": 17.5,
+    "dpr": 2
+  },
+  "electron": "43.2.0",
+  "chromium": "150.0.7871.129",
+  "colorProfile": "sRGB process-startup flag",
+  "pngSha256": "8c4e6db99652fbc479eb67ad300d3e55c08bbf6c9fccf68cdd96bc971d26a581",
+  "note": "Transparent foreground; only CSS text-shadow pixels. Native text remains separate."
+}

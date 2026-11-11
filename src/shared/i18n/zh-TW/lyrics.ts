@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "將選中的字微調 50 毫秒",
   "lyrics.editor.help.otherUndo": "撤銷——按住 Shift 重做",
   "lyrics.editor.help.otherReplace": "貼上整首歌的歌詞；保留的行會保留其時間",
-  "lyrics.editor.help.otherClose": "關閉編輯器（如有未儲存的修改會先詢問）"
+  "lyrics.editor.help.otherClose": "關閉編輯器（如有未儲存的修改會先詢問）",
+
 }

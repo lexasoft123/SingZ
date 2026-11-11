@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "Ajuste uma palavra focada em 50 ms",
   "lyrics.editor.help.otherUndo": "Desfazer — use Shift para refazer",
   "lyrics.editor.help.otherReplace": "Cole a letra inteira; mantenha as linhas com o tempo.",
-  "lyrics.editor.help.otherClose": "Feche o editor (confirma se há edições não salvas)"
+  "lyrics.editor.help.otherClose": "Feche o editor (confirma se há edições não salvas)",
+
 }

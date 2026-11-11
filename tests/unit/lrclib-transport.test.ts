@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { fetcher, logger } = vi.hoisted(() => ({ fetcher: vi.fn(), logger: vi.fn() }))
-vi.mock('electron', () => ({ net: { fetch: fetcher } }))
+vi.mock('electron', () => ({ app: { getVersion: () => '0.0.0-test' }, net: { fetch: fetcher } }))
 vi.mock('../../src/main/log', () => ({ log: logger }))
 beforeEach(() => {
   vi.resetModules()

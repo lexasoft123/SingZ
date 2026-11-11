@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "집중된 단어를 50 ms로 눌러",
   "lyrics.editor.help.otherUndo": "실행 취소 — Shift를 함께 누르면 다시 실행",
   "lyrics.editor.help.otherReplace": "노래 전체를 붙여 놓아 줄은 시간대로 유지하라",
-  "lyrics.editor.help.otherClose": "편집기를 닫아주십시오 (보장되지 않은 편집에 대해 먼저 질문합니다)"
+  "lyrics.editor.help.otherClose": "편집기를 닫아주십시오 (보장되지 않은 편집에 대해 먼저 질문합니다)",
+
 }

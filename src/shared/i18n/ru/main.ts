@@ -3,6 +3,7 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+
   "main.sync.downloadDeferred": "Не удалось добавить «{dir}»: {reason}. Песня осталась в Drive; устраните причину и повторите синхронизацию.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/с",
@@ -220,5 +221,6 @@ export const main: Translation<typeof en> = {
   'main.sync.removing': 'Удаление {file} из Drive…',
   'main.sync.removingGone': 'Удаление {name} из Drive (переименовано/удалено)…',
   'main.sync.updatingCatalog': 'Обновляем каталог телефона…',
-  'main.sync.upToDate': 'Drive актуален'
+  'main.sync.upToDate': 'Drive актуален',
+
 }

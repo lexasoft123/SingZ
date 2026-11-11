@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Google Drive प्रोजेक्ट",
+  "library.drive.hint": "ऑफ़लाइन चलाने के लिए गाने डाउनलोड करें। ये लोकल कॉपी आपकी Drive लाइब्रेरी को नहीं बदलतीं।",
+  "library.drive.search": "Drive प्रोजेक्ट खोजें",
+  "library.drive.downloading": "प्रोजेक्ट डाउनलोड हो रहा है…",
+  "library.drive.cancelled": "डाउनलोड रोका गया। जाँची गई फ़ाइलें रखी गई हैं। जारी रखने के लिए गाना चुनें।",
+  "library.drive.loading": "आपके Drive प्रोजेक्ट लोड हो रहे हैं…",
+  "library.drive.open": "खोलें",
+  "library.drive.download": "डाउनलोड करें और खोलें",
+  "library.drive.empty": "Google Drive में कोई SingZ प्रोजेक्ट नहीं मिला।",
+
   "library.dropScreen.syncProgress": "Google Drive से सिंक हो रहा है… {msg}",
   "library.dropScreen.cancelSync": "रद्द करें",
   "library.dropScreen.syncPaused": "सिंक रुका है। पूरी फ़ाइलें सुरक्षित हैं। जारी रखने के लिए अभी सिंक करें चुनें।",
@@ -125,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "अलग-अलग स्वर",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "प्लेबैक शुरू नहीं किया जा सका: {message}",
-  "library.engine.songUnreadable": "इस गीत को डिस्क से फिर से नहीं पढ़ा जा सका, इसलिए प्लेबैक में खेलने के लिए कुछ नहीं है।"
+  "library.engine.songUnreadable": "इस गीत को डिस्क से फिर से नहीं पढ़ा जा सका, इसलिए प्लेबैक में खेलने के लिए कुछ नहीं है।",
+
 }

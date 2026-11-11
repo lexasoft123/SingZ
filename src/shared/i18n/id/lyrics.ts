@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "Tekan kata yang terfokus dengan 50 ms",
   "lyrics.editor.help.otherUndo": "Undo  tambahkan Shift untuk diulang",
   "lyrics.editor.help.otherReplace": "Lempas seluruh lagu; tetap garis menjaga waktu mereka",
-  "lyrics.editor.help.otherClose": "Tutup editor (menanyakan terlebih dahulu tentang suntingan yang tidak disimpan)"
+  "lyrics.editor.help.otherClose": "Tutup editor (menanyakan terlebih dahulu tentang suntingan yang tidak disimpan)",
+
 }

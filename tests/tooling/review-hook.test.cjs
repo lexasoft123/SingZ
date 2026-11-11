@@ -116,6 +116,22 @@ test('installer preserves unrelated configured hooks', (t) => {
   assert.equal(f.git(['config', '--get', 'core.hooksPath']), '/custom hooks')
 })
 
+test('installer keeps a shared absolute hooksPath that holds the same review hooks', (t) => {
+  const f = fixture(t)
+  const shared = join(f.parent, 'main checkout hooks')
+  mkdirSync(shared)
+  for (const name of ['pre-commit', 'prepare-commit-msg']) {
+    copyFileSync(join(f.root, '.githooks', name), join(shared, name))
+    chmodSync(join(shared, name), 0o755)
+  }
+  f.git(['config', '--local', 'core.hooksPath', shared])
+  assert.equal(installGitHooks(f.root, f.env), shared)
+  assert.equal(f.git(['config', '--get', 'core.hooksPath']), shared)
+  writeFileSync(join(shared, 'pre-commit'), '#!/bin/sh\nexit 0\n')
+  assert.throws(() => installGitHooks(f.root, f.env), /Refusing to replace existing core.hooksPath/)
+  assert.equal(f.git(['config', '--get', 'core.hooksPath']), shared)
+})
+
 test('installer refuses to hide an active legacy hook', (t) => {
   const f = fixture(t)
   const legacy = join(f.git(['rev-parse', '--absolute-git-dir']), 'hooks', 'post-commit')

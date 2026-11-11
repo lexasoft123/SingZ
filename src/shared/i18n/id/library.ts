@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Proyek Google Drive",
+  "library.drive.hint": "Unduh lagu untuk diputar secara offline. Salinan lokal ini tidak mengubah perpustakaan Drive Anda.",
+  "library.drive.search": "Cari proyek Drive",
+  "library.drive.downloading": "Mengunduh proyek…",
+  "library.drive.cancelled": "Unduhan dijeda. File yang sudah diverifikasi tetap disimpan. Pilih lagunya untuk melanjutkan.",
+  "library.drive.loading": "Memuat proyek Drive Anda…",
+  "library.drive.open": "Buka",
+  "library.drive.download": "Unduh dan buka",
+  "library.drive.empty": "Tidak ada proyek SingZ di Google Drive.",
+
   "library.dropScreen.syncProgress": "Menyinkronkan dengan Google Drive… {msg}",
   "library.dropScreen.cancelSync": "Batal",
   "library.dropScreen.syncPaused": "Sinkronisasi dijeda. File yang selesai tetap disimpan. Pilih Sinkronkan sekarang untuk melanjutkan.",
@@ -125,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Pembagian vokal",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Putar tidak bisa dimulai: {message}",
-  "library.engine.songUnreadable": "Lagu ini tidak bisa dibaca kembali dari disk, jadi playback tidak memiliki apa-apa untuk dimainkan."
+  "library.engine.songUnreadable": "Lagu ini tidak bisa dibaca kembali dari disk, jadi playback tidak memiliki apa-apa untuk dimainkan.",
+
 }

@@ -3,6 +3,7 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+
   "main.sync.downloadDeferred": "{dir} 추가 실패: {reason}. 곡은 Drive에 남아 있습니다. 문제를 해결한 후 다시 동기화하세요.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/초",
@@ -155,5 +156,6 @@ export const main: Translation<typeof en> = {
   "main.sync.removing": "{file}을 드라이브에서 제거하고...",
   "main.sync.removingGone": "{name}을 드라이브에서 제거하는 것 (이곳에서 변경 또는 삭제)...",
   "main.sync.updatingCatalog": "전화 카탈로그를 업데이트하는 것...",
-  "main.sync.upToDate": "드라이브는 최신입니다"
+  "main.sync.upToDate": "드라이브는 최신입니다",
+
 }

@@ -172,7 +172,6 @@ export const training: Translation<typeof en> = {
 
   // ── in-session screen ──
   'training.nav.backToTraining': '← Практика',
-  'training.session.aria.backToSong': '← Песня',
   'training.session.aria.endSession': 'Завершить',
   'training.session.aria.exerciseProgress': '№{current} из {total}',
   'training.session.aria.targetNotes': 'Целевые ноты',

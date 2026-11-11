@@ -3,7 +3,16 @@ import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  ...en, // New Drive reader controls fall back to English until translated.
+  "library.drive.title": "Mga proyekto sa Google Drive",
+  "library.drive.hint": "I-download ang mga kanta para mapatugtog offline. Hindi binabago ng mga lokal na kopyang ito ang iyong Drive library.",
+  "library.drive.search": "Maghanap ng mga proyekto sa Drive",
+  "library.drive.downloading": "Dina-download ang proyekto…",
+  "library.drive.cancelled": "Naka-pause ang pag-download. Itinatabi ang mga na-verify na file. Piliin ang kanta para magpatuloy.",
+  "library.drive.loading": "Nilo-load ang iyong mga proyekto sa Drive…",
+  "library.drive.open": "Buksan",
+  "library.drive.download": "I-download at buksan",
+  "library.drive.empty": "Walang nakitang proyekto ng SingZ sa Google Drive.",
+
   "library.dropScreen.syncProgress": "Nagsi-sync sa Google Drive… {msg}",
   "library.dropScreen.cancelSync": "Kanselahin",
   "library.dropScreen.syncPaused": "Naka-pause ang sync. Napanatili ang natapos na mga file. Piliin ang I-sync ngayon para magpatuloy.",
@@ -125,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Paghiwalay ng mga boses",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Hindi maaaring magsimula ang pag-play: {message}",
-  "library.engine.songUnreadable": "Hindi na mai-re-read ang kanta na ito mula sa disk, kaya walang dapat i-playback."
+  "library.engine.songUnreadable": "Hindi na mai-re-read ang kanta na ito mula sa disk, kaya walang dapat i-playback.",
+
 }

@@ -193,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "Ang access sa microphone ay naka-block. SingZ sa mga setting ng privacy ng sistema.",
   "settings.micPreview.busy": "Ang mikropono ay busy sa ibang app. I-close ang app, at piliin muli ang input.",
   "settings.micPreview.unavailable": "Ang mikropono ay hindi magagamit. I-connect ito muli o pumili ng isa pang input.",
-  "settings.micPreview.unknown": "Hindi makapag-start ang mikropono."
+  "settings.micPreview.unknown": "Hindi makapag-start ang mikropono.",
+
+  "settings.mic.unavailable": "Hindi available ang mikropono",
 }

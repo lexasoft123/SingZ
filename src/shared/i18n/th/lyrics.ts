@@ -133,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "หมักคําที่เน้น 50 ms",
   "lyrics.editor.help.otherUndo": "Undo  เพิ่ม Shift เพื่อทําใหม่",
   "lyrics.editor.help.otherReplace": "เล่นเพลงทั้งหมดไว้ ใส่เส้นไว้ไว้",
-  "lyrics.editor.help.otherClose": "ปิดการแก้ไข (ถามก่อนเกี่ยวกับการแก้ไขที่ไม่ได้บันทึก)"
+  "lyrics.editor.help.otherClose": "ปิดการแก้ไข (ถามก่อนเกี่ยวกับการแก้ไขที่ไม่ได้บันทึก)",
+
 }

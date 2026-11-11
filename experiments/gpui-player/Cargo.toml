@@ -1,0 +1,82 @@
+[package]
+name = "singz-gpui-player"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+ui-tests = ["dep:gpui_linux_capture"]
+
+[dependencies]
+gpui-kit = "=0.9.0"
+# Enable native offscreen rendering without gpui-kit optional fast-backend features.
+gpui-test-platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["test-support"] }
+singz-uikit = { git = "https://github.com/lexasoft123/singz-ui.git", rev = "1c1081adc21975a346faeed1b48ebff20348935f" }
+anyhow = "1"
+async-channel = "=2.5.0"
+base64 = "=0.22.1"
+getrandom = "=0.3.4"
+libc = "=0.2.191"
+md-5 = "=0.10.6"
+url = "=2.5.8"
+# Platform trust (Secure Transport / SChannel / system OpenSSL), no bundled roots.
+ureq = { version = "=3.5.1", default-features = false, features = ["native-tls-no-default"] }
+native-tls = "=0.2.18"
+# ureq-proto TRACE dumps raw HTTP bytes, including OAuth headers. Keep DEBUG
+# diagnostics, but compile out TRACE even when a runtime logger requests it.
+log = { version = "=0.4.35", features = ["max_level_debug"] }
+# Reuse GPUI's reactor for cancellable waits beneath ureq's blocking API.
+async-io = "=2.6.0"
+async-net = "=2.0.0"
+futures-lite = "=2.6.1"
+scoped-tls-hkt = "=0.1.5"
+dirs = "=6.0.0"
+lofty = "=0.25.2"
+regex = "1"
+unicode-normalization = "0.1"
+sha1 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["std", "clock"] }
+sha2 = "=0.11.1"
+resvg = "=0.46.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Generate current, short-lived localhost TLS identities only in tests.
+[dev-dependencies]
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
+
+[build-dependencies]
+serde_json = "1"
+url = "2.5"
+
+[profile.dev]
+debug = 0
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = "line-tables-only"
+strip = "symbols"
+
+[profile.qualify]
+inherits = "release"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSDictionary", "NSObject", "NSString", "NSUserDefaults", "NSValue"] }
+core-foundation-sys = "=0.8.7"
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.11", features = ["runtime_shaders"] }
+
+[patch.crates-io]
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+
+gpui-component = { path = "vendor/gpui-component" }
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_linux_capture = { package = "gpui-pre-linux", version = "=0.3.11", optional = true, features = ["test-support"] }

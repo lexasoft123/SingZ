@@ -44,6 +44,7 @@
 #include <deque>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -68,10 +69,13 @@
 #include <zcore/legacy/courts.h>
 #include <zcore/legacy/melody.h>
 #include <zcore/media/wav.h>
+#include <zcore/base/utf8_file.h>
+
+using singz::openUtf8;
 
 static std::vector<float> readF32(const std::string& path) {
   std::vector<float> out;
-  std::FILE* f = std::fopen(path.c_str(), "rb");
+  std::FILE* f = openUtf8(path, "rb");
   if (f == nullptr) return out;
   std::fseek(f, 0, SEEK_END);
   const long bytes = std::ftell(f);
@@ -1372,7 +1376,7 @@ static int buildInfoCommand() {
   return 0;
 }
 
-int main(int argc, char** argv) {
+static int run(int argc, char** argv) {
   if (argc < 2) {
     printLiveInputUsage(stderr);
     std::fprintf(stderr,
@@ -1555,7 +1559,7 @@ int main(int argc, char** argv) {
       singz::MlGrid ml;
       bool haveMl = false;
       if (!mlPath.empty()) {
-        std::FILE* f = std::fopen(mlPath.c_str(), "rb");
+        std::FILE* f = openUtf8(mlPath, "rb");
         if (f) {
           std::string text;
           char chunk[65536];
@@ -1624,7 +1628,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "mlmix: %s\n", err.c_str());
       return 1;
     }
-    FILE* f = std::fopen(argv[2], "wb");
+    FILE* f = openUtf8(argv[2], "wb");
     if (!f) {
       std::fprintf(stderr, "mlmix: cannot write %s\n", argv[2]);
       return 1;
@@ -1732,7 +1736,7 @@ int main(int argc, char** argv) {
      * the one property a %.17g hop through Foundation would NOT give us.
      */
     const auto readMlFile = [](const std::string& path, singz::MlGrid& g) -> std::string {
-      std::FILE* f = std::fopen(path.c_str(), "rb");
+      std::FILE* f = openUtf8(path, "rb");
       if (!f) return "cannot open " + path;
       std::string text;
       char chunk[65536];
@@ -2321,7 +2325,7 @@ int main(int argc, char** argv) {
     int nFrames = 0;
     const std::vector<float> frames = singz::frameSignal(signal, nFrames);
     if (!framesOut.empty()) {
-      FILE* fo = std::fopen(framesOut.c_str(), "wb");
+      FILE* fo = openUtf8(framesOut, "wb");
       if (!fo) {
         std::fprintf(stderr, "mlgrid: could not write %s\n", framesOut.c_str());
         return 1;
@@ -2377,7 +2381,7 @@ int main(int argc, char** argv) {
       for (int which = 0; which < 2; which++) {
         const std::vector<float>& v = which == 0 ? beatLogits : downLogits;
         const std::string p = logitsOut + (which == 0 ? "-beat.f32" : "-down.f32");
-        FILE* fo = std::fopen(p.c_str(), "wb");
+        FILE* fo = openUtf8(p, "wb");
         if (!fo) {
           std::fprintf(stderr, "mlgrid: could not write %s\n", p.c_str());
           return 1;
@@ -2619,3 +2623,24 @@ int main(int argc, char** argv) {
   std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
   return 2;
 }
+
+#if defined(_WIN32)
+int wmain(int argc, wchar_t** wide) {
+  std::vector<std::string> strings;
+  for (int i = 0; i < argc; ++i) {
+    const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                         wide[i], -1, nullptr, 0, nullptr, nullptr);
+    if (count <= 0) return 2;
+    std::string text(static_cast<size_t>(count), '\0');
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide[i], -1,
+                             text.data(), count, nullptr, nullptr)) return 2;
+    text.pop_back();
+    strings.push_back(std::move(text));
+  }
+  std::vector<char*> args;
+  for (auto& text : strings) args.push_back(text.data());
+  return run(argc, args.data());
+}
+#else
+int main(int argc, char** argv) { return run(argc, argv); }
+#endif

@@ -183,5 +183,6 @@ export const library: Translation<typeof en> = {
   'library.playbackErrorToast.couldNotStart': 'Ошибка воспроизведения: {message}',
 
   // ── audio/engine (the one status genuinely shown to the singer, as this toast) ──
-  'library.engine.songUnreadable': 'Эту песню не удалось перечитать с диска, так что играть нечего.'
+  'library.engine.songUnreadable': 'Эту песню не удалось перечитать с диска, так что играть нечего.',
+
 }

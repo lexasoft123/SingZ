@@ -193,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "El acceso al micrófono está bloqueado. Permite que SingZ en la configuración de privacidad del sistema.",
   "settings.micPreview.busy": "El micrófono está en uso en otra aplicación. Cierra esa aplicación, y luego selecciona el micrófono nuevamente.",
   "settings.micPreview.unavailable": "El micrófono no está disponible. Conéctalo de nuevo o elige otra entrada.",
-  "settings.micPreview.unknown": "El micrófono no pudo iniciarse. Verifique la conexión del dispositivo e intente de nuevo."
+  "settings.micPreview.unknown": "El micrófono no pudo iniciarse. Verifique la conexión del dispositivo e intente de nuevo.",
+
+  "settings.mic.unavailable": "Micrófono no disponible",
 }
