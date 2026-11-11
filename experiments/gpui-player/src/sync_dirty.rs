@@ -17,6 +17,59 @@ const MAX_DIRS: usize = 100;
 const MAX_RETIRE_OPS: usize = 1024;
 const MAX_SEQ: u64 = (1u64 << 53) - 1;
 static NEXT: AtomicU64 = AtomicU64::new(1);
+const SNAPSHOT_ATTEMPTS: usize = 8;
+const WRITER_ATTEMPTS: usize = 26;
+const WRITER_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+const WRITER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+// Only ledger open/metadata or publication failures may carry this marker. Exhaustion returns
+// the underlying OS error so a persistent ACL denial is never reported as churn.
+#[derive(Debug)]
+struct LedgerFileBusy(std::io::Error);
+impl std::fmt::Display for LedgerFileBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+impl std::error::Error for LedgerFileBusy {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotIo {
+    Metadata,
+    Open,
+    OpenedMetadata,
+    Read,
+    CurrentMetadata,
+    Directory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriterIo {
+    Read(SnapshotIo),
+    Cas(SnapshotIo),
+    Create,
+    Replace,
+    StageOpen,
+    StageWrite,
+    StageFlush,
+    Directory,
+    DirectoryFlush,
+}
+#[cfg(test)]
+#[derive(Debug)]
+struct WriterFaults {
+    step: WriterIo,
+    code: i32,
+    failures: usize,
+    calls: std::sync::atomic::AtomicUsize,
+    external: Option<Vec<u8>>,
+    directory_error: Option<i32>,
+    windows: bool,
+    attempt_limit: usize,
+}
 
 /// An ordinary bounded ledger was atomically replaced during a snapshot.
 /// This is transient; malformed JSON and unsafe file kinds remain hard errors.
@@ -85,6 +138,7 @@ pub fn is_publication_not_attempted(error:&anyhow::Error)->bool {
 pub struct Store {
     directory: PathBuf,
     #[cfg(test)] fail_publication_flush:bool,
+    #[cfg(test)] writer_faults: Option<std::sync::Arc<WriterFaults>>,
 }
 struct Document {
     raw: Value,
@@ -93,7 +147,7 @@ struct Document {
 }
 impl Store {
     pub fn new(directory: PathBuf) -> Self {
-        Self { directory, #[cfg(test)] fail_publication_flush:false }
+        Self { directory, #[cfg(test)] fail_publication_flush:false, #[cfg(test)] writer_faults:None }
     }
     #[cfg(test)]
     pub(crate) fn with_failed_publication_flush(&self)->Self {
@@ -105,17 +159,49 @@ impl Store {
     pub fn snapshot(&self) -> Result<Snapshot> {
         self.snapshot_with_hook(|| {})
     }
-    fn snapshot_with_hook(&self, mut after_open: impl FnMut()) -> Result<Snapshot> {
-        // Only read-only snapshots retry. Update closures and publication CAS
-        // must still observe one exact captured document and run once.
-        for attempt in 0..8 {
-            let result = bytes_with_hook(&self.directory, &mut after_open).and_then(document);
+    fn snapshot_with_hook(&self, after_open: impl FnMut()) -> Result<Snapshot> {
+        self.snapshot_with_io_hook(after_open, |_| Ok(()))
+    }
+    fn snapshot_with_io_hook(
+        &self,
+        after_open: impl FnMut(),
+        before_io: impl FnMut(SnapshotIo) -> std::io::Result<()>,
+    ) -> Result<Snapshot> {
+        self.snapshot_with_io_policy(after_open, before_io, cfg!(windows))
+    }
+    fn snapshot_with_io_policy(
+        &self,
+        mut after_open: impl FnMut(),
+        mut before_io: impl FnMut(SnapshotIo) -> std::io::Result<()>,
+        windows_file_races: bool,
+    ) -> Result<Snapshot> {
+        // The platform policy is an argument only so host tests can exercise
+        // Windows errors. Production enables it exclusively on Windows above.
+        // Snapshot retries never execute writer callbacks. Writer retries below
+        // restart the complete captured-document transaction separately.
+        for attempt in 0..SNAPSHOT_ATTEMPTS {
+            let result = bytes_with_hook(
+                &self.directory,
+                &mut after_open,
+                &mut before_io,
+                windows_file_races,
+            )
+            .and_then(document);
             match result {
                 Ok(document) => return Ok(document.state),
-                Err(error) if is_snapshot_changed(&error) && attempt < 7 => {
+                Err(error)
+                    if (is_snapshot_changed(&error) || error.is::<LedgerFileBusy>())
+                        && attempt + 1 < SNAPSHOT_ATTEMPTS =>
+                {
+                    // Keep the existing budget: seven 2 ms sleeps, 14 ms total.
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(match error.downcast::<LedgerFileBusy>() {
+                        Ok(busy) => busy.0.into(),
+                        Err(error) => error,
+                    });
+                }
             }
         }
         unreachable!("Snapshot retry loop always returns")
@@ -158,7 +244,7 @@ impl Store {
                 if state.dirs.len()>MAX_DIRS {state.dirs.clear();state.all_seq=state.seq;}
                 state.retire_ops.insert(id.into(),state.seq);
                 Ok(())
-            },||publication_started=true)
+            },|started|publication_started=started)
         })();
         let state=result.map_err(|cause|if publication_started {cause}
             else {anyhow::Error::new(PublicationNotAttempted{cause})})?;
@@ -170,9 +256,8 @@ impl Store {
         ensure!(operation_id_valid(id),"Invalid local operation ID");
         let mut removed=false;
         self.update(|state| {
-            if state.retire_ops.get(id)==Some(&expected_sequence) {
-                state.retire_ops.remove(id);removed=true;
-            }
+            removed=state.retire_ops.get(id)==Some(&expected_sequence);
+            if removed {state.retire_ops.remove(id);}
             if !state.is_dirty(){state.since=None;}
             Ok(())
         })?;
@@ -240,25 +325,26 @@ impl Store {
             Ok(())
         })
     }
-    fn update(&self, change: impl FnOnce(&mut Snapshot) -> Result<()>) -> Result<Snapshot> {
+    fn update(&self, change: impl FnMut(&mut Snapshot) -> Result<()>) -> Result<Snapshot> {
         self.update_with_lock_timeout(std::time::Duration::from_secs(2), change)
     }
-    // All callers are filesystem workers. Wait only for actual lease contention;
-    // malformed state, symlinks, permissions and publication conflicts must not
-    // be hidden behind retries or execute the mutation closure more than once.
+    // Callbacks mutate only the supplied candidate and may be replayed after a
+    // provably uncommitted Windows file failure. Assign result flags afresh on
+    // every attempt; external side effects do not belong in these callbacks.
+    // Malformed data, unsafe files and CAS conflicts remain permanent errors.
     fn update_with_lock_timeout(
         &self,
         timeout: std::time::Duration,
-        change: impl FnOnce(&mut Snapshot) -> Result<()>,
+        change: impl FnMut(&mut Snapshot) -> Result<()>,
     ) -> Result<Snapshot> {
-        self.update_with_publication_stage(timeout,change,||{})
+        self.update_with_publication_stage(timeout, change, |_| {})
     }
     fn update_with_publication_stage(
         &self,
-        timeout:std::time::Duration,
-        change:impl FnOnce(&mut Snapshot)->Result<()>,
-        before_publish:impl FnOnce(),
-    )->Result<Snapshot> {
+        timeout: std::time::Duration,
+        mut change: impl FnMut(&mut Snapshot) -> Result<()>,
+        mut publication_stage: impl FnMut(bool),
+    ) -> Result<Snapshot> {
         fs::create_dir_all(&self.directory)?;
         let dir = self.directory.canonicalize()?;
         let started = std::time::Instant::now();
@@ -277,14 +363,95 @@ impl Store {
                 }
             }
         };
-        let mut document = read(&dir)?;
-        change(&mut document.state)?;
-        before_publish();
+        // Hold the lease across the bounded retry window. Each candidate and
+        // pending staging file is dropped before sleeping; every attempt reads
+        // a fresh document, reapplies the mutation, then checks its own CAS.
+        let retry_started = std::time::Instant::now();
+        let windows = self.writer_windows_policy();
+        let limit = WRITER_ATTEMPTS;
         #[cfg(test)]
-        if self.fail_publication_flush {
-            return publish_with_flush(&dir,document,|_|anyhow::bail!("Injected directory flush failure after ledger publication"));
+        let limit = self
+            .writer_faults
+            .as_ref()
+            .map_or(limit, |faults| faults.attempt_limit);
+        for attempt in 0..limit {
+            publication_stage(false);
+            let result = (|| {
+                let mut document = document(bytes_with_hook(
+                    &dir,
+                    &mut || {},
+                    &mut |step| self.writer_io(WriterIo::Read(step)),
+                    windows,
+                )?)?;
+                change(&mut document.state)?;
+                publication_stage(true);
+                publish_with_hook(
+                    &dir,
+                    document,
+                    |dir| {
+                        self.writer_io(WriterIo::DirectoryFlush)?;
+                        #[cfg(test)]
+                        if self.fail_publication_flush {
+                            anyhow::bail!(
+                                "Injected directory flush failure after ledger publication"
+                            );
+                        }
+                        flush_directory(dir)
+                    },
+                    &mut |step| self.writer_io(step),
+                    windows,
+                )
+            })();
+            match result {
+                Ok(state) => return Ok(state),
+                Err(error) => {
+                    let remaining = WRITER_RETRY_BUDGET.saturating_sub(retry_started.elapsed());
+                    if error.is::<LedgerFileBusy>() && attempt + 1 < limit && !remaining.is_zero() {
+                        std::thread::sleep(remaining.min(WRITER_RETRY_DELAY));
+                        continue;
+                    }
+                    return Err(match error.downcast::<LedgerFileBusy>() {
+                        Ok(busy) => busy.0.into(),
+                        Err(error) => error,
+                    });
+                }
+            }
         }
-        publish(&dir, document)
+        unreachable!("Writer retry loop always returns")
+    }
+    fn writer_windows_policy(&self) -> bool {
+        #[cfg(test)]
+        if let Some(faults) = &self.writer_faults {
+            return faults.windows;
+        }
+        cfg!(windows)
+    }
+    fn writer_io(&self, step: WriterIo) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(faults) = &self.writer_faults {
+            if matches!(
+                step,
+                WriterIo::Directory
+                    | WriterIo::Read(SnapshotIo::Directory)
+                    | WriterIo::Cas(SnapshotIo::Directory)
+            ) {
+                if let Some(code) = faults.directory_error {
+                    return Err(std::io::Error::from_raw_os_error(code));
+                }
+            }
+            if step == faults.step {
+                let call = faults.calls.fetch_add(1, Ordering::SeqCst);
+                if call < faults.failures {
+                    // Emulate an independent publisher between failed attempts.
+                    if let Some(bytes) = &faults.external {
+                        fs::write(self.directory.join(NAME), bytes)?;
+                    }
+                    return Err(std::io::Error::from_raw_os_error(faults.code));
+                }
+            }
+        }
+        let _ = step;
+        Ok(())
     }
 }
 pub fn snapshot() -> Result<Snapshot> {
@@ -352,7 +519,7 @@ fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     }
 }
 fn bytes(dir: &Path) -> Result<Option<Vec<u8>>> {
-    bytes_with_hook(dir, &mut || {})
+    bytes_with_hook(dir, &mut || {}, &mut |_| Ok(()), false)
 }
 fn bounded_ordinary(meta: &fs::Metadata) -> Result<()> {
     ensure!(
@@ -361,28 +528,90 @@ fn bounded_ordinary(meta: &fs::Metadata) -> Result<()> {
     );
     Ok(())
 }
-fn bytes_with_hook(dir: &Path, after_open: &mut impl FnMut()) -> Result<Option<Vec<u8>>> {
+fn ledger_read_io<T>(
+    dir: &Path,
+    step: SnapshotIo,
+    before_io: &mut impl FnMut(SnapshotIo) -> std::io::Result<()>,
+    windows_file_races: bool,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> Result<T> {
+    let result = before_io(step).and_then(|()| operation());
+    match result {
+        Err(error)
+            if windows_file_races
+                && matches!(
+                    step,
+                    SnapshotIo::Metadata
+                        | SnapshotIo::Open
+                        | SnapshotIo::OpenedMetadata
+                        | SnapshotIo::CurrentMetadata
+                )
+                && matches!(error.raw_os_error(), Some(5 | 32)) =>
+        {
+            // A ledger's delete-pending handle can deny open/metadata briefly.
+            // A denied directory is not a replace race: surface it immediately.
+            before_io(SnapshotIo::Directory)?;
+            fs::read_dir(dir)?.next().transpose()?;
+            Err(LedgerFileBusy(error).into())
+        }
+        result => Ok(result?),
+    }
+}
+fn bytes_with_hook(
+    dir: &Path,
+    after_open: &mut impl FnMut(),
+    before_io: &mut impl FnMut(SnapshotIo) -> std::io::Result<()>,
+    windows_file_races: bool,
+) -> Result<Option<Vec<u8>>> {
     let path = dir.join(NAME);
-    let meta = match fs::symlink_metadata(&path) {
+    let meta = match ledger_read_io(
+        dir,
+        SnapshotIo::Metadata,
+        before_io,
+        windows_file_races,
+        || fs::symlink_metadata(&path),
+    ) {
         Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
     };
     bounded_ordinary(&meta)?;
-    let file = File::open(&path)?;
-    let opened = file.metadata()?;
+    let file = ledger_read_io(dir, SnapshotIo::Open, before_io, windows_file_races, || {
+        File::open(&path)
+    })?;
+    let opened = ledger_read_io(
+        dir,
+        SnapshotIo::OpenedMetadata,
+        before_io,
+        windows_file_races,
+        || file.metadata(),
+    )?;
     bounded_ordinary(&opened)?;
     if !same(&meta, &opened) {
         return Err(SnapshotChanged.into());
     }
     after_open();
     let mut result = vec![];
-    file.take(LIMIT + 1).read_to_end(&mut result)?;
+    ledger_read_io(dir, SnapshotIo::Read, before_io, windows_file_races, || {
+        file.take(LIMIT + 1).read_to_end(&mut result)
+    })?;
     ensure!(
         result.len() as u64 <= LIMIT,
         "Sync intent exceeds its bound"
     );
-    let current = fs::symlink_metadata(&path)?;
+    let current = ledger_read_io(
+        dir,
+        SnapshotIo::CurrentMetadata,
+        before_io,
+        windows_file_races,
+        || fs::symlink_metadata(&path),
+    )?;
     // Never retry an unsafe replacement as though it were an app publication.
     bounded_ordinary(&current)?;
     if !same(&meta, &current) {
@@ -482,13 +711,53 @@ fn lease(dir: &Path) -> Result<crate::file_lease::Lease> {
     };
     crate::file_lease::Lease::acquire(file).context("Sync intent is already being updated")
 }
-fn publish(dir: &Path, document: Document) -> Result<Snapshot> {
-    publish_with_flush(dir,document,|dir| {
-        #[cfg(unix)] File::open(dir)?.sync_all().context("Could not flush durable sync intent directory")?;
-        let _=dir;Ok(())
-    })
+fn flush_directory(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    File::open(dir)?
+        .sync_all()
+        .context("Could not flush durable sync intent directory")?;
+    let _ = dir;
+    Ok(())
 }
-fn publish_with_flush(dir: &Path, mut document: Document, flush:impl FnOnce(&Path)->Result<()>) -> Result<Snapshot> {
+#[cfg(test)]
+fn publish(dir: &Path, document: Document) -> Result<Snapshot> {
+    publish_with_flush(dir, document, flush_directory)
+}
+#[cfg(test)]
+fn publish_with_flush(
+    dir: &Path,
+    document: Document,
+    flush: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Snapshot> {
+    publish_with_hook(dir, document, flush, &mut |_| Ok(()), false)
+}
+fn publication_io<T>(
+    dir: &Path,
+    step: WriterIo,
+    before_io: &mut impl FnMut(WriterIo) -> std::io::Result<()>,
+    windows: bool,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> Result<T> {
+    match before_io(step).and_then(|()| operation()) {
+        Err(error)
+            if windows
+                && matches!(step, WriterIo::Create | WriterIo::Replace)
+                && matches!(error.raw_os_error(), Some(5 | 32)) =>
+        {
+            before_io(WriterIo::Directory)?;
+            fs::read_dir(dir)?.next().transpose()?;
+            Err(LedgerFileBusy(error).into())
+        }
+        result => Ok(result?),
+    }
+}
+fn publish_with_hook(
+    dir: &Path,
+    mut document: Document,
+    flush: impl FnOnce(&Path) -> Result<()>,
+    before_io: &mut impl FnMut(WriterIo) -> std::io::Result<()>,
+    windows: bool,
+) -> Result<Snapshot> {
     let mut dirty = document
         .raw
         .get("gdriveDirty")
@@ -524,22 +793,40 @@ fn publish_with_flush(dir: &Path, mut document: Document, flush:impl FnOnce(&Pat
         }
     }
     let pending = Pending(path);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&pending.0)?;
-    file.write_all(&encoded)?;
-    file.sync_all()?;
+    let mut file = publication_io(dir, WriterIo::StageOpen, before_io, windows, || {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending.0)
+    })?;
+    publication_io(dir, WriterIo::StageWrite, before_io, windows, || {
+        file.write_all(&encoded)
+    })?;
+    publication_io(dir, WriterIo::StageFlush, before_io, windows, || {
+        file.sync_all()
+    })?;
     drop(file);
     ensure!(
-        bytes(dir)? == document.bytes,
+        bytes_with_hook(
+            dir,
+            &mut || {},
+            &mut |step| before_io(WriterIo::Cas(step)),
+            windows
+        )? == document.bytes,
         "Sync intent changed outside this app"
     );
     if document.bytes.is_some() {
-        crate::project_store::replace(&pending.0, &dir.join(NAME))?;
+        // The completed staging file was already flushed through its writable
+        // handle above. Avoid project_store::replace's redundant Windows reopen
+        // and flush, and classify only the actual atomic rename failure here.
+        publication_io(dir, WriterIo::Replace, before_io, windows, || {
+            fs::rename(&pending.0, dir.join(NAME))
+        })?;
     } else {
-        fs::hard_link(&pending.0, dir.join(NAME))
-            .context("Sync intent appeared during publication")?;
+        publication_io(dir, WriterIo::Create, before_io, windows, || {
+            fs::hard_link(&pending.0, dir.join(NAME))
+        })
+        .context("Sync intent appeared during publication")?;
     }
     flush(dir).map_err(|cause|anyhow::Error::new(PublicationUncertain{cause}))?;
     Ok(document.state)

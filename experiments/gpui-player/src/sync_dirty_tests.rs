@@ -337,6 +337,563 @@ fn outside_library_uses_directory_boundaries_instead_of_string_prefixes() {
     );
 }
 
+// Faults are attached to a Store so these tests exercise the public mark, clear,
+// operation and acknowledgement paths, including their result bookkeeping.
+fn writer_fault_store(
+    f: &Fixture,
+    step: WriterIo,
+    code: i32,
+    failures: usize,
+    external: Option<Value>,
+    attempt_limit: usize,
+) -> (Store, Arc<WriterFaults>) {
+    let faults = Arc::new(WriterFaults {
+        step,
+        code,
+        failures,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        external: external.map(|value| serde_json::to_vec(&value).unwrap()),
+        directory_error: None,
+        windows: true,
+        attempt_limit,
+    });
+    let mut store = f.store.clone();
+    store.writer_faults = Some(faults.clone());
+    (store, faults)
+}
+fn assert_no_writer_temps(f: &Fixture) {
+    assert!(fs::read_dir(&f.store.directory).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    }));
+}
+fn check_windows_writer_recovery(code: i32) {
+    for step in [
+        WriterIo::Read(SnapshotIo::Open),
+        WriterIo::Read(SnapshotIo::Metadata),
+        WriterIo::Read(SnapshotIo::OpenedMetadata),
+        WriterIo::Read(SnapshotIo::CurrentMetadata),
+        WriterIo::Cas(SnapshotIo::Open),
+        WriterIo::Cas(SnapshotIo::Metadata),
+        WriterIo::Cas(SnapshotIo::OpenedMetadata),
+        WriterIo::Cas(SnapshotIo::CurrentMetadata),
+        WriterIo::Create,
+        WriterIo::Replace,
+    ] {
+        for failures in [1, 3] {
+            let f = Fixture::new();
+            let initial = if step == WriterIo::Create {
+                0
+            } else {
+                f.store.mark_library("initial").unwrap();
+                1
+            };
+            let (store, faults) =
+                writer_fault_store(&f, step, code, failures, None, WRITER_ATTEMPTS);
+            let path = f.dir("Marked once");
+            store
+                .mark_project(&path, "retry transaction")
+                .unwrap_or_else(|error| {
+                    panic!("{step:?}, OS {code}, {failures} failures: {error:#}")
+                });
+            assert_eq!(faults.calls.load(Ordering::SeqCst), failures + 1);
+            let state = f.store.snapshot().unwrap();
+            assert_eq!(state.seq, initial + 1);
+            assert_eq!(state.dirs[path.to_str().unwrap()], initial + 1);
+            assert_no_writer_temps(&f);
+            f.store
+                .mark_project(&f.dir("Next mark"), "lease released")
+                .unwrap();
+            assert_eq!(f.store.snapshot().unwrap().seq, initial + 2);
+        }
+    }
+    // A failed replace must discard its candidate and CAS capture. An external
+    // publication during the failure advances the ledger and adds unknown data.
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let external = json!({"version":1,"foreign":"preserve", "gdriveDirty":
+        {"seq":9,"allSeq":9,"dirs":{},"since":111}});
+    let (store, faults) = writer_fault_store(
+        &f,
+        WriterIo::Replace,
+        code,
+        2,
+        Some(external),
+        WRITER_ATTEMPTS,
+    );
+    store
+        .mark_project(&f.dir("Newest"), "rebase mutation")
+        .unwrap();
+    assert_eq!(faults.calls.load(Ordering::SeqCst), 3);
+    let state = f.store.snapshot().unwrap();
+    assert_eq!(state.seq, 10);
+    assert_eq!(state.all_seq, 9);
+    assert_eq!(state.dirs[f.dir("Newest").to_str().unwrap()], 10);
+    assert_eq!(state.since, Some(111));
+    assert_eq!(read(&f.store.directory).unwrap().raw["foreign"], "preserve");
+    assert_no_writer_temps(&f);
+
+    let f = Fixture::new();
+    let seq = f
+        .store
+        .commit_operation(&[f.dir("Old")], "operation", "initial")
+        .unwrap();
+    f.store.mark_project(&f.dir("New"), "newer mark").unwrap();
+    let (store, _) = writer_fault_store(&f, WriterIo::Replace, code, 2, None, WRITER_ATTEMPTS);
+    let state = store.clear(seq).unwrap();
+    assert_eq!(state.seq, 2);
+    assert_eq!(state.dirs.len(), 1);
+    assert_eq!(state.retire_ops["operation"], seq);
+    // The first candidate removed the operation, but another publisher already
+    // acknowledged it before retry. The returned bool belongs to the last try.
+    let external = json!({"version":1,"gdriveDirty":{"seq":9,"allSeq":9,"dirs":{},"since":111}});
+    let (store, _) = writer_fault_store(
+        &f,
+        WriterIo::Replace,
+        code,
+        1,
+        Some(external),
+        WRITER_ATTEMPTS,
+    );
+    assert!(!store.acknowledge_operation("operation", seq).unwrap());
+    assert_eq!(f.store.snapshot().unwrap().seq, 9);
+    assert!(f.store.snapshot().unwrap().retire_ops.is_empty());
+
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let (store, faults) = writer_fault_store(&f, WriterIo::Replace, code, 2, None, WRITER_ATTEMPTS);
+    let seq = store
+        .commit_operation(&[f.dir("Operation")], "retry-operation", "operation retry")
+        .unwrap();
+    assert_eq!(seq, 2);
+    assert_eq!(faults.calls.load(Ordering::SeqCst), 3);
+    let state = f.store.snapshot().unwrap();
+    assert_eq!(state.retire_ops["retry-operation"], 2);
+    assert_eq!(state.dirs[f.dir("Operation").to_str().unwrap()], 2);
+    let (store, _) = writer_fault_store(&f, WriterIo::Replace, code, 2, None, WRITER_ATTEMPTS);
+    assert!(store.acknowledge_operation("retry-operation", 2).unwrap());
+    assert_eq!(f.store.snapshot().unwrap().seq, 2);
+    assert!(f.store.snapshot().unwrap().retire_ops.is_empty());
+
+    // A retry that fails validation before publication must not inherit the
+    // previous attempt's publication-stage flag.
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let (mut store, mut faults) =
+        writer_fault_store(&f, WriterIo::Replace, code, 1, None, WRITER_ATTEMPTS);
+    store.writer_faults = None;
+    Arc::get_mut(&mut faults).unwrap().external = Some(b"{broken".to_vec());
+    store.writer_faults = Some(faults.clone());
+    let error = store
+        .commit_operation(&[f.dir("Operation")], "not-published", "validation failure")
+        .unwrap_err();
+    assert!(is_publication_not_attempted(&error));
+    assert_eq!(faults.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read(f.store.directory.join(NAME)).unwrap(), b"{broken");
+    assert_no_writer_temps(&f);
+
+    for other in [13, 87] {
+        let f = Fixture::new();
+        f.store.mark_library("initial").unwrap();
+        let (store, faults) = writer_fault_store(
+            &f,
+            WriterIo::Replace,
+            other,
+            usize::MAX,
+            None,
+            WRITER_ATTEMPTS,
+        );
+        let error = store.mark_library("non-retryable error").unwrap_err();
+        assert_eq!(faults.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(other)
+        );
+        assert_eq!(f.store.snapshot().unwrap().seq, 1);
+    }
+
+    // Only file boundaries qualify: mutation errors, staging errors, directory
+    // errors and the post-publication durability boundary are never replayed.
+    for step in [
+        WriterIo::StageOpen,
+        WriterIo::StageWrite,
+        WriterIo::StageFlush,
+    ] {
+        let f = Fixture::new();
+        f.store.mark_library("initial").unwrap();
+        let before = fs::read(f.store.directory.join(NAME)).unwrap();
+        let (store, faults) = writer_fault_store(&f, step, code, usize::MAX, None, WRITER_ATTEMPTS);
+        let error = store.mark_library("denied staging").unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(code)
+        );
+        assert_eq!(faults.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read(f.store.directory.join(NAME)).unwrap(), before);
+        assert_no_writer_temps(&f);
+    }
+    for step in [
+        WriterIo::Read(SnapshotIo::Open),
+        WriterIo::Cas(SnapshotIo::Open),
+        WriterIo::Replace,
+    ] {
+        let f = Fixture::new();
+        f.store.mark_library("initial").unwrap();
+        let (mut store, mut faults) =
+            writer_fault_store(&f, step, code, usize::MAX, None, WRITER_ATTEMPTS);
+        store.writer_faults = None;
+        Arc::get_mut(&mut faults).unwrap().directory_error = Some(code);
+        store.writer_faults = Some(faults.clone());
+        let error = store.mark_library("denied directory").unwrap_err();
+        assert_eq!(faults.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(code)
+        );
+        assert_eq!(f.store.snapshot().unwrap().seq, 1);
+        assert_no_writer_temps(&f);
+    }
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let (store, faults) = writer_fault_store(
+        &f,
+        WriterIo::DirectoryFlush,
+        code,
+        usize::MAX,
+        None,
+        WRITER_ATTEMPTS,
+    );
+    let error = store.mark_library("published once").unwrap_err();
+    assert!(is_publication_uncertain(&error));
+    assert_eq!(faults.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.store.snapshot().unwrap().seq, 2);
+    assert_no_writer_temps(&f);
+
+    let (store, _) = writer_fault_store(&f, WriterIo::Replace, code, 0, None, WRITER_ATTEMPTS);
+    let mut mutations = 0;
+    let error = store
+        .update(|_| {
+            mutations += 1;
+            Err(std::io::Error::from_raw_os_error(code).into())
+        })
+        .unwrap_err();
+    assert_eq!(mutations, 1);
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .raw_os_error(),
+        Some(code)
+    );
+    assert_eq!(f.store.snapshot().unwrap().seq, 2);
+
+    // The same hook cannot admit a Windows retry when platform policy is off.
+    let (mut store, mut faults) = writer_fault_store(
+        &f,
+        WriterIo::Replace,
+        code,
+        usize::MAX,
+        None,
+        WRITER_ATTEMPTS,
+    );
+    store.writer_faults = None;
+    Arc::get_mut(&mut faults).unwrap().windows = false;
+    store.writer_faults = Some(faults.clone());
+    let error = store.mark_library("non-Windows policy").unwrap_err();
+    assert_eq!(faults.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .raw_os_error(),
+        Some(code)
+    );
+    assert_eq!(f.store.snapshot().unwrap().seq, 2);
+}
+#[test]
+fn windows_writer_retries_access_denied_transactions_without_duplicate_marks() {
+    check_windows_writer_recovery(5);
+}
+#[test]
+fn windows_writer_retries_sharing_violation_transactions_without_duplicate_marks() {
+    check_windows_writer_recovery(32);
+}
+#[test]
+fn windows_writer_persistent_denial_returns_original_error_without_publication() {
+    for step in [
+        WriterIo::Read(SnapshotIo::Open),
+        WriterIo::Cas(SnapshotIo::Open),
+        WriterIo::Create,
+        WriterIo::Replace,
+    ] {
+        for code in [5, 32] {
+            let f = Fixture::new();
+            if step != WriterIo::Create {
+                f.store.mark_library("initial").unwrap();
+            }
+            let before = fs::read(f.store.directory.join(NAME)).ok();
+            let (store, faults) = writer_fault_store(&f, step, code, usize::MAX, None, 4);
+            let error = store
+                .mark_project(&f.dir("Unpublished"), "persistent denial")
+                .unwrap_err();
+            assert_eq!(
+                faults.calls.load(Ordering::SeqCst),
+                4,
+                "{step:?}, OS {code}: {error:#}"
+            );
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(code)
+            );
+            assert!(!is_snapshot_changed(&error));
+            assert_eq!(fs::read(f.store.directory.join(NAME)).ok(), before);
+            assert_no_writer_temps(&f);
+        }
+    }
+    // Exercise the real wall-clock budget as well as the shorter attempt cap.
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let (store, faults) = writer_fault_store(
+        &f,
+        WriterIo::Read(SnapshotIo::Open),
+        5,
+        usize::MAX,
+        None,
+        WRITER_ATTEMPTS,
+    );
+    let started = std::time::Instant::now();
+    let error = store.mark_library("elapsed budget").unwrap_err();
+    assert!(started.elapsed() >= WRITER_RETRY_BUDGET);
+    assert!((1..=WRITER_ATTEMPTS).contains(&faults.calls.load(Ordering::SeqCst)));
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .raw_os_error(),
+        Some(5)
+    );
+    assert_eq!(f.store.snapshot().unwrap().seq, 1);
+}
+#[cfg(windows)]
+#[test]
+fn windows_native_writer_recovery_uses_the_production_platform_gate() {
+    // A default Store selects the same Windows policy as the injected stores.
+    assert!(Fixture::new().store.writer_windows_policy());
+    check_windows_writer_recovery(5);
+    check_windows_writer_recovery(32);
+}
+
+// The portable variants run the exact Windows policy on the host; the Windows
+// variants also verify snapshot_with_hook's production platform selection.
+fn snapshot_with_injected_io(
+    store: &Store,
+    native_gate: bool,
+    hook: impl FnMut(SnapshotIo) -> std::io::Result<()>,
+) -> Result<Snapshot> {
+    if native_gate {
+        store.snapshot_with_io_hook(|| {}, hook)
+    } else {
+        store.snapshot_with_io_policy(|| {}, hook, true)
+    }
+}
+fn check_windows_snapshot_recovery(native_gate: bool, code: i32) {
+    for step in [
+        SnapshotIo::Open,
+        SnapshotIo::Metadata,
+        SnapshotIo::OpenedMetadata,
+        SnapshotIo::CurrentMetadata,
+    ] {
+        for failures in [1, 3, 7] {
+            let f = Fixture::new();
+            f.store.mark_project(&f.dir("A"), "initial").unwrap();
+            let expected = f.store.snapshot().unwrap();
+            let mut calls = 0;
+            let state = snapshot_with_injected_io(&f.store, native_gate, |at| {
+                if at == step {
+                    calls += 1;
+                    if calls <= failures {
+                        return Err(std::io::Error::from_raw_os_error(code));
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("{step:?}, OS {code}, {failures} failures: {error:#}"));
+            assert_eq!(calls, failures + 1);
+            assert_eq!(state, expected);
+        }
+    }
+    // Similar errors outside ledger open/metadata must remain permanent.
+    for (step, code) in [
+        (SnapshotIo::Read, 5),
+        (SnapshotIo::Read, 32),
+        (SnapshotIo::Open, 13),
+        (SnapshotIo::Open, 87),
+    ] {
+        let f = Fixture::new();
+        f.store.mark_library("initial").unwrap();
+        let mut calls = 0;
+        let error = snapshot_with_injected_io(&f.store, native_gate, |at| {
+            if at == step {
+                calls += 1;
+                return Err(std::io::Error::from_raw_os_error(code));
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(code)
+        );
+        assert!(!is_snapshot_changed(&error));
+    }
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let mut opens = 0;
+    let error = snapshot_with_injected_io(&f.store, native_gate, |at| {
+        if at == SnapshotIo::Open {
+            opens += 1;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "synthetic denial",
+            ));
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert_eq!(opens, 1);
+    let error = error.downcast_ref::<std::io::Error>().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(error.raw_os_error(), None);
+    // Directory denial is surfaced before admitting even one retry. Give the
+    // directory its own code to prove it, rather than the ledger error, survives.
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let mut opens = 0;
+    let mut directory_checks = 0;
+    let error = snapshot_with_injected_io(&f.store, native_gate, |at| match at {
+        SnapshotIo::Open => {
+            opens += 1;
+            Err(std::io::Error::from_raw_os_error(5))
+        }
+        SnapshotIo::Directory => {
+            directory_checks += 1;
+            Err(std::io::Error::from_raw_os_error(32))
+        }
+        _ => Ok(()),
+    })
+    .unwrap_err();
+    assert_eq!((opens, directory_checks), (1, 1));
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .raw_os_error(),
+        Some(32)
+    );
+    assert!(!is_snapshot_changed(&error));
+    // The non-Windows snapshot policy never tags or retries these errors,
+    // even though the injected raw code is identical.
+    let mut opens = 0;
+    let error = f
+        .store
+        .snapshot_with_io_policy(
+            || {},
+            |at| {
+                if at == SnapshotIo::Open {
+                    opens += 1;
+                    return Err(std::io::Error::from_raw_os_error(5));
+                }
+                assert_ne!(at, SnapshotIo::Directory);
+                Ok(())
+            },
+            false,
+        )
+        .unwrap_err();
+    assert_eq!(opens, 1);
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .raw_os_error(),
+        Some(5)
+    );
+}
+fn check_windows_snapshot_persistent_denial(native_gate: bool) {
+    for step in [
+        SnapshotIo::Open,
+        SnapshotIo::Metadata,
+        SnapshotIo::OpenedMetadata,
+        SnapshotIo::CurrentMetadata,
+    ] {
+        for code in [5, 32] {
+            let f = Fixture::new();
+            f.store.mark_library("initial").unwrap();
+            let before = fs::read(f.store.directory.join(NAME)).unwrap();
+            let mut calls = 0;
+            let error = snapshot_with_injected_io(&f.store, native_gate, |at| {
+                if at == step {
+                    calls += 1;
+                    return Err(std::io::Error::from_raw_os_error(code));
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            assert_eq!(calls, 8, "{step:?}, OS {code}: {error:#}");
+            assert!(!is_snapshot_changed(&error));
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(code)
+            );
+            assert_eq!(fs::read(f.store.directory.join(NAME)).unwrap(), before);
+        }
+    }
+}
+#[test]
+fn windows_policy_retries_access_denied_ledger_replace_races() {
+    check_windows_snapshot_recovery(false, 5);
+}
+#[test]
+fn windows_policy_retries_sharing_violation_ledger_replace_races() {
+    check_windows_snapshot_recovery(false, 32);
+}
+#[test]
+fn windows_policy_returns_original_persistent_denial_after_eight_attempts() {
+    check_windows_snapshot_persistent_denial(false);
+}
+#[cfg(windows)]
+#[test]
+fn windows_snapshots_retry_ledger_open_and_metadata_replace_races() {
+    check_windows_snapshot_recovery(true, 5);
+    check_windows_snapshot_recovery(true, 32);
+}
+#[cfg(windows)]
+#[test]
+fn windows_snapshots_return_original_persistent_denial_after_eight_attempts() {
+    check_windows_snapshot_persistent_denial(true);
+}
+
 #[test]
 fn snapshot_retries_atomic_replace_from_real_writer_after_open() {
     let f = Fixture::new();
@@ -463,10 +1020,12 @@ fn concurrent_snapshots_and_atomic_marks_preserve_coherent_monotonic_highwaters(
     let barrier = Arc::new(Barrier::new(5));
     let finished = Arc::new(AtomicBool::new(false));
     let mutations = Arc::new(AtomicUsize::new(0));
+    let accepted = Arc::new(AtomicUsize::new(0));
     let writer_store = f.store.clone();
     let writer_barrier = barrier.clone();
     let writer_done = finished.clone();
     let writer_mutations = mutations.clone();
+    let writer_accepted = accepted.clone();
     let writer = std::thread::spawn(move || {
         writer_barrier.wait();
         for _ in 0..64 {
@@ -478,6 +1037,7 @@ fn concurrent_snapshots_and_atomic_marks_preserve_coherent_monotonic_highwaters(
                     Ok(())
                 })
                 .unwrap();
+            writer_accepted.fetch_add(1, Ordering::SeqCst);
         }
         writer_done.store(true, Ordering::Release);
     });
@@ -514,10 +1074,22 @@ fn concurrent_snapshots_and_atomic_marks_preserve_coherent_monotonic_highwaters(
     for reader in readers {
         reader.join().unwrap();
     }
+    let callbacks = mutations.load(Ordering::SeqCst);
+    if cfg!(windows) {
+        assert!(
+            callbacks >= 64,
+            "Each accepted update must invoke its mutation callback"
+        );
+    } else {
+        assert_eq!(
+            callbacks, 64,
+            "Non-Windows writer callbacks unexpectedly replayed"
+        );
+    }
     assert_eq!(
-        mutations.load(Ordering::SeqCst),
+        accepted.load(Ordering::SeqCst),
         64,
-        "Snapshot retries replayed a writer mutation"
+        "Expected all 64 writer updates to return successfully"
     );
     let final_state = f.store.snapshot().unwrap();
     assert_eq!(final_state.seq, 65);
