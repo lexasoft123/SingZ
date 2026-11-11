@@ -719,9 +719,7 @@ impl Render for Header {
                             )
                             .when(!compact, |d| {
                                 d.child(
-                                    div()
-                                        .when(compact, |label| label.min_w_0().truncate())
-                                        .child(singz_uikit::tracked_label(
+                                    div().child(singz_uikit::tracked_label(
                                             if crate::integration::fixture_mode()
                                                 || self.engine_ready
                                             {
