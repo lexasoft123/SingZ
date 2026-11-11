@@ -212,6 +212,8 @@ mod ui_lyrics_scroll;
 mod ui_lyrics_editor;
 #[cfg(feature = "ui-tests")]
 mod ui_lyrics_align;
+#[cfg(feature = "ui-tests")]
+mod ui_analysis_lyrics_races;
 #[cfg(feature="ui-tests")]
 mod ui_lyrics_sidebar;
 #[cfg(feature = "ui-tests")]
@@ -6379,6 +6381,8 @@ fn main() {
             assert!(background&&std::env::var_os("SINGZ_MUTE").is_some());
             ui_project_picker::run(window_handle,view.clone(),directory.into(),cx);
         }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory)=std::env::var_os("SINGZ_GPUI_Q04_TEST"){ assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1"), "Q-04 requires background and SINGZ_MUTE=1"); ui_analysis_lyrics_races::run(window_handle,view.clone(),directory.into(),cx); }
         #[cfg(feature = "ui-tests")]
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_LYRICS_ALIGN_TEST"){
             assert!(background&&std::env::var_os("SINGZ_MUTE").is_some());
