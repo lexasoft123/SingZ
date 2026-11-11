@@ -6,6 +6,7 @@ publish = false
 
 [features]
 ui-tests = ["dep:gpui_linux_capture"]
+test-hooks = []
 
 [dependencies]
 gpui-kit = "=0.9.0"
@@ -41,6 +42,9 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std", "cl
 sha2 = "=0.11.1"
 resvg = "=0.46.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
+# Raw deflate for the update archive reader; already in the dependency graph (lofty, png).
+flate2 = "=1.1.11"
 
 # Generate current, short-lived localhost TLS identities only in tests.
 [dev-dependencies]

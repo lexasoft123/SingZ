@@ -511,11 +511,11 @@ def build_installer(payload: Path, output: Path, *, runner=subprocess.run, env=N
             suffix = '' if parent == PurePosixPath('.') else '\\' + nsis_literal(str(parent).replace('/', '\\'))
             lines.append('SetOutPath "$INSTDIR' + suffix + '"')
             lines.append('File "' + nsis_literal(str(payload.joinpath(*PurePosixPath(path).parts))) + '"')
-        lines.extend(['!macroend', '!macro UninstallPayload'])
-        for path in sorted(paths):
-            lines.append('Delete "$INSTDIR\\' + nsis_literal(path.replace('/', '\\')) + '"')
-        for directory in sorted(dirs, key=lambda p: (-len(PurePosixPath(p).parts), p)):
-            lines.append('RMDir "$INSTDIR\\' + nsis_literal(directory.replace('/', '\\')) + '"')
+        # The original inventory, under a name no update archive carries, so the
+        # uninstaller's safe walker can remove this version's files even after
+        # updates replaced manifest.json. Nothing is deleted by path here.
+        lines.append('SetOutPath "$INSTDIR"')
+        lines.append('File "/oname=.singz-original-manifest.json" "' + nsis_literal(str(payload / 'manifest.json')) + '"')
         lines.append('!macroend')
         include.write_text('\n'.join(lines) + '\n', encoding='utf-8-sig')
         staged = temp / 'setup.exe'

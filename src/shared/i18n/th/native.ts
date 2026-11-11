@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "ไม่มีการบันทึกเสียงจากไมโครโฟนที่ตรงกันอยู่",
   "microphone.error.nativeInput": "อินพุตเนทีฟล้มเหลว",
   "microphone.error.recordingFailed": "การบันทึกเสียงไมโครโฟนเนทีฟล้มเหลว",
-  "training.session.aria.backToSong": "กลับมาเพลง"
+  "training.session.aria.backToSong": "กลับมาเพลง",
+  "update.settings.title": "อัปเดต",
+  "update.settings.version": "เวอร์ชัน {version}",
+  "update.settings.check": "ตรวจสอบตอนนี้",
+  "update.settings.beta": "รับเวอร์ชันเบต้า",
+  "update.state.none": "SingZ เป็นเวอร์ชันล่าสุดแล้ว",
+  "update.state.checking": "กำลังตรวจสอบการอัปเดต…",
+  "update.state.available": "มีเวอร์ชัน {version} พร้อมใช้งาน",
+  "update.state.downloading": "กำลังดาวน์โหลดเวอร์ชัน {version}… {percent}%",
+  "update.state.ready": "เวอร์ชัน {version} พร้อมแล้ว รีสตาร์ตเพื่อติดตั้ง",
+  "update.state.error": "อัปเดตไม่สำเร็จ: {message}",
+  "update.state.rolledBack": "เวอร์ชัน {version} เริ่มต้นไม่สำเร็จ จึงย้อนกลับเป็นเวอร์ชันก่อนหน้า"
 }

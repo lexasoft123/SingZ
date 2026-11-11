@@ -97,5 +97,16 @@ export const native = {
   "microphone.recording.noActive": "No matching microphone recording is active",
   "microphone.error.nativeInput": "Native input failed",
   "microphone.error.recordingFailed": "Native microphone recording failed",
-  "training.session.aria.backToSong": 'Back to song'
+  "training.session.aria.backToSong": 'Back to song',
+  "update.settings.title": "Updates",
+  "update.settings.version": "Version {version}",
+  "update.settings.check": "Check now",
+  "update.settings.beta": "Receive beta versions",
+  "update.state.none": "SingZ is up to date",
+  "update.state.checking": "Checking for updates…",
+  "update.state.available": "Version {version} is available",
+  "update.state.downloading": "Downloading version {version}… {percent}%",
+  "update.state.ready": "Version {version} is ready. Restart to install it.",
+  "update.state.error": "Update failed: {message}",
+  "update.state.rolledBack": "Version {version} did not start and was rolled back."
 }

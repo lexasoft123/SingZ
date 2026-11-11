@@ -99,10 +99,18 @@ class AssemblyTests(unittest.TestCase):
             commands.append(args)
             include = Path(next(x[10:] for x in args if x.startswith('/DINCLUDE=')))
             generated = include.read_text(encoding='utf-8')
-            self.assertIn('engines\\llama-server.exe', generated)
-            self.assertIn('pitch\\crepe-tiny.bin', generated)
+            self.assertIn('SetOutPath "$INSTDIR\\engines"', generated)
+            self.assertIn(str(Path('engines', 'llama-server.exe')) + '"', generated)
+            self.assertIn('SetOutPath "$INSTDIR\\pitch"', generated)
+            self.assertIn(str(Path('pitch', 'crepe-tiny.bin')) + '"', generated)
             self.assertNotIn('$APPDATA', generated.upper())
             self.assertNotIn('RMDir /r', generated)
+            # No payload path is ever deleted by absolute path: the safe walker
+            # alone removes payload files, from both inventories.
+            self.assertNotIn('Delete ', generated)
+            self.assertNotIn('RMDir', generated)
+            self.assertNotIn('UninstallPayload', generated)
+            self.assertIn('/oname=.singz-original-manifest.json', generated)
             Path(next(x[9:] for x in args if x.startswith('/DOUTPUT='))).write_bytes(b'installer')
             return SimpleNamespace(returncode=0)
         package.build_installer(self.output, self.base / 'setup.exe', runner=runner, env={})
@@ -110,6 +118,19 @@ class AssemblyTests(unittest.TestCase):
         source = (package.ROOT / 'experiments/gpui-player/packaging/windows/singz-native.nsi').read_text()
         self.assertNotIn('RMDir /r', source)
         self.assertNotIn('$APPDATA', source.upper())
+        uninstall = source[source.index('Section "Uninstall"'):]
+        self.assertNotIn('UninstallPayload', source)
+        self.assertIn("--uninstall-payload' $0", uninstall)
+        self.assertIn('StrCmp $0 0 payload_removed payload_refused', uninstall)
+        refused = uninstall[uninstall.index('payload_refused:'):uninstall.index('payload_removed:')]
+        self.assertIn('Abort', refused)
+        self.assertNotIn('Delete', refused)
+        # Every delete the script itself does is one top-level, fixed name.
+        for line in uninstall.splitlines():
+            line = line.strip()
+            if line.startswith('Delete "$INSTDIR\\'):
+                self.assertNotIn('\\', line[len('Delete "$INSTDIR\\'):], line)
+        self.assertLess(uninstall.index('payload_removed:'), uninstall.index('DeleteRegKey'))
         self.assertIn('!uninstfinalize', source)
         self.assertIn('= 0', source)
         self.assertIn('MUI_LANGUAGE "PortugueseBR"', source)

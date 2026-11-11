@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "Nenhuma gravação de microfone correspondente está ativa",
   "microphone.error.nativeInput": "Falha na entrada nativa",
   "microphone.error.recordingFailed": "Falha na gravação nativa do microfone",
-  "training.session.aria.backToSong": "Voltar para a música"
+  "training.session.aria.backToSong": "Voltar para a música",
+  "update.settings.title": "Atualizações",
+  "update.settings.version": "Versão {version}",
+  "update.settings.check": "Verificar agora",
+  "update.settings.beta": "Receber versões beta",
+  "update.state.none": "O SingZ está atualizado",
+  "update.state.checking": "Verificando atualizações…",
+  "update.state.available": "A versão {version} está disponível",
+  "update.state.downloading": "Baixando a versão {version}… {percent}%",
+  "update.state.ready": "A versão {version} está pronta. Reinicie para instalá-la.",
+  "update.state.error": "Falha na atualização: {message}",
+  "update.state.rolledBack": "A versão {version} não iniciou e a anterior foi restaurada."
 }

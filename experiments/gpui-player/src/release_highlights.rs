@@ -197,13 +197,12 @@ pub fn localized(notes: &ReleaseNotes, language: &str) -> ReleaseNotes {
     translated
 }
 pub fn valid_version(version: &str) -> bool {
+    if version.contains('-') || version.contains('+') { return crate::updater_manifest::valid_version(version); }
     let parts: Vec<_> = version.split('.').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
+    parts.len()==3 && parts.iter().all(|p|!p.is_empty() && p.bytes().all(|c|c.is_ascii_digit()))
 }
 fn compare(a: &str, b: &str) -> Ordering {
+    if a.contains('-') || b.contains('-') { return crate::updater_manifest::compare(a,b); }
     // JavaScript Number comparison deliberately permits leading zeroes and
     // rounds oversized components; integer parsing would change that contract.
     for (left, right) in a.split('.').zip(b.split('.')) {

@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "Eşleşen etkin bir mikrofon kaydı yok",
   "microphone.error.nativeInput": "Yerel giriş başarısız oldu",
   "microphone.error.recordingFailed": "Yerel mikrofon kaydı başarısız oldu",
-  "training.session.aria.backToSong": "Şarkıya dön"
+  "training.session.aria.backToSong": "Şarkıya dön",
+  "update.settings.title": "Güncellemeler",
+  "update.settings.version": "Sürüm {version}",
+  "update.settings.check": "Şimdi denetle",
+  "update.settings.beta": "Beta sürümlerini al",
+  "update.state.none": "SingZ güncel",
+  "update.state.checking": "Güncellemeler denetleniyor…",
+  "update.state.available": "Sürüm {version} mevcut",
+  "update.state.downloading": "Sürüm {version} indiriliyor… %{percent}",
+  "update.state.ready": "Sürüm {version} hazır. Yüklemek için yeniden başlatın.",
+  "update.state.error": "Güncelleme başarısız: {message}",
+  "update.state.rolledBack": "Sürüm {version} başlamadı ve önceki sürüme geri dönüldü."
 }

@@ -187,6 +187,42 @@ in settings, every string through the native i18n catalog.
 **Not in the first version.** Delta updates, background install without a
 restart, Linux (preview target: check and offer only), elevation prompts.
 
+**Threat model** (coordinator decision, 2026-11-12). Trusted: the current
+user and administrators (an administrator can replace the app, its install
+folder or the user's files directly, so the updater does not try to defend
+against one). Untrusted: other non-admin local users, plus the network and the
+release feed (the manifest signature and archive hash are the authority for
+what gets installed). The defences that follow from this: the update
+coordination directory sits beside the install, is created private (macOS
+`0700`; Windows a protected DACL for the user, SYSTEM and Administrators only)
+and must be owned by the user, not a link or reparse point, without a macOS
+ACL, before it is used; an unsafe or foreign directory is left untouched and
+the app offers the download link instead. No file is created by a predictable
+name or opened through a link. Uninstall deletes only what the current and
+original inventories list, walking from a handle on the install folder and
+refusing every link or junction; a refusal stops the uninstaller with
+everything else left in place.
+
+Accepted residual risks:
+
+- Something running as the user or as an administrator can tamper with the
+  install, its inventories or the coordination directory; nothing stops that.
+- On macOS an administrator (every admin user can write `/Applications`) can
+  rename or replace the coordination directory between its check and later
+  path-based use; the directory is checked when used, not held open.
+- On Windows the uninstaller pins each ancestor folder while it deletes inside
+  it, but swapping an ancestor needs write access inside the user's own
+  install, which only the user or an administrator has. No oplock or
+  transaction machinery is used against that.
+- Windows `sync_dir` is a no-op (NTFS journals metadata); power-loss
+  durability of directory entries there rests on NTFS, not on a flush.
+- The marker files that identify Windows payloads are labels bound to the
+  transaction, not authentication: whoever can write the install can forge
+  them, which the model already trusts.
+- Denial of service by another local user (for example pre-creating an
+  unsafe coordination directory) is out of scope beyond the fallback: the app
+  then offers the download link instead of updating itself.
+
 ### 4.2 Identity during coexistence (permanent)
 
 | | Electron desktop (unchanged) | Native |

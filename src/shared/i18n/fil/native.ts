@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "Walang katugmang recording ng mikropono na aktibo",
   "microphone.error.nativeInput": "Nabigo ang native input",
   "microphone.error.recordingFailed": "Nabigo ang native na pagre-record ng mikropono",
-  "training.session.aria.backToSong": "Bumalik sa kanta"
+  "training.session.aria.backToSong": "Bumalik sa kanta",
+  "update.settings.title": "Mga update",
+  "update.settings.version": "Bersyon {version}",
+  "update.settings.check": "Suriin ngayon",
+  "update.settings.beta": "Tumanggap ng mga beta na bersyon",
+  "update.state.none": "Napapanahon na ang SingZ",
+  "update.state.checking": "Sinusuri ang mga update…",
+  "update.state.available": "Available ang bersyon {version}",
+  "update.state.downloading": "Dina-download ang bersyon {version}… {percent}%",
+  "update.state.ready": "Handa na ang bersyon {version}. I-restart para i-install.",
+  "update.state.error": "Nabigo ang update: {message}",
+  "update.state.rolledBack": "Hindi nag-start ang bersyon {version} kaya ibinalik ang dating bersyon."
 }

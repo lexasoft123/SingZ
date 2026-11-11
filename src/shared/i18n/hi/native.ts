@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "कोई मिलती-जुलती माइक्रोफ़ोन रिकॉर्डिंग सक्रिय नहीं है",
   "microphone.error.nativeInput": "नेटिव इनपुट विफल रहा",
   "microphone.error.recordingFailed": "नेटिव माइक्रोफ़ोन रिकॉर्डिंग विफल रही",
-  "training.session.aria.backToSong": "गीत पर वापस"
+  "training.session.aria.backToSong": "गीत पर वापस",
+  "update.settings.title": "अपडेट",
+  "update.settings.version": "संस्करण {version}",
+  "update.settings.check": "अभी जाँचें",
+  "update.settings.beta": "बीटा संस्करण प्राप्त करें",
+  "update.state.none": "SingZ अप-टू-डेट है",
+  "update.state.checking": "अपडेट जाँचे जा रहे हैं…",
+  "update.state.available": "संस्करण {version} उपलब्ध है",
+  "update.state.downloading": "संस्करण {version} डाउनलोड हो रहा है… {percent}%",
+  "update.state.ready": "संस्करण {version} तैयार है। इंस्टॉल करने के लिए रीस्टार्ट करें।",
+  "update.state.error": "अपडेट विफल: {message}",
+  "update.state.rolledBack": "संस्करण {version} शुरू नहीं हुआ और पिछला संस्करण बहाल कर दिया गया।"
 }

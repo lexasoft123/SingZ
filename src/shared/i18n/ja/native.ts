@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "一致するマイク録音は進行中ではありません",
   "microphone.error.nativeInput": "ネイティブ入力に失敗しました",
   "microphone.error.recordingFailed": "ネイティブのマイク録音に失敗しました",
-  "training.session.aria.backToSong": "曲に戻る"
+  "training.session.aria.backToSong": "曲に戻る",
+  "update.settings.title": "アップデート",
+  "update.settings.version": "バージョン {version}",
+  "update.settings.check": "今すぐ確認",
+  "update.settings.beta": "ベータ版を受け取る",
+  "update.state.none": "SingZ は最新です",
+  "update.state.checking": "アップデートを確認中…",
+  "update.state.available": "バージョン {version} が利用可能です",
+  "update.state.downloading": "バージョン {version} をダウンロード中… {percent}%",
+  "update.state.ready": "バージョン {version} の準備ができました。再起動してインストールします。",
+  "update.state.error": "アップデートに失敗しました: {message}",
+  "update.state.rolledBack": "バージョン {version} が起動しなかったため、元に戻しました。"
 }

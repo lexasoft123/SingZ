@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "일치하는 마이크 녹음이 진행 중이 아닙니다",
   "microphone.error.nativeInput": "네이티브 입력에 실패했습니다",
   "microphone.error.recordingFailed": "네이티브 마이크 녹음에 실패했습니다",
-  "training.session.aria.backToSong": "노래로 돌아가"
+  "training.session.aria.backToSong": "노래로 돌아가",
+  "update.settings.title": "업데이트",
+  "update.settings.version": "버전 {version}",
+  "update.settings.check": "지금 확인",
+  "update.settings.beta": "베타 버전 받기",
+  "update.state.none": "SingZ가 최신 버전입니다",
+  "update.state.checking": "업데이트 확인 중…",
+  "update.state.available": "버전 {version}을(를) 사용할 수 있습니다",
+  "update.state.downloading": "버전 {version} 다운로드 중… {percent}%",
+  "update.state.ready": "버전 {version}이(가) 준비되었습니다. 다시 시작하여 설치하세요.",
+  "update.state.error": "업데이트 실패: {message}",
+  "update.state.rolledBack": "버전 {version}이(가) 시작되지 않아 이전 버전으로 되돌렸습니다."
 }

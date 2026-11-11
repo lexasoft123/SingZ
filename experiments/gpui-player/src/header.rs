@@ -17,6 +17,7 @@ pub enum HeaderEvent {
     StopMonitor,
     Training,
     Log,
+    Update,
     Engine,
     Language,
     Help,
@@ -26,6 +27,15 @@ pub enum HeaderEvent {
     AddToLibrary,
     Rename(String),
     TitleClosed,
+}
+
+/// Electron's title-bar update chip: `ready` and `available` act, `downloading`
+/// only reports (src/renderer/src/App.tsx).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum UpdateChip {
+    Ready,
+    Available(String),
+    Downloading(u8),
 }
 
 pub struct Header {
@@ -49,6 +59,7 @@ pub struct Header {
     engine_ready: bool,
     editing: bool,
     rename_enabled: bool,
+    update: Option<UpdateChip>,
     title_input: Entity<InputState>,
     _title_subscription: Subscription,
     #[cfg(feature = "ui-tests")]
@@ -68,6 +79,7 @@ impl Header {
             self.save_enabled, self.native_audio_ready, self.training,
             self.loaded, self.catalog, self.import_available, self.engine_ready,
             self.editing, self.rename_enabled).hash(&mut state);
+        self.update.hash(&mut state);
         self.title.hash(&mut state);
         if self.editing { self.title_input.read(cx).value().hash(&mut state); }
         state.finish()
@@ -81,7 +93,7 @@ impl Header {
         });
         Self {
             guides: Default::default(),
-            controls: ["header-language","header-help","header-settings","header-log","header-save","header-import","header-projects","header-catalog","header-songs","header-training","header-version","header-engine","header-rename"].into_iter().map(|id|(id,cx.focus_handle().tab_stop(true))).collect(),
+            controls: ["header-language","header-help","header-settings","header-log","header-save","header-import","header-projects","header-catalog","header-songs","header-training","header-version","header-engine","header-rename","header-update"].into_iter().map(|id|(id,cx.focus_handle().tab_stop(true))).collect(),
             output_label: "System default output".into(),
             monitor_label: None,
             monitor_stopping: false,
@@ -100,6 +112,7 @@ impl Header {
             engine_ready: false,
             editing: false,
             rename_enabled: true,
+            update: None,
             title_input: input,
             _title_subscription: subscription,
             #[cfg(feature = "ui-tests")]
@@ -203,6 +216,12 @@ impl Header {
         self.controls.iter().find_map(|(id,focus)|focus.is_focused(window).then(||(*id).to_owned()))
             .or_else(||self.monitor_status_focus.is_focused(window).then(||"header-monitor-status".into()))
             .or_else(||self.monitor_stop_focus.is_focused(window).then(||"header-monitor-stop".into()))
+    }
+    pub fn set_update(&mut self, update: Option<UpdateChip>, cx: &mut Context<Self>) {
+        if self.update != update {
+            self.update = update;
+            cx.notify();
+        }
     }
     pub fn set_engine(&mut self, ready: bool, cx: &mut Context<Self>) {
         if self.engine_ready != ready {
@@ -684,6 +703,31 @@ impl Render for Header {
                                 self.guides.track_box(button, "projects", [1.; 4])
                             }),
                         )
+                    })
+                    .when_some(self.update.clone(), |d, chip| match chip {
+                        UpdateChip::Ready => d.child(
+                            self.right_button("header-update", t("app.update.restart"), HeaderEvent::Update, compact, cx)
+                                .aria_label(t("app.update.restartTitle")),
+                        ),
+                        UpdateChip::Available(version) => d.child(
+                            self.right_button(
+                                "header-update",
+                                crate::i18n::tv("app.update.get", &[("version", version)]),
+                                HeaderEvent::Update,
+                                compact,
+                                cx,
+                            )
+                            .aria_label(t("app.update.availableTitle")),
+                        ),
+                        UpdateChip::Downloading(percent) => d.child(
+                            div()
+                                .id("header-update-progress")
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(rgb(FAINT))
+                                .aria_label(t("app.update.downloadingTitle"))
+                                .child(crate::i18n::tv("app.update.downloading", &[("percent", percent.to_string())])),
+                        ),
                     })
                     .child(self.right_button(
                         "header-log",

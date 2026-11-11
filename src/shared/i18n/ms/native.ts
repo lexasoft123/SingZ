@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "Tiada rakaman mikrofon yang sepadan sedang aktif",
   "microphone.error.nativeInput": "Input natif gagal",
   "microphone.error.recordingFailed": "Rakaman mikrofon natif gagal",
-  "training.session.aria.backToSong": "Kembali ke lagu"
+  "training.session.aria.backToSong": "Kembali ke lagu",
+  "update.settings.title": "Kemas kini",
+  "update.settings.version": "Versi {version}",
+  "update.settings.check": "Semak sekarang",
+  "update.settings.beta": "Terima versi beta",
+  "update.state.none": "SingZ sudah terkini",
+  "update.state.checking": "Menyemak kemas kini…",
+  "update.state.available": "Versi {version} tersedia",
+  "update.state.downloading": "Memuat turun versi {version}… {percent}%",
+  "update.state.ready": "Versi {version} sudah sedia. Mulakan semula untuk memasangnya.",
+  "update.state.error": "Kemas kini gagal: {message}",
+  "update.state.rolledBack": "Versi {version} gagal dimulakan dan dikembalikan ke versi sebelumnya."
 }

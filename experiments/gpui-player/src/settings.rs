@@ -18,6 +18,9 @@ pub enum SettingsEvent {
     InputPrefs(crate::microphone::Prefs),
     EnableMicrophone,
     Monitor,
+    CheckUpdates,
+    UpdateBeta(bool),
+    InstallUpdate,
 }
 impl EventEmitter<SettingsEvent> for SettingsScreen {}
 
@@ -31,6 +34,7 @@ struct PlaybackGraphView {
 }
 
 pub struct SettingsScreen {
+    update: Option<crate::updater_host::Snapshot>,
     scope: FocusHandle,
     controls: RefCell<HashMap<&'static str, FocusHandle>>,
     focus_order: RefCell<Vec<&'static str>>,
@@ -118,6 +122,7 @@ impl SettingsScreen {
             KeyBinding::new("shift-tab", PreviousFocus, Some("SingZSettings")),
         ]);
         Self {
+            update: None,
             scope: cx.focus_handle(), controls: Default::default(), focus_order: Default::default(),
             control_bounds: Default::default(), pending_focus: false, menu_index: None,
             menu_scroll: ScrollHandle::new(), typeahead: String::new(), typeahead_at: None,
@@ -169,6 +174,40 @@ impl SettingsScreen {
     }
     /// Keep only immutable native graph presentation. A rejected/absent graph
     /// stays unavailable on the playback route, never a fabricated monitor chain.
+    pub fn set_update(&mut self, update: Option<crate::updater_host::Snapshot>, cx: &mut Context<Self>) {
+        if self.update != update {
+            self.update = update;
+            cx.notify();
+        }
+    }
+    /// Electron's update states as Settings rows: status line, "Check now", the
+    /// restart / download action when one applies, and the beta channel toggle.
+    fn updates(&self, update: &crate::updater_host::Snapshot, cx: &mut Context<Self>) -> Div {
+        use crate::{i18n::{t, tv}, updater_host::View};
+        let status = match &update.view {
+            View::None => t("update.state.none"),
+            View::Checking => t("update.state.checking"),
+            View::Available { version, .. } => tv("update.state.available", &[("version", version.clone())]),
+            View::Downloading { version, percent } => tv("update.state.downloading", &[("version", version.clone()), ("percent", percent.to_string())]),
+            View::Ready { version } => tv("update.state.ready", &[("version", version.clone())]),
+            View::Error { message } => tv("update.state.error", &[("message", message.clone())]),
+        };
+        let busy = matches!(update.view, View::Checking | View::Downloading { .. });
+        let action = match &update.view {
+            View::Ready { .. } => Some(t("app.update.restart")),
+            View::Available { version, .. } => Some(tv("app.update.get", &[("version", version.clone())])),
+            _ => None,
+        };
+        div().mt(px(16.)).flex().flex_col().gap(px(6.))
+            .child(div().text_size(px(13.)).font_family("SingZ Display 800").child(t("update.settings.title")))
+            .child(div().text_size(px(11.)).text_color(rgb(DIM)).child(tv("update.settings.version", &[("version", crate::updater_host::running_version())])))
+            .child(div().id("settings-update-status").role(Role::Status).aria_label(status.clone()).text_size(px(12.)).text_color(rgb(TEXT)).child(status))
+            .when_some(update.rolled_back.clone(), |d, version| d.child(div().text_size(px(11.)).text_color(rgb(DANGER)).child(tv("update.state.rolledBack", &[("version", version)]))))
+            .child(div().flex().gap(px(8.))
+                .child(self.control("settings-update-check", ghost_pill("settings-update-check", t("update.settings.check")), !busy, cx))
+                .when_some(action, |d, label| d.child(self.control("settings-update-install", ghost_pill("settings-update-install", label), true, cx))))
+            .child(self.check_row("settings-update-beta", t("update.settings.beta"), update.beta, cx))
+    }
     pub fn set_playback_status(&mut self, status: Option<&crate::integration::Status>, cx: &mut Context<Self>) {
         let next = status.filter(|s| !s.training_only && !s.empty_project && s.graph_generation != 0 && s.state != 0)
             .map(|s| PlaybackGraphView { generation: s.graph_generation, state: s.state,
@@ -771,6 +810,12 @@ impl SettingsScreen {
                 if self.native { self.input_prefs.headphones = self.headphones; cx.emit(SettingsEvent::InputPrefs(self.input_prefs.clone())); }
             }
             "settings-tab-audio" => {}
+            "settings-update-check" => cx.emit(SettingsEvent::CheckUpdates),
+            "settings-update-install" => cx.emit(SettingsEvent::InstallUpdate),
+            "settings-update-beta" => {
+                let beta = self.update.as_ref().is_some_and(|u| u.beta);
+                cx.emit(SettingsEvent::UpdateBeta(!beta));
+            }
             _ => {
                 if self.open_field == Some(id) { self.open_field = None; self.menu_index = None; }
                 else {
@@ -1929,6 +1974,7 @@ impl Render for SettingsScreen {
             self.field_labels.borrow_mut().clear();
             self.field_bounds.borrow_mut().remove("settings-input-pref-error");
         }
+        let updates = self.update.clone().map(|update| self.updates(&update, cx));
         let content = div()
             .id("settings-keyboard-scope")
             .key_context("SingZSettings")
@@ -2001,6 +2047,7 @@ impl Render for SettingsScreen {
                                             .track_scroll(&self.scroll)
                                             .pr(px(10.))
                                             .child(self.audio(cx))
+                                            .children(updates)
                                             .when(crate::migrate::imported_count() > 0, |view| view.child(div().mt(px(16.)).text_size(px(11.)).text_color(rgb(DIM)).child(crate::i18n::tv("settings.migration.summary", &[("count", crate::migrate::imported_count().to_string())])))),
                                     )
                                     .child(production_scrollbar(&self.scroll)),

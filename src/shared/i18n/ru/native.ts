@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "Нет подходящей активной записи с микрофона",
   "microphone.error.nativeInput": "Сбой ввода звука",
   "microphone.error.recordingFailed": "Сбой записи с микрофона",
-  "training.session.aria.backToSong": '← Песня'
+  "training.session.aria.backToSong": '← Песня',
+  "update.settings.title": "Обновления",
+  "update.settings.version": "Версия {version}",
+  "update.settings.check": "Проверить сейчас",
+  "update.settings.beta": "Получать бета-версии",
+  "update.state.none": "SingZ обновлён до последней версии",
+  "update.state.checking": "Проверка обновлений…",
+  "update.state.available": "Доступна версия {version}",
+  "update.state.downloading": "Загрузка версии {version}… {percent}%",
+  "update.state.ready": "Версия {version} готова. Перезапустите, чтобы установить.",
+  "update.state.error": "Не удалось обновить: {message}",
+  "update.state.rolledBack": "Версия {version} не запустилась, возвращена прежняя версия."
 }

@@ -1,4 +1,11 @@
 use super::*;
+
+#[test]
+fn native_release_version_accepts_prereleases_with_semver_precedence() {
+    assert!(valid_version("0.27.0-beta.2"));
+    assert!(!valid_version("0.27.0-"));
+    assert_eq!(compare("0.27.0-beta.2", "0.27.0"), Ordering::Less);
+}
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -84,15 +91,7 @@ fn skipped_releases_are_newest_first_and_desktop_never_adopts_mobile_only_highli
 }
 #[test]
 fn malformed_previous_is_current_only_and_malformed_current_is_unavailable() {
-    for invalid in [
-        "",
-        "v0.26.5",
-        "0.26",
-        "0.26.5-beta",
-        " 0.26.5",
-        "0.26.5\n",
-        "٠.٢٦.٥",
-    ] {
+    for invalid in ["", "v0.26.5", "0.26", " 0.26.5", "0.26.5\n", "٠.٢٦.٥"] {
         assert!(!valid_version(invalid));
         assert!(notes(invalid, None, "en").is_none());
         assert_eq!(
@@ -100,11 +99,14 @@ fn malformed_previous_is_current_only_and_malformed_current_is_unavailable() {
             notes(CURRENT_VERSION, None, "en")
         );
     }
+    assert!(valid_version("0.26.5-beta.1"));
     assert!(valid_version("00.026.005"));
     assert!(notes("00.026.005", None, "en").is_none());
-    let padded_current = CURRENT_VERSION.split('.')
+    let padded_current = CURRENT_VERSION
+        .split('.')
         .map(|part| format!("00{part}"))
-        .collect::<Vec<_>>().join(".");
+        .collect::<Vec<_>>()
+        .join(".");
     assert!(notes(CURRENT_VERSION, Some(&padded_current), "en").is_none());
 }
 #[test]

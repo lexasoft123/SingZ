@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "沒有進行中的相符麥克風錄音",
   "microphone.error.nativeInput": "原生輸入失敗",
   "microphone.error.recordingFailed": "原生麥克風錄音失敗",
-  "training.session.aria.backToSong": "返回歌曲"
+  "training.session.aria.backToSong": "返回歌曲",
+  "update.settings.title": "更新",
+  "update.settings.version": "版本 {version}",
+  "update.settings.check": "立即檢查",
+  "update.settings.beta": "接收測試版",
+  "update.state.none": "SingZ 已是最新版本",
+  "update.state.checking": "正在檢查更新…",
+  "update.state.available": "版本 {version} 可用",
+  "update.state.downloading": "正在下載版本 {version}… {percent}%",
+  "update.state.ready": "版本 {version} 已就緒，重新啟動即可安裝。",
+  "update.state.error": "更新失敗：{message}",
+  "update.state.rolledBack": "版本 {version} 無法啟動，已還原。"
 }

@@ -44,10 +44,23 @@ Section
 SectionEnd
 Section "Uninstall"
   SetShellVarContext current
+  ; The installed (possibly updated) app removes the files of its current and
+  ; its original inventory, refusing any link or junction on the way. It is
+  ; the only thing that deletes payload paths: if it refuses anything, the
+  ; uninstall stops and leaves every remaining file and registration in place.
+  ClearErrors
+  ExecWait '"$INSTDIR\singz-gpui-player.exe" --uninstall-payload' $0
+  IfErrors payload_refused
+  StrCmp $0 0 payload_removed payload_refused
+payload_refused:
+  MessageBox MB_ICONSTOP|MB_OK "Some SingZ Native files could not be removed safely and were left in place." /SD IDOK
+  SetErrorLevel 2
+  Abort
+payload_removed:
+  Delete "$INSTDIR\singz-gpui-player.exe"
   Delete "$DESKTOP\SingZ Native.lnk"
   Delete "$SMPROGRAMS\SingZ Native\SingZ Native.lnk"
   RMDir "$SMPROGRAMS\SingZ Native"
-  !insertmacro UninstallPayload
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.lexasoft.singz.native"

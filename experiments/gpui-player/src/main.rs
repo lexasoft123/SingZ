@@ -198,6 +198,18 @@ mod transport_host;
 mod metronome_host;
 mod monitor_host;
 mod inflight;
+mod updater_manifest;
+mod updater_apply;
+mod updater_fetch;
+mod updater_host;
+mod updater_lock;
+mod updater_stage;
+mod updater_state;
+mod updater_swap;
+mod updater_zip;
+mod updater_uninstall;
+#[cfg(windows)]
+mod updater_winsec;
 #[cfg(test)]
 mod inflight_tests;
 #[cfg(feature = "ui-tests")]
@@ -762,6 +774,7 @@ struct Player {
     release_service: Option<release_highlights::Service>,
     release_startup_ready: bool,
     release_pending: Option<release_highlights::ReleaseNotes>,
+    update_snapshot: Option<updater_host::Snapshot>,
     #[cfg(feature = "ui-tests")]
     release_external_urls: Vec<String>,
     #[cfg(feature = "ui-tests")]
@@ -1173,6 +1186,9 @@ impl Player {
                 settings::SettingsEvent::Output(uid) => this.select_output(uid.clone(), cx),
                 settings::SettingsEvent::Provider(provider) => this.select_audio_provider(*provider, cx),
                 settings::SettingsEvent::Close => this.screen = this.previous_screen,
+                settings::SettingsEvent::CheckUpdates => updater_host::check_now(),
+                settings::SettingsEvent::UpdateBeta(beta) => updater_host::set_beta(*beta),
+                settings::SettingsEvent::InstallUpdate => this.activate_update(cx),
                 settings::SettingsEvent::QuickStart => {
                     this.screen = this.previous_screen;
                     this.open_quick_start(false, cx);
@@ -1224,6 +1240,7 @@ impl Player {
                 header::HeaderEvent::Language => this.open_language_menu(window,cx),
                 header::HeaderEvent::Help => this.open_quick_start(false,cx),
                 header::HeaderEvent::WhatsNew=>this.open_release_highlights(cx),
+                header::HeaderEvent::Update=>this.activate_update(cx),
                 header::HeaderEvent::Save if this.backend.is_some() => this.save_project(cx),
                 header::HeaderEvent::Save => this.notice=Some("Mix changes remain local to this prototype.".into()),
                 header::HeaderEvent::AddToLibrary if this.backend.is_some()=>this.open_library_import(cx),
@@ -1299,6 +1316,7 @@ impl Player {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let quit_subscription = cx.on_app_quit(|this, cx| {
+            updater_host::on_quit();
             this.retain_source_edits();
             this.shutdown_desktop(cx);
             if let Some((_, _, _, _, path)) = this.source_pending.take() { source_jobs::discard_working_copy(&path); }
@@ -1656,7 +1674,7 @@ impl Player {
             notice_was_open: false,
             notice_previous_focus: None,
             quick_start,
-            whats_new,release_service,release_startup_ready,release_pending:None,
+            whats_new,release_service,release_startup_ready,release_pending:None,update_snapshot:None,
             #[cfg(feature="ui-tests")]
             release_external_urls:vec![],
             #[cfg(feature="ui-tests")]
@@ -1684,6 +1702,34 @@ impl Player {
             self.whats_new.update(cx,|s,cx|s.open(notes,cx));
         }
         cx.notify();
+    }
+    /// Mirror the updater service into the header chip and the Settings rows.
+    fn poll_updater(&mut self,cx:&mut Context<Self>){
+        updater_host::set_busy(self.playing);
+        let Some(snapshot)=updater_host::snapshot() else {return;};
+        if self.update_snapshot.as_ref()==Some(&snapshot){return;}
+        let chip=match &snapshot.view {
+            updater_host::View::Ready{..}=>Some(header::UpdateChip::Ready),
+            updater_host::View::Available{version,..}=>Some(header::UpdateChip::Available(version.clone())),
+            updater_host::View::Downloading{percent,..}=>Some(header::UpdateChip::Downloading(*percent)),
+            _=>None,
+        };
+        self.header.update(cx,|header,cx|header.set_update(chip,cx));
+        self.settings.update(cx,|settings,cx|settings.set_update(Some(snapshot.clone()),cx));
+        self.update_snapshot=Some(snapshot);
+        cx.notify();
+    }
+    /// Header chip or Settings button: install a staged update, or open the
+    /// download page when this install cannot replace itself.
+    fn activate_update(&mut self,cx:&mut Context<Self>){
+        match self.update_snapshot.as_ref().map(|s|s.view.clone()) {
+            Some(updater_host::View::Ready{..})=>match updater_host::begin_install() {
+                Ok(())=>cx.quit(),
+                Err(error)=>diagnostics::event("updater",format!("{error:#}"),diagnostics::Level::Error),
+            },
+            Some(updater_host::View::Available{url,..})=>cx.open_url(&url),
+            _=>{}
+        }
     }
     fn poll_release_highlights(&mut self,cx:&mut Context<Self>){
         if !self.release_startup_ready {
@@ -2819,9 +2865,12 @@ impl Player {
                         });
                     }
                 },
-                integration::Event::Inventory(result) => self
-                    .settings
-                    .update(cx, |settings, cx| settings.set_inventory(result, cx)),
+                integration::Event::Inventory(result) => {
+                    // The helper answered its device query: one input to the
+                    // updater's first-launch health gate.
+                    if result.is_ok() { updater_host::audio_ready(); }
+                    self.settings.update(cx, |settings, cx| settings.set_inventory(result, cx))
+                }
                 integration::Event::KaraokePref(enabled) => {
                     if self.karaoke_pref_seq==0 {self.karaoke_preferred=enabled;}
                 }
@@ -6287,6 +6336,8 @@ fn main() {
         }
         return;
     }
+    updater_apply::run_if_requested();
+    updater_host::startup();
     migrate::startup();
     text_rendering::configure();
     let application=gpui_kit::application().with_assets(Assets);
@@ -6308,7 +6359,14 @@ fn main() {
         let background = std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some();
         desktop_lifecycle::install_actions(cx);
         let (window_handle, view) = desktop_lifecycle::open_player_window(cx).expect("open player");
-        let _ = window_handle.update(cx, |_, window, _| window.on_next_frame(|_, _| migrate::after_first_frame()));
+        let _ = window_handle.update(cx, |_, window, _| window.on_next_frame(|_, _| { migrate::after_first_frame(); updater_host::after_first_frame(); }));
+        let update_view = view.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                cx.update(|cx| { update_view.update(cx, |player, cx| player.poll_updater(cx)); });
+            }
+        }).detach();
         let crash_view = view.clone();
         let startup_pending = std::cell::Cell::new(!previous_crashes.is_empty());
         let deliver_crash = std::rc::Rc::new(move |view: &Entity<Player>, cx: &mut App| {

@@ -99,5 +99,16 @@ export const native: Translation<typeof en> = {
   "microphone.recording.noActive": "Không có bản ghi micro phù hợp nào đang hoạt động",
   "microphone.error.nativeInput": "Đầu vào gốc bị lỗi",
   "microphone.error.recordingFailed": "Ghi âm micro gốc bị lỗi",
-  "training.session.aria.backToSong": "Trở lại bài hát"
+  "training.session.aria.backToSong": "Trở lại bài hát",
+  "update.settings.title": "Cập nhật",
+  "update.settings.version": "Phiên bản {version}",
+  "update.settings.check": "Kiểm tra ngay",
+  "update.settings.beta": "Nhận phiên bản beta",
+  "update.state.none": "SingZ đã là bản mới nhất",
+  "update.state.checking": "Đang kiểm tra bản cập nhật…",
+  "update.state.available": "Đã có phiên bản {version}",
+  "update.state.downloading": "Đang tải phiên bản {version}… {percent}%",
+  "update.state.ready": "Phiên bản {version} đã sẵn sàng. Khởi động lại để cài đặt.",
+  "update.state.error": "Cập nhật thất bại: {message}",
+  "update.state.rolledBack": "Phiên bản {version} không khởi động được và đã được khôi phục về bản trước."
 }
