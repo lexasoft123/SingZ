@@ -57,12 +57,13 @@ export default function BoxApp(): React.JSX.Element {
     })
   }
   const transport = transportRef.current
-  const microphones = useMemo(() => new BoxMicrophones(window.singz), [])
+  const microphones = useMemo(() => new BoxMicrophones(boxApi), [])
   // Live microphone telemetry is subscribed by leaf surfaces (Player meters,
   // Mixer rows, Settings) so 5 Hz levels never re-render the whole BoxApp.
   useEffect(() => {
     microphones.connect()
-    return () => { void microphones.dispose().catch(() => undefined) }
+    // Stop reading only. Analysis belongs to the audio host and outlives this UI.
+    return () => microphones.dispose()
   }, [microphones])
   const collectionRef = useRef<BoxCollectionController | null>(null)
   if (!collectionRef.current) {
@@ -77,7 +78,7 @@ export default function BoxApp(): React.JSX.Element {
   if (!queueStoreRef.current) queueStoreRef.current = new BoxQueueStore(boxApi)
   const queueStore = queueStoreRef.current
   const flushPrivateState = useCallback(async (): Promise<void> => {
-    await Promise.all([queueStore.flush(), microphones.dispose()])
+    await queueStore.flush(); microphones.dispose()
   }, [queueStore, microphones])
   const phoneProjectionRef = useRef<BoxPhoneProjection | null>(null)
   if (!phoneProjectionRef.current) phoneProjectionRef.current = new BoxPhoneProjection()
@@ -359,7 +360,6 @@ export default function BoxApp(): React.JSX.Element {
   }, [flushPrivateState, transport])
 
   const cancelOpenForNavigation = useCallback((): boolean => {
-    if (['starting', 'stopping'].includes(microphones.getSnapshot().phase)) return false
     if (!settingsNavigator.canNavigate() || interactionLocked()) return false
     if (!latest.current.snapshot.loadingName) {
       cancelPreviewStart(openIntent.current, previewStartIntent, openingDir, () => setBusyDir(null), publishPhoneSnapshot)
@@ -371,7 +371,7 @@ export default function BoxApp(): React.JSX.Element {
     setBusyDir(null)
     void publishPhoneSnapshot()
     return true
-  }, [microphones, interactionLocked, publishPhoneSnapshot, settingsNavigator, transport])
+  }, [interactionLocked, publishPhoneSnapshot, settingsNavigator, transport])
 
   const goCatalog = useCallback(() => {
     if (!cancelOpenForNavigation()) return
@@ -575,7 +575,6 @@ export default function BoxApp(): React.JSX.Element {
       return
     }
     if (route === 'settings') {
-      if (['starting', 'stopping'].includes(microphones.getSnapshot().phase)) return
       backFromSettings()
       return
     }
@@ -590,7 +589,7 @@ export default function BoxApp(): React.JSX.Element {
       setFocusVersion(version => version + 1)
       tvRef.current?.querySelector<HTMLElement>('.box-navigation button.on')?.focus()
     }
-  }, [microphones, backFromAccount, backFromDetails, backFromSettings, closeMix, goCatalog, goCurrent, goQueue, mixOpen, pendingSwitch, route, settingsNavigator, snapshot.active])
+  }, [backFromAccount, backFromDetails, backFromSettings, closeMix, goCatalog, goCurrent, goQueue, mixOpen, pendingSwitch, route, settingsNavigator, snapshot.active])
 
   const actionsRef = useRef({ back, goCatalog, goQueue, goCurrent, closeMix })
   actionsRef.current = { back, goCatalog, goQueue, goCurrent, closeMix }

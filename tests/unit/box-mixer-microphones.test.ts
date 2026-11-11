@@ -7,10 +7,11 @@ import { Mixer, MixerMicrophoneRow } from '../../src/renderer/src/box/Mixer'
 import type { MicrophoneSnapshot } from '../../src/renderer/src/box/microphones'
 
 function snapshot(): MicrophoneSnapshot {
-  return { phase: 'running', capability: 'available', devices: [], inventoryError: null, error: null,
-    selection: { uid: 'alsa:flow8', channel: 7 }, enabledChannelsByDevice: { 'alsa:flow8': Array.from({ length: 10 }, (_, i) => i) },
-    active: { uid: 'alsa:flow8', channel: 7, channels: 10, generation: '11', label: 'FLOW 8', enabledChannels: Array.from({ length: 10 }, (_, i) => i) },
-    levels: { generation: '11', receivedAt: Date.now(), channelIndices: Array.from({ length: 10 }, (_, i) => i), peak: [0.25, 0.5, ...Array(8).fill(0.9)], rms: Array(10).fill(0.1) }, pitch: null }
+  const all = Array.from({ length: 10 }, (_, i) => i)
+  return { phase: 'running', reason: '', detail: '', revision: '3', origin: 'user', epoch: 'e', device: 'alsa:flow8', pending: false, error: null,
+    enabledChannelsByDevice: { 'alsa:flow8': all },
+    active: { uid: 'alsa:flow8', channels: 10, generation: '11', label: 'FLOW 8', enabledChannels: all, analysisChannel: 7 },
+    levels: { generation: '11', receivedAt: Date.now(), channelIndices: all, peak: [0.25, 0.5, ...Array(8).fill(0.9)], rms: Array(10).fill(0.1) }, pitch: null }
 }
 const row = (value: MicrophoneSnapshot | undefined, id: 'mic1' | 'mic2' = 'mic1'): string => renderToStaticMarkup(createElement(MixerMicrophoneRow, { id, snapshot: value }))
 beforeEach(async () => { vi.useFakeTimers(); vi.setSystemTime(1000); await prepareBoxLocale('en') })
@@ -43,18 +44,32 @@ describe('mixer private microphone input observation', () => {
     expect(html).toContain('Hardware monitoring'); expect(html).toContain('On the mixer'); expect(html).toContain('Analysis input level')
     expect(html).not.toContain('<input'); expect(html).not.toContain('<button'); expect(html).not.toContain('No meter available')
   })
-  it.each(['absent', 'stale', 'generation', 'starting', 'invalid-level'] as const)('shows unavailable instead of fabricated silence for %s', bad => {
+  it.each(['absent', 'stale', 'generation', 'invalid-level', 'error'] as const)('shows unavailable instead of fabricated silence for %s', bad => {
     const value = snapshot()
     if (bad === 'absent') value.levels = null
     if (bad === 'stale') value.levels!.receivedAt = Date.now() - 1000
     if (bad === 'generation') value.levels!.generation = '9'
-    if (bad === 'starting') value.phase = 'starting'
     if (bad === 'invalid-level') value.levels!.peak[0] = Number.NaN
+    if (bad === 'error') { value.phase = 'error'; value.reason = 'internal' }
     const html = row(value)
-    expect(html).not.toContain('role="meter"'); expect(html).toContain('Unavailable'); expect(html).toContain('No meter available')
+    expect(html).not.toContain('role="meter"'); expect(html).toContain('>Unavailable<'); expect(html).toContain('No meter available')
+  })
+  it.each([
+    ['off', { phase: 'off' as const, device: null, active: null, levels: null }, 'Off'],
+    ['starting', { phase: 'starting' as const, active: null, levels: null }, 'Starting…'],
+    ['waiting', { phase: 'waiting' as const, reason: 'no-device' as const, active: null, levels: null }, 'No input']
+  ])('says %s instead of Unavailable when nothing is wrong', (_name, patch, text) => {
+    const html = row({ ...snapshot(), ...patch })
+    expect(html).not.toContain('role="meter"'); expect(html).toContain(`>${text}<`); expect(html).not.toContain('Unavailable')
+  })
+  it('with one input enabled, Mic 1 meters and Mic 2 is Off', () => {
+    const value = snapshot(); value.enabledChannelsByDevice['alsa:flow8'] = [7]
+    value.active = { ...value.active!, enabledChannels: [7] }; value.levels = { ...value.levels!, channelIndices: [7], peak: [0.4], rms: [0.1] }
+    expect(row(value, 'mic1')).toContain('aria-valuenow="0.4"')
+    expect(row(value, 'mic2')).toContain('>Off<')
   })
   it('shows one valid input only for a mono device, and treats measured zero as real silence', () => {
-    const value = snapshot(); value.active!.channels = 1; value.levels!.peak = [0]; value.levels!.rms = [0]
+    const value = snapshot(); value.active!.channels = 1; value.active!.enabledChannels = [0]; value.enabledChannelsByDevice['alsa:flow8'] = [0]; value.levels!.channelIndices = [0]; value.levels!.peak = [0]; value.levels!.rms = [0]
     expect(row(value)).toContain('aria-valuenow="0"'); expect(row(value)).toContain('−∞ dBFS')
     expect(row(value, 'mic2')).not.toContain('role="meter"')
     expect(row(undefined)).not.toContain('role="meter"')

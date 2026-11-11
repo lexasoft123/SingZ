@@ -1,0 +1,23 @@
+import { afterEach, expect, it, vi } from 'vitest'
+const rpc = vi.hoisted(() => ({ call: vi.fn(), reconcile: vi.fn() }))
+vi.mock('../../src/main/box-audio/client', () => ({ createBoxAudioClient: () => rpc }))
+vi.mock('../../src/main/capture', () => ({ CaptureOwner: class {} }))
+vi.mock('../../src/main/log', () => ({ log: vi.fn(), logChunk: vi.fn() }))
+afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); vi.resetAllMocks() })
+it('forwards observer reads and reconciles before another selection CAS without changing its expected revision', async () => {
+  vi.stubEnv('SINGZ_SURFACE', 'box'); vi.stubEnv('SINGZ_BOX_AUDIO_SOCKET', '/private/box/audio.sock')
+  const { boxMicrophones } = await import('../../src/main/audio-process')
+  rpc.call.mockResolvedValueOnce({ revision: '8' })
+  expect(await boxMicrophones.snapshot()).toEqual({ revision: '8' })
+  expect(rpc.call).toHaveBeenCalledWith('service', 'microphones', [])
+  expect(rpc.reconcile).not.toHaveBeenCalled()
+  const edit = { expectedRevision: '7', device: null, channels: {} }
+  rpc.call.mockResolvedValueOnce({ ok: false, code: 'stale', snapshot: { revision: '8' } })
+  expect(await boxMicrophones.setSelection(edit)).toMatchObject({ ok: false, code: 'stale' })
+  expect(rpc.reconcile).toHaveBeenCalledOnce()
+  expect(rpc.call).toHaveBeenLastCalledWith('service', 'setMicrophoneSelection', [edit])
+  expect(rpc.reconcile.mock.invocationCallOrder[0]).toBeLessThan(rpc.call.mock.invocationCallOrder[1])
+  rpc.reconcile.mockRejectedValueOnce(new Error('Host unreachable'))
+  await expect(boxMicrophones.setSelection(edit)).rejects.toThrow('Host unreachable')
+  expect(rpc.call).toHaveBeenCalledTimes(2)
+})

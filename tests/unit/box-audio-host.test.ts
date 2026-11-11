@@ -99,62 +99,35 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       expect(secondRuntime.calls).toEqual([['start', 1, '2']])
     } finally { await client.shutdown(); await second.close(); await rm(dir, { recursive: true, force: true }) }
   })
-  it('reads the restarted host before private capture begin/cancel, without replaying the old host or unfencing playback', async () => {
+  it('reconciles a new epoch before selection CAS, allows uncertain reads, and never replays an unknown edit', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-audio-'))
     const path = join(dir, 'audio.sock')
-    const withCapture = () => {
-      const value = fake()
-      value.runtime.owner.begin = (...args: unknown[]) => { value.calls.push(['begin', args[0], args[2]]); return { ok: true, state: 'running' } }
-      value.runtime.owner.cancel = (...args: unknown[]) => { value.calls.push(['cancel', ...args]); return { ok: true, cancelled: false } }
-      return value
+    const make = () => {
+      const f = fake()
+      f.runtime.microphones = {
+        snapshot: async () => ({ generation: '77' } as any),
+        setSelection: async (edit) => { f.calls.push(['edit', edit.expectedRevision]); return { ok: false, code: 'stale', error: 'stale', snapshot: null } }
+      }
+      return f
     }
-    const firstRuntime = withCapture()
-    const first = await startBoxAudioHost(path, firstRuntime.runtime)
-    const client = createBoxAudioClient(path)
-    const emit = () => undefined
-    await client.call('owner', 'begin', [7, { deviceUid: 'flow8', inputChannel: 0 }, '11', emit])
-    await first.close()
-    await new Promise<void>(resolve => setImmediate(resolve))
-    const secondRuntime = withCapture()
-    const second = await startBoxAudioHost(path, secondRuntime.runtime)
-    try {
-      // Nothing else (routing preview, retained snapshot) reconciles first.
-      expect(await client.call('owner', 'cancel', [7, '11'])).toEqual({ ok: true, cancelled: false })
-      expect(await client.call('owner', 'begin', [7, { deviceUid: 'flow8', inputChannel: 0 }, '12', emit])).toMatchObject({ ok: true })
-      const capture = secondRuntime.calls.filter(row => row[0] === 'begin' || row[0] === 'cancel').map(row => [row[0], row.at(-1)])
-      expect(capture).toEqual([['cancel', '11'], ['begin', '12']])
-    } finally { await client.shutdown(); await second.close() }
-    // A playback mutation is still fenced after a restart until someone reconciles.
-    const thirdRuntime = withCapture()
-    const third = await startBoxAudioHost(path, thirdRuntime.runtime)
-    const fresh = createBoxAudioClient(path)
-    try {
-      await fresh.call('owner', 'playbackStatus', [])
-      await third.close()
-      await new Promise<void>(resolve => setImmediate(resolve))
-      const fourthRuntime = withCapture()
-      const fourth = await startBoxAudioHost(path, fourthRuntime.runtime)
-      try {
-        await expect(fresh.call('owner', 'startPlayback', [9, '1'])).rejects.toThrow('uncertain')
-        expect(fourthRuntime.calls).toHaveLength(0)
-      } finally { await fresh.shutdown(); await fourth.close() }
-    } finally { await rm(dir, { recursive: true, force: true }) }
-  })
-  it('keeps capture fenced when a capture mutation outcome is unknown on the same host', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'box-audio-'))
-    const path = join(dir, 'audio.sock')
-    const { runtime, calls } = fake()
-    let release!: () => void
-    runtime.owner.begin = () => new Promise(resolve => { calls.push(['slow-begin']); release = () => resolve({ ok: true, state: 'running' }) })
-    const host = await startBoxAudioHost(path, runtime)
+    const first = await startBoxAudioHost(path, make().runtime)
     const client = createBoxAudioClient(path, { timeoutMs: 80 })
-    const emit = () => undefined
+    await client.call('service', 'microphones', [])
+    await first.close(); await new Promise<void>(resolve => setImmediate(resolve))
+    const f = make()
+    const second = await startBoxAudioHost(path, f.runtime)
     try {
-      await expect(client.call('owner', 'begin', [7, { deviceUid: 'flow8', inputChannel: 0 }, '11', emit])).rejects.toThrow('outcome unknown')
-      await expect(client.call('owner', 'begin', [7, { deviceUid: 'flow8', inputChannel: 0 }, '12', emit])).rejects.toThrow('uncertain')
-      expect(calls.filter(row => row[0] === 'slow-begin')).toHaveLength(1)
+      expect(await client.call('service', 'microphones', [])).toMatchObject({ generation: '77', epoch: second.epoch })
+      expect(await client.call('service', 'setMicrophoneSelection', [{ expectedRevision: '7', device: null, channels: {} }])).toMatchObject({ code: 'stale' })
+      expect(f.calls).toEqual([['edit', '7']])
+      let release!: () => void
+      f.runtime.microphones!.setSelection = () => new Promise(resolve => { f.calls.push(['slow-edit']); release = () => resolve({ ok: false, code: 'stale', error: '', snapshot: null }) })
+      await expect(client.call('service', 'setMicrophoneSelection', [{ expectedRevision: '7', device: null, channels: {} }])).rejects.toThrow('outcome unknown')
+      await expect(client.call('service', 'setMicrophoneSelection', [{ expectedRevision: '7', device: null, channels: {} }])).rejects.toThrow('uncertain')
       release()
-    } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+      expect(await client.call('service', 'microphones', [])).toMatchObject({ generation: '77' })
+      expect(f.calls.filter(row => row[0] === 'slow-edit')).toHaveLength(1)
+    } finally { await client.shutdown(); await second.close(); await rm(dir, { recursive: true, force: true }) }
   })
   it('treats shared initialization as host readiness and rejects raw physical reconfiguration or PCM', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-audio-'))
@@ -232,76 +205,35 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       await rm(dir, { recursive: true, force: true })
     }
   })
-  it('retires capture callbacks on refusal, replacement, cancellation and renderer detach', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'box-audio-sinks-'))
+  it('keeps the reserved analysis owner alive across socket close and detach; rejects client capture ownership', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-audio-analysis-'))
     const path = join(dir, 'audio.sock')
     const { runtime } = fake()
-    const emitters: (() => void)[] = []
-    const hits: number[] = Array(8).fill(0)
-    let mode: 'ok' | 'refuse' | 'throw' | 'pending' = 'ok'
-    let active = ''
-    let release: (() => void) | undefined
-    let began: (() => void) | undefined
-    runtime.owner.begin = (_renderer: number, _config: unknown, generation: string, emit: (value: unknown) => void) => {
-      emitters.push(() => emit({ generation }))
-      if (mode === 'throw') throw new Error('Fixture transport refusal')
-      if (mode === 'refuse') return { ok: false }
-      if (mode === 'pending') return new Promise(resolve => {
-        release = () => { active = generation; resolve({ ok: true }) }
-        began?.()
-      })
-      active = generation
-      return { ok: true }
-    }
-    runtime.owner.cancel = (_renderer: number, generation: string) => {
-      const cancelled = generation === active
-      if (cancelled) active = ''
-      return { ok: true, cancelled }
+    let generation = '123', cancelled = false
+    runtime.owner.begin = vi.fn()
+    runtime.owner.cancel = vi.fn()
+    runtime.owner.rendererDetached = (id: number) => { if (id === 2) { generation = '0'; cancelled = true } }
+    runtime.microphones = {
+      snapshot: async () => ({ generation, revision: '7', levels: { peak: [.2] } } as any),
+      setSelection: async edit => ({ ok: false, code: 'stale', error: 'stale', snapshot: { revision: '7' } as any })
     }
     const host = await startBoxAudioHost(path, runtime)
-    const client = createBoxAudioClient(path)
-    const begin = (renderer: number, generation: number) => client.call('owner', 'begin',
-      [renderer, {}, String(generation), () => { ++hits[generation] }])
-    const emitAll = async () => { for (const emit of emitters) emit(); await client.reconcile() }
+    const first = createBoxAudioClient(path), second = createBoxAudioClient(path)
     try {
-      await begin(11, 1)
-      mode = 'refuse'
-      await begin(11, 2)
-      mode = 'throw'
-      await expect(begin(11, 3)).rejects.toThrow('Fixture transport refusal')
-      await emitAll()
-      expect(hits.slice(1, 4)).toEqual([1, 0, 0])
-      mode = 'pending'
-      const started = new Promise<void>(resolve => { began = resolve })
-      const replacement = begin(11, 4)
-      await started
-      emitters[0]() // Prior capture remains subscribed until replacement acknowledgement.
-      release!()
-      await replacement
-      await emitAll()
-      expect(hits[1]).toBe(2)
-      expect(hits[4]).toBe(1)
-      mode = 'ok'
-      await begin(22, 5)
-      await client.call('owner', 'cancel', [11, '4']) // A stale cancellation cannot retire the current sink.
-      await emitAll()
-      expect(hits[4]).toBe(1)
-      expect(hits[5]).toBe(1)
-      await client.call('owner', 'cancel', [22, '5'])
-      await emitAll()
-      expect(hits[5]).toBe(1)
-      await begin(33, 6)
-      await client.call('owner', 'rendererDetached', [22])
-      await emitAll()
-      expect(hits[6]).toBe(1)
-      await client.call('owner', 'rendererDetached', [33])
-      await emitAll()
-      expect(hits[6]).toBe(1)
-      await begin(44, 7)
-      await client.call('owner', 'rendererGone', [44])
-      await emitAll()
-      expect(hits[7]).toBe(0)
-    } finally { release?.(); await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+      expect(await first.call('service', 'microphones', [])).toMatchObject({ generation: '123' })
+      await expect(first.call('owner', 'begin', [2, {}, '9', () => {}])).rejects.toThrow('owned by the audio host')
+      await expect(first.call('owner', 'cancel', [2, '123'])).rejects.toThrow('owned by the audio host')
+      await first.call('owner', 'beginMonitor', [2, {}])
+      await first.call('owner', 'rendererDetached', [2])
+      await first.shutdown()
+      expect(await second.call('service', 'microphones', [])).toMatchObject({ generation: '123', epoch: host.epoch })
+      expect(await second.call('service', 'setMicrophoneSelection', [{ expectedRevision: '6', device: null, channels: {} }])).toMatchObject({ ok: false, code: 'stale', snapshot: { revision: '7', epoch: host.epoch } })
+      expect(cancelled).toBe(false)
+      expect(runtime.owner.begin).not.toHaveBeenCalled(); expect(runtime.owner.cancel).not.toHaveBeenCalled()
+      // Named negative control: using the raw socket owner id cancels the lease.
+      ;(runtime.owner.rendererDetached as (id: number) => void)(2)
+      expect(cancelled).toBe(true)
+    } finally { await first.shutdown(); await second.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
   })
   it('recovers a timed-out retained Stop through an authoritative idle barrier without replaying it', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-retained-'))
@@ -627,11 +559,11 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
         expected: { epoch: prepared.epoch, generation: '7' }, descriptor
       }])
       await client.call('owner', 'endMonitor', [51, '7'])
-      await client.call('owner', 'cancel', [51, '7'])
+      await expect(client.call('owner', 'cancel', [51, '7'])).rejects.toThrow('owned by the audio host')
       const snapshot = await client.reconcile() as { recovery?: { generation: string } }
       expect(snapshot.recovery?.generation).toBe('7')
       expect(current).toMatchObject({ generation: '7' })
-      expect(calls).toEqual([['endMonitor', 1001, '7'], ['cancel', 1001, '7']])
+      expect(calls).toEqual([['endMonitor', 1001, '7']])
     } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
   })
   it('rejects oversized incomplete frames, PCM and malformed JSON', () => {

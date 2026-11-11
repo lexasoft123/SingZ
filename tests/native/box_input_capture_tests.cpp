@@ -1,4 +1,6 @@
 #include "native/playback/box_input_capture.h"
+#include "native/playback/box_input_queue.h"
+#include <zdsp/analysis/capture_adapter.h>
 #include "native/playback/box_input_read_schedule.h"
 #include "native/playback/box_routing_owner.h"
 #include "native/playback/shared_audio_service.h"
@@ -11,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <loopz/document_json.hpp>
+#include <loopz/audio_history.hpp>
 #include <memory>
 #include <new>
 #include <limits>
@@ -23,6 +26,14 @@ namespace {
 thread_local bool trackSparseHeap = false;
 thread_local uint64_t sparseHeapEvents = 0;
 }
+// TSan supplies strong new/delete interceptors. Keep the allocation probe in
+// ordinary/ASan builds; all behavioral and concurrency checks still run in TSan.
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define SINGZ_BOX_INPUT_TSAN 1
+#endif
+#endif
+#if !defined(__SANITIZE_THREAD__) && !defined(SINGZ_BOX_INPUT_TSAN)
 void* operator new(std::size_t bytes) {
   if (trackSparseHeap) ++sparseHeapEvents;
   if (auto* value = std::malloc(bytes ? bytes : 1)) return value;
@@ -36,6 +47,8 @@ void operator delete(void* value) noexcept {
 void operator delete[](void* value) noexcept { ::operator delete(value); }
 void operator delete(void* value, std::size_t) noexcept { ::operator delete(value); }
 void operator delete[](void* value, std::size_t) noexcept { ::operator delete(value); }
+
+#endif
 
 #define CHECK(v)                                                               \
   do {                                                                         \
@@ -106,6 +119,107 @@ void scheduleRecoversJitterWithoutReset() {
   consume(catchupB);
   CHECK(catchupB.plan.blocks == 4 && !catchupB.discontinuity());
   CHECK(reanchors == 1);
+}
+void nativeQueuePreservesSamplesAndBounds() {
+  BoxInputQueue queue;
+  queue.start();
+  std::array<float, kFrames> pcm{};
+  for (uint32_t f = 0; f < kFrames; ++f) pcm[f] = float(f) / 8192;
+  const float* planes[]{pcm.data()};
+  AudioInputBusBlock bus;
+  bus.planes = planes; bus.channelCount = 1;
+  bus.frames = bus.capacityFrames = kFrames;
+  bus.firstNs = 1000000000; bus.deliveryNs = 1001000000;
+  bus.quality = AudioInputTimestampQuality::Hardware;
+  const auto before = sparseHeapEvents;
+  trackSparseHeap = true;
+  for (uint32_t i = 0; i < BoxInputQueue::capacity; ++i) queue.push(bus, 44100);
+  const auto* first = queue.peek();
+  CHECK(first && first->rate == 44100 && first->bus.firstNs == bus.firstNs);
+  CHECK(std::equal(pcm.begin(), pcm.end(), first->pcm.get()));
+  pcm.fill(-1);
+  queue.push(bus, 44100); // Saturation cannot overwrite a borrowed slot.
+  CHECK(first->pcm[17] == float(17) / 8192);
+  queue.consume();
+  queue.push(bus, 44100);
+  for (uint32_t i = 1; i < BoxInputQueue::capacity; ++i) queue.consume();
+  CHECK(queue.peek()->serial == BoxInputQueue::capacity + 2);
+  CHECK(queue.peek()->pcm[17] == -1);
+  queue.consume();
+  CHECK(!queue.peek());
+  queue.stop(); queue.start(); queue.push(bus, 48000);
+  CHECK(queue.peek()->epoch == 2 && queue.peek()->rate == 48000);
+  trackSparseHeap = false;
+  CHECK(before == sparseHeapEvents);
+}
+// Compare the production analysis adapter at the native capture rate against
+// the former 48 kHz timestamp-history route, on voiced harmonic signals. The
+// native queue's PCM equality above separately pins exact pre-resample meters.
+void nativePitchMatchesResampledPitch() {
+  constexpr uint64_t origin = 1000000000;
+  for (const double rate : {44100., 48000., 96000.}) {
+    for (const double frequency : {110., 220., 440., 880.}) {
+      loopz::AudioHistory history(1);
+      std::vector<float> source(24000);
+      for (size_t f = 0; f < source.size(); ++f) {
+        const double phase = 2 * 3.141592653589793 * frequency * f / rate;
+        source[f] = float(.2 * std::sin(phase) + .04 * std::sin(2 * phase));
+      }
+      for (uint32_t f = 0; f + kFrames <= source.size(); f += kFrames) {
+        const float* planes[]{source.data() + f};
+        CHECK(history.append({planes, kFrames}, kFrames,
+            origin + uint64_t(f * 1e9 / rate), rate, f, true));
+      }
+      const auto analyze = [&](bool native) {
+        BoxInputQueue queue; queue.start(rate);
+        zdsp::analysis::LiveInputAnalysisAdapter adapter(1);
+        double last = 0;
+        uint32_t voiced = 0;
+        std::array<float, kFrames> converted{};
+        float* output[]{converted.data()};
+        loopz::AudioReadCursor cursor;
+        const double hz = native ? rate : 48000;
+        for (uint32_t f = 0; f < uint32_t(.16 * hz); f += kFrames) {
+          AudioInputBlockView block;
+          block.sampleRate = hz; block.frames = kFrames;
+          block.capture.clockDomainId = 1; block.capture.streamGeneration = 1;
+          block.capture.sequence = f / kFrames + 1;
+          block.capture.sampleHostTimeNs = origin + 30000000 + uint64_t(f * 1e9 / hz);
+          block.capture.callbackHostTimeNs = block.capture.sampleHostTimeNs + 1000000;
+          block.capture.timestampQuality = AudioInputTimestampQuality::Hardware;
+          block.capture.flags = AudioInputSampleHostTimeValid | AudioInputCallbackHostTimeValid |
+              AudioInputTimestampQualityValid;
+          if (native) {
+            const float* planes[]{source.data() + uint32_t(.03 * rate) + f};
+            AudioInputBusBlock raw;
+            raw.planes = planes; raw.channelCount = 1;
+            raw.frames = raw.capacityFrames = kFrames;
+            raw.firstNs = block.capture.sampleHostTimeNs;
+            raw.deliveryNs = block.capture.callbackHostTimeNs;
+            queue.push(raw, rate);
+            CHECK(queue.peek());
+            block.mono = queue.peek()->pcm.get();
+            block.sampleRate = queue.peek()->rate;
+          }
+          else {
+            const auto read = history.read(block.capture.sampleHostTimeNs, hz,
+                {output, kFrames}, kFrames, cursor);
+            CHECK(read.online && !read.missingFrames);
+            block.mono = converted.data();
+          }
+          CHECK(adapter.push(block, [&](const auto& window) {
+            if (window.analysis.frequency > 0) { last = window.analysis.frequency; ++voiced; }
+          }));
+          if (native) queue.consume();
+        }
+        CHECK(voiced >= 5);
+        return last;
+      };
+      const auto native = analyze(true), previous = analyze(false);
+      CHECK(std::abs(1200 * std::log2(native / previous)) < 5);
+      CHECK(std::abs(1200 * std::log2(native / frequency)) < 10);
+    }
+  }
 }
 void sparseReadsNeverProcessDisabledChannels() {
   struct Spy final : loopz::AudioSource {
@@ -243,7 +357,10 @@ public:
       opened_ = false;
     }
   }
-  bool takeFailure(std::string &) override { return false; }
+  bool takeFailure(std::string &error) override {
+    if (opened_ && hardware_->offline.load()) { error = "Fixture unplugged"; return true; }
+    return false;
+  }
 
 private:
   void pushTones() {
@@ -256,7 +373,7 @@ private:
     while (!stopping_.load()) {
       const auto current = nowNs();
       for (unsigned budget = 0;
-           hardware_->supply.load() && budget < 32 &&
+           hardware_->supply.load() && !hardware_->offline.load() && budget < 32 &&
            origin + frameNs(frame + kFrames) <= current && !stopping_.load();
            ++budget) {
         for (uint32_t sample = 0; sample < kFrames; ++sample) {
@@ -306,14 +423,16 @@ struct Sink {
   std::atomic<double> squares{0};
   std::atomic<float> peak{0};
   std::atomic<bool> badMetadata{false};
+  std::atomic<uint64_t> discontinuities{0};
   float last{0}; // one joined analysis reader owns this field
   void accept(const AudioInputBlockView &block) {
+    if (block.capture.discontinuity == AudioInputDiscontinuityReason::StreamGenerationChanged) ++discontinuities;
     if (block.frames != kFrames || block.sampleRate != kRate || !block.mono ||
         block.timestampQuality !=
             AudioInputTimestampQuality::CallbackEstimate ||
         block.capture.timestampQuality !=
             AudioInputTimestampQuality::CallbackEstimate ||
-        (block.capture.flags & AudioInputSourceFrameValid) ||
+        !(block.capture.flags & AudioInputSourceFrameValid) ||
         !block.capture.streamGeneration || !block.sampleHostTimeNs ||
         block.capture.sampleHostTimeNs != block.sampleHostTimeNs)
       badMetadata.store(true);
@@ -373,6 +492,8 @@ void edit(const char *operation, loopz::JSON commands) {
 }
 } // namespace
 int main() {
+  nativeQueuePreservesSamplesAndBounds();
+  nativePitchMatchesResampledPitch();
   sparseReadsNeverProcessDisabledChannels();
   scheduleRecoversJitterWithoutReset();
   char pattern[] = "/tmp/singz-box-input-XXXXXX";
@@ -401,7 +522,7 @@ int main() {
   CHECK(started.ok && started.deviceChannels == kChannels &&
         started.sampleRate == kRate);
   CHECK(started.sharingMode == "loopz-shared" &&
-        started.timestampSource == "loopz-estimated-history");
+        started.timestampSource == "loopz-native-capture");
   eventually([&] {
     return first.blocks.load(std::memory_order_acquire) >= 24 &&
            capture.stats().deliveredFrames >= 24 * kFrames &&
@@ -417,6 +538,21 @@ int main() {
   CHECK(levels.peak[1] > 0.08f && levels.peak[1] < 0.12f);
   CHECK(levels.rms[0] > 0.11f && levels.rms[0] < 0.17f);
   CHECK(levels.rms[1] > 0.05f && levels.rms[1] < 0.09f);
+  // A private subscription must survive a physical failure: LoopZ reopens
+  // underneath the held reader, which publishes no fabricated offline levels.
+  const auto opensBeforeLoss = hardware->opens.load();
+  const auto boundariesBeforeLoss = first.discontinuities.load();
+  hardware->offline.store(true);
+  eventually([&] { return hardware->live == 0 &&
+      capture.state() == AudioInputState::Starting && !capture.meter().valid; });
+  const auto blocksWhileOffline = first.blocks.load();
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  CHECK(first.blocks.load() == blocksWhileOffline && !capture.meter().valid);
+  hardware->offline.store(false);
+  eventually([&] { return hardware->opens > opensBeforeLoss && hardware->live == 1 &&
+      capture.state() == AudioInputState::Running && capture.meter().valid &&
+      first.discontinuities > boundariesBeforeLoss; }, 5);
+  CHECK(hardware->maximumLive == 1 && hardware->outputOpens == 0);
   const auto opensBeforeInvalid = hardware->opens.load();
   const auto stopsBeforeInvalid = hardware->stops.load();
   for (const auto invalid : {std::vector<uint32_t>{1, 1}, {1, 0}, {0}, {1, 10}, {1, 64}}) {
@@ -508,6 +644,24 @@ int main() {
                                     {"controls", {{"enabled", false}}}}}));
   eventually([&] { return hardware->live == 0; });
 
+  // Stop while offline must join before releasing the last private tap. A
+  // later poll/device return must not revive a cancelled analysis worker.
+  Sink offlineStop;
+  config.channel = 1;
+  CHECK(capture.start(config, [&](const auto &block) { offlineStop.accept(block); }).ok);
+  eventually([&] { return offlineStop.blocks >= 24 && capture.meter().valid; });
+  hardware->offline.store(true);
+  eventually([&] { return hardware->live == 0 && capture.state() == AudioInputState::Starting; });
+  capture.stop();
+  const auto joinedOffline = offlineStop.blocks.load();
+  const auto opensAfterOfflineStop = hardware->opens.load();
+  hardware->offline.store(false);
+  for (unsigned i = 0; i < 210; ++i) {
+    pollBoxRouting();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  CHECK(offlineStop.blocks == joinedOffline && !capture.meter().valid &&
+      hardware->live == 0 && hardware->opens == opensAfterOfflineStop);
   const auto beforeInvalid = hardware->opens.load();
   config.deviceUid = "missing";
   CHECK(!capture.start(config, [&](const auto &block) { third.accept(block); })
@@ -527,6 +681,13 @@ int main() {
   shutdownBoxRouting();
   CHECK(hardware->live == 0 && hardware->maximumLive == 1 &&
         hardware->outputOpens == 0);
+  CHECK(initializeBoxRoutingWithHost(
+      std::string(scratch) + "/null-input.json", error,
+      [hardware] { return std::make_unique<Host>(hardware); }, {},
+      [] { return std::unique_ptr<AudioInputBackend>{}; }));
+  CHECK(!capture.start(config, [&](const auto& block) { third.accept(block); }).ok);
+  capture.stop();
+  shutdownBoxRouting();
   std::filesystem::remove_all(scratch);
   std::puts("Box private input "
             "tones/metadata/meters/missing-history/sharing/drain passed");

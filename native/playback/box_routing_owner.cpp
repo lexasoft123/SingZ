@@ -1,3 +1,4 @@
+#include "box_input_queue.h"
 #include "box_routing_owner.h"
 #include "box_timing_journal.h"
 #include "loopz_source_backend.h"
@@ -167,6 +168,51 @@ class InstrumentedHost final : public AudioHostBackend {
   AudioHostRender callback_{};
   void* context_{};
 };
+// Registry and backend lifetime are serialized on the routing owner. Shared
+// queues survive physical reopen so an analysis lease follows device recovery.
+std::map<std::string, std::shared_ptr<BoxInputQueue>> nativeInputs;
+class AnalysisInput final : public AudioInputBackend {
+ public:
+  explicit AnalysisInput(std::unique_ptr<AudioInputBackend> backend) : backend_(std::move(backend)) {}
+  ~AnalysisInput() override { stop(); }
+  AudioInputResult open(const AudioInputConfig& c, AudioInputPush p, void* ctx) override {
+    return backend_->open(c, p, ctx);
+  }
+  AudioInputBusResult openBus(const AudioInputBusConfig& c, AudioInputBusPush push, void* ctx) override {
+    if (!backend_) return {};
+    auto& queue = nativeInputs[c.deviceUid];
+    if (!queue) queue = std::make_shared<BoxInputQueue>();
+    queue_ = queue; push_ = push; context_ = ctx;
+    auto result = backend_->openBus(c, deliver, this);
+    rate_ = result.result.sampleRate;
+    return result;
+  }
+  AudioInputResult start() override {
+    if (queue_) queue_->start(rate_);
+    auto result = backend_->start();
+    if (!result.ok && queue_) queue_->stop();
+    return result;
+  }
+  void stop() override {
+    backend_->stop();
+    if (queue_) queue_->stop();
+  }
+  bool takeFailure(std::string& error) override { return backend_->takeFailure(error); }
+ private:
+  static bool deliver(void* opaque, const AudioInputBusBlock& block) noexcept {
+    auto& self = *static_cast<AnalysisInput*>(opaque);
+    // Publish the original route first; the private tap cannot change its
+    // samples, result or lifecycle, including when its queue is full.
+    const bool result = self.push_(self.context_, block);
+    self.queue_->push(block, self.rate_);
+    return result;
+  }
+  std::unique_ptr<AudioInputBackend> backend_;
+  std::shared_ptr<BoxInputQueue> queue_;
+  AudioInputBusPush push_{};
+  void* context_{};
+  double rate_{};
+};
 bool carriesSong(const loopz::RouteDocument& document, size_t bus, size_t depth = 0) {
   if (depth >= document.devices.size()) return false;
   const auto& device = document.devices[bus];
@@ -278,7 +324,11 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
           [factory, inventory] {
             return std::make_unique<InstrumentedHost>(factory(), inventory);
           },
-          inputFactory);
+          [inputFactory]() -> std::unique_ptr<AudioInputBackend> {
+            auto backend = inputFactory();
+            if (!backend) return {};
+            return std::make_unique<AnalysisInput>(std::move(backend));
+          });
       nextView = runtime.get();
       runtime->bindNativeSource("native:singz", std::make_shared<ObservedSongSource>(nextSong->history));
       // Construction restores only an explicit saved document. An absent state
@@ -373,6 +423,9 @@ BoxInputTap acquireBoxInputTap(const std::string& uid, uint32_t channel) {
     const auto status = runtimeView->inputStatus(subscription.id);
     if (!status || !status->connected)
       throw std::runtime_error(status && !status->error.empty() ? status->error : "Microphone input is offline");
+    result.native = nativeInputs.at(uid);
+    if (!result.native->acquireReader())
+      throw std::runtime_error("Microphone analysis already has a reader");
   } catch (...) {
     runtimeView->releaseInput(subscription.id);
     throw;
@@ -414,6 +467,7 @@ void shutdownBoxRouting() noexcept {
   epoch.fetch_add(1, std::memory_order_acq_rel);
   sharedAudioService().shutdown();
   control.reset();
+  nativeInputs.clear();
   song.reset();
   runtimeView = nullptr;
   controlClock = nullptr;

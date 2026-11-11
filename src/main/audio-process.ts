@@ -1,3 +1,4 @@
+import type { BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from '../shared/box-audio'
 import { retainedPlaybackSnapshot } from '../shared/box-retained-playback'
 import type { BoxRetainedPlaybackSnapshot } from '../shared/box-contract'
 import { app, utilityProcess, type UtilityProcess } from 'electron'
@@ -79,6 +80,7 @@ class DesktopAudioProcess {
       allowLoadingUnsignedLibraries: true,
       env: { ...process.env, SINGZ_AUDIO_PROCESS: '1', SINGZ_AUDIO_EPOCH: epoch,
         SINGZ_AUDIO_PACKAGED: app.isPackaged ? '1' : '0',
+        ...(process.env.SINGZ_SURFACE === 'box' ? { SINGZ_AUDIO_BOX_DATA_DIR: app.getPath('userData') } : {}),
         SINGZ_AUDIO_RESOURCES_PATH: process.resourcesPath }
     })
     const rpc = this.rpc = new AudioProcessRpc(epoch, child, undefined, error => {
@@ -236,10 +238,17 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
   rendererDetached(id: number): void
   stop(): Promise<void>
 } {
+  const localBox = process.env.SINGZ_SURFACE === 'box' && !process.env.SINGZ_BOX_AUDIO_SOCKET
+  const rendererMethods = new Set(['beginMonitor', 'endMonitor', 'setMonitorGain', 'configureMicrophoneMix', 'stopMicrophoneMix',
+    'preparePlayback', 'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback', 'seekPlayback',
+    'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback'])
+  const rendererId = (id: number): number => localBox ? id + 1000 : id
   const cleanup = new Set<number>()
   const unavailable = new CaptureOwner(undefined, () => { throw new Error('Dedicated audio process unavailable; restart SingZ') })
   const lifecycle = (method: 'rendererGone' | 'rendererDetached', id: number): void => {
-    void desktopAudioProcess.call('owner', method, [id]).catch(error => {
+    // A destroyed renderer still stops what it owned (playback, mic mix). That
+    // stop also ends host analysis, which the supervisor restarts on its next tick.
+    void desktopAudioProcess.call('owner', method, [rendererId(id)]).catch(error => {
       reportFallback(method, error)
       desktopAudioProcess.terminate(new Error(`Audio lifecycle cleanup could not be delivered: ${String(error)}`))
     })
@@ -249,7 +258,9 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
       if (method === 'bindRendererCleanup') return (id: number) => { if (cleanup.has(id)) return false; cleanup.add(id); return true }
       if (method === 'rendererGone' || method === 'rendererDetached') return (id: number) => lifecycle(method, id)
       if (method === 'stop') return () => { stopBoxRetainedAssociations(); return desktopAudioProcess.shutdown() }
-      return async (...args: unknown[]) => {
+      return async (...original: unknown[]) => {
+        const args = [...original]
+        if (localBox && rendererMethods.has(method)) args[0] = rendererId(Number(args[0]))
         try { return await desktopAudioProcess.call('owner', method, args) }
         catch (error) {
           reportFallback(method, error)
@@ -368,4 +379,16 @@ export async function boxPrepareRetainedPlayback(
     )
   }
   return receipt
+}
+
+/** Host-owned analysis service; reads are safe during transport uncertainty. */
+export const boxMicrophones = {
+  snapshot: (): Promise<BoxMicrophoneSnapshot> => { requireBoxAudioSocket(); return boxAudioProcess!.call('service', 'microphones', []) },
+  setSelection: async (edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> => {
+    requireBoxAudioSocket()
+    // An earlier lost reply may have committed this revision. Read authoritative
+    // service state before another CAS; never replay or replace the caller's revision.
+    await boxAudioProcess!.reconcile()
+    return boxAudioProcess!.call('service', 'setMicrophoneSelection', [edit])
+  }
 }

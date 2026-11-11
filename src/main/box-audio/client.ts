@@ -8,10 +8,8 @@ export class BoxAudioUncertainError extends Error {
   constructor(message: string) { super(message); this.name = 'BoxAudioUncertainError' }
 }
 export interface BoxAudioClientOptions { timeoutMs?: number }
-/** Private microphone capture owns no state that survives its host process. After
- *  a host restart these commands first read the new host's canonical state
- *  (service.reconcile); they never replay anything sent to the old host. */
-const CAPTURE_RESYNC = new Set(['begin', 'cancel'])
+/** Selection edits reconcile a new host epoch before CAS; never replay an unknown edit. */
+const CAPTURE_RESYNC = new Set(['setMicrophoneSelection'])
 export interface BoxAudioClient {
   call<T>(target: BoxAudioTarget, method: string, args: unknown[]): Promise<T>
   callStamped<T>(target: BoxAudioTarget, method: string, args: unknown[]): Promise<{ epoch: string; value: T }>
@@ -94,7 +92,7 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
     const readOnly = boxAudioReadOnly(target, method)
     // Uncertainty caused only by a host restart (no unknown outcome on this epoch)
     // is resolved for capture by reading the new host first; nothing is replayed.
-    if (uncertain && !readOnly && target === 'owner' && CAPTURE_RESYNC.has(method) && unknownEpoch !== epoch) {
+    if (uncertain && !readOnly && target === 'service' && CAPTURE_RESYNC.has(method) && unknownEpoch !== epoch) {
       await (resyncing ??= call('service', 'reconcile', []).finally(() => { resyncing = undefined }))
       await ensure()
     }
