@@ -1,8 +1,8 @@
 const { randomBytes } = require('node:crypto')
 const {
   closeSync,
-  existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -145,8 +145,23 @@ function releaseRefusal(directory) {
   return null
 }
 
+/** Whether `path` exists. Only ENOENT means "no"; an unreadable parent or any
+ *  other error throws, so an unknowable state is never taken for absence. */
+function pathExists(path) {
+  try { lstatSync(path); return true } catch (error) {
+    if (error.code === 'ENOENT') return false
+    throw error
+  }
+}
+
+/** The slot directories present. Only a missing slots directory (ENOENT) means
+ *  "no slots"; EACCES or any other error throws so callers fail closed rather
+ *  than treat live holders as absent. */
 function occupiedSlots(slotsPath) {
-  try { return readdirSync(slotsPath).filter(name => SLOT_NAME.test(name)) } catch { return [] }
+  try { return readdirSync(slotsPath).filter(name => SLOT_NAME.test(name)) } catch (error) {
+    if (error.code === 'ENOENT') return []
+    throw error
+  }
 }
 
 function describeHolder(directory, label) {
@@ -269,7 +284,7 @@ function attempt(repoRoot, owner, options, state) {
   }
 
   // An old-format holder, or an exclusive claim, occupies every slot.
-  if (existsSync(legacy)) {
+  if (pathExists(legacy)) {
     state.busy = `an exclusive or old-format build holds every slot (${describeHolders([{ directory: legacy, label: 'exclusive/old-format' }])})`
     return null
   }
@@ -289,7 +304,12 @@ function attempt(repoRoot, owner, options, state) {
       rmSync(path, { recursive: true, force: true })
       throw error
     }
-    if (existsSync(legacy)) {
+    let claimed
+    try { claimed = pathExists(legacy) } catch (error) {
+      rmSync(path, { recursive: true, force: true })
+      throw error
+    }
+    if (claimed) {
       rmSync(path, { recursive: true, force: true })
       state.busy = `an exclusive or old-format build holds every slot (${describeHolders([{ directory: legacy, label: 'exclusive/old-format' }])})`
       return null
@@ -313,7 +333,11 @@ function abandon(repoRoot, state) {
  *  NativeBuildBusyError naming the holders when none is free. */
 function acquireNativeBuildLock(repoRoot, owner, options = {}) {
   const state = {}
-  const handle = attempt(repoRoot, owner, options, state)
+  let handle
+  try { handle = attempt(repoRoot, owner, options, state) } catch (error) {
+    abandon(repoRoot, state)
+    throw error
+  }
   if (handle) return handle
   abandon(repoRoot, state)
   throw new NativeBuildBusyError(
@@ -358,18 +382,50 @@ function releaseStaleNativeBuildLock(repoRoot, which) {
   const exclusive = which === 'exclusive'
   if (!exclusive && !/^[1-9][0-9]*$/.test(String(which)))
     throw new Error(`--release-stale takes a slot number or "exclusive" (got ${which})`)
-  const directory = exclusive
-    ? nativeBuildLockPath(repoRoot)
-    : join(nativeBuildSlotsPath(repoRoot), `slot-${which}`)
-  if (!existsSync(directory)) throw new Error(`Nothing to release: ${directory} does not exist`)
-  const refusal = releaseRefusal(directory)
-  if (refusal) throw new Error(`Refusing to release ${directory}: ${refusal}`)
-  const token = readRecord(directory)?.token
-  // Narrow the window against a concurrent --release-stale plus a new claimant:
-  // run one release at a time (it is a manual, human-run command).
-  if (readRecord(directory)?.token !== token) throw new Error(`Refusing to release ${directory}: it changed owner`)
-  rmSync(directory, { recursive: true, force: false })
-  return { directory, token }
+  const legacy = nativeBuildLockPath(repoRoot)
+  const directory = exclusive ? legacy : join(nativeBuildSlotsPath(repoRoot), `slot-${which}`)
+  if (!pathExists(directory)) throw new Error(`Nothing to release: ${directory} does not exist`)
+
+  if (exclusive) {
+    // The legacy directory is the target itself, so it cannot fence itself.
+    // Validate, then re-read the token immediately before removing.
+    const refusal = releaseRefusal(directory)
+    if (refusal) throw new Error(`Refusing to release ${directory}: ${refusal}`)
+    const token = readRecord(directory)?.token
+    if (readRecord(directory)?.token !== token) throw new Error(`Refusing to release ${directory}: it changed owner`)
+    rmSync(directory, { recursive: true, force: false })
+    return { directory, token }
+  }
+
+  // Fence: hold the legacy exclusive directory for the whole release. While it
+  // exists no slot can be taken (takers back off), so the dead slot validated
+  // here cannot be removed and re-acquired underneath this call, and two
+  // overlapping releases cannot both run: the second finds the claim held.
+  const claimToken = newToken()
+  try {
+    mkdirSync(legacy)
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    throw new Error(`Refusing to release ${directory}: the exclusive lock directory ${legacy} is held ` +
+      `(${describeHolders([{ directory: legacy, label: 'exclusive/old-format' }])}); another release or an exclusive build is in progress, retry later`)
+  }
+  try {
+    writeRecord(legacy, {
+      format: RECORD_FORMAT, token: claimToken, pid: process.pid, owner: 'release-stale',
+      hostname: hostname(), repoIdentity: gitCommonDirectory(repoRoot), checkout: resolve(repoRoot),
+      startedAt: new Date().toISOString(), exclusive: true, draining: true
+    })
+    // Re-check under the fence: the slot may have been released meanwhile.
+    if (!pathExists(directory)) throw new Error(`Nothing to release: ${directory} does not exist`)
+    const refusal = releaseRefusal(directory)
+    if (refusal) throw new Error(`Refusing to release ${directory}: ${refusal}`)
+    const token = readRecord(directory)?.token
+    rmSync(directory, { recursive: true, force: false })
+    return { directory, token }
+  } finally {
+    if (readRecord(legacy)?.token === claimToken || !pathExists(join(legacy, 'owner.json')))
+      rmSync(legacy, { recursive: true, force: true })
+  }
 }
 
 /** The record proving `token` holds a slot (or the exclusive/old-format lock)

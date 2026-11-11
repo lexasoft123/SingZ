@@ -590,3 +590,39 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     assert.equal(locks.acquireNativeBuildLock(root, 'next', ONE_SLOT).slot, 1)
   })
 }
+
+test('an unreadable slots directory fails closed: no exclusive grant, no assertion', POSIX, (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignores directory permissions')
+  const { chmodSync } = require('node:fs')
+  const { root, track } = fixture(t)
+  const holder = track(locks.acquireNativeBuildLock(root, 'live slot', ONE_SLOT))
+  const slots = locks.nativeBuildSlotsPath(root)
+  chmodSync(slots, 0o300) // write+search, no read: readdir fails with EACCES
+  t.after(() => { try { chmodSync(slots, 0o700) } catch { /* removed */ } })
+  assert.throws(() => locks.acquireNativeBuildLock(root, 'exclusive', { ...ONE_SLOT, exclusive: true }), /EACCES/)
+  assert.equal(existsSync(locks.nativeBuildLockPath(root)), false, 'the failed exclusive attempt must not leave its claim')
+  assert.throws(() => locks.assertNativeBuildLockHeld(root, holder.token), /EACCES/)
+  chmodSync(slots, 0o700)
+  assert.equal(locks.assertNativeBuildLockHeld(root, holder.token).slot, 1)
+})
+
+test('--release-stale is fenced by the exclusive directory: an overlapping release cannot remove a live slot', POSIX, (t) => {
+  const { root } = fixture(t)
+  const slot = slotDirectory(root, 1)
+  const legacy = locks.nativeBuildLockPath(root)
+  mkdirSync(slot, { recursive: true })
+  writeFileSync(join(slot, 'owner.json'), JSON.stringify(staleRecord({ draining: true })))
+  // Release A is mid-flight: it holds the fence (alive owner, so it is not itself stale).
+  mkdirSync(legacy)
+  writeFileSync(join(legacy, 'owner.json'), JSON.stringify(staleRecord({ pid: process.pid, draining: true })))
+  // B must wait/refuse, and C must not be admitted into the slot A validated.
+  assert.throws(() => locks.releaseStaleNativeBuildLock(root, 1), /exclusive lock directory .* is held/)
+  assert.equal(existsSync(slot), true, 'B must not touch the slot while A holds the fence')
+  assert.throws(() => locks.acquireNativeBuildLock(root, 'C', ONE_SLOT), { code: 'SINGZ_NATIVE_BUILD_BUSY' })
+  assert.equal(existsSync(legacy), true, "B must not remove A's fence")
+  // Once A finishes, a release works and leaves neither slot nor fence behind.
+  rmSync(legacy, { recursive: true })
+  locks.releaseStaleNativeBuildLock(root, 1)
+  assert.equal(existsSync(slot), false)
+  assert.equal(existsSync(legacy), false)
+})

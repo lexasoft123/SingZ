@@ -194,7 +194,8 @@ fi
 # a `git add -A` can never commit them: a committed vendor symlink once
 # merged into main and silently CLOBBERED the real vendor/ on checkout.
 EXCLUDE="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
-# Idempotent and safe under concurrent setups (lock + temp file + rename).
+# Idempotent and safe under concurrent setups (appends only the missing lines,
+# preserving existing content, and re-reads to confirm).
 node "$WT/scripts/ensure-git-exclude.cjs" "$EXCLUDE" \
   '# worktree-setup provisioning links (machine-local, every worktree)' \
   'vendor' 'gdrive.config.json' 'local.properties'
