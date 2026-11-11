@@ -46,7 +46,7 @@ export const boxSettings: Translation<typeof english> = {
   'box.settings.noOutputsTitle': 'Аудиовыходы не найдены',
   'box.settings.noOutputsBody': 'Подключите выход хотя бы с одним выходным каналом и обновите список устройств.',
   'box.settings.inputs': 'Микрофонные входы',
-  'box.settings.inputsHelp': 'Сведения из текущего списка аудиоустройств, только для чтения.',
+  'box.settings.inputsHelp': "Входы, о которых сообщает аудиохост. Каналы для анализа выбираются для микрофонов; мониторинг по умолчанию остаётся на аппаратном микшере.",
   'box.settings.inputList': 'Подключённые микрофонные входы',
   'box.settings.noInputsTitle': 'Микрофонные входы не найдены',
   'box.settings.inputUnavailable': 'Сведения о входах появятся после чтения аудиоустройств.',

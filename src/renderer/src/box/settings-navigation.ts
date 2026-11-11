@@ -6,6 +6,18 @@ export function detailsReturnRoute(current: BoxRoute, previous: BoxRoute): BoxRo
   return current === 'details' ? previous : current
 }
 
+/** Settings (the hub) and Account return to the screen they were opened from, not
+ * to the catalog. Opening one from the other keeps the original origin. */
+export function overlayReturnRoute(current: BoxRoute, previous: BoxRoute, opening: 'home' | 'account'): BoxRoute {
+  return current === 'home' || current === 'settings' || current === opening ? previous : current
+}
+
+/** Account opened from the Settings hub returns to the hub, unless the hub itself was
+ * opened from Account: then Account keeps its own origin, so Back cannot cycle. */
+export function accountReturnFromHub(hubReturn: BoxRoute, accountReturn: BoxRoute): BoxRoute {
+  return hubReturn === 'account' ? accountReturn : 'home'
+}
+
 export interface BoxSettingsNavigationState {
   applyingOutput: boolean
   hasCurrent: boolean

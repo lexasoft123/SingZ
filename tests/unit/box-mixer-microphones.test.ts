@@ -20,7 +20,7 @@ afterEach(() => { vi.useRealTimers(); setLocale('en') })
 describe('mixer private microphone input observation', () => {
   it('wires the same snapshot through the full mixer to physical channels0/1, not the selected pitch channel', () => {
     const noop = vi.fn()
-    const html = renderToStaticMarkup(createElement(Mixer, { microphoneSnapshot: snapshot(), tab: 'main', tracks: [], masterVolume: 1, playing: true, canPlay: true,
+    const html = renderToStaticMarkup(createElement(Mixer, { microphoneSnapshot: snapshot(), tab: 'main', tracks: [], masterVolume: 1, playing: true, status: 'playing', canPlay: true,
       onTab: noop, onVolume: noop, onMuted: noop, onSolo: noop, onMasterVolume: noop, onToggle: noop, onClose: noop }))
     expect(html).toContain('data-mix-meter="mic1"'); expect(html).toContain('data-mix-meter="mic2"')
     expect(html).toContain('aria-valuenow="0.25"'); expect(html).toContain('aria-valuenow="0.5"')
