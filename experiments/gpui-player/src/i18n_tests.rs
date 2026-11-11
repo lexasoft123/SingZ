@@ -249,3 +249,199 @@ multiline`,
         vec!["common", "app", "main"]
     );
 }
+
+/// Every string the native shell used to type in Rust. Each must resolve in all
+/// 15 locales; a missing key would come back as the key itself.
+const NATIVE_ONLY_KEYS: &[&str] = &[
+    "main.menu.settings",
+    "main.menu.quit",
+    "main.menu.window",
+    "main.menu.closeWindow",
+    "main.dialog.addAudioTracks",
+    "main.model.checking",
+    "main.source.preparing",
+    "diagnostics.notice.savePrototype",
+    "diagnostics.notice.sessionGone",
+    "settings.output.loadingDevices",
+    "settings.mic.noChannels",
+    "settings.mic.waiting",
+    "settings.mic.permissionRequired",
+    "settings.mic.unavailable",
+    "settings.mic.off",
+    "settings.mic.captureUnavailable",
+    "settings.mic.previewOff",
+    "settings.mic.enable",
+    "settings.mic.retry",
+    "settings.monitor.startPausesPlayback",
+    "settings.route.applying",
+    "settings.dsp.alwaysOn",
+    "microphone.recording.noActive",
+    "microphone.error.nativeInput",
+    "microphone.error.recordingFailed",
+    "player.pitch.micStopping",
+    "player.pitch.micUnavailableShort",
+    "player.pitch.micMonitoringOwns",
+    "player.pitch.warning.invalid",
+    "player.pitch.warning.invalidDuration",
+    "player.pitch.warning.differentDuration",
+    "player.pitch.warning.needsUpdating",
+    "carryLine.queuedSaveDidNotRun",
+    "library.progress.updatingLyrics",
+    "library.progress.readingAudio",
+    "library.progress.decodingAudio",
+    "library.progress.savingProject",
+    "library.splitWorkflow.checkingSplitter",
+    "library.splitWorkflow.preparingAudio",
+    "library.drive.updatingCatalog",
+    "library.drive.alreadyDownloaded",
+    "library.drive.downloaded",
+    "library.drive.downloadCancelled",
+    "library.drive.notConfigured",
+    "library.drive.checking",
+    "library.drive.finishingSync",
+    "library.picker.noPlayable",
+    "library.recovery.renamedFolderWarning",
+    "drive.auth.callbackInvalid",
+    "lyrics.align.cancelled",
+    "lyrics.align.modelsMissing",
+    "lyrics.editor.earlierDraftSaved",
+    "lyrics.editor.noLines",
+    "quickStart.title",
+    "quickStart.welcome",
+    "quickStart.start",
+    "quickStart.later",
+    "quickStart.skip",
+    "quickStart.back",
+    "quickStart.next",
+    "quickStart.done",
+    "quickStart.intro",
+    "quickStart.tempo",
+    "quickStart.loop",
+    "quickStart.step.library.title",
+    "quickStart.step.library.body",
+    "quickStart.step.split.title",
+    "quickStart.step.split.body",
+    "quickStart.step.stems.title",
+    "quickStart.step.stems.body",
+    "quickStart.step.lyrics.title",
+    "quickStart.step.lyrics.body",
+    "quickStart.step.practice.title",
+    "quickStart.step.practice.body",
+    "quickStart.step.training.title",
+    "quickStart.step.training.body",
+    "quickStart.step.sync.title",
+    "quickStart.step.sync.body",
+    "quickStart.step.settings.title",
+    "quickStart.step.settings.body",
+    "quickStart.saved.title",
+    "quickStart.saved.body",
+    "quickStart.karaoke.title",
+    "quickStart.karaoke.body",
+];
+/// English is a deliberate answer for these (the word is the same in that language).
+const SAME_AS_ENGLISH: &[(&str, &str)] = &[("fil", "main.menu.window")];
+#[test]
+fn native_only_strings_exist_in_every_locale_and_are_translated() {
+    for key in NATIVE_ONLY_KEYS {
+        let english = lookup(Locale::En, key, &[]);
+        assert!(!english.is_empty() && english != *key, "English is missing {key}");
+        for locale in Locale::ALL {
+            let text = lookup(locale, key, &[]);
+            assert!(!text.is_empty() && text != *key, "{} is missing {key}", locale.as_str());
+            if locale != Locale::En && !SAME_AS_ENGLISH.contains(&(locale.as_str(), *key)) {
+                assert_ne!(text, english, "{} left {key} in English", locale.as_str());
+            }
+        }
+    }
+}
+#[test]
+fn quick_start_tour_copy_is_complete_and_matches_the_generated_en_ru_copy() {
+    let json: serde_json::Value = serde_json::from_str(include_str!("quick_start_copy.json")).unwrap();
+    for locale in [Locale::En, Locale::Ru] {
+        let copy = &json[locale.as_str()];
+        let key = |name: &str| lookup(locale, &format!("quickStart.{name}"), &[]);
+        for name in ["title", "welcome", "start", "later", "skip", "back", "next", "done", "intro", "tempo", "loop"] {
+            assert_eq!(key(name), copy[name].as_str().unwrap(), "{} {name}", locale.as_str());
+        }
+        for (step, source) in [
+            ("step.library", &copy["steps"]["library"]),
+            ("step.split", &copy["steps"]["split"]),
+            ("step.stems", &copy["steps"]["stems"]),
+            ("step.lyrics", &copy["steps"]["lyrics"]),
+            ("step.practice", &copy["steps"]["practice"]),
+            ("step.training", &copy["steps"]["training"]),
+            ("step.sync", &copy["steps"]["sync"]),
+            ("step.settings", &copy["steps"]["settings"]),
+            ("saved", &copy["saved"]),
+            ("karaoke", &copy["karaoke"]),
+        ] {
+            assert_eq!(key(&format!("{step}.title")), source[0].as_str().unwrap(), "{} {step}", locale.as_str());
+            assert_eq!(key(&format!("{step}.body")), source[1].as_str().unwrap(), "{} {step}", locale.as_str());
+        }
+    }
+}
+/// The part of a source file that ships: everything before its test module.
+fn shipped(source: &str) -> &str {
+    let mut offset = 0;
+    let mut pending: Option<usize> = None;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[cfg(test)]") {
+            pending = Some(offset);
+        } else if let Some(start) = pending {
+            if trimmed.starts_with("mod ") || trimmed.starts_with("pub mod ") {
+                return &source[..start];
+            }
+            if !trimmed.starts_with("#[") {
+                pending = None;
+            }
+        }
+        offset += line.len();
+    }
+    source
+}
+/// R-04's grep, kept as a test: these literals were typed in Rust and now live in i18n.
+#[test]
+fn converted_native_strings_stay_out_of_shipped_rust_source() {
+    let sources: &[(&str, &str, &[&str])] = &[
+        ("desktop_lifecycle.rs", include_str!("desktop_lifecycle.rs"), &["Settings…", "Quit SingZ", "Close Window", "Menu::new(\"Window\")"]),
+        ("custom_tracks_host.rs", include_str!("custom_tracks_host.rs"), &["Add audio tracks"]),
+        ("diagnostics_host.rs", include_str!("diagnostics_host.rs"), &["That session log is no longer kept", "Saving log files is not connected"]),
+        ("library.rs", include_str!("library.rs"), &["Search projects…", "No playable projects in this folder", "starts_with(\"Sync paused.\")", "\"Signed out of Google Drive.\"", "\"Finishing Drive sync…\""]),
+        ("settings.rs", include_str!("settings.rs"), &[
+            "Loading native devices…", "\"No channels\"", "Waiting for microphone…", "Microphone permission required",
+            "\"Microphone unavailable\"", "Microphone is off", "Microphone capture unavailable", "Microphone preview is off",
+            "Enable microphone", "Retry microphone", "Buffer pending", "Starting monitoring pauses",
+            "Applying output route", "Native DSP playback is always", "Choose playback device…", "\"System default\""]),
+        ("pitch_strip.rs", include_str!("pitch_strip.rs"), &["\"Stopping…\"", "\"Mic unavailable\"", "Monitoring owns microphone", "\"Microphone unavailable\"", "Analyzing vocals…"]),
+        ("project_pitch.rs", include_str!("project_pitch.rs"), &["Saved pitch data is invalid", "Saved pitch has an invalid", "Saved pitch belongs to", "Saved pitch needs updating"]),
+        ("source_jobs.rs", include_str!("source_jobs.rs"), &[
+            "Updating lyrics…", "Reading audio…", "Decoding audio…", "Saving project…", "Checking splitter…",
+            "Preparing audio…", "\"Preparing…\".into()", "The stem splitter has not been downloaded yet"]),
+        ("drive_sync.rs", include_str!("drive_sync.rs"), &["Updating catalog…"]),
+        ("drive_restore.rs", include_str!("drive_restore.rs"), &["\"Already downloaded\"", "progress(\"Downloaded\""]),
+        ("drive_restore_service.rs", include_str!("drive_restore_service.rs"), &["Download cancelled. Completed files are kept."]),
+        ("drive_service.rs", include_str!("drive_service.rs"), &[
+            "Google Drive is not configured", "\"Signed out of Google Drive.\"", "Sync paused. Completed files are kept",
+            "Finish signing in to Google in your browser", "Checking Google Drive…", "\"Finishing Drive sync…\""]),
+        ("drive_local_ops.rs", include_str!("drive_local_ops.rs"), &["Recovered the actual renamed folder"]),
+        ("drive_auth.rs", include_str!("drive_auth.rs"), &["Invalid sign-in callback. Return to SingZ"]),
+        ("models.rs", include_str!("models.rs"), &["Checking installed models…"]),
+        ("engine_status.rs", include_str!("engine_status.rs"), &["The stem splitter has not been downloaded yet"]),
+        ("microphone.rs", include_str!("microphone.rs"), &["No matching microphone recording is active", "\"Native input failed\"", "Native microphone recording failed"]),
+        ("lyrics_align.rs", include_str!("lyrics_align.rs"), &["write!(f, \"Alignment cancelled\")", "Alignment models are not installed"]),
+        ("lyrics_editor.rs", include_str!("lyrics_editor.rs"), &["The earlier draft was saved", "No lines to save."]),
+        ("carry_line_host.rs", include_str!("carry_line_host.rs"), &["\" Queued Save did not run.\""]),
+        ("quick_start.rs", include_str!("quick_start.rs"), &["quick_start_copy.json"]),
+    ];
+    let mut found = vec![];
+    for (file, source, literals) in sources {
+        let source = shipped(source);
+        for literal in *literals {
+            if source.contains(literal) {
+                found.push(format!("{file}: {literal}"));
+            }
+        }
+    }
+    assert!(found.is_empty(), "user-visible text is typed in Rust again:\n{}", found.join("\n"));
+}

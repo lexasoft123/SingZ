@@ -3,12 +3,6 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
-  "main.error.copySourceChanged": "Sumber salinan untuk “{name}” telah berubah. Cuba lagi.",
-  "main.error.linkedFilesystemPath": "Laluan pautan simbolik tidak boleh digunakan untuk salinan kerja.",
-  "main.error.portableName": "“{name}”: Pilih nama sehingga 240 bait tanpa nama simpanan Windows, aksara kawalan, atau noktah atau ruang di hujung.",
-  "main.error.networkFilesystem": "Menyimpan atau memindahkan projek pada sistem fail rangkaian tidak disokong. Pilih folder pustaka setempat.",
-  "main.error.filesystemPublish": "“{name}”: Sistem fail ini tidak dapat menyimpan projek dengan selamat. Pilih folder pustaka setempat yang lain dan cuba lagi.",
-  "main.error.sourceCacheFull": "Cache salinan kerja penuh. Tutup projek yang tidak digunakan dan cuba lagi kemudian.",
 
   "main.sync.downloadDeferred": "{dir} tidak ditambah: {reason}. Lagu kekal di Drive; betulkan masalah dan segerakkan semula.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
@@ -162,5 +156,6 @@ export const main: Translation<typeof en> = {
   "main.sync.removing": "Menghapuskan {file} dari Drive...",
   "main.sync.removingGone": "Menghapuskan {name} dari Drive (disebut atau dihapuskan di sini)...",
   "main.sync.updatingCatalog": "Mengemas kini katalog telefon...",
-  "main.sync.upToDate": "Drive adalah terkini"
+  "main.sync.upToDate": "Drive adalah terkini",
+
 }

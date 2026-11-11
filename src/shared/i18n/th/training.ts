@@ -142,7 +142,6 @@ export const training: Translation<typeof en> = {
   "training.exerciseCount_one": "{n} การออกกําลังกาย",
   "training.exerciseCount_other": "{n} การฝึกอบรม",
   "training.nav.backToTraining": "← การฝึกอบรม",
-  "training.session.aria.backToSong": "กลับมาเพลง",
   "training.session.aria.endSession": "การประชุมจบ",
   "training.session.aria.exerciseProgress": "กิจกรรม {current} ของ {total}",
   "training.session.aria.targetNotes": "เติมเงินไทยฟรี",

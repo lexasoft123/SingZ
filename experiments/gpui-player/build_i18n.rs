@@ -287,6 +287,16 @@ pub fn extract(root: &Path) -> Result<BTreeMap<String, BTreeMap<String, String>>
             dictionary
                 .extend(parse(&text).map_err(|error| format!("{}: {error}", path.display()))?);
         }
+        // Native-only strings live outside the merge list so the Electron
+        // renderer, which imports index.ts, never bundles them.
+        let path = root.join(locale).join("native.ts");
+        let text =
+            fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        for (key, value) in parse(&text).map_err(|error| format!("{}: {error}", path.display()))? {
+            if dictionary.insert(key.clone(), value).is_some() {
+                return Err(format!("{}: {key} is also defined in a shared namespace", path.display()));
+            }
+        }
         all.insert(locale.into(), dictionary);
     }
     Ok(all)

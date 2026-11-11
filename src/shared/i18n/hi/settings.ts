@@ -3,7 +3,6 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
-  'settings.migration.summary': 'आपके पिछले SingZ से {count} सेटिंग आयात की गईं।',
   "settings.action.close": "बंद करें",
   "settings.common.systemDefault": "सिस्टम डिफ़ॉल्ट",
   "settings.common.savedDeviceMissing": "सहेजे गए उपकरण (संलग्न नहीं)",
@@ -194,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "माइक्रोफोन एक्सेस अवरुद्ध है. सिस्टम गोपनीयता सेटिंग्स में SingZ को अनुमति दें.",
   "settings.micPreview.busy": "माइक्रोफोन एक और ऐप में व्यस्त है. उस ऐप को बंद करें, फिर फिर इनपुट चुनें।",
   "settings.micPreview.unavailable": "वो माइक्रोफ़ोन उपलब्ध नहीं है. उसे फिर से कनेक्ट करें या दूसरा इनपुट चुनें.",
-  "settings.micPreview.unknown": "माइक्रोफोन चालू नहीं हो सका. डिवाइस कनेक्शन की जांच करें और फिर से प्रयास करें."
+  "settings.micPreview.unknown": "माइक्रोफोन चालू नहीं हो सका. डिवाइस कनेक्शन की जांच करें और फिर से प्रयास करें.",
+
+  "settings.mic.unavailable": "माइक्रोफ़ोन उपलब्ध नहीं है",
 }

@@ -3,10 +3,6 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
-  'lyrics.editor.skippedRows': "已跳過 {n} 行。儲存時僅保留顯示的行。",
-  'lyrics.editor.backupFailed': "無法備份原始歌詞。歌詞檔案未作變更。",
-  'lyrics.panel.autoPreservedEdited': "為保留您編輯的歌詞，已停止自動搜尋。請使用「變更…」或「編輯」來替換歌詞。",
-  'lyrics.panel.autoPreservedUnreadable': "無法讀取已儲存的歌詞，已停止自動搜尋。檔案未作變更，請使用「編輯」修復。",
   "lyrics.check.preciseSuffix": " · 精確",
   "lyrics.state.noWordsDetected": "在人聲中沒有檢測到任何歌詞。",
   "lyrics.check.mismatchPrecise": "在人聲中只聽到了 {pct}% 的歌詞——請檢查歌詞，或試試精確對齊。",
@@ -137,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "將選中的字微調 50 毫秒",
   "lyrics.editor.help.otherUndo": "撤銷——按住 Shift 重做",
   "lyrics.editor.help.otherReplace": "貼上整首歌的歌詞；保留的行會保留其時間",
-  "lyrics.editor.help.otherClose": "關閉編輯器（如有未儲存的修改會先詢問）"
+  "lyrics.editor.help.otherClose": "關閉編輯器（如有未儲存的修改會先詢問）",
+
 }

@@ -3,10 +3,6 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
-  'lyrics.editor.skippedRows': "छोड़ी गई पंक्तियाँ: {n}। सहेजने पर केवल दिखाई गई पंक्तियाँ रहेंगी।",
-  'lyrics.editor.backupFailed': "मूल बोलों का बैकअप नहीं बन सका। बोलों की फ़ाइल में कोई बदलाव नहीं हुआ।",
-  'lyrics.panel.autoPreservedEdited': "आपके संपादित बोल सुरक्षित रखने के लिए स्वचालित खोज रोक दी गई। उन्हें बदलने के लिए बदलें… या संपादित करें का उपयोग करें।",
-  'lyrics.panel.autoPreservedUnreadable': "सहेजे गए बोल पढ़े नहीं जा सके, इसलिए स्वचालित खोज रोक दी गई। फ़ाइल में कोई बदलाव नहीं हुआ; उसे संपादन में ठीक करें।",
   "lyrics.check.preciseSuffix": "· सटीक",
   "lyrics.state.noWordsDetected": "आवाजों में कोई शब्द नहीं मिला।",
   "lyrics.check.mismatchPrecise": "इन शब्दों में से केवल {pct}% को स्वरों में सुना गया था  पाठ की जाँच करें, या सटीकता का प्रयास करें।",
@@ -137,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "एक केंद्रित शब्द को 50 एमएस द्वारा नड्ग करें",
   "lyrics.editor.help.otherUndo": "हटाएँ  जोड़ें पुनरावृत्ति करने के लिए शिफ्ट",
   "lyrics.editor.help.otherReplace": "पूरे गीत को पेस्ट करें; पंक्तियों को समय पर रखें",
-  "lyrics.editor.help.otherClose": "संपादक को बंद करें (पहले सहेजे गए संपादन के बारे में पूछें)"
+  "lyrics.editor.help.otherClose": "संपादक को बंद करें (पहले सहेजे गए संपादन के बारे में पूछें)",
+
 }

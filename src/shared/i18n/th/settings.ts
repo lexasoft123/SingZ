@@ -3,7 +3,6 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
-  'settings.migration.summary': 'นำเข้าการตั้งค่า {count} รายการจาก SingZ เวอร์ชันก่อนแล้ว',
   "settings.action.close": "ปิด",
   "settings.common.systemDefault": "ระบบโดยปกติ",
   "settings.common.savedDeviceMissing": "อุปกรณ์ที่เก็บไว้ (ไม่เชื่อมต่อ)",
@@ -194,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "การเข้าถึงไมโครโฟนถูกปิด ให้ SingZ ในระบบการตั้งค่าความเป็นส่วนตัว",
   "settings.micPreview.busy": "มิโครฟอนมีงานในแอพอื่น ปิดแอพนั้น แล้วเลือกอินทอร์อีกครั้ง",
   "settings.micPreview.unavailable": "มิโครฟอนนั้นไม่ได้อยู่ ติดต่อมันใหม่ หรือเลือกอินทอร์พ์ใหม่",
-  "settings.micPreview.unknown": "มิโครฟอนไม่ได้เปิด ตรวจสอบการเชื่อมต่อของอุปกรณ์และลองอีกครั้ง"
+  "settings.micPreview.unknown": "มิโครฟอนไม่ได้เปิด ตรวจสอบการเชื่อมต่อของอุปกรณ์และลองอีกครั้ง",
+
+  "settings.mic.unavailable": "ไม่สามารถใช้ไมโครโฟนได้",
 }

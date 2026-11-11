@@ -86,13 +86,15 @@ pub struct SettingsScreen {
     #[cfg(feature = "ui-tests")]
     gain_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 }
-const OUTPUTS: &[&str] = &["System default", "MacBook Pro speakers", "Studio interface"];
+/// Fixture device rows. An empty first entry is the localized default row
+/// (`options` fills it from the dictionary); the rest are device names, data.
+const OUTPUTS: &[&str] = &["", "MacBook Pro speakers", "Studio interface"];
 const INPUTS: &[&str] = &[
-    "System default",
+    "",
     "MacBook Pro microphone",
     "Studio interface · 2 ch",
 ];
-const MONITOR_OUTPUTS: &[&str] = &["Choose playback device…", "Studio interface · 2 out · USB"];
+const MONITOR_OUTPUTS: &[&str] = &["", "Studio interface · 2 out · USB"];
 
 /// A playback lane cannot be assigned to both sides of the monitor route.
 fn monitor_channel_choice(mut current: [usize; 2], slot: usize, channel: usize) -> Option<[usize; 2]> {
@@ -416,16 +418,32 @@ impl SettingsScreen {
         self.route_busy = false;
         cx.notify();
     }
+    /// The first dropdown row, which selects the system's own choice.
+    fn default_row(id: &str) -> String {
+        crate::i18n::t(if id == "settings-monitor-output" {
+            "settings.monitor.choosePlaybackDevice"
+        } else {
+            "settings.common.systemDefault"
+        })
+    }
     fn options(&self, id: &str, defaults: &[&str]) -> Vec<(String, String)> {
         if id=="settings-provider" {return vec![("wasapi".into(),crate::i18n::t("settings.windows.wasapiOption")),("asio".into(),"ASIO".into())];}
         if !self.native {
             return defaults
                 .iter()
-                .map(|s| (String::new(), s.to_string()))
+                .enumerate()
+                .map(|(index, s)| {
+                    let label = if index == 0 && s.is_empty() {
+                        Self::default_row(id)
+                    } else {
+                        s.to_string()
+                    };
+                    (String::new(), label)
+                })
                 .collect();
         }
         let Some(inventory) = &self.inventory else {
-            return vec![(String::new(), "Loading native devices…".into())];
+            return vec![(String::new(), crate::i18n::t("settings.output.loadingDevices"))];
         };
         let devices = match id {
             "settings-output" | "settings-monitor-output" => Some(false),
@@ -433,14 +451,7 @@ impl SettingsScreen {
             _ => None,
         };
         if let Some(input) = devices {
-            let mut options = vec![(
-                String::new(),
-                if id == "settings-monitor-output" {
-                    "Choose playback device…".into()
-                } else {
-                    "System default".into()
-                },
-            )];
+            let mut options = vec![(String::new(), Self::default_row(id))];
             let devices:Vec<_>=if input {inventory.devices.iter().filter(|d|d.inputs>0).collect()}
                 else if id=="settings-monitor-output" {inventory.monitor_outputs().collect()}
                 else {inventory.playback_outputs().collect()};
@@ -958,7 +969,7 @@ impl SettingsScreen {
             if id=="settings-provider" {
                 "Saved audio provider · unavailable".into()
             } else if options.is_empty() {
-                "No channels".into()
+                crate::i18n::t("settings.mic.noChannels")
             } else {
                 "Saved channel · unavailable".into()
             }
@@ -1071,20 +1082,20 @@ impl SettingsScreen {
                     if live {
                         format!("{db:.1} dBFS")
                     } else {
-                        "Waiting for microphone…".into()
+                        crate::i18n::t("settings.mic.waiting")
                     }
                 }
                 crate::microphone::Phase::Starting | crate::microphone::Phase::Stopping => {
                     crate::i18n::t("settings.mic.startingPreview").into()
                 }
-                crate::microphone::Phase::Permission => "Microphone permission required".into(),
-                crate::microphone::Phase::Error => "Microphone unavailable".into(),
-                _ => "Microphone is off".into(),
+                crate::microphone::Phase::Permission => crate::i18n::t("settings.mic.permissionRequired"),
+                crate::microphone::Phase::Error => crate::i18n::t("settings.mic.unavailable"),
+                _ => crate::i18n::t("settings.mic.off"),
             }
         } else if self.review_fixture {
             crate::i18n::t("settings.mic.startingPreview").into()
         } else {
-            "Microphone capture unavailable".into()
+            crate::i18n::t("settings.mic.captureUnavailable")
         };
         Self::strip(12.)
             .child(
@@ -1244,7 +1255,7 @@ impl SettingsScreen {
                 Self::mono(if self.native {
                     self.microphone.error.clone().unwrap_or_else(|| {
                         if self.microphone.label.is_empty() {
-                            "Microphone preview is off.".into()
+                            crate::i18n::t("settings.mic.previewOff")
                         } else {
                             format!(
                                 "{} · IN {}/{}{}",
@@ -1278,7 +1289,7 @@ impl SettingsScreen {
                     view.child(
                         self.control("settings-enable-microphone", ghost_pill(
                             "settings-enable-microphone",
-                            if self.microphone.phase == crate::microphone::Phase::Permission { "Enable microphone" } else { "Retry microphone" },
+                            crate::i18n::t(if self.microphone.phase == crate::microphone::Phase::Permission { "settings.mic.enable" } else { "settings.mic.retry" }),
                         ).mt(px(8.)), true, cx),
                     )
                 },
@@ -1394,7 +1405,7 @@ impl SettingsScreen {
                 self.microphone.buffer_frames as f32 * 1000. / self.microphone.sample_rate.max(1.)
             )
         } else {
-            "Buffer pending".into()
+            crate::i18n::t("player.dspGraph.bufferPending")
         };
         let nodes = [
             (
@@ -1619,7 +1630,7 @@ impl SettingsScreen {
                 .clone()
                 .or_else(|| self.monitor_route().err())
                 .unwrap_or_else(|| {
-                    "Starting monitoring pauses song playback. Stop restores it paused.".into()
+                    crate::i18n::t("settings.monitor.startPausesPlayback")
                 })
         };
         let gain_slider = |cx: &mut Context<Self>| {
@@ -1864,9 +1875,9 @@ impl SettingsScreen {
                 .when(self.route_error.is_some(),|view|view.child(div().mt(px(9.)).px(px(11.)).py(px(10.)).rounded(px(9.)).border_1().border_color(Self::recovery_border()).bg(Rgba {r:0.124706,g:0.080902,b:0.0617255,a:1.})
                     .child(Self::hint(self.route_error.clone().unwrap_or_default()).mt(px(0.)).text_color(rgb(DANGER)))
                     .child(div().mt(px(8.)).flex().items_center().gap(px(10.)).child(self.retry_route(cx)))))
-                .when(self.route_busy,|view|view.child(Self::hint("Applying output route… Playback will stay paused.")))
+                .when(self.route_busy,|view|view.child(Self::hint(crate::i18n::t("settings.route.applying"))))
                 .child(div().opacity(0.45).child(self.check_row("settings-native",crate::i18n::t("settings.playback.useNativeLabel"),true,cx)))
-                .child(Self::hint("Native DSP playback is always enabled.")))
+                .child(Self::hint(crate::i18n::t("settings.dsp.alwaysOn"))))
             .when(self.windows_provider(),|view|view
                 .child(Self::label(crate::i18n::t("settings.windows.providerLabel")))
                 .child(self.field("settings-provider",&["System audio (WASAPI)","ASIO"],0,cx))

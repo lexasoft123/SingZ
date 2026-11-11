@@ -97,7 +97,7 @@ impl Player {
                     Some((id, self.diagnostics_session, generation, name))
             }
             Err(_) => self.log_panel.update(cx, |log, cx| {
-                let past = diagnostics::parse_session("That session log is no longer kept.");
+                let past = diagnostics::parse_session(&crate::i18n::t("diagnostics.notice.sessionGone"));
                 log.set_session_rows(
                     &name,
                     generation,
@@ -110,7 +110,7 @@ impl Player {
     }
     pub(super) fn save_diagnostics(&mut self, selected: Option<String>, cx: &mut Context<Self>) {
         if self.diagnostics.is_none() {
-            self.notice = Some("Saving log files is not connected in this prototype.".into());
+            self.notice = Some(crate::i18n::t("diagnostics.notice.savePrototype"));
             cx.notify();
             return;
         }
@@ -225,7 +225,7 @@ impl Player {
                 if session == self.diagnostics_session && self.screen == Screen::Log {
                     let past = match event.result {
                         Ok(diagnostics::Reply::Read(past)) => past,
-                        _ => diagnostics::parse_session("That session log is no longer kept."),
+                        _ => diagnostics::parse_session(&crate::i18n::t("diagnostics.notice.sessionGone")),
                     };
                     self.log_panel.update(cx, |log, cx| {
                         log.set_session_rows(

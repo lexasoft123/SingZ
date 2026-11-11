@@ -134,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Paghiwalay ng mga boses",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Hindi maaaring magsimula ang pag-play: {message}",
-  "library.engine.songUnreadable": "Hindi na mai-re-read ang kanta na ito mula sa disk, kaya walang dapat i-playback."
+  "library.engine.songUnreadable": "Hindi na mai-re-read ang kanta na ito mula sa disk, kaya walang dapat i-playback.",
+
 }

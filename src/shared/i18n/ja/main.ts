@@ -3,12 +3,6 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
-  "main.error.copySourceChanged": "「{name}」のコピー元が変更されました。もう一度お試しください。",
-  "main.error.linkedFilesystemPath": "作業用コピーにシンボリックリンクのパスは使用できません。",
-  "main.error.portableName": "“{name}”: 名前は240バイト以内で、Windowsの予約名、制御文字、末尾のピリオドや空白は使えません。",
-  "main.error.networkFilesystem": "ネットワーク上のファイルシステムへのプロジェクトの保存や移動には対応していません。ローカルのライブラリフォルダを選んでください。",
-  "main.error.filesystemPublish": "“{name}”: このファイルシステムにはプロジェクトを安全に保存できませんでした。別のローカルのライブラリフォルダを選んで再試行してください。",
-  "main.error.sourceCacheFull": "作業用コピーのキャッシュがいっぱいです。使用していないプロジェクトを閉じて、後でもう一度お試しください。",
 
   "main.sync.downloadDeferred": "{dir} を追加できませんでした：{reason}。曲は Drive に残っています。問題を解決して再同期してください。",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
@@ -162,5 +156,6 @@ export const main: Translation<typeof en> = {
   "main.sync.removing": "ドライブから{file}を削除する",
   "main.sync.removingGone": "{name}をドライブから削除する (ここに改名または削除)",
   "main.sync.updatingCatalog": "電話カタログを更新する...",
-  "main.sync.upToDate": "ドライブは最新です"
+  "main.sync.upToDate": "ドライブは最新です",
+
 }

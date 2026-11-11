@@ -215,5 +215,6 @@ export const player: Translation<typeof en> = {
   "player.dspGraph.transport.pre-roll": "전접기",
   "player.dspGraph.transport.playing": "놀아",
   "player.dspGraph.transport.paused": "정지",
-  "player.dspGraph.transport.completed": "완료"
+  "player.dspGraph.transport.completed": "완료",
+
 }

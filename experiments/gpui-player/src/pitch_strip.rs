@@ -39,7 +39,11 @@ fn key_shadow() -> Arc<RenderImage> {
 const CONTROLS_W: f32 = 228.;
 const KEYBOARD_W: f32 = 60.;
 const DURATION: f64 = 192.;
-const MIC_UNAVAILABLE: &str = "Microphone unavailable";
+/// The beat-finding note is hidden only while the pitch analysis itself runs.
+/// That is a typed flag; the warning text is display copy and may be translated.
+fn beat_progress_visible(pitch: Option<&crate::project_pitch::Pitch>) -> bool {
+    !pitch.is_some_and(|pitch| pitch.analyzing)
+}
 
 pub struct PitchStrip {
     timeline_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -232,15 +236,15 @@ impl Render for PitchStrip {
             }));
         let native = self.data.is_some() && !crate::integration::fixture_mode();
         let mic_label = if !native {
-            MIC_UNAVAILABLE.to_owned()
+            crate::i18n::t("settings.mic.unavailable")
         } else {
             match self.microphone.phase {
                 crate::microphone::Phase::Live => crate::i18n::t("player.pitch.micOn"),
                 crate::microphone::Phase::Starting => crate::i18n::t("player.pitch.micStarting"),
-                crate::microphone::Phase::Stopping => "Stopping…".to_owned(),
+                crate::microphone::Phase::Stopping => crate::i18n::t("player.pitch.micStopping"),
                 crate::microphone::Phase::Permission => crate::i18n::t("player.pitch.micBlocked"),
-                crate::microphone::Phase::Error => "Mic unavailable".to_owned(),
-                crate::microphone::Phase::Monitoring => "Monitoring owns microphone".to_owned(),
+                crate::microphone::Phase::Error => crate::i18n::t("player.pitch.micUnavailableShort"),
+                crate::microphone::Phase::Monitoring => crate::i18n::t("player.pitch.micMonitoringOwns"),
                 crate::microphone::Phase::Off => crate::i18n::t("player.pitch.micMatch"),
             }
         };
@@ -348,7 +352,7 @@ impl Render for PitchStrip {
             }
         }))
         .child(hud(
-            self.beat_progress.filter(|_| self.data.as_ref().is_none_or(|p|p.warning.as_deref() != Some("Analyzing vocals…"))),
+            self.beat_progress.filter(|_| beat_progress_visible(self.data.as_deref())),
             note,
             fit,
             microphone,
@@ -1038,4 +1042,21 @@ fn paint_native_notes(
             }
         },
     );
+}
+#[cfg(test)]
+mod tests {
+    use super::beat_progress_visible;
+    use crate::project_pitch::Pitch;
+    #[test]
+    fn beat_note_follows_the_typed_analysis_flag_not_the_warning_text() {
+        let mut pitch = Pitch::default();
+        // The old check hid the note for exactly this English text. Display
+        // copy is translated now, so the text alone must not decide anything.
+        pitch.warning = Some("Analyzing vocals…".into());
+        assert!(beat_progress_visible(Some(&pitch)));
+        pitch.warning = Some("Analizando…".into());
+        pitch.analyzing = true;
+        assert!(!beat_progress_visible(Some(&pitch)));
+        assert!(beat_progress_visible(None));
+    }
 }

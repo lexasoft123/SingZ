@@ -142,7 +142,6 @@ export const training: Translation<typeof en> = {
   "training.exerciseCount_one": "{n} ejercicio",
   "training.exerciseCount_other": "{n} ejercicios",
   "training.nav.backToTraining": "← Práctica",
-  "training.session.aria.backToSong": "Volver a la canción",
   "training.session.aria.endSession": "Finalizar sesión",
   "training.session.aria.exerciseProgress": "Ejercicio {current} de {total}",
   "training.session.aria.targetNotes": "Notas objetivo",

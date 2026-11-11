@@ -168,7 +168,6 @@ export const training: Translation<typeof en> = {
 
   // ── in-session screen ──
   'training.nav.backToTraining': '← 训练',
-  'training.session.aria.backToSong': '返回歌曲',
   'training.session.aria.endSession': '结束练习',
   'training.session.aria.exerciseProgress': '第 {current} / {total} 项练习',
   'training.session.aria.targetNotes': '目标音',

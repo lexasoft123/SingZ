@@ -179,5 +179,6 @@ export const library: Translation<typeof en> = {
   'library.playbackErrorToast.couldNotStart': '无法开始播放：{message}',
 
   // ── audio/engine (the one status genuinely shown to the singer, as this toast) ──
-  'library.engine.songUnreadable': '无法从磁盘重新读取这首歌，因此没有内容可以播放。'
+  'library.engine.songUnreadable': '无法从磁盘重新读取这首歌，因此没有内容可以播放。',
+
 }

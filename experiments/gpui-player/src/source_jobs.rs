@@ -62,7 +62,9 @@ fn split_label(label: &str) -> String {
         (Some(2), label)
     } else { (None, label) };
     let key = match label {
-        "Preparing…" | "Checking splitter…" | "Preparing audio…" => "warmingUp",
+        // main.rs still publishes this English label; every label this module
+        // publishes is already translated and passes through unchanged.
+        "Preparing…" => "warmingUp",
         "Splitting stems" => "splittingStems",
         "Separating vocals" => "separatingVocals",
         "Loading stems…" => "loadingStems",
@@ -240,7 +242,7 @@ impl Service {
                 }
                 state.generation = id;
                 state.busy = true;
-                state.label = "Preparing…".into();
+                state.label = crate::i18n::t("main.source.preparing");
                 state.percent = 0.;
                 state.error = None;
                 state.result = None;
@@ -1547,7 +1549,7 @@ fn execute_with_engine(
                 output.working,
                 "Only a private split output can refresh its lyrics"
             );
-            progress("Updating lyrics…", 98.);
+            progress(&crate::i18n::t("library.progress.updatingLyrics"), 98.);
             refresh_split_lyrics(
                 &source_dir,
                 &output.path,
@@ -1587,7 +1589,7 @@ fn execute_with_engine(
             Job::Open(path)
         }
         Job::Save { dir: source, mut raw, custom, target } => {
-            progress("Saving project…", 0.);
+            progress(&crate::i18n::t("library.progress.savingProject"), 0.);
             #[cfg(feature = "ui-tests")]
             if let Some(gate) = std::env::var_os("SINGZ_GPUI_SOURCE_SAVE_PREPARE_GATE")
                 .map(PathBuf::from)
@@ -1636,10 +1638,10 @@ fn execute_with_engine(
                 .contains(&ext.as_str()),
                 "Choose an audio file or a SingZ project"
             );
-            progress("Reading audio…", 0.);
+            progress(&crate::i18n::t("library.progress.readingAudio"), 0.);
             let song = format!("song.{ext}");
             copy(&path, &dir.join(&song), serial, id)?;
-            progress("Decoding audio…", 20.);
+            progress(&crate::i18n::t("library.progress.decodingAudio"), 20.);
             let rendered = dir.join("input44k.wav");
             render(&dir.join(&song), &rendered, serial, id)?;
             fs::remove_file(rendered)?;
@@ -1660,7 +1662,7 @@ fn execute_with_engine(
             require_vocals,
             mut target,
         } => {
-            progress("Checking splitter…", 0.);
+            progress(&crate::i18n::t("library.splitWorkflow.checkingSplitter"), 0.);
             let started = Instant::now();
             let discovered = crate::engine_status::discover(config, serial, id);
             cancelled(serial, id)?;
@@ -1684,8 +1686,8 @@ fn execute_with_engine(
                 "{}",
                 engine_status
                     .message
-                    .as_deref()
-                    .unwrap_or("The stem splitter has not been downloaded yet.")
+                    .clone()
+                    .unwrap_or_else(|| crate::i18n::t("main.error.splitterNotDownloaded"))
             );
             let engine = engine_status
                 .resolved
@@ -1697,7 +1699,7 @@ fn execute_with_engine(
                     "Backing-vocal separation requires the installed splitter pack. Download or reinstall it in AI models."
                 );
             }
-            progress("Preparing audio…", 0.);
+            progress(&crate::i18n::t("library.splitWorkflow.preparingAudio"), 0.);
             clone_project(&source, &dir, serial, id)?;
             fs::create_dir_all(dir.join("stems"))?;
             let materialized = crate::project_store::materialize_custom(

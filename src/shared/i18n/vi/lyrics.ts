@@ -3,10 +3,6 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
-  'lyrics.editor.skippedRows': "Số dòng bị bỏ qua: {n}. Khi lưu, chỉ giữ lại các dòng đang hiển thị.",
-  'lyrics.editor.backupFailed': "Không thể sao lưu lời bài hát gốc. Tệp lời bài hát không thay đổi.",
-  'lyrics.panel.autoPreservedEdited': "Đã dừng tìm kiếm tự động để giữ lại lời bài hát bạn đã sửa. Dùng Đổi… hoặc Chỉnh sửa để thay thế.",
-  'lyrics.panel.autoPreservedUnreadable': "Đã dừng tìm kiếm tự động vì không đọc được lời bài hát đã lưu. Tệp không thay đổi; dùng Chỉnh sửa để sửa lỗi.",
   "lyrics.check.preciseSuffix": "· chính xác",
   "lyrics.state.noWordsDetected": "Không có từ nào được phát hiện trong giọng hát.",
   "lyrics.check.mismatchPrecise": "Chỉ có {pct}% từ này được nghe trong giọng hát  kiểm tra văn bản, hoặc thử chính xác.",
@@ -137,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "Nhấn một từ tập trung 50 ms",
   "lyrics.editor.help.otherUndo": "Undo  thêm Shift để làm lại",
   "lyrics.editor.help.otherReplace": "Nhép toàn bộ bài hát; giữ các dòng giữ thời gian của họ",
-  "lyrics.editor.help.otherClose": "Đóng trình chỉnh sửa (hỏi trước về các chỉnh sửa chưa được lưu)"
+  "lyrics.editor.help.otherClose": "Đóng trình chỉnh sửa (hỏi trước về các chỉnh sửa chưa được lưu)",
+
 }

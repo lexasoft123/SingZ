@@ -52,7 +52,7 @@ impl Default for EngineStatus {
             command: None,
             needs_models: true,
             needs_pcm: false,
-            message: Some("The stem splitter has not been downloaded yet.".into()),
+            message: Some(crate::i18n::t("main.error.splitterNotDownloaded")),
             resolved: None,
         }
     }

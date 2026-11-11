@@ -3,12 +3,6 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
-  "main.error.copySourceChanged": "“{name}”의 복사 원본이 변경되었습니다. 다시 시도하세요.",
-  "main.error.linkedFilesystemPath": "작업 사본에는 심볼릭 링크 경로를 사용할 수 없습니다.",
-  "main.error.portableName": "“{name}”: 이름은 240바이트 이내여야 하며 Windows 예약 이름, 제어 문자, 끝의 마침표나 공백을 사용할 수 없습니다.",
-  "main.error.networkFilesystem": "네트워크 파일 시스템에서는 프로젝트 저장 및 이동을 지원하지 않습니다. 로컬 라이브러리 폴더를 선택하세요.",
-  "main.error.filesystemPublish": "“{name}”: 이 파일 시스템에 프로젝트를 안전하게 저장할 수 없습니다. 다른 로컬 라이브러리 폴더를 선택하고 다시 시도하세요.",
-  "main.error.sourceCacheFull": "작업 사본 캐시가 가득 찼습니다. 사용하지 않는 프로젝트를 닫고 나중에 다시 시도하세요.",
 
   "main.sync.downloadDeferred": "{dir} 추가 실패: {reason}. 곡은 Drive에 남아 있습니다. 문제를 해결한 후 다시 동기화하세요.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
@@ -162,5 +156,6 @@ export const main: Translation<typeof en> = {
   "main.sync.removing": "{file}을 드라이브에서 제거하고...",
   "main.sync.removingGone": "{name}을 드라이브에서 제거하는 것 (이곳에서 변경 또는 삭제)...",
   "main.sync.updatingCatalog": "전화 카탈로그를 업데이트하는 것...",
-  "main.sync.upToDate": "드라이브는 최신입니다"
+  "main.sync.upToDate": "드라이브는 최신입니다",
+
 }

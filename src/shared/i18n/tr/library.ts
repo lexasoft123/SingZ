@@ -133,5 +133,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Vokal ayırma",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Çalma başlatılamadı: {message}",
-  "library.engine.songUnreadable": "Bu şarkı diski tekrar okunamadı, bu yüzden çalma özelliği hiçbir şey çalmadı."
+  "library.engine.songUnreadable": "Bu şarkı diski tekrar okunamadı, bu yüzden çalma özelliği hiçbir şey çalmadı.",
+
 }

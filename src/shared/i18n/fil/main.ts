@@ -3,12 +3,6 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
-  "main.error.copySourceChanged": "Nagbago ang pinagmulan ng kopya para sa “{name}”. Subukan muli.",
-  "main.error.linkedFilesystemPath": "Hindi maaaring gumamit ng mga symbolic link na path para sa mga working copy.",
-  "main.error.portableName": "“{name}”: Pumili ng pangalang hanggang 240 byte na walang nakalaang pangalan ng Windows, control character, o tuldok o espasyo sa dulo.",
-  "main.error.networkFilesystem": "Hindi suportado ang pag-save o paglipat ng proyekto sa network file system. Pumili ng lokal na folder ng library.",
-  "main.error.filesystemPublish": "“{name}”: Hindi ligtas na mai-save ng file system na ito ang proyekto. Pumili ng ibang lokal na folder ng library at subukan muli.",
-  "main.error.sourceCacheFull": "Puno na ang cache ng mga working copy. Isara ang mga hindi ginagamit na proyekto at subukan muli sa ibang pagkakataon.",
 
   "main.sync.downloadDeferred": "Hindi naidagdag ang {dir}: {reason}. Nasa Drive pa rin ito; ayusin ang problema at mag-sync muli.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
@@ -162,5 +156,6 @@ export const main: Translation<typeof en> = {
   "main.sync.removing": "Paglipat ng {file} mula sa Drive...",
   "main.sync.removingGone": "Paglipat ng {name} mula sa Drive (nag- Rename o tinanggal dito)...",
   "main.sync.updatingCatalog": "Pag-update ng katalogo ng telepono...",
-  "main.sync.upToDate": "Ang drive ay up-to-date"
+  "main.sync.upToDate": "Ang drive ay up-to-date",
+
 }

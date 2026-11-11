@@ -36,6 +36,7 @@ impl Player {
         self.language_state = Some(snapshot.state);
         if changed {
             i18n::set_current(snapshot.state.locale);
+            desktop_lifecycle::install_menus(cx);
             self.language_menu.update(cx, |menu, cx| menu.set_locale(snapshot.state.language, snapshot.state.locale, snapshot.state.system_locale, cx));
             self.library.update(cx, |library, cx| library.refresh_locale(window, cx));
             self.drive_projects.update(cx,|dialog,cx|dialog.refresh_locale(window,cx));

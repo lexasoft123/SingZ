@@ -3,7 +3,6 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
-  'settings.migration.summary': '已从之前的 SingZ 导入 {count} 项设置。',
   // ── shared actions/labels, reused across dialogs in this namespace ──
   'settings.action.close': '关闭',
   'settings.common.systemDefault': '系统默认',
@@ -276,5 +275,7 @@ export const settings: Translation<typeof en> = {
   'settings.micPreview.accessBlocked': '麦克风访问被阻止。请在系统隐私设置中允许 SingZ。',
   'settings.micPreview.busy': '麦克风正被另一个应用占用。请关闭那个应用后重新选择输入。',
   'settings.micPreview.unavailable': '该麦克风不可用。请重新连接它，或选择另一个输入。',
-  'settings.micPreview.unknown': '麦克风无法启动。请检查设备连接后重试。'
+  'settings.micPreview.unknown': '麦克风无法启动。请检查设备连接后重试。',
+
+  "settings.mic.unavailable": "麦克风不可用",
 }

@@ -1,7 +1,7 @@
 //! Independent OAuth/sync worker; the GPUI thread only sends intent and reads state.
 use crate::{
     drive_auth::{AuthClient, Config, OAuthSession, TokenStore},
-    drive_state::{Action, ProjectState, Snapshot},
+    drive_state::{Action, ProgressKind, ProjectState, Snapshot},
     sync_scheduler::{Outcome, Phase, Run, Scheduler},
 };
 use anyhow::{ensure, Context, Result};
@@ -408,7 +408,7 @@ fn worker(
                     }
                     Ok(Command::Action(e, _)) if e == epoch.load(Ordering::Acquire) => {
                         publish(shared, |s| {
-                            s.error = Some("Google Drive is not configured".into())
+                            s.error = Some(crate::i18n::t("library.drive.notConfigured"))
                         })
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -507,7 +507,8 @@ fn worker(
                             s.signing_in = false;
                             s.busy = false;
                             s.projects.clear();
-                            s.progress = "Signed out of Google Drive.".into();
+                            s.progress = crate::i18n::t("library.projectPicker.signedOut");
+                            s.progress_kind = ProgressKind::SignedOut;
                             s.error = None;
                         });
                     }
@@ -520,9 +521,8 @@ fn worker(
                             s.capture_project = None;
                             s.scheduler = scheduler.status();
                             running.store(false, Ordering::Release);
-                            s.progress =
-                            "Sync paused. Completed files are kept. Choose Sync now to continue."
-                                .into();
+                            s.progress = crate::i18n::t("library.dropScreen.syncPaused");
+                            s.progress_kind = ProgressKind::Paused;
                             s.error = None;
                         });
                     }
@@ -532,7 +532,8 @@ fn worker(
                         publish(shared, |s| {
                             s.signing_in = true;
                             s.error = None;
-                            s.progress = "Finish signing in to Google in your browser…".into();
+                            s.progress = crate::i18n::t("library.common.finishGoogleSignIn");
+                            s.progress_kind = ProgressKind::None;
                         });
                         let cancel = || {
                             !alive.load(Ordering::Acquire)
@@ -626,7 +627,8 @@ fn worker(
                     s.busy = true;
                     s.error = None;
                     s.fraction = 0.;
-                    s.progress = "Checking Google Drive…".into();
+                    s.progress = crate::i18n::t("library.drive.checking");
+                    s.progress_kind = ProgressKind::None;
                     s.scheduler = scheduler.status();
                 });
                 let remote = crate::drive_remote::Remote::new(AuthClient::new(
@@ -646,6 +648,7 @@ fn worker(
                         );
                         publish(shared, |s| {
                             s.progress = message;
+                            s.progress_kind = ProgressKind::None;
                             s.fraction = fraction.clamp(0., 1.);
                         })
                     },
@@ -735,8 +738,9 @@ fn worker(
                             {
                                 s.projects.insert(path.clone(), ProjectState::Synced);
                             }
+                            s.progress_kind = if explicit_follow_up { ProgressKind::Finishing } else { ProgressKind::None };
                             s.progress = if explicit_follow_up {
-                                "Finishing Drive sync…".into()
+                                crate::i18n::t("library.drive.finishingSync")
                             } else if clean {
                                 format!(
                                     "Drive is up to date — {} uploaded, {} unchanged. Your phones see them under Google Drive.",

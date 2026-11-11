@@ -285,7 +285,7 @@ impl Render for ModelsScreen {
                     .mb(px(14.)),
             )
             .when(!state.loaded, |d| {
-                d.child(Self::text("Checking installed models…", 12., DIM))
+                d.child(Self::text(t("main.model.checking"), 12., DIM))
             })
             .child(rows);
         if state.windows {

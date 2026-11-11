@@ -416,7 +416,7 @@ pub fn run(
     }
     if current_catalog.metadata.as_ref().and_then(|m| m.entry.md5_checksum.as_deref())
         != Some(checksum.as_str()) {
-        progress("Updating catalog…".into(), 0.995);
+        progress(crate::i18n::t("library.drive.updatingCatalog"), 0.995);
         // A quiet project needs only the listed observation, but cleanup is a
         // write. Reobserve after the project/orphan passes and their callbacks;
         // another writer may have published a row in the meantime.

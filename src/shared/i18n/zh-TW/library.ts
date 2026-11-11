@@ -134,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "正在分離人聲",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "無法開始播放：{message}",
-  "library.engine.songUnreadable": "無法從磁碟重新讀取這首歌，因此沒有內容可以播放。"
+  "library.engine.songUnreadable": "無法從磁碟重新讀取這首歌，因此沒有內容可以播放。",
+
 }

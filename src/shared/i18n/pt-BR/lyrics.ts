@@ -3,10 +3,6 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
-  'lyrics.editor.skippedRows': "Linhas ignoradas: {n}. Ao salvar, apenas as linhas exibidas serão mantidas.",
-  'lyrics.editor.backupFailed': "Não foi possível criar uma cópia da letra original. O arquivo da letra não foi alterado.",
-  'lyrics.panel.autoPreservedEdited': "A busca automática foi interrompida para preservar a letra que você editou. Use Alterar… ou Editar para substituí-la.",
-  'lyrics.panel.autoPreservedUnreadable': "A busca automática foi interrompida porque não foi possível ler a letra salva. O arquivo foi preservado; use Editar para corrigi-lo.",
   "lyrics.check.preciseSuffix": " · preciso",
   "lyrics.state.noWordsDetected": "Nenhuma palavra foi detectada nas faixas.",
   "lyrics.check.mismatchPrecise": "Apenas {pct}% dessas palavras foram ouvidas nas vocais — ver o texto, ou experimentar o Precise.",
@@ -137,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "Ajuste uma palavra focada em 50 ms",
   "lyrics.editor.help.otherUndo": "Desfazer — use Shift para refazer",
   "lyrics.editor.help.otherReplace": "Cole a letra inteira; mantenha as linhas com o tempo.",
-  "lyrics.editor.help.otherClose": "Feche o editor (confirma se há edições não salvas)"
+  "lyrics.editor.help.otherClose": "Feche o editor (confirma se há edições não salvas)",
+
 }

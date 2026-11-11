@@ -173,7 +173,6 @@ export const training = {
 
   // ── in-session screen ──
   'training.nav.backToTraining': '← Training',
-  'training.session.aria.backToSong': 'Back to song',
   'training.session.aria.endSession': 'End session',
   'training.session.aria.exerciseProgress': 'Exercise {current} of {total}',
   'training.session.aria.targetNotes': 'Target notes',

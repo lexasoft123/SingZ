@@ -3,10 +3,6 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
-  'lyrics.editor.skippedRows': "Пропущено строк: {n}. При сохранении останутся только показанные строки.",
-  'lyrics.editor.backupFailed': "Не удалось создать резервную копию исходного текста. Файл текста не изменён.",
-  'lyrics.panel.autoPreservedEdited': "Автоматический поиск остановлен, чтобы сохранить ваши правки текста. Для замены используйте «Изменить…» или «Редактировать».",
-  'lyrics.panel.autoPreservedUnreadable': "Автоматический поиск остановлен: сохранённый текст не удалось прочитать. Файл не изменён; исправьте его в редакторе.",
   // ── shared badges/suffixes (used by both the check-verdict text and the panel) ──
   // trailing badge appended when the check ran the precise (CTC) method, e.g. "…heard · precise"
   'lyrics.check.preciseSuffix': ' · точно',
@@ -200,5 +196,6 @@ export const lyrics: Translation<typeof en> = {
 
   'lyrics.editor.help.otherUndo': 'Отменить, Shift — повтор',
   'lyrics.editor.help.otherReplace': 'Вставить песню; сохранённые строки хранят время',
-  'lyrics.editor.help.otherClose': 'Закрыть редактор (спросит про изменения)'
+  'lyrics.editor.help.otherClose': 'Закрыть редактор (спросит про изменения)',
+
 }

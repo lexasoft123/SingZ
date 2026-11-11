@@ -3,10 +3,6 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
-  'lyrics.editor.skippedRows': "Baris dilangkau: {n}. Apabila disimpan, hanya baris yang dipaparkan akan dikekalkan.",
-  'lyrics.editor.backupFailed': "Lirik asal tidak dapat disandarkan. Fail lirik tidak diubah.",
-  'lyrics.panel.autoPreservedEdited': "Carian automatik dihentikan untuk mengekalkan lirik yang anda sunting. Gunakan Tukar… atau Sunting untuk menggantikannya.",
-  'lyrics.panel.autoPreservedUnreadable': "Carian automatik dihentikan kerana lirik yang disimpan tidak dapat dibaca. Fail tidak diubah; gunakan Sunting untuk membaikinya.",
   "lyrics.check.preciseSuffix": "· tepat",
   "lyrics.state.noWordsDetected": "Tiada perkataan yang dideteksi dalam vokal.",
   "lyrics.check.mismatchPrecise": "Hanya {pct}% perkataan ini didengar dalam vokal  memeriksa teks, atau cuba Precise.",
@@ -137,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "Tekan perkataan yang tertumpu dengan 50 ms",
   "lyrics.editor.help.otherUndo": "Undo  menambah Shift untuk diulang",
   "lyrics.editor.help.otherReplace": "Paskan keseluruhan lagu; simpan baris menjaga masa mereka",
-  "lyrics.editor.help.otherClose": "Tutup editor (menanyakan terlebih dahulu mengenai suntingan yang tidak disimpan)"
+  "lyrics.editor.help.otherClose": "Tutup editor (menanyakan terlebih dahulu mengenai suntingan yang tidak disimpan)",
+
 }

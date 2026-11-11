@@ -268,5 +268,6 @@ export const player: Translation<typeof en> = {
   'player.dspGraph.transport.pre-roll': 'отсчёт',
   'player.dspGraph.transport.playing': 'играет',
   'player.dspGraph.transport.paused': 'пауза',
-  'player.dspGraph.transport.completed': 'завершён'
+  'player.dspGraph.transport.completed': 'завершён',
+
 }

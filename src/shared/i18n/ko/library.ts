@@ -134,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "분리된 보컬",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "재생 시작되지 않았습니다: {message}",
-  "library.engine.songUnreadable": "이 노래는 디스크에서 다시 읽을 수 없었기 때문에 재생은 재생할 것이 없습니다."
+  "library.engine.songUnreadable": "이 노래는 디스크에서 다시 읽을 수 없었기 때문에 재생은 재생할 것이 없습니다.",
+
 }

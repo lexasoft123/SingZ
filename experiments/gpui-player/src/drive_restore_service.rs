@@ -46,7 +46,7 @@ impl Service {
                 let id=request.serial;
                 if id!=current.load(Ordering::Acquire) {continue;}
                 if matches!(request.kind,Kind::Cancel) {
-                    publish(&shared,id,|s|{s.busy=false;s.message="Download cancelled. Completed files are kept.".into();s.completed=None;});
+                    publish(&shared,id,|s|{s.busy=false;s.message=crate::i18n::t("library.drive.downloadCancelled");s.completed=None;});
                     continue;
                 }
                 let cancelled=||!live.load(Ordering::Acquire)||current.load(Ordering::Acquire)!=id;

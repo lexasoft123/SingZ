@@ -142,7 +142,6 @@ export const training: Translation<typeof en> = {
   "training.exerciseCount_one": "{n} व्यायाम",
   "training.exerciseCount_other": "{n} अभ्यास",
   "training.nav.backToTraining": "प्रशिक्षण",
-  "training.session.aria.backToSong": "गीत पर वापस",
   "training.session.aria.endSession": "सत्र का समापन",
   "training.session.aria.exerciseProgress": "{total} का अभ्यास {current}",
   "training.session.aria.targetNotes": "लक्ष्य नोट",

@@ -688,7 +688,7 @@ impl Prepared {
                             &raw,
                         )?;
                     } else {
-                        warnings.push("Recovered the actual renamed folder, but retained newer saved metadata with a different title.".to_owned());
+                        warnings.push(crate::i18n::t("library.recovery.renamedFolderWarning"));
                     }
                 }
                 // Also confirms a prior attempt whose metadata replacement was

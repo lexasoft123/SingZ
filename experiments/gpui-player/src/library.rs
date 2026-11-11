@@ -225,7 +225,7 @@ impl LibraryScreen {
             KeyBinding::new("tab", NextCatalogFocus, Some("SingZLibrary")),
             KeyBinding::new("shift-tab", PreviousCatalogFocus, Some("SingZLibrary")),
         ]);
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(t("library.dropScreen.searchPlaceholder")));
         let subscription = cx.subscribe_in(&search, window, |this, state, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 let query = state.read(cx).value().to_string();
@@ -439,7 +439,7 @@ impl LibraryScreen {
             singz_uikit::drive_status_line(error.clone(),true,true,false,true,w)
         } else if syncing {
             singz_uikit::drive_status_line(tv("library.dropScreen.syncProgress", &[("msg",drive.progress.clone())]),true,false,false,true,w)
-        } else if drive.progress.starts_with("Sync paused.") || drive.progress=="Signed out of Google Drive." {
+        } else if drive_keeps_progress(drive) {
             // Source driveMsg survives the completed operation. It takes
             // precedence over the generic signed-in/waiting status, without
             // turning a pending or warning-bearing run into an up-to-date claim.
@@ -447,7 +447,7 @@ impl LibraryScreen {
         } else if let Some(error)=&drive.scheduler.last_error {
             let text=if drive.scheduler.phase==Phase::Retrying {tv("library.dropScreen.retryScheduled", &[("error",error.clone())])}else{error.clone()};
             singz_uikit::drive_status_line(text,false,true,false,true,w)
-        } else if drive.signed_in && drive.scheduler.phase==Phase::Pending && drive.progress=="Finishing Drive sync…" {
+        } else if drive.signed_in && drive.scheduler.phase==Phase::Pending && drive.progress_kind==crate::drive_state::ProgressKind::Finishing {
             singz_uikit::drive_status_line(drive.progress.clone(),true,false,false,true,w)
         } else if drive.is_up_to_date() {
             let label=drive.scheduler.last_sync.and_then(|time| {
@@ -1151,7 +1151,7 @@ impl Render for LibraryScreen {
                                                 .mb(px(28.))
                                                 .text_color(rgb(FAINT))
                                                 .child(if native && self.query.is_empty() {
-                                                    "No playable projects in this folder".to_owned()
+                                                    t("library.picker.noPlayable")
                                                 } else {
                                                     format!(
                                                         "Nothing matches “{}”.",
@@ -1164,5 +1164,30 @@ impl Render for LibraryScreen {
                             .child(production_scrollbar(&self.scroll)),
                     ),
             )
+    }
+}
+/// Source driveMsg survives the completed operation for these kinds only. The
+/// kind is typed state; the progress text is translated and never compared.
+fn drive_keeps_progress(drive: &crate::drive_state::Snapshot) -> bool {
+    use crate::drive_state::ProgressKind;
+    matches!(drive.progress_kind, ProgressKind::Paused | ProgressKind::SignedOut)
+}
+#[cfg(test)]
+mod drive_progress_tests {
+    use super::drive_keeps_progress;
+    use crate::drive_state::{ProgressKind, Snapshot};
+    #[test]
+    fn kept_drive_status_follows_the_typed_kind_in_any_language() {
+        let mut drive = Snapshot { progress: "Синхронизация приостановлена.".into(), ..Default::default() };
+        assert!(!drive_keeps_progress(&drive));
+        drive.progress_kind = ProgressKind::Paused;
+        assert!(drive_keeps_progress(&drive));
+        drive.progress_kind = ProgressKind::SignedOut;
+        assert!(drive_keeps_progress(&drive));
+        // English text alone no longer selects the branch.
+        let english = Snapshot { progress: "Sync paused. Completed files are kept.".into(), ..Default::default() };
+        assert!(!drive_keeps_progress(&english));
+        let finishing = Snapshot { progress_kind: ProgressKind::Finishing, ..Default::default() };
+        assert!(!drive_keeps_progress(&finishing));
     }
 }

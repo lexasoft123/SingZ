@@ -30,7 +30,7 @@ fn focus_target(view:&Entity<Player>,w:&mut Window,cx:&mut App,index:usize)->any
  let menu=view.read(cx).language_menu.read(cx);let s=menu.state(w,cx);
  anyhow::ensure!(s["focusedIndex"].as_u64()==Some(index as u64)&&s["focusInside"]==true,"Actual locale keyboard target differs: {s}");
  let id=format!("language-option-{}",Language::ALL[index].as_str());let b=menu.bounds(&id).ok_or_else(||anyhow::anyhow!("Actual locale row missing: {id}"))?;
- let viewport=menu.bounds("language-rows").ok_or_else(||anyhow::anyhow!("Language scroll viewport missing"))?;
+ let viewport=menu.scroll_viewport();anyhow::ensure!(viewport.size.height>px(0.),"Language scroll viewport missing");
  anyhow::ensure!(b.top()>=viewport.top()-px(0.1)&&b.bottom()<=viewport.bottom()+px(0.1)&&b.left()>=px(0.)&&b.right()<=w.viewport_size().width,"Keyboard target not visible inside menu: {id} {b:?} {viewport:?}");Ok(())
 }
 pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){let clipboard=cx.read_from_clipboard();cx.spawn(async move|cx|{
@@ -58,11 +58,27 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){l
   if stage=="restart" {settled!(Language::Locale(Locale::Ja));}
   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
   wait!(p,w,app=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==project)&&p.duration>60.);
+  // Opening analyses the song and legitimately auto-saves it. Wait for that save to
+  // finish, then record the project exactly as it is: from here on, choosing a
+  // language must not rewrite a single file (compared by the Python runner).
+  wait!(p,w,app=>!p.saving&&!p.beat_auto_save&&!p.source_working&&p.source_job.is_none()&&std::fs::read_to_string(project.join("project.json")).is_ok_and(|t|t.contains("\"savedAt\"")));
+  fn copy_tree(from:&Path,to:&Path)->std::io::Result<()>{std::fs::create_dir_all(to)?;for entry in std::fs::read_dir(from)?{let entry=entry?;let target=to.join(entry.file_name());if entry.file_type()?.is_dir(){copy_tree(&entry.path(),&target)?;}else{std::fs::copy(entry.path(),&target)?;}}Ok(())}
+  let settled=out.join("settled-project");let _=std::fs::remove_dir_all(&settled);copy_tree(&project,&settled)?;
   handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").ok_or_else(||anyhow::anyhow!("Actual native Play missing"))?;click(w,cx,b.center());Ok(())})??;
   wait!(p,w,app=>p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing)&&p.position>0.1);
   let baseline=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.native_loop,p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)})?;
   macro_rules! audio_unchanged {()=>{handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing),"Language change paused real native playback");
    anyhow::ensure!((p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.native_loop,p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)==baseline,"Locale selection rebuilt native graph or changed mix/transport");Ok(())})??;};}
+  // Native transport as the singer would observe it: running or paused, and where.
+  macro_rules! audio_snapshot {()=>{handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.playing,p.last_playback_status.as_ref().is_some_and(|s|s.playing),p.position)})?};}
+  // A language change must leave the transport exactly as it was: playing stays
+  // playing and paused stays paused at the same position; graph and mix are untouched.
+  macro_rules! audio_state_same {($before:expr)=>{{let before=$before;handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);
+   let now=(p.playing,p.last_playback_status.as_ref().is_some_and(|s|s.playing),p.position);
+   anyhow::ensure!(now.0==before.0&&now.1==before.1,"Language change altered native transport state: before {before:?} after {now:?}");
+   if before.1 {anyhow::ensure!(now.2>=before.2-0.05,"Playing position moved backwards across a language change: {before:?} {now:?}");}
+   else {anyhow::ensure!((now.2-before.2).abs()<0.05,"Paused position moved across a language change: {before:?} {now:?}");}
+   anyhow::ensure!((p.native_epoch,p.gain,p.muted,p.solo,p.master_volume,p.transpose,p.tempo,p.native_loop,p.project.as_ref().and_then(|p|p.selection),p.last_playback_status.as_ref().unwrap().graph_generation)==baseline,"Locale selection rebuilt native graph or changed mix/transport");Ok(())})??;}};}
   for (width,height) in [(1280.,800.),(1060.,640.)] {
    handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;wait!(p,w,app=>w.viewport_size()==size(px(width),px(height)));
    let suffix=width as u32;
@@ -88,7 +104,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){l
    for (index,language) in Language::ALL.into_iter().enumerate() {
     choose!(language,if index%2==0 {"enter"}else{"space"});audio_unchanged!();
     open!();handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let menu=view.read(cx).language_menu.read(cx);let state=menu.state(w,cx);
-     anyhow::ensure!(state["rows"].as_array().unwrap().len()==14,"Missing actual locale rows");
+     anyhow::ensure!(state["rows"].as_array().unwrap().len()==Language::ALL.len(),"Missing actual locale rows");
      let selected:Vec<_>=state["rows"].as_array().unwrap().iter().filter(|r|r["selected"]==true).collect();
      anyhow::ensure!(selected.len()==1&&selected[0]["value"]==language.as_str(),"Selected check differs from accepted language: {state}");
      let b=menu.bounds("language-menu").ok_or_else(||anyhow::anyhow!("Language popup not measured"))?;
@@ -98,7 +114,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){l
     handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;wait!(p,w,app=>!p.language_menu.read(app).is_open());
    }
    open!();handle.update(cx,|_,w,cx|->anyhow::Result<()>{
-    for (key_value,expected) in [("home",0usize),("up",13),("down",0),("end",13),("home",0)] {
+    for (key_value,expected) in {let last=Language::ALL.len()-1;[("home",0usize),("up",last),("down",0),("end",last),("home",0)]} {
      key(w,cx,key_value);draw(w,cx);let state=view.read(cx).language_menu.read(cx).state(w,cx);
      anyhow::ensure!(state["focusedIndex"].as_u64()==Some(expected as u64),"Locale arrows/Home/End differ: {key_value}: {state}");
     }Ok(())})??;
@@ -109,21 +125,33 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){l
    // A real controlled text input keeps its uncommitted search while the
    // dictionaries and placeholder change; type events settle between updates.
    choose!(Language::Locale(Locale::En),"enter");
-   handle.update(cx,|_,w,cx|{draw(w,cx);click(w,cx,point(px(203.),px(26.)));})?;wait!(p,w,app=>p.screen==Screen::Library);
+   handle.update(cx,|_,w,cx|header(&view,w,cx,"catalog"))??;wait!(p,w,app=>p.screen==Screen::Library);
    handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-f"}else{"ctrl-f"}))?;
    wait!(p,w,app=>p.library.read(app).search_focused(w,app));
    let mut query=String::new();
    for value in ["l","o","c","a","l","e"] {query.push_str(value);handle.update(cx,|_,w,cx|key(w,cx,value))?;
     wait!(p,w,app=>p.library.read(app).review_snapshot()["query"]==query);
    }
-   choose!(Language::Locale(Locale::Ru),"space");audio_unchanged!();
+   // Opening the catalog pauses playback by design, so here the invariant is
+   // that choosing a language leaves the (paused) transport exactly as it was.
+   let on_catalog=audio_snapshot!();
+   choose!(Language::Locale(Locale::Ru),"space");audio_state_same!(on_catalog);
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).library.read(cx).review_snapshot()["query"]=="locale","Locale refresh erased a real controlled search draft");shot(&view,w,cx,&out,&format!("search-preserved-ru-{suffix}"))})??;
    // Clear through the actual input, preserving the next width's clean setup.
    handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-f"}else{"ctrl-f"}))?;
    wait!(p,w,app=>p.library.read(app).search_focused(w,app));
    handle.update(cx,|_,w,cx|{key(w,cx,if cfg!(target_os="macos"){"cmd-a"}else{"ctrl-a"});key(w,cx,"backspace");})?;
    wait!(p,w,app=>p.library.read(app).review_snapshot()["query"]=="");
-   handle.update(cx,|_,w,cx|click(w,cx,point(px(203.),px(26.))))?;wait!(p,w,app=>p.screen==Screen::Player);audio_unchanged!();
+   handle.update(cx,|_,w,cx|header(&view,w,cx,"catalog"))??;wait!(p,w,app=>p.screen==Screen::Player);
+   // Back on the player the catalog's pause still holds; resume with the real Play
+   // button, then change language while playing and require the position to keep advancing.
+   handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").ok_or_else(||anyhow::anyhow!("Actual native Play missing"))?;click(w,cx,b.center());Ok(())})??;
+   wait!(p,w,app=>p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+   let running=audio_snapshot!();
+   choose!(Language::Locale(Locale::Ko),"enter");
+   audio_state_same!(running);
+   wait!(p,w,app=>p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing)&&p.position>running.2+0.3);
+   audio_unchanged!();
    // Reposition an OPEN popup across actual native resizing, not a captured
    // screenshot transform. Restore size before the next normal case.
    open!();let alternate=if suffix==1280 {(1060.,640.)}else{(1280.,800.)};

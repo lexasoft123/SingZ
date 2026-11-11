@@ -215,5 +215,6 @@ export const player: Translation<typeof en> = {
   "player.dspGraph.transport.pre-roll": "पूर्व-रोल",
   "player.dspGraph.transport.playing": "खेलना",
   "player.dspGraph.transport.paused": "विराम",
-  "player.dspGraph.transport.completed": "पूरा किया गया"
+  "player.dspGraph.transport.completed": "पूरा किया गया",
+
 }

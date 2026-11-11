@@ -625,7 +625,7 @@ impl OAuthSession {
                             let _ = reply(
                                 &mut stream,
                                 400,
-                                "Invalid sign-in callback. Return to SingZ and retry.",
+                                &crate::i18n::t("drive.auth.callbackInvalid"),
                             );
                         }
                     }

@@ -3,12 +3,6 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
-  "main.error.copySourceChanged": "A origem da cópia de “{name}” mudou. Tente novamente.",
-  "main.error.linkedFilesystemPath": "Caminhos com links simbólicos não podem ser usados para cópias de trabalho.",
-  "main.error.portableName": "“{name}”: Escolha um nome de até 240 bytes sem nomes reservados do Windows, caracteres de controle ou ponto ou espaço no final.",
-  "main.error.networkFilesystem": "Não é possível salvar ou mover projetos em um sistema de arquivos de rede. Escolha uma pasta local para a biblioteca.",
-  "main.error.filesystemPublish": "“{name}”: Este sistema de arquivos não conseguiu salvar o projeto com segurança. Escolha outra pasta local para a biblioteca e tente novamente.",
-  "main.error.sourceCacheFull": "O cache de cópias de trabalho está cheio. Feche os projetos que não estiver usando e tente novamente mais tarde.",
 
   "main.sync.downloadDeferred": "{dir} não foi adicionada: {reason}. Continua no Drive; corrija o problema e sincronize novamente.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
@@ -161,5 +155,6 @@ export const main: Translation<typeof en> = {
   "main.sync.removing": "Removendo {file} do Drive…",
   "main.sync.removingGone": "Removendo {name} do Drive (renomeado ou excluído aqui)…",
   "main.sync.updatingCatalog": "Atualizando o catálogo do telefone…",
-  "main.sync.upToDate": "O drive está atualizado."
+  "main.sync.upToDate": "O drive está atualizado.",
+
 }

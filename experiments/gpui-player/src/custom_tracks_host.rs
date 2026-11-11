@@ -232,7 +232,7 @@ impl Player {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("Add audio tracks".into()),
+            prompt: Some(crate::i18n::t("main.dialog.addAudioTracks").into()),
         });
         cx.spawn(async move |this, cx| match prompt.await {
             Ok(Ok(Some(paths))) => {

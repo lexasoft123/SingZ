@@ -134,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "अलग-अलग स्वर",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "प्लेबैक शुरू नहीं किया जा सका: {message}",
-  "library.engine.songUnreadable": "इस गीत को डिस्क से फिर से नहीं पढ़ा जा सका, इसलिए प्लेबैक में खेलने के लिए कुछ नहीं है।"
+  "library.engine.songUnreadable": "इस गीत को डिस्क से फिर से नहीं पढ़ा जा सका, इसलिए प्लेबैक में खेलने के लिए कुछ नहीं है।",
+
 }

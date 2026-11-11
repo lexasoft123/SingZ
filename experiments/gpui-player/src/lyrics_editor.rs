@@ -123,7 +123,7 @@ impl Editor {
     }
     pub fn saved_revision(&mut self, revision:u64, error:Option<String>, cx:&mut Context<Self>){
         if error.is_none()&&revision!=self.revision {
-            self.saving=false;self.error=Some("The earlier draft was saved. Your newer changes are still unsaved.".into());self.dirty=true;cx.notify();
+            self.saving=false;self.error=Some(crate::i18n::t("lyrics.editor.earlierDraftSaved"));self.dirty=true;cx.notify();
         }else{self.saved(error,cx);}
     }
     pub fn alignment_progress(&mut self, label:String, percent:f32, cx:&mut Context<Self>) {
@@ -191,7 +191,7 @@ impl Editor {
             "lyed-discard"=>cx.emit(Event::Close),
             "lyed-save" if !self.saving&&!self.busy=>{
                 let lines=edit::lines_from_rows(&self.rows,self.duration);
-                if lines.is_empty(){self.error=Some("No lines to save.".into());}else{self.saving=true;self.error=None;cx.emit(Event::Save(lines,self.revision));}
+                if lines.is_empty(){self.error=Some(crate::i18n::t("lyrics.editor.noLines"));}else{self.saving=true;self.error=None;cx.emit(Event::Save(lines,self.revision));}
             }
             "lyed-undo"=>{if let Some(rows)=self.history.undo(&self.rows){self.rows=rows;self.dirty=true;self.revision+=1;self.text_group=None;}},
             "lyed-replace" if !self.busy&&!self.saving=>{

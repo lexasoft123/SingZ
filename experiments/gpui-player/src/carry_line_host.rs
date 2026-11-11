@@ -263,9 +263,9 @@ impl Player {
                 self.notice = Some(format!(
                     "Carry the line was not applied: {error}{}",
                     if queued {
-                        " Queued Save did not run."
+                        format!(" {}", crate::i18n::t("carryLine.queuedSaveDidNotRun"))
                     } else {
-                        ""
+                        String::new()
                     }
                 ));
             }

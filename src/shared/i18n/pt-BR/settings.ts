@@ -3,7 +3,6 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
-  'settings.migration.summary': 'Foram importadas {count} configurações do seu SingZ anterior.',
   "settings.action.close": "Fechar",
   "settings.common.systemDefault": "Padrão do sistema",
   "settings.common.savedDeviceMissing": "Dispositivo salvo (não conectado)",
@@ -194,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "Acesso ao microfone está bloqueado. Permita que o SingZ seja acessado nas configurações de privacidade do sistema.",
   "settings.micPreview.busy": "O microfone está em uso em outro aplicativo. Feche esse aplicativo e, em seguida, escolha o microfone novamente.",
   "settings.micPreview.unavailable": "O microfone não está disponível. Reconecte-o ou escolha outra entrada.",
-  "settings.micPreview.unknown": "O microfone não pôde iniciar. Verifique a conexão do dispositivo e tente novamente."
+  "settings.micPreview.unknown": "O microfone não pôde iniciar. Verifique a conexão do dispositivo e tente novamente.",
+
+  "settings.mic.unavailable": "Microfone indisponível",
 }

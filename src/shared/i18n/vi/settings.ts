@@ -3,7 +3,6 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
-  'settings.migration.summary': 'Đã nhập {count} cài đặt từ SingZ trước đây của bạn.',
   "settings.action.close": "Đóng",
   "settings.common.systemDefault": "Hệ thống mặc định",
   "settings.common.savedDeviceMissing": "Thiết bị lưu (không kết nối)",
@@ -194,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "Phiên bản micro bị chặn, cho phép SingZ trong cài đặt bảo mật hệ thống.",
   "settings.micPreview.busy": "Máy vi đang bận trong một ứng dụng khác.",
   "settings.micPreview.unavailable": "Máy vi không có sẵn. Kết nối lại nó hoặc chọn đầu vào khác.",
-  "settings.micPreview.unknown": "Máy vi không khởi động được, kiểm tra kết nối thiết bị và thử lại."
+  "settings.micPreview.unknown": "Máy vi không khởi động được, kiểm tra kết nối thiết bị và thử lại.",
+
+  "settings.mic.unavailable": "Micro không khả dụng",
 }

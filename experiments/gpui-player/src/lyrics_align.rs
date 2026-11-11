@@ -83,8 +83,8 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => write!(f, "Alignment cancelled"),
-            Self::NeedsModel(_) => write!(f, "Alignment models are not installed"),
+            Self::Cancelled => f.write_str(&crate::i18n::t("lyrics.align.cancelled")),
+            Self::NeedsModel(_) => f.write_str(&crate::i18n::t("lyrics.align.modelsMissing")),
             Self::NeedsEngine(m) => write!(f, "Missing alignment runtime: {}", m.join(", ")),
             Self::Error(e) => f.write_str(e),
         }

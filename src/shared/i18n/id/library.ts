@@ -134,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Pembagian vokal",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Putar tidak bisa dimulai: {message}",
-  "library.engine.songUnreadable": "Lagu ini tidak bisa dibaca kembali dari disk, jadi playback tidak memiliki apa-apa untuk dimainkan."
+  "library.engine.songUnreadable": "Lagu ini tidak bisa dibaca kembali dari disk, jadi playback tidak memiliki apa-apa untuk dimainkan.",
+
 }

@@ -29,10 +29,18 @@ uikit = repository.parent/'singz-ui'
 spec = importlib.util.spec_from_file_location('locale_perf', Path(__file__).with_name('interface-perf.py'))
 perf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(perf)
-LANGUAGES = [('system', None), ('en', 'English'), ('tr', 'Türkçe'), ('ru', 'Русский'),
-    ('zh-CN', '简体中文'), ('hi', 'हिन्दी'), ('ja', '日本語'), ('ko', '한국어'),
-    ('th', 'ไทย'), ('id', 'Bahasa Indonesia'), ('vi', 'Tiếng Việt'), ('fil', 'Filipino'),
-    ('ms', 'Bahasa Melayu'), ('zh-TW', '繁體中文')]
+def shipped_languages():
+    # The menu rows are Language::ALL: System, then Locale::ALL in menu order,
+    # labelled with Locale::endonym(); read them from the same Rust source.
+    import re
+    source = (Path(__file__).resolve().parents[1]/'src/i18n.rs').read_text()
+    variants = dict(re.findall(r'Self::(\w+) => "([\w-]+)",', source[source.index('pub fn as_str(self)'):source.index('pub fn parse(value')]))
+    order = re.search(r'pub const ALL: \[Self; (\d+)\] = \[(.*?)\];', source, re.S)
+    names = re.findall(r'Self::(\w+)', order.group(2))
+    assert len(names) == int(order.group(1))
+    endonyms = dict(re.findall(r'Self::(\w+) => "([^"]+)",', source[source.index('pub fn endonym(self)'):source.index('pub fn code(self)')]))
+    return [('system', None)] + [(variants[name], endonyms[name]) for name in names]
+LANGUAGES = shipped_languages()
 
 
 def foreground():
@@ -183,7 +191,13 @@ with tempfile.TemporaryDirectory(prefix='singz-locale-ui-') as temporary:
     for stage in ('exercise', 'restart'):
         launch({**environment, 'SINGZ_GPUI_LOCALE_TEST': str(out/stage), 'SINGZ_GPUI_LOCALE_STAGE': stage,
             **({'SINGZ_LANG': 'en'} if stage == 'exercise' else {'SINGZ_GPUI_LOCALE_TEST_PERSIST': '1'})}, out/stage)
-        assert inventory(project) == initial, 'Locale selection rewrote the loaded project'
+        # The open's analysis auto-save is legitimate; the native stage copies the
+        # project once that has settled, immediately before the first language choice.
+        assert (out/stage/'settled-project'/'project.json').exists(), 'Native stage never recorded the settled project'
+        settled = inventory(out/stage/'settled-project')
+        now = inventory(project)
+        assert now == settled, 'Locale selection rewrote the loaded project: ' + str(
+            sorted(k for k in {*now, *settled} if now.get(k) != settled.get(k)))
         saved = json.loads((preferences/'language.json').read_text())
         assert saved['language'] == 'ja' and saved['foreign'] == {'preserve': 23}, saved
         (out/stage/'persisted-preference.json').write_text(json.dumps(saved, indent=2))
@@ -212,7 +226,7 @@ with tempfile.TemporaryDirectory(prefix='singz-locale-ui-') as temporary:
                 menu = data['menu']
                 assert data['locale']['language'] == menu['language'] == language
                 assert menu['selectedIndex'] == menu['focusedIndex'] == index and menu['focusInside']
-                assert len(menu['rows']) == 14
+                assert len(menu['rows']) == len(LANGUAGES)
                 assert [row['value'] for row in menu['rows']] == [value for value, _ in LANGUAGES]
                 assert [row['label'] for row in menu['rows'][1:]] == [value for _, value in LANGUAGES[1:]]
                 assert sum(bool(row['selected']) for row in menu['rows']) == 1 and menu['rows'][index]['selected']
@@ -254,7 +268,7 @@ with tempfile.TemporaryDirectory(prefix='singz-locale-ui-') as temporary:
             assert held['localePending'] and held['locale']['locale'] == 'en'
             assert not final['localePending'] and final['locale']['locale'] == 'ja'
             assert final['localeSequence'] == held['localeSequence']+3
-    (out/'result.json').write_text(json.dumps({'stages': 2, 'sizes': 2, 'actualChoicesPerSize': 14,
+    (out/'result.json').write_text(json.dumps({'stages': 2, 'sizes': 2, 'actualChoicesPerSize': len(LANGUAGES),
         'nativePlaybackContinuity': 'locale changes before intentional Training navigation',
         'searchDraftPreserved': True, 'tourAndReleaseCopy': ['en','ru'],
         'latestRapidPickDurableJa': True, 'persistedJaRestoredWhileHidden': True,

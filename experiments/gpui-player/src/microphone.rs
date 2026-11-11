@@ -167,7 +167,7 @@ impl View {
                 } else {
                     Phase::Error
                 },
-                error: Some(v["error"].as_str().unwrap_or("Native input failed").into()),
+                error: Some(v["error"].as_str().map(str::to_owned).unwrap_or_else(|| crate::i18n::t("microphone.error.nativeInput"))),
                 ..Self::default()
             });
         }
@@ -915,7 +915,8 @@ impl Session {
                             "{}",
                             value["error"]
                                 .as_str()
-                                .unwrap_or("Native microphone recording failed")
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| crate::i18n::t("microphone.error.recordingFailed"))
                         );
                         return Ok(packet.clone());
                     }
@@ -1258,7 +1259,7 @@ fn worker(
                         g,
                         id,
                         RecordingState::Error {
-                            message: "No matching microphone recording is active".into(),
+                            message: crate::i18n::t("microphone.recording.noActive"),
                         },
                     );
                 }

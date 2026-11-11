@@ -132,5 +132,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Separação de vocais",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Reprodução não pôde iniciar: {message}",
-  "library.engine.songUnreadable": "Esta música não pôde ser lida novamente a partir do disco, então não há nada para tocar."
+  "library.engine.songUnreadable": "Esta música não pôde ser lida novamente a partir do disco, então não há nada para tocar.",
+
 }

@@ -3,10 +3,6 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
-  'lyrics.editor.skippedRows': "건너뛴 줄: {n}. 저장하면 표시된 줄만 남습니다.",
-  'lyrics.editor.backupFailed': "원본 가사를 백업할 수 없습니다. 가사 파일은 변경되지 않았습니다.",
-  'lyrics.panel.autoPreservedEdited': "편집한 가사를 보존하기 위해 자동 검색을 중지했습니다. 교체하려면 변경… 또는 편집을 사용하세요.",
-  'lyrics.panel.autoPreservedUnreadable': "저장된 가사를 읽을 수 없어 자동 검색을 중지했습니다. 파일은 변경되지 않았습니다. 편집에서 수정하세요.",
   "lyrics.check.preciseSuffix": "· 정확성",
   "lyrics.state.noWordsDetected": "보컬에서 단어가 발견되지 않았습니다.",
   "lyrics.check.mismatchPrecise": "가사 중 {pct}%만 보컬에서 확인됐습니다. 가사를 확인하거나 정밀 정렬을 시도하세요.",
@@ -137,5 +133,6 @@ export const lyrics: Translation<typeof en> = {
   "lyrics.editor.help.wordsNudge": "집중된 단어를 50 ms로 눌러",
   "lyrics.editor.help.otherUndo": "실행 취소 — Shift를 함께 누르면 다시 실행",
   "lyrics.editor.help.otherReplace": "노래 전체를 붙여 놓아 줄은 시간대로 유지하라",
-  "lyrics.editor.help.otherClose": "편집기를 닫아주십시오 (보장되지 않은 편집에 대해 먼저 질문합니다)"
+  "lyrics.editor.help.otherClose": "편집기를 닫아주십시오 (보장되지 않은 편집에 대해 먼저 질문합니다)",
+
 }

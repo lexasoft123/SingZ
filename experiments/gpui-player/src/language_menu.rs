@@ -76,6 +76,8 @@ impl LanguageMenu {
     pub fn set_animation_time(&mut self,time:Option<f32>,cx:&mut Context<Self>) {
         self.animation_time=time.map(|time|time.max(0.));cx.notify();
     }
+    /// The clipped scroll viewport; a row is visible only when inside it.
+    pub fn scroll_viewport(&self)->Bounds<Pixels> {self.scroll.bounds()}
     pub fn bounds(&self,id:&str)->Option<Bounds<Pixels>> {self.bounds.borrow().get(id).copied()}
     fn rows(&self)->Vec<Row> {
         let os=if cfg!(target_os="windows") {"Windows"}else if cfg!(target_os="macos") {"macOS"}else{"Linux"};

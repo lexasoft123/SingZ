@@ -3,7 +3,6 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
-  'settings.migration.summary': '已從先前的 SingZ 匯入 {count} 項設定。',
   "settings.action.close": "關閉",
   "settings.common.systemDefault": "系統預設",
   "settings.common.savedDeviceMissing": "已儲存的裝置（未連線）",
@@ -194,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "麥克風訪問被阻止。請在系統隱私設定中允許 SingZ。",
   "settings.micPreview.busy": "麥克風正被另一個應用佔用。請關閉那個應用後重新選擇輸入。",
   "settings.micPreview.unavailable": "該麥克風不可用。請重新連線它，或選擇另一個輸入。",
-  "settings.micPreview.unknown": "麥克風無法啟動。請檢查裝置連線後重試。"
+  "settings.micPreview.unknown": "麥克風無法啟動。請檢查裝置連線後重試。",
+
+  "settings.mic.unavailable": "麥克風無法使用",
 }

@@ -20,6 +20,9 @@ pub struct Pitch {
     /// Independently measured vocal source coverage; never an inferred f0 length.
     source_duration: Option<f64>,
     pub warning: Option<String>,
+    /// True while the pitch analysis for this song is running. The UI keys its
+    /// state on this flag, never on the text of `warning`.
+    pub analyzing: bool,
     pub det_version: f64,
     cached_range: Option<(i32, i32)>,
     key_inferred: bool,
@@ -93,7 +96,7 @@ impl Pitch {
             data.f0 = f0;
             data.hop = hop;
         } else if raw.is_object() {
-            data.warning = Some("Saved pitch data is invalid.".into());
+            data.warning = Some(crate::i18n::t("player.pitch.warning.invalid"));
         }
         data.refresh_inferred_key();
         data
@@ -138,13 +141,13 @@ impl Pitch {
         self.source_duration = source_duration.filter(|_| valid_source);
         if !self.f0.is_empty() {
             if !valid_timeline || !valid_source {
-                self.warning = Some("Saved pitch has an invalid source duration.".into());
+                self.warning = Some(crate::i18n::t("player.pitch.warning.invalidDuration"));
                 self.f0.clear();
             } else if (self.f0.len() as f64 * self.hop - self.analysis_duration()).abs() > 2. {
-                self.warning = Some("Saved pitch belongs to a different song duration.".into());
+                self.warning = Some(crate::i18n::t("player.pitch.warning.differentDuration"));
                 self.f0.clear();
             } else if self.det_version < VERSION as f64 {
-                self.warning = Some("Saved pitch needs updating.".into());
+                self.warning = Some(crate::i18n::t("player.pitch.warning.needsUpdating"));
                 self.f0.clear();
             }
         }

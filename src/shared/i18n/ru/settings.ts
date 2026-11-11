@@ -3,7 +3,6 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
-  'settings.migration.summary': 'Импортировано настроек из предыдущего SingZ: {count}.',
   // ── shared actions/labels, reused across dialogs in this namespace ──
   'settings.action.close': 'Закрыть',
   'settings.common.systemDefault': 'По умолчанию',
@@ -275,5 +274,7 @@ export const settings: Translation<typeof en> = {
   'settings.micPreview.accessBlocked': 'Доступ к микрофону закрыт. Разрешите SingZ в приватности системы.',
   'settings.micPreview.busy': 'Микрофон занят другим приложением. Закройте это приложение и выберите вход снова.',
   'settings.micPreview.unavailable': 'Этот микрофон недоступен. Переподключите его или выберите другой вход.',
-  'settings.micPreview.unknown': 'Микрофон не запустился. Проверьте подключение и повторите.'
+  'settings.micPreview.unknown': 'Микрофон не запустился. Проверьте подключение и повторите.',
+
+  "settings.mic.unavailable": "Микрофон недоступен",
 }

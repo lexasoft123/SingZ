@@ -20,6 +20,18 @@ pub enum ProjectState {
     Blocked,
 }
 
+/// Which kept status line `Snapshot::progress` holds. The UI keys on this,
+/// never on the (translated) progress text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProgressKind {
+    #[default]
+    None,
+    SignedOut,
+    Paused,
+    Finishing,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -32,6 +44,7 @@ pub struct Snapshot {
     pub capture_project: Option<PathBuf>,
     pub scheduler: crate::sync_scheduler::Status,
     pub progress: String,
+    pub progress_kind: ProgressKind,
     pub fraction: f32,
     pub error: Option<String>,
     pub projects: BTreeMap<PathBuf, ProjectState>,
@@ -57,6 +70,7 @@ impl Default for Snapshot {
             capture_project: None,
             scheduler: crate::sync_scheduler::Scheduler::new().status(),
             progress: String::new(),
+            progress_kind: ProgressKind::None,
             fraction: 0.,
             error: None,
             projects: BTreeMap::new(),

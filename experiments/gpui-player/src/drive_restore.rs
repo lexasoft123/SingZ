@@ -847,7 +847,7 @@ fn download_with(
             && verified_reuse.contains(&(path.clone(), old.created_ms))
         {
             drive_adopt::remove_stage(&stage.guard);
-            progress("Already downloaded".into(), 1.);
+            progress(crate::i18n::t("library.drive.alreadyDownloaded"), 1.);
             return Ok(path);
         }
     }
@@ -892,7 +892,7 @@ fn download_with(
     #[cfg(unix)]
     File::open(cache_root)?.sync_all()?;
     root.verify()?;
-    progress("Downloaded".into(), 1.);
+    progress(crate::i18n::t("library.drive.downloaded"), 1.);
     Ok(published)
 }
 #[cfg(test)]

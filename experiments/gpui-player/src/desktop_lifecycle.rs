@@ -47,17 +47,30 @@ pub(super) fn install_actions(cx: &mut App) {
             KeyBinding::new("cmd-w", DesktopClose, None),
             KeyBinding::new("cmd-,", DesktopSettings, None),
         ]);
-        cx.set_menus([
-            Menu::new("SingZ").items([
-                MenuItem::action("Settings…", DesktopSettings),
-                MenuItem::separator(),
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Quit SingZ", DesktopQuit),
-            ]),
-            Menu::new("Window").items([MenuItem::action("Close Window", DesktopClose)]),
-        ]);
+        install_menus(cx);
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn install_menus(_: &mut App) {}
+
+/// The macOS application menu in the current UI language. The locale arrives
+/// after startup, so the caller that applies a locale change must call this
+/// again; `set_menus` replaces the whole bar.
+#[cfg(target_os = "macos")]
+pub(super) fn install_menus(cx: &mut App) {
+    use crate::i18n::t;
+    cx.set_menus([
+        Menu::new("SingZ").items([
+            MenuItem::action(t("main.menu.settings"), DesktopSettings),
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action(t("main.menu.quit"), DesktopQuit),
+        ]),
+        Menu::new(t("main.menu.window"))
+            .items([MenuItem::action(t("main.menu.closeWindow"), DesktopClose)]),
+    ]);
 }
 
 fn saved(bounds: Bounds<Pixels>) -> SavedBounds {

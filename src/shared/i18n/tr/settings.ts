@@ -3,7 +3,6 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
-  'settings.migration.summary': 'Önceki SingZ uygulamanızdan {count} ayar içe aktarıldı.',
   "settings.action.close": "Kapat",
   "settings.common.systemDefault": "Sistem varsayılanı",
   "settings.common.savedDeviceMissing": "Kaydedilmiş cihaz (bağlantıda değil)",
@@ -194,5 +193,7 @@ export const settings: Translation<typeof en> = {
   "settings.micPreview.accessBlocked": "Mikrofon erişimi engellendi. SingZ'i sistem gizlilik ayarlarında izin verin.",
   "settings.micPreview.busy": "Mikrofon başka bir uygulamada kullanılmakta. O uygulamayı kapatın, ardından tekrar girişi seçin.",
   "settings.micPreview.unavailable": "Bu mikrofon kullanılabilir değil. Tekrar bağlayın veya başka bir giriş seçin.",
-  "settings.micPreview.unknown": "Mikrofon çalışmadı. Cihaz bağlantısını kontrol edin ve tekrar deneyin."
+  "settings.micPreview.unknown": "Mikrofon çalışmadı. Cihaz bağlantısını kontrol edin ve tekrar deneyin.",
+
+  "settings.mic.unavailable": "Mikrofon kullanılamıyor",
 }

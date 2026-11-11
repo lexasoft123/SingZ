@@ -2,7 +2,7 @@
 use crate::guide_layout::{self, Rect, Side, Viewport};
 use crate::quick_start_store::{retain_seen, seen};
 use gpui_kit::{prelude::FluentBuilder, *};
-use std::{cell::Cell, rc::Rc, sync::OnceLock};
+use std::{cell::Cell, rc::Rc};
 actions!(
     singz_quick_start,
     [NextFocus, PreviousFocus, Activate, Dismiss]
@@ -16,25 +16,16 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", Dismiss, Some("SingZQuickStart")),
     ]);
 }
-fn all_copy() -> &'static serde_json::Value {
-    static COPY: OnceLock<serde_json::Value> = OnceLock::new();
-    COPY.get_or_init(|| {
-        serde_json::from_str(include_str!("quick_start_copy.json"))
-            .expect("generated Quick start copy")
-    })
-}
+/// The tour copy is ordinary shared i18n (`quickStart.*` in
+/// `src/shared/i18n/<locale>/quickstart.ts`), so every locale has it.
 fn copy_locale() -> &'static str {
-    if crate::i18n::current().as_str() == "ru" {
-        "ru"
-    } else {
-        "en"
-    }
-}
-fn copy() -> &'static serde_json::Value {
-    &all_copy()[copy_locale()]
+    crate::i18n::current().as_str()
 }
 fn text(key: &str) -> String {
-    copy()[key].as_str().unwrap().into()
+    crate::i18n::t(&format!("quickStart.{key}"))
+}
+fn pair(key: &str) -> (String, String) {
+    (text(&format!("{key}.title")), text(&format!("{key}.body")))
 }
 #[derive(Clone)]
 struct Step {
@@ -44,34 +35,22 @@ struct Step {
 }
 fn step(target: &'static str) -> Step {
     let key = match target {
-        "browse" => "library",
+        "browse" => "step.library",
         "saved" => "saved",
-        "split" => "split",
-        "stems" => "stems",
-        "lyrics" => "lyrics",
+        "split" => "step.split",
+        "stems" => "step.stems",
+        "lyrics" => "step.lyrics",
         "karaoke" => "karaoke",
-        "loop" | "tempo" => "practice",
-        "training" => "training",
-        "sync" => "sync",
-        _ => "settings",
+        "loop" | "tempo" => "step.practice",
+        "training" => "step.training",
+        "sync" => "step.sync",
+        _ => "step.settings",
     };
-    let tuple = if matches!(key, "saved" | "karaoke") {
-        &copy()[key]
-    } else {
-        &copy()["steps"][key]
-    };
+    let (title, body) = pair(key);
     Step {
         target,
-        title: if target == "tempo" {
-            text("tempo")
-        } else {
-            tuple[0].as_str().unwrap().into()
-        },
-        body: if target == "loop" {
-            text("loop")
-        } else {
-            tuple[1].as_str().unwrap().into()
-        },
+        title: if target == "tempo" { text("tempo") } else { title },
+        body: if target == "loop" { text("loop") } else { body },
     }
 }
 #[derive(Clone, Copy)]

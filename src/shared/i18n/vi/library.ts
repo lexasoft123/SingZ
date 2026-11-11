@@ -134,5 +134,6 @@ export const library: Translation<typeof en> = {
   "library.splitWorkflow.separatingVocals": "Phân biệt giọng hát",
   "library.splitWorkflow.combinedLabel": "{step}/2 · {label}",
   "library.playbackErrorToast.couldNotStart": "Không thể phát lại: {message}",
-  "library.engine.songUnreadable": "Bài hát này không thể đọc lại từ đĩa, vì vậy playback không có gì để chơi."
+  "library.engine.songUnreadable": "Bài hát này không thể đọc lại từ đĩa, vì vậy playback không có gì để chơi.",
+
 }

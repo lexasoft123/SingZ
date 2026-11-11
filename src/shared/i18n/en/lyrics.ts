@@ -1,9 +1,5 @@
 /* English strings for the `lyrics` namespace — see ../index.ts. */
 export const lyrics = {
-  'lyrics.editor.skippedRows': "Rows skipped: {n}. Saving keeps only the rows shown.",
-  'lyrics.editor.backupFailed': "The original lyrics could not be backed up. The lyrics file was not changed.",
-  'lyrics.panel.autoPreservedEdited': "Automatic lyrics lookup was stopped to preserve your edited lyrics. Use Change… or Edit to replace them.",
-  'lyrics.panel.autoPreservedUnreadable': "Automatic lyrics lookup was stopped because the saved lyrics could not be read. The file was kept unchanged; use Edit to repair it.",
   // ── shared badges/suffixes (used by both the check-verdict text and the panel) ──
   // trailing badge appended when the check ran the precise (CTC) method, e.g. "…heard · precise"
   'lyrics.check.preciseSuffix': ' · precise',
@@ -191,5 +187,6 @@ export const lyrics = {
 
   'lyrics.editor.help.otherUndo': 'Undo — add Shift to redo',
   'lyrics.editor.help.otherReplace': 'Paste the whole song; kept lines keep their timing',
-  'lyrics.editor.help.otherClose': 'Close the editor (asks first about unsaved edits)'
+  'lyrics.editor.help.otherClose': 'Close the editor (asks first about unsaved edits)',
+
 }

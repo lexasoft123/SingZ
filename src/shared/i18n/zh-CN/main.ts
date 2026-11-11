@@ -3,12 +3,6 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
-  "main.error.copySourceChanged": "“{name}”的复制源已更改。请重试。",
-  "main.error.linkedFilesystemPath": "工作副本不能使用符号链接路径。",
-  "main.error.portableName": "“{name}”: 名称最多为 240 字节，不能使用 Windows 保留名称、控制字符，也不能以点或空格结尾。",
-  "main.error.networkFilesystem": "不支持在网络文件系统上保存或移动项目。请选择本地音乐库文件夹。",
-  "main.error.filesystemPublish": "“{name}”: 此文件系统无法安全保存项目。请选择其他本地音乐库文件夹后重试。",
-  "main.error.sourceCacheFull": "工作副本缓存已满。请关闭不用的项目，稍后重试。",
 
   "main.sync.downloadDeferred": "未添加 {dir}：{reason}。歌曲仍在 Drive 中；解决问题后请重新同步。",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
@@ -220,5 +214,6 @@ export const main: Translation<typeof en> = {
   'main.sync.removing': '正在从 Drive 删除 {file}…',
   'main.sync.removingGone': '正在从 Drive 删除 {name}（已在此处重命名或删除）…',
   'main.sync.updatingCatalog': '正在更新手机目录…',
-  'main.sync.upToDate': 'Drive 已是最新'
+  'main.sync.upToDate': 'Drive 已是最新',
+
 }

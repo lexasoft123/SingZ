@@ -1,7 +1,5 @@
 /* English strings for the `app` namespace — see ../index.ts. */
 export const app = {
-  'app.crash.previous': "SingZ closed unexpectedly last time. Details were saved to the log.",
-  'app.crash.internal': "An internal error occurred. Please restart SingZ after your saves finish.",
   'app.whatsNew.title': "What’s new",
   'app.whatsNew.fullNotes': "Full release notes",
   'app.whatsNew.done': "Got it",

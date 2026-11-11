@@ -530,6 +530,7 @@ impl Render for Header {
             .when(self.loaded && !self.training, |d| {
                 d.child(
                     self.button("header-catalog", "", HeaderEvent::Catalog, cx)
+                        .when(true, |d| self.guides.track(d, "catalog"))
                         .ml(px(-4.))
                         .gap(px(7.))
                         .text_color(rgb(if catalog { ACCENT } else { TEXT }))
