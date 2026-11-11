@@ -12,6 +12,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new(platform: source::Platform, identity: &str) -> Self {
+        Self::with_audio_policy(platform, identity, cfg!(windows))
+    }
+    fn with_audio_policy(platform: source::Platform, identity: &str, windows: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "c40-{}-{}",
             std::process::id(),
@@ -64,7 +67,7 @@ impl Fixture {
             ),
             serde_json::to_value(receipt).unwrap(),
         );
-        f.write("native-handover.json",json!({"formatVersion":1,"product":"desktop","audio":{"nativeOutputUid":"speaker","outputId":"chromium-hash","nativeInputUid":"mic","inputChannel":1,"nativeMonitorOutputUid":"speaker","nativeMonitorOutputChannels":[1,0],"monitorGainDb":-12},"karaoke":true,"metronome":{"click":true,"countInBars":1,"volume":0.4,"accent":false,"grid":true},"trainingControls":{"formatVersion":1,"sound":2,"volume":0.8,"tolerance":2,"focus":1,"program":null}}));
+        f.write("native-handover.json",json!({"formatVersion":1,"product":"desktop","audio":{"nativeOutputUid":playback_uid(windows),"outputId":"chromium-hash","nativeInputUid":"mic","inputChannel":1,"nativeMonitorOutputUid":"speaker","nativeMonitorOutputChannels":[1,0],"monitorGainDb":-12},"karaoke":true,"metronome":{"click":true,"countInBars":1,"volume":0.4,"accent":false,"grid":true},"trainingControls":{"formatVersion":1,"sound":2,"volume":0.8,"tolerance":2,"focus":1,"program":null}}));
         f
     }
     fn write(&self, name: &str, value: Value) {
@@ -86,8 +89,14 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
+fn playback_uid(windows: bool) -> &'static str {
+    if windows { "wasapi:speaker" } else { "speaker" }
+}
 fn inventory() -> Result<Inventory> {
-    Ok(Inventory {
+    inventory_for(cfg!(windows))
+}
+fn inventory_for(windows: bool) -> Result<Inventory> {
+    let mut inventory = Inventory {
         devices: vec![
             Device {
                 uid: "speaker".into(),
@@ -106,8 +115,47 @@ fn inventory() -> Result<Inventory> {
                 output_probe_busy: false,
             },
         ],
-        ..Default::default()
-    })
+        default_output: playback_uid(windows).into(),
+        default_input: "mic".into(),
+    };
+    if windows {
+        // Real Windows inventory has a separate provider-scoped playback row;
+        // the raw speaker row above belongs to independent monitoring.
+        let mut playback = inventory.devices[0].clone();
+        playback.uid = playback_uid(true).into();
+        inventory.devices.push(playback);
+    }
+    Ok(inventory)
+}
+// Exercise the Windows fixture contract even on macOS/Linux: playback is
+// provider-scoped, while WASAPI capture and independent monitor IDs stay raw.
+#[test]
+fn windows_audio_fixture_imports_scoped_playback_and_raw_capture() {
+    let f = Fixture::with_audio_policy(source::Platform::Windows, "SingZ", true);
+    let devices = inventory_for(true).unwrap();
+    let handover: Value =
+        serde_json::from_slice(&fs::read(f.profile.join("native-handover.json")).unwrap()).unwrap();
+    let output = handover["audio"]["nativeOutputUid"].as_str().unwrap();
+    crate::audio_devices::validate_output_uid(crate::audio_devices::Provider::Wasapi, output, true)
+        .expect("Windows fixture playback must satisfy the production UID policy");
+    assert!(
+        devices
+            .devices
+            .iter()
+            .any(|d| d.uid == output && d.outputs == 2)
+    );
+    assert!(
+        devices
+            .devices
+            .iter()
+            .any(|d| d.uid == "speaker" && d.outputs == 2)
+    );
+    run(&f.config, &f.profiles, &|| Ok(devices.clone())).unwrap();
+    let audio = f.raw("audio.json");
+    assert_eq!(audio["outputUid"], "wasapi:speaker");
+    assert_eq!(audio["inputUid"], "mic");
+    assert_eq!(audio["monitorOutputUid"], "speaker");
+    assert_eq!(audio["monitorOutputChannels"], json!([1, 0]));
 }
 fn bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn visit(root: &Path, p: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
@@ -148,7 +196,10 @@ fn complete_profile(platform: source::Platform, identity: &str) {
     );
     assert_eq!(window["maximized"], true);
     assert_eq!(f.raw("audio.json")["inputUid"], "mic");
-    assert_eq!(f.raw("audio.json")["outputUid"], "speaker");
+    assert_eq!(
+        f.raw("audio.json")["outputUid"],
+        playback_uid(cfg!(windows))
+    );
     assert_eq!(f.raw("audio.json")["karaoke"], true);
     assert_eq!(f.raw("metronome.json")["volume"], 0.4);
     assert_eq!(f.raw("training-controls.json")["sound"], 2);
