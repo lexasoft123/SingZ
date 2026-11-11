@@ -265,10 +265,14 @@ fn measure_transport_load(catalog: bool) {
             assert!(*max <= 100., "max {max} > 100ms");
         }
     }
+    // The bound is that a held job never makes a command more than 5 ms slower
+    // at p99. A held phase that happens to be faster (the unheld phase caught
+    // unrelated machine load) is not a regression, so this is one-sided.
     for index in 0..3 {
+        let (unheld, held) = (metrics[0].0[index][1], metrics[1].0[index][1]);
         assert!(
-            (metrics[0].0[index][1] - metrics[1].0[index][1]).abs() <= 5.,
-            "held job changed p99 by more than 5ms"
+            held - unheld <= 5.,
+            "held job slowed p99 by more than 5ms ({unheld} -> {held})"
         );
     }
     assert!(
