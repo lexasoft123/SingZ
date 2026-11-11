@@ -261,50 +261,19 @@ fn precise_flavor(config: &Config) -> Flavor {
         config.flavor
     }
 }
-fn resolve_engine(override_path: Option<std::ffi::OsString>, name: &str) -> Option<PathBuf> {
-    if let Some(path) = override_path.map(PathBuf::from) {
-        return regular(&path).then_some(path);
-    }
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let file = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.into()
-    };
-    let platform = if cfg!(windows) {
-        "win32"
-    } else if cfg!(target_os = "macos") {
-        "darwin"
-    } else {
-        "linux"
-    };
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        "x64"
-    };
-    let mut candidates = vec![
-        dir.join(&file),
-        dir.join("engines").join(&file),
-        dir.join("../Resources/engines").join(&file),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../vendor")
-            .join(format!("{platform}-{arch}"))
-            .join(&file),
-    ];
-    if cfg!(target_os = "macos") {
-        candidates
-            .push(PathBuf::from("/Applications/SingZ.app/Contents/Resources/engines").join(&file));
-    }
-    candidates.into_iter().find(|p| regular(p))
-}
 fn capability_for(config: &Config) -> Capabilities {
     let mut missing = vec![];
-    if resolve_engine(gated_env!("SINGZ_LLAMA_SERVER"), "llama-server").is_none() {
+    if crate::engine_status::resolve_bundled_engine(
+        gated_env!("SINGZ_LLAMA_SERVER"),
+        "llama-server",
+    )
+    .is_none()
+    {
         missing.push("llama-server".into());
     }
-    if resolve_engine(gated_env!("SINGZ_CRISPASR"), "crispasr").is_none() {
+    if crate::engine_status::resolve_bundled_engine(gated_env!("SINGZ_CRISPASR"), "crispasr")
+        .is_none()
+    {
         missing.push("crispasr".into());
     }
     Capabilities {
@@ -470,8 +439,11 @@ fn transcribe_inner(
             work.check(cancel)?;
             let flat = flat_words(&work.draft);
             let assigned = chunk_of_each_word(&work.draft, &chunks);
-            let runtime =
-                resolve_engine(gated_env!("SINGZ_CRISPASR"), "crispasr").context("Word aligner is missing")?;
+            let runtime = crate::engine_status::resolve_bundled_engine(
+                gated_env!("SINGZ_CRISPASR"),
+                "crispasr",
+            )
+            .context("Word aligner is missing")?;
             let mut warnings = vec![];
             let placed = place_chunks(
                 &work,
@@ -1100,9 +1072,12 @@ struct Server {
 impl Server {
     fn start(input: &Inputs, cancel: &impl Fn() -> bool) -> Result<Self> {
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let exe = resolve_engine(gated_env!("SINGZ_LLAMA_SERVER"), "llama-server")
-            .context("llama-server is missing")?;
-        let mut cmd = Command::new(exe);
+        let exe = crate::engine_status::resolve_bundled_engine(
+            gated_env!("SINGZ_LLAMA_SERVER"),
+            "llama-server",
+        )
+        .context("llama-server is missing")?;
+        let mut cmd = crate::engine_status::offline_engine_command(exe);
         cmd.arg("-m")
             .arg(input.config.models.join(ASR))
             .arg("--mmproj")
@@ -1569,7 +1544,8 @@ fn fast(
     }
     let assigned = domain::assign_words_to_chunks(flat.len(), &anchor_chunk);
     let runtime =
-        resolve_engine(gated_env!("SINGZ_CRISPASR"), "crispasr").context("Word aligner is missing")?;
+        crate::engine_status::resolve_bundled_engine(gated_env!("SINGZ_CRISPASR"), "crispasr")
+            .context("Word aligner is missing")?;
     let bad_lines: HashSet<_> = judged.check.bad_lines.iter().copied().collect();
     let placed = place_chunks(
         input,
@@ -1666,7 +1642,7 @@ fn place_chunks(
             text.len() <= 64 * 1024,
             "Alignment chunk text exceeds native argument budget"
         );
-        let mut cmd = Command::new(runtime);
+        let mut cmd = crate::engine_status::offline_engine_command(runtime);
         cmd.arg("--align-only")
             .arg("-am")
             .arg(input.config.models.join(ALIGNER))
@@ -1777,7 +1753,7 @@ fn precise_ctc(
     let flavor = precise_flavor(&input.config);
     let onnx = matches!(flavor, Flavor::IntelMac | Flavor::Windows);
     let script = scratch.write("align.py", source_script(onnx)?.as_bytes())?;
-    let mut cmd = Command::new(python(&input.config));
+    let mut cmd = crate::engine_status::offline_engine_command(python(&input.config));
     cmd.arg(&script).arg(&wav).arg(&token_file);
     if onnx {
         cmd.arg(input.config.models.join("mms-fa.onnx"));

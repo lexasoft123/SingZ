@@ -430,8 +430,7 @@ source/build receipt and compliance notices (Windows DLLs remain adjacent to the
 executables). Its receipt describes pre-signing inputs; the final package inventory
 is authoritative for delivered bytes. This is provenance, not a full codec matrix
 qualification. Follow its LGPL notices and corresponding-source/replacement offer.
-Optional inference/model packs and separate lyric/alignment engines are NOT included
-or downloaded by this packager. Features requiring them need separately installed,
+Model packs are downloaded separately. Lyric and alignment engines are in engines/. Features requiring them need separately installed,
 compatible native packs and their own licenses. No missing model is a successful
 inference result. Native microphone/OS permissions remain the user's responsibility.
 
@@ -447,7 +446,7 @@ not that these applications launched or that audio/inference worked on this OS.
 
 def assemble(platform: str, runtime: Path, output: Path, *, uikit_dir: Path | None = None,
              publisher=rename_exclusive, require_drive_config: bool = False,
-             build_info_file: Path | None = None) -> Path:
+             build_info_file: Path | None = None, engines: Path | None = None) -> Path:
     if platform not in ('windows', 'linux'):
         raise PackageError('Platform must be windows or linux')
     if platform == 'linux' and os.name != 'posix':
@@ -485,6 +484,13 @@ def assemble(platform: str, runtime: Path, output: Path, *, uikit_dir: Path | No
                 if stem in reserved or any(ord(char) < 32 or char in '<>:"/\\|?*' for char in path.name):
                     raise PackageError(f'Invalid Windows DLL filename: {path.name}')
                 selected.append((path, Path(path.name), 'adjacent-dll', False))
+    if engines is not None:
+        engines = Path(engines).absolute()
+        ordinary(engines, True)
+        for engine in ('llama-server', 'crispasr'):
+            source = engines / (engine + suffix)
+            ordinary(source)
+            selected.append((source, Path('engines') / source.name, 'engine', True))
     codec_selected, codec_runtime, codec_expected = codec_payload(runtime, platform)
     selected.extend(codec_selected)
     # Avoid case-folded collisions on Windows even when assembly runs on Linux.
@@ -538,6 +544,7 @@ def main() -> None:
     parser.add_argument('--platform', choices=('windows', 'linux'), required=True)
     parser.add_argument('--runtime-dir', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True, help='Fresh, nonexistent portable-folder destination')
+    parser.add_argument('--engines-dir', type=Path, required=True, help='Directory containing llama-server and crispasr for the target')
     parser.add_argument('--uikit-dir', type=Path, help='Existing singz-ui repository or gpui crate root; fonts are already embedded')
     parser.add_argument('--require-drive-config', action='store_true', help='Require configured baked Drive metadata bound to the unsigned source UI hash')
     parser.add_argument('--build-info-file', type=Path, help='Safe JSON previously emitted by the source UI --native-build-info; assembler never runs it')
@@ -546,7 +553,7 @@ def main() -> None:
     try:
         require_fresh_vendor()
         validate_runtime_profile(args.runtime_dir, args.allow_debug)
-        manifest = assemble(args.platform, args.runtime_dir, args.output_dir, uikit_dir=args.uikit_dir, require_drive_config=args.require_drive_config, build_info_file=args.build_info_file)
+        manifest = assemble(args.platform, args.runtime_dir, args.output_dir, uikit_dir=args.uikit_dir, engines=args.engines_dir, require_drive_config=args.require_drive_config, build_info_file=args.build_info_file)
     except (PackageError, OSError, ValueError) as error:
         parser.exit(1, f'Packaging failed: {error}\n')
     print(manifest)

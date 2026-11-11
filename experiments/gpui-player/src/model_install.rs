@@ -77,6 +77,16 @@ pub fn valid_part(path: &Path, part: &Part) -> bool {
         FileKind::Onnx => true,
     }
 }
+pub fn pack_format_compatible(config: &Config, root: &Path) -> bool {
+    let raw = fs::read(root.join("python/pack.json"))
+        .ok()
+        .filter(|b| b.len() <= 65536)
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    raw.as_ref()
+        .and_then(|v| v["formatVersion"].as_u64())
+        .unwrap_or(0)
+        >= config.flavor.pack_format()
+}
 pub fn pack_complete(config: &Config, root: &Path) -> bool {
     let python = if config.flavor == Flavor::Windows {
         root.join("python/python.exe")
@@ -86,16 +96,7 @@ pub fn pack_complete(config: &Config, root: &Path) -> bool {
     if !regular(&python, 1) || !regular(&root.join("python/models/uvr/UVR_MDXNET_KARA_2.onnx"), 1) {
         return false;
     }
-    let raw = fs::read(root.join("python/pack.json"))
-        .ok()
-        .filter(|b| b.len() <= 65536)
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    if raw
-        .as_ref()
-        .and_then(|v| v["formatVersion"].as_u64())
-        .unwrap_or(0)
-        < config.flavor.pack_format()
-    {
+    if !pack_format_compatible(config, root) {
         return false;
     }
     if config.flavor == Flavor::AppleSilicon {

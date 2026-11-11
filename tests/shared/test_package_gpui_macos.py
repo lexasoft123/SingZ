@@ -102,6 +102,20 @@ class AssemblyTests(unittest.TestCase):
             self.assertEqual((self.output / 'Contents/Resources/licenses' / name).read_bytes(), (self.font_licenses / name).read_bytes())
         self.assertEqual(self.commands, [])
 
+    def test_mismatched_engine_architecture_is_refused(self):
+        engines = self.base / 'engines'
+        engines.mkdir()
+        for name in ('llama-server', 'crispasr'):
+            path = engines / name
+            path.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic executable')
+            path.chmod(0o755)
+        def inspect(path):
+            arch = 'x86_64' if path.name == 'crispasr' else 'arm64'
+            return (['/usr/lib/libSystem.B.dylib'], [], {'architectures': [arch], 'minimumMacOS': '14.0'})
+        with self.assertRaisesRegex(package.PackageError, 'architecture'):
+            self.assemble(engines=engines, inspector=inspect)
+        self.assert_clean()
+
     def test_missing_or_empty_embedded_font_notices_refused(self):
         for name in package.FONT_LICENSES:
             with self.subTest(name=name):

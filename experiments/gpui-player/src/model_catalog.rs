@@ -26,7 +26,11 @@ impl Flavor {
         }
     }
     pub fn pack_format(self) -> u64 {
-        if self == Self::Windows { 10 } else { 6 }
+        if matches!(self, Self::Windows | Self::Linux) {
+            10
+        } else {
+            6
+        }
     }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -118,9 +122,11 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or(home.join(".config"))
         };
+        let root = data.join("SingZ");
+        #[cfg(feature = "ui-tests")]
         let root = std::env::var_os("SINGZ_GPUI_CONFIG_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| data.join("SingZ"));
+            .unwrap_or(root);
         let flavor = Flavor::host();
         let version: serde_json::Value =
             serde_json::from_str(include_str!("../../../package.json"))

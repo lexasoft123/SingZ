@@ -77,6 +77,16 @@ class AssemblyTests(unittest.TestCase):
     def assemble(self, platform=None, **kwargs):
         return package.assemble(platform or self.platform, self.runtime, self.output, uikit_dir=self.uikit, **kwargs)
 
+    def test_windows_packages_lyric_engines(self):
+        self.executables('windows')
+        engines = self.base / 'engines'
+        engines.mkdir()
+        for name in ('llama-server.exe', 'crispasr.exe'):
+            (engines / name).write_bytes(pe())
+        self.assemble('windows', engines=engines)
+        for name in ('llama-server.exe', 'crispasr.exe'):
+            self.assertTrue((self.output / 'engines' / name).is_file())
+
     def assert_clean(self):
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.base.glob('.singz-desktop-package-*')), [])

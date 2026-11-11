@@ -357,3 +357,91 @@ fn intel_pack_shared_with_arm_host_still_requires_embedded_onnx_weights() {
     .unwrap();
     assert!(validated_pack(&config));
 }
+
+#[test]
+fn system_engine_is_always_offline() {
+    let engine = ResolvedEngine::System {
+        argv: vec!["demucs".into()],
+        path: "".into(),
+    };
+    let fixture = Fixture::new();
+    for command in [engine.system_command().unwrap(), pack_command(&fixture.config(Flavor::AppleSilicon)), offline_engine_command("llama-server"), offline_engine_command("crispasr")] {
+        assert_eq!(
+            command.get_envs().find(|(k, _)| *k == "HF_HUB_OFFLINE").and_then(|(_, v)| v),
+            Some(std::ffi::OsStr::new("1"))
+        );
+    }
+}
+
+#[test]
+fn linux_uses_electron_pack_format() {
+    assert_eq!(Flavor::Linux.pack_format(), 10);
+}
+
+#[test]
+fn shipped_and_developer_engine_candidates_are_platform_specific() {
+    for (exe_dir, windows, expected, file) in [
+        (
+            "/SingZ.app/Contents/MacOS",
+            false,
+            "/SingZ.app/Contents/MacOS/../Resources/engines/llama-server",
+            "llama-server",
+        ),
+        (
+            "/install",
+            true,
+            "/install/engines/llama-server.exe",
+            "llama-server.exe",
+        ),
+    ] {
+        let vendor = Path::new("/checkout/vendor/target");
+        let shipped = engine_candidates(Path::new(exe_dir), "llama-server", windows, None);
+        assert!(shipped.contains(&PathBuf::from(expected)));
+        assert!(!shipped.iter().any(|p| p.starts_with(vendor)));
+        let development =
+            engine_candidates(Path::new(exe_dir), "llama-server", windows, Some(vendor));
+        assert!(development.contains(&vendor.join(file)));
+    }
+    let fixture = Fixture::new();
+    for (windows, exe_suffix, bundled_suffix) in [(false, "SingZ.app/Contents/MacOS", "../Resources/engines/llama-server"), (true, "install", "engines/llama-server.exe")] {
+        let exe = fixture.0.join(exe_suffix);
+        let vendor = fixture.0.join("vendor");
+        fs::create_dir_all(&exe).unwrap();
+        fs::create_dir_all(&vendor).unwrap();
+        let file = if windows { "llama-server.exe" } else { "llama-server" };
+        fs::write(vendor.join(file), b"developer").unwrap();
+        assert!(choose_engine(engine_candidates(&exe, "llama-server", windows, None)).is_none());
+        assert_eq!(choose_engine(engine_candidates(&exe, "llama-server", windows, Some(&vendor))), Some(vendor.join(file)));
+        let bundled = exe.join(bundled_suffix);
+        fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        fs::write(&bundled, b"shipped").unwrap();
+        assert_eq!(choose_engine(engine_candidates(&exe, "llama-server", windows, None)), Some(bundled));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn incompatible_pack_never_starts() {
+    let fixture = Fixture::new();
+    let config = fixture.config(Flavor::AppleSilicon);
+    let called = fixture.0.join("called");
+    fixture.pack(
+        &config,
+        &format!("printf called > '{}'; exit 0", called.display()),
+    );
+    fs::write(
+        config.pack.join("python/pack.json"),
+        b"{\"formatVersion\":5}",
+    )
+    .unwrap();
+    assert!(!crate::model_install::pack_format_compatible(
+        &config,
+        &config.pack
+    ));
+    let mut env = fixture.environment();
+    env.no_system = true;
+    let status = discover_in(&config, &env, &AtomicU64::new(1), 1).unwrap();
+    assert!(!status.ok);
+    assert_eq!(status.message, Some(crate::i18n::t("main.error.splitterPackIncompatible")));
+    assert!(!called.exists());
+}

@@ -506,9 +506,15 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
             info['CFBundleIconFile'] = 'SingZ.icns'
         require_native_payload(bundle)
         dependencies = dependency_inventory(bundle, inspector)
+        indexed = {record['path']: record for record in dependencies}
+        application_architectures = set(indexed['Contents/MacOS/singz-gpui-player']['architectures'])
+        for name in ('llama-server', 'crispasr'):
+            relative = 'Contents/Resources/engines/' + name
+            if (resources / 'engines' / name).exists():
+                record = indexed.get(relative)
+                if record is None or record['filetype'] != 'EXECUTE' or not application_architectures.issubset(record['architectures']):
+                    raise PackageError(f'Engine is missing application architecture or not MH_EXECUTE: {name}')
         if codec_runtime is not None:
-            indexed = {record['path']: record for record in dependencies}
-            application_architectures = set(indexed['Contents/MacOS/singz-gpui-player']['architectures'])
             for name in codec_runtime['libraryNames']:
                 record = indexed.get('Contents/MacOS/ffmpeg/' + name)
                 if record is None or record['filetype'] != 'DYLIB' or not application_architectures.issubset(record['architectures']):
@@ -555,7 +561,7 @@ def main() -> None:
     parser.add_argument('--runtime-dir', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--version')
-    parser.add_argument('--engines-dir', type=Path)
+    parser.add_argument('--engines-dir', type=Path, required=True)
     parser.add_argument('--icon', type=Path, help='Optional existing .icns; no image generation')
     parser.add_argument('--font-license-dir', type=Path, help='Directory containing required Bricolage-OFL.txt and MartianMono-OFL.txt notices')
     parser.add_argument('--ad-hoc-sign', action='store_true')
@@ -566,6 +572,11 @@ def main() -> None:
     try:
         require_fresh_vendor()
         validate_runtime_profile(args.runtime_dir, args.allow_debug)
+        for name in ('llama-server', 'crispasr'):
+            engine = args.engines_dir / name
+            ordinary(engine)
+            if not engine.stat().st_mode & 0o111 or not macho(engine):
+                raise PackageError(f'Required engine must be executable Mach-O: {engine}')
         result = assemble(args.runtime_dir, args.output, version=args.version, engines=args.engines_dir, icon=args.icon, font_license_dir=args.font_license_dir, ad_hoc_sign=args.ad_hoc_sign, require_drive_config=args.require_drive_config, build_info_file=args.build_info_file)
     except (PackageError, OSError, ValueError) as error:
         parser.exit(1, f'Packaging failed: {error}\n')

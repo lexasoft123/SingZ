@@ -4,17 +4,82 @@ use crate::{
     model_catalog::{Config, Flavor},
     model_install::{cancelled, command_observe},
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
     ffi::{OsStr, OsString},
     fs::File,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::atomic::AtomicU64,
     time::Duration,
 };
+// The package layout is independent of the machine performing the lookup.
+fn engine_candidates(
+    exe_dir: &Path,
+    name: &str,
+    windows: bool,
+    developer: Option<&Path>,
+) -> Vec<PathBuf> {
+    let file = if windows {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    let mut candidates = vec![exe_dir.join("engines").join(&file)];
+    if !windows {
+        candidates.push(exe_dir.join("../Resources/engines").join(&file));
+    }
+    if let Some(vendor) = developer {
+        candidates.push(exe_dir.join(&file));
+        candidates.push(vendor.join(&file));
+    }
+    candidates
+}
+fn choose_engine(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|p| p.metadata().is_ok_and(|m| m.is_file() && m.len() > 0))
+}
+pub fn resolve_bundled_engine(override_path: Option<OsString>, name: &str) -> Option<PathBuf> {
+    let regular = |path: &Path| path.metadata().is_ok_and(|m| m.is_file() && m.len() > 0);
+    if let Some(path) = override_path.map(PathBuf::from) {
+        return regular(&path).then_some(path);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    #[cfg(any(debug_assertions, feature = "ui-tests"))]
+    let developer = {
+        let platform = if cfg!(windows) {
+            "win32"
+        } else if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            "linux"
+        };
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x64"
+        };
+        Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vendor")
+                .join(format!("{platform}-{arch}")),
+        )
+    };
+    #[cfg(not(any(debug_assertions, feature = "ui-tests")))]
+    let developer: Option<PathBuf> = None;
+    choose_engine(engine_candidates(
+        dir, name, cfg!(windows), developer.as_deref(),
+    ))
+}
+pub fn offline_engine_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command.env("HF_HUB_OFFLINE", "1");
+    command
+}
 pub const ONNX_SHIM: &str = "import sys; from demucs_onnx.cli import main; sys.exit(main())";
 #[derive(Clone, Debug)]
 pub enum ResolvedEngine {
@@ -29,7 +94,7 @@ impl ResolvedEngine {
         let Self::System { argv, path } = self else {
             return None;
         };
-        let mut command = Command::new(argv.first()?);
+        let mut command = offline_engine_command(argv.first()?);
         command.args(&argv[1..]).env("PATH", path);
         Some(command)
     }
@@ -194,7 +259,7 @@ pub fn pack_python(config: &Config) -> PathBuf {
     })
 }
 pub fn pack_command(config: &Config) -> Command {
-    let mut command = Command::new(pack_python(config));
+    let mut command = offline_engine_command(pack_python(config));
     command
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONUTF8", "1")
@@ -372,6 +437,19 @@ fn discover_in(
         }
     }
     cancelled(serial, id)?;
+    if (pack_python(config).exists() || config.pack.join("python/pack.json").exists())
+        && !crate::model_install::pack_format_compatible(config, &config.pack)
+    {
+        crate::diagnostics::event(
+            "splitter",
+            format!("Installed splitter pack format is incompatible; this build requires version {}", config.flavor.pack_format()),
+            crate::diagnostics::Level::Warn,
+        );
+        return Ok(EngineStatus {
+            message: Some(crate::i18n::t("main.error.splitterPackIncompatible")),
+            ..EngineStatus::default()
+        });
+    }
     crate::diagnostics::event(
         "splitter",
         "No usable stem splitter found; download a splitter pack or finish engine setup",
