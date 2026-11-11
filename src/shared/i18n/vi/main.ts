@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.error.copySourceChanged": "Nguồn sao chép của “{name}” đã thay đổi. Hãy thử lại.",
+  "main.error.linkedFilesystemPath": "Không thể dùng đường dẫn liên kết tượng trưng cho bản sao làm việc.",
+  "main.error.portableName": "“{name}”: Chọn tên tối đa 240 byte, không dùng tên dành riêng của Windows, ký tự điều khiển, dấu chấm hoặc dấu cách ở cuối.",
+  "main.error.networkFilesystem": "Không hỗ trợ lưu hoặc di chuyển dự án trên hệ thống tệp mạng. Hãy chọn thư mục thư viện cục bộ.",
+  "main.error.filesystemPublish": "“{name}”: Hệ thống tệp này không thể lưu dự án an toàn. Hãy chọn thư mục thư viện cục bộ khác rồi thử lại.",
+  "main.error.sourceCacheFull": "Bộ nhớ đệm bản sao làm việc đã đầy. Hãy đóng các dự án không dùng và thử lại sau.",
+
   "main.sync.downloadDeferred": "Chưa thêm {dir}: {reason}. Bài hát vẫn trên Drive; hãy khắc phục rồi đồng bộ lại.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/giây",

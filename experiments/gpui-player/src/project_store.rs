@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Write, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -294,6 +294,31 @@ fn ordinary_stems(dir: &Path) -> Result<PathBuf> {
     );
     Ok(stems)
 }
+// Verify both endpoints: coarse source timestamps cannot prove stability, and
+// hashing the source alone cannot establish that the destination was written.
+fn verify_content(input: &mut File, expected: &[u8], message: String, cancel: &impl Fn() -> bool) -> Result<()> {
+    input.seek(SeekFrom::Start(0))?;
+    let mut digest = Sha256::new();
+    let mut block = [0u8; 65536];
+    loop {
+        custom_cancel(cancel)?;
+        let n = input.read(&mut block)?;
+        if n == 0 { break; }
+        digest.update(&block[..n]);
+    }
+    ensure!(&digest.finalize()[..] == expected, "{message}");
+    Ok(())
+}
+#[cfg(test)]
+pub(crate) fn verify_copy_content(input: &mut File, expected: &[u8]) -> Result<()> {
+    verify_content(input, expected, crate::i18n::tv("main.error.copySourceChanged", &[("name", "source".into())]), &||false)
+}
+pub(crate) fn verify_written_copy(input: &mut File, destination: &Path, expected: &[u8], cancel: &impl Fn() -> bool) -> Result<()> {
+    let name = destination.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    verify_content(input, expected, crate::i18n::tv("main.error.copySourceChanged", &[("name", name)]), cancel)?;
+    let mut written = File::open(destination)?;
+    verify_content(&mut written, expected, crate::project_publish::publish_error(destination), cancel)
+}
 fn copy_encoded(source: &Path, destination: &Path, cancel: &impl Fn() -> bool) -> Result<()> {
     custom_cancel(cancel)?;
     let before = fs::symlink_metadata(source)?;
@@ -352,9 +377,11 @@ fn copy_encoded(source: &Path, destination: &Path, cancel: &impl Fn() -> bool) -
         .create_new(true)
         .open(&temp)?;
     let mut count = 0u64;
+    let mut digest = Sha256::new();
     let mut block = [0u8; 65536];
     loop {
         custom_cancel(cancel)?;
+        crate::source_jobs::check_work_budget()?;
         let n = input.read(&mut block)?;
         if n == 0 {
             break;
@@ -362,7 +389,10 @@ fn copy_encoded(source: &Path, destination: &Path, cancel: &impl Fn() -> bool) -
         count += n as u64;
         ensure!(count <= before.len(), "Custom source changed while saving");
         output.write_all(&block[..n])?;
+        digest.update(&block[..n]);
     }
+    output.sync_all()?;
+    verify_written_copy(&mut input, &temp, &digest.finalize(), cancel)?;
     let after = fs::symlink_metadata(source)?;
     ensure!(
         after.is_file()
@@ -466,6 +496,7 @@ pub fn materialize_custom(
             crate::tracks::normalize_custom_path(&relative).is_some(),
             "Unsafe custom track filename"
         );
+        crate::source_jobs::validate_component(std::ffi::OsStr::new(&name))?;
         copy_encoded(&lane.file, &stems.join(&name), cancel)?;
         let mut anchored = lane.clone();
         anchored.file = destination.join(&relative);
@@ -713,6 +744,7 @@ pub(crate) fn commit_expected_locked(
     if !matches!(name, "project.json" | "lyrics.json") {
         bail!("Invalid project member")
     }
+    crate::project_publish::writable_filesystem(dir)?;
     let destination = dir.join(name);
     let current_bytes = member_bytes(dir, name)?;
     let current = current_bytes.as_ref().map(|b| fingerprint(b));
@@ -750,9 +782,9 @@ pub(crate) fn commit_expected_locked(
     if expected.is_none() {
         // An atomic no-replace publication closes the absent-file race even
         // against writers that ignore our advisory project lease.
-        fs::hard_link(&pending.0, &destination).context("Project member appeared while saving")?;
+        fs::hard_link(&pending.0, &destination).context(crate::project_publish::publish_error(&destination))?;
     } else {
-        replace(&pending.0, &destination)?;
+        replace(&pending.0, &destination).context(crate::project_publish::publish_error(&destination))?;
     }
     #[cfg(not(windows))]
     {
@@ -766,6 +798,38 @@ pub(crate) fn commit_expected_locked(
 mod tests {
     use super::*;
     include!("project_store_timeline_tests.rs");
+    #[test]
+    fn c21_content_check_rejects_same_length_edits_without_relying_on_mtime() {
+        let path = std::env::temp_dir().join(format!("singz-c21-content-{}", std::process::id()));
+        fs::write(&path, b"before").unwrap();
+        let mut file = File::open(&path).unwrap();
+        let copied = Sha256::digest(b"before");
+        verify_copy_content(&mut file, &copied).unwrap();
+        fs::write(&path, b"edited").unwrap();
+        assert!(verify_copy_content(&mut file, &copied).is_err());
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn c21_review_verifies_destination_and_honors_cancel() {
+        let base=std::env::temp_dir().join(format!("singz-c21-verify-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let source=base.join("source");
+        let destination=base.join("destination");
+        fs::write(&source, vec![1u8; 200000]).unwrap();
+        fs::write(&destination, vec![2u8; 200000]).unwrap();
+        let mut input=File::open(&source).unwrap();
+        let expected=Sha256::digest(vec![1u8;200000]);
+        assert!(verify_written_copy(&mut input,&destination,&expected,&||false).is_err(), "corrupted destination accepted");
+        fs::copy(&source,&destination).unwrap();
+        let calls=std::cell::Cell::new(0);
+        let cancel=|| { calls.set(calls.get()+1); calls.get() >= 3 };
+        assert!(verify_written_copy(&mut input,&destination,&expected,&cancel).is_err(), "verification ignored cancellation");
+        assert_eq!(calls.get(),3, "cancellation was not checked during hashing");
+        fs::write(&source, vec![3u8;200000]).unwrap();
+        let error=verify_written_copy(&mut input,&destination,&expected,&||false).unwrap_err();
+        assert_eq!(error.to_string(),crate::i18n::tv("main.error.copySourceChanged", &[("name","destination".into())]));
+        fs::remove_dir_all(base).unwrap();
+    }
     fn mix() -> Mix {
         Mix {
             carry: Default::default(),

@@ -481,6 +481,7 @@ fn run_with_publication_hook(
         let staging = stage_dir(&root)?;
         for (index, item) in plan.items.iter().enumerate() {
             ensure!(!cancel(), "Export cancelled");
+            crate::source_jobs::validate_component(std::ffi::OsStr::new(&item.name))?;
             ensure!(
                 !item.sources.is_empty() && item.sources.len() <= 64,
                 "Invalid export source count"

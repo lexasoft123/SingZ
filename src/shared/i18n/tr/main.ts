@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.error.copySourceChanged": "“{name}” için kopyalama kaynağı değişti. Tekrar deneyin.",
+  "main.error.linkedFilesystemPath": "Çalışma kopyaları için sembolik bağlantı yolları kullanılamaz.",
+  "main.error.portableName": "“{name}”: Windows ayrılmış adları, kontrol karakterleri veya sonunda nokta ya da boşluk içermeyen, en fazla 240 baytlık bir ad seçin.",
+  "main.error.networkFilesystem": "Ağ dosya sisteminde proje kaydetme veya taşıma desteklenmiyor. Yerel bir kitaplık klasörü seçin.",
+  "main.error.filesystemPublish": "“{name}”: Bu dosya sistemi projeyi güvenle kaydedemedi. Başka bir yerel kitaplık klasörü seçip yeniden deneyin.",
+  "main.error.sourceCacheFull": "Çalışma kopyası önbelleği dolu. Kullanılmayan projeleri kapatıp daha sonra tekrar deneyin.",
+
   "main.sync.downloadDeferred": "{dir} eklenemedi: {reason}. Hala Drive’da bulunmaktadır; sorunu düzeltin ve tekrar senkronize edin.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/s",

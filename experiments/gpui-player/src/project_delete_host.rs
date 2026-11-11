@@ -287,6 +287,7 @@ impl Player {
                         let before = self.native_epoch;
                         let guard = confirmed.filter(|target| target.dir == restore.active_dir);
                         let overlay=self.project.as_ref().map(|project|integration::OpenCustomOverlay{source_dir:project.dir.clone(),mix:restore.resume.mix.clone(),preserve_generated:false});
+                        let pending_path = restore.active_dir.clone();
                         self.open_project_with_overlay(restore.active_dir,guard,overlay,cx);
                         if self.native_epoch != before {
                             self.source_pending = Some((
@@ -294,6 +295,7 @@ impl Player {
                                 restore.working,
                                 restore.target,
                                 Some(restore.resume),
+                                pending_path,
                             ));
                         } else {
                             // Deletion already released the audio connection. A rejected

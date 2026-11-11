@@ -77,7 +77,7 @@ pub fn rename(dir: &Path, expected: &str, name: &str) -> Result<Outcome> {
 fn rename_with_sync(dir: &Path, expected: &str, name: &str, store: crate::sync_dirty::Store) -> Result<Outcome> {
     let old = dir.canonicalize()?;
     let next = old.parent().context("Cannot rename a filesystem root")?
-        .join(crate::source_jobs::safe_name(name.trim()));
+        .join(crate::source_jobs::checked_name(name)?);
     let mark = |reason| {
         for path in [&old, &next] {
             if let Err(error) = store.mark_project(path, reason) {
@@ -125,7 +125,7 @@ fn rename_using_authorized(
         hash == expected,
         "Project changed outside this app. Reopen it before renaming."
     );
-    let name = crate::source_jobs::safe_name(name.trim());
+    let name = crate::source_jobs::checked_name(name)?;
     let next = parent.join(&name);
     raw.as_object_mut()
         .context("Invalid project metadata")?
@@ -173,7 +173,7 @@ fn rename_using_authorized(
         ) {
             anyhow::bail!("A project called “{name}” already exists.");
         }
-        return Err(error).with_context(|| format!("Cannot rename the project to “{name}”"));
+        return Err(error).context(crate::project_publish::publish_error(&next));
     }
     if let Err(error) = publish(&next, "project.json", expected, &raw) {
         // Metadata has not been published on failure. Retain the real path if
@@ -323,6 +323,82 @@ mod tests {
             .1;
         (root, dir, hash)
     }
+    #[test]
+    fn c21_rejects_nonportable_names_before_moving() {
+        let mut names = vec!["CON", "con.wav", "PrN.any.more", "AUX", "nul", "COM1", "com9.mp3", "LPT1", "lPt9.txt", "COM¹.wav", "LPT²", "CONIN$", "CONOUT$", "title.", "title ", "title. ", "x\0y"]
+            .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        for prefix in ["COM", "LPT"] {
+            for n in 0..=9 {
+                for suffix in ["", ".wav", ".any.extension"] {
+                    names.push(format!("{prefix}{n}{suffix}"));
+                    names.push(format!("{}{n}{suffix}", prefix.to_lowercase()));
+                }
+            }
+        }
+        names.extend(["a".repeat(241), "é".repeat(121)]);
+        for (i, name) in names.iter().enumerate() {
+            let (root, dir, hash) = fixture(&format!("c21-invalid-{i}"));
+            let dir = dir.canonicalize().unwrap();
+            let result = rename_using(&dir, &hash, name, crate::project_store::commit_locked);
+            assert!(result.is_err(), "accepted {name:?}");
+            assert!(dir.join("song.wav").is_file(), "moved {name:?}");
+            assert_eq!(crate::project_store::read(&dir, "project.json").unwrap().1, hash);
+            fs::remove_dir_all(root).unwrap();
+        }
+        for (i, name) in ["COM10".into(), "LPT10".into(), "ＣＯＮ".into(), "СON".into(), "a".repeat(240), "é".repeat(120)].iter().enumerate() {
+            let (root, dir, hash) = fixture(&format!("c21-valid-{i}"));
+            let dir = dir.canonicalize().unwrap();
+            let result = rename_using(&dir, &hash, name, crate::project_store::commit_locked).unwrap();
+            assert_eq!(result.dir.file_name().unwrap().to_str().unwrap(), name);
+            assert_eq!(fs::read(result.dir.join("song.wav")).unwrap(), b"source");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    // TMPDIR may point to an attached exFAT image. This exercises the same
+    // publication and exclusive-move primitives without touching user settings.
+    #[test]
+    fn c21_filesystem_save_rename_move_qualification() {
+        let (root, dir, hash) = fixture("c21-filesystem");
+        let root = root.canonicalize().unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let (mut raw, _) = crate::project_store::read(&dir, "project.json").unwrap();
+        raw["name"] = json!("Saved");
+        let saved = crate::project_store::commit_locked(&dir, "project.json", &hash, &raw).unwrap();
+        let absent = crate::project_store::commit_expected_locked(&dir, "lyrics.json", None, &json!({"lines":[]}));
+        match absent {
+            Ok(_) => assert!(dir.join("lyrics.json").is_file()),
+            Err(error) => {
+                assert!(error.to_string().contains(&crate::project_publish::publish_error(&dir.join("lyrics.json"))), "{error:#}");
+                assert!(!dir.join("lyrics.json").exists());
+                eprintln!("absent-member publication safely refused: {error:#}");
+            }
+        }
+        let identity = crate::directory_identity::read(&dir).unwrap();
+        let (current, title) = match rename_using(&dir, &saved, "Renamed", crate::project_store::commit_locked) {
+            Ok(renamed) => (renamed.dir, "Renamed"),
+            Err(error) => {
+                assert!(error.to_string().contains(&crate::project_publish::publish_error(&root.join("Renamed"))), "{error:#}");
+                assert!(!root.join("Renamed").exists());
+                assert_eq!(crate::project_store::read(&dir, "project.json").unwrap().1, saved);
+                eprintln!("rename safely refused: {error:#}");
+                (dir, "Saved")
+            }
+        };
+        assert_eq!(identity, crate::directory_identity::read(&current).unwrap());
+        let moved = root.join("Moved");
+        let current = match crate::project_library::publish_directory(&current, &moved) {
+            Ok(()) => { assert!(!current.exists()); moved },
+            Err(error) => {
+                assert!(error.to_string().contains(&crate::project_publish::publish_error(&moved)), "{error:#}");
+                assert!(!moved.exists());
+                eprintln!("move safely refused: {error:#}");
+                current
+            }
+        };
+        assert_eq!(fs::read(current.join("song.wav")).unwrap(), b"source");
+        assert_eq!(crate::project_store::read(&current, "project.json").unwrap().0["name"], title);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[cfg(windows)]
     #[test]
     fn null_path_cannot_be_truncated_at_the_native_move_boundary() {
@@ -335,7 +411,7 @@ mod tests {
     #[test]
     fn moves_in_current_parent_preserving_media_and_unknown_metadata() {
         let (root, dir, hash) = fixture("move");
-        let result = rename(&dir, &hash, " New / title.wav ").unwrap();
+        let result = rename(&dir, &hash, " New / title.wav").unwrap();
         assert_eq!(result.dir.file_name().unwrap(), "New title");
         assert!(!dir.exists());
         assert!(result.warning.is_none());

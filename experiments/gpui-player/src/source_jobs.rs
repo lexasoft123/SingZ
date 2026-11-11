@@ -3,10 +3,11 @@
 use crate::{
     integration::STEMS,
     model_catalog::{Config, Flavor},
-    model_install::{cancelled, command_observe},
+    model_install::{cancelled, command_observe as run_command_observe},
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
     fs::{self, File, OpenOptions},
@@ -323,6 +324,8 @@ impl Service {
                             state.error = Some(format!("{e:#}"));
                         }
                     }
+                } else if let Ok(result) = result {
+                    if result.working { discard_working_copy(&result.path); }
                 }
                 publish(&mut state, &output);
                 worker_retired.fetch_max(id, Ordering::Release);
@@ -391,8 +394,388 @@ fn publish_discovery(
     publish(state, view);
     true
 }
+#[cfg(test)]
+thread_local! {
+    static TEST_CACHE_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TEST_OPEN_RENDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_CACHE_EVENTS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
 fn cache() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = TEST_CACHE_ROOT.with(|root| root.borrow().clone()) { return root; }
     crate::audio_devices::directory().join("source-work")
+}
+// Working copies retain a lease until the UI discards them. Abandoned copies
+// are eligible for age-based pruning only after their owner releases the lease.
+thread_local! {
+    static WORK_DIRECTORY: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static WORK_CHECKED: RefCell<Option<Instant>> = const { RefCell::new(None) };
+}
+struct WorkBudget;
+impl Drop for WorkBudget {
+    fn drop(&mut self) {
+        WORK_DIRECTORY.with(|path| *path.borrow_mut() = None);
+        WORK_CHECKED.with(|checked| *checked.borrow_mut() = None);
+    }
+}
+pub(crate) fn check_work_budget() -> Result<()> {
+    let due = WORK_CHECKED.with(|checked| checked.borrow().is_none_or(|time| time.elapsed() >= Duration::from_secs(1)));
+    if due {
+        WORK_DIRECTORY.with(|path| -> Result<()> {
+            if let Some(path) = path.borrow().as_ref() {
+                ensure!(cache_size(path)? <= 8 * 1024 * 1024 * 1024,
+                    "{}", crate::i18n::t("main.error.sourceCacheFull"));
+            }
+            Ok(())
+        })?;
+        WORK_CHECKED.with(|checked| *checked.borrow_mut() = Some(Instant::now()));
+    }
+    Ok(())
+}
+fn command_observe(
+    command: Command, serial: &AtomicU64, generation: u64, timeout: Duration,
+    mut poll: impl FnMut() -> Result<()>,
+    observe: impl FnMut(&[u8], &[u8]) -> Result<()>,
+) -> Result<Vec<u8>> {
+    run_command_observe(command, serial, generation, timeout, || {
+        poll()?;
+        check_work_budget()
+    }, observe)
+}
+fn cache_leases() -> &'static Mutex<Vec<(PathBuf, crate::file_lease::Lease)>> {
+    static LEASES: std::sync::OnceLock<Mutex<Vec<(PathBuf, crate::file_lease::Lease)>>> = std::sync::OnceLock::new();
+    LEASES.get_or_init(Default::default)
+}
+struct CopyValue { path: PathBuf, baseline: Option<Vec<u8>>, retained: bool, split: bool }
+fn cache_values() -> &'static Mutex<Vec<CopyValue>> {
+    static VALUES: std::sync::OnceLock<Mutex<Vec<CopyValue>>> = std::sync::OnceLock::new();
+    VALUES.get_or_init(Default::default)
+}
+const RETAINED: &str = ".singz-native-source-retained";
+fn cache_event(line: String, level: crate::diagnostics::Level) {
+    #[cfg(test)]
+    TEST_CACHE_EVENTS.with(|events| { if let Some(events) = events.borrow_mut().as_mut() { events.push(line.clone()); } });
+    crate::diagnostics::event("projects", line, level);
+}
+fn cache_skip(action: &str, path: &Path, error: impl std::fmt::Display) {
+    cache_event(format!("Could not {action} source cache {}: {error}; skipped", path.display()), crate::diagnostics::Level::Warn);
+}
+// Old timestamp-only markers remain edited/unknown value. New markers identify
+// expensive split outputs; reads are bounded even if a cache marker is corrupt.
+fn cache_retention(path: &Path) -> Option<(u8, u128)> {
+    let marker = path.join(RETAINED);
+    let meta = match fs::symlink_metadata(&marker) {
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => meta,
+        // A marker that exists but is a link or not a file, or cannot be inspected,
+        // still says "this copy was retained": rank it as an edited copy with no
+        // known last use (evicted first among retained copies, never as disposable).
+        Ok(_) => return Some((1, 0)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => { cache_skip("inspect retention marker for", path, error); return Some((1, 0)); }
+    };
+    let mut text = String::new();
+    if let Err(error) = File::open(&marker).and_then(|file| file.take(128).read_to_string(&mut text)) { cache_skip("read retention marker for", path, error); }
+    let (rank, stamp) = if let Some(stamp) = text.strip_prefix("split ") { (2, stamp) }
+        else { (1, text.strip_prefix("edited ").unwrap_or(&text)) };
+    let used = stamp.trim().parse::<u128>().ok().unwrap_or_else(|| meta.modified().ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |time| time.as_nanos()));
+    Some((rank, used))
+}
+fn cache_song_title(path: &Path) -> String {
+    if fs::symlink_metadata(path.join("project.json")).is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink()) {
+        if let Ok((raw, _)) = crate::project_store::read(path, "project.json") {
+            if let Some(title) = raw["name"].as_str() { return title.to_owned(); }
+        }
+    }
+    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+fn value_fingerprint(path: &Path) -> Result<Vec<u8>> {
+    let mut digest = Sha256::new();
+    for name in ["project.json", "lyrics.json"] {
+        let file = path.join(name);
+        match fs::symlink_metadata(&file) {
+            Ok(meta) => {
+                ensure!(meta.is_file() && !meta.file_type().is_symlink(), "Linked working-copy value");
+                digest.update(name.as_bytes()); digest.update(fs::read(file)?);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Custom-lane creation/replacement changes the metadata or the stems tree.
+    // Metadata stamps avoid rehashing potentially multi-gigabyte audio on the UI.
+    let mut todo = vec![path.join("stems")]; let mut members = Vec::new();
+    while let Some(file) = todo.pop() {
+        match fs::symlink_metadata(&file) {
+            Ok(meta) => {
+                ensure!(!meta.file_type().is_symlink(), "Linked working-copy value");
+                members.push((file.strip_prefix(path)?.to_owned(), meta.len(), meta.modified()?));
+                ensure!(members.len() <= 32768, "Working-copy value tree is too large");
+                if meta.is_dir() { for entry in fs::read_dir(file)? { todo.push(entry?.path()); } }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    members.sort(); digest.update(format!("{members:?}").as_bytes());
+    Ok(digest.finalize().to_vec())
+}
+fn mark_retained(path: &Path, split: bool) {
+    let used = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    if let Err(error) = fs::write(path.join(RETAINED), format!("{} {used}", if split { "split" } else { "edited" })) {
+        crate::diagnostics::event("projects", format!("Could not retain working copy: {error}"), crate::diagnostics::Level::Warn);
+    }
+}
+// Only registered working copies may be released; saved projects never enter this map.
+pub(crate) fn discard_working_copy(path: &Path) {
+    let mut leases = cache_leases().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(index) = leases.iter().position(|(p, _)| p == path) {
+        let value = {
+            let mut values = cache_values().lock().unwrap_or_else(|e| e.into_inner());
+            values.iter().position(|value| value.path == path).map(|i| values.swap_remove(i))
+        };
+        // A failed value read is uncertainty, so preserve rather than erase edits.
+        let prior = cache_retention(path);
+        let split = value.as_ref().is_some_and(|value| value.split) || prior.is_some_and(|(rank, _)| rank == 2);
+        let retained = path.join(RETAINED).exists() || value.as_ref().is_some_and(|value| value.retained || value.baseline.is_none()
+            || value.baseline.as_ref() != value_fingerprint(path).ok().as_ref());
+        if retained { mark_retained(path, split); }
+        let (_, lease) = leases.swap_remove(index);
+        drop(leases); drop(lease); // Windows closes the marker before directory removal.
+        if !retained {
+            if let Err(error) = fs::remove_dir_all(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    crate::diagnostics::event("projects", format!("Could not remove discarded working copy: {error}"), crate::diagnostics::Level::Warn);
+                }
+            }
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpenAttempt { Deferred, Issued, Failed }
+pub(crate) fn discard_failed_source_open(path: &Path, attempt: OpenAttempt, incoming: Option<&Path>, current: Option<&Path>) {
+    if attempt == OpenAttempt::Failed { discard_pending_working_copy(path, incoming, current); }
+}
+#[cfg(test)]
+pub(crate) fn adopt_working_copy(path: &Path) { adopt_working_copy_with_value(path, true); }
+// A true value denotes completed split output; later UI edits use the edit hook.
+pub(crate) fn adopt_working_copy_with_value(path: &Path, valuable: bool) {
+    let leases = cache_leases().lock().unwrap_or_else(|e| e.into_inner());
+    if !leases.iter().any(|(p, _)| p == path) { return; }
+    let mut values = cache_values().lock().unwrap_or_else(|e| e.into_inner());
+    let split = valuable || cache_retention(path).is_some_and(|(rank, _)| rank == 2);
+    if let Some(value) = values.iter_mut().find(|value| value.path == path) {
+        value.retained |= valuable; value.split |= split;
+    } else {
+        values.push(CopyValue { path: path.to_owned(), baseline: value_fingerprint(path).ok(), retained: valuable, split });
+    }
+    if valuable || path.join(RETAINED).exists() { mark_retained(path, split); }
+    // Keep the eviction lease until navigation/discard, including for retained copies.
+}
+pub(crate) fn retain_edited_working_copy(path: &Path) {
+    let mut values = cache_values().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(value) = values.iter_mut().find(|value| value.path == path) {
+        if !value.retained { value.retained = true; mark_retained(path, value.split); }
+    }
+}
+// A cancelled writer can retire after navigation. Release its former UI copy
+// only once the source service is idle, preserving all remaining UI references.
+pub(crate) fn release_unowned_working_copies(keep: &[PathBuf]) {
+    let paths: Vec<_> = cache_values().lock().unwrap_or_else(|e| e.into_inner()).iter()
+        .filter(|value| !keep.contains(&value.path)).map(|value| value.path.clone()).collect();
+    for path in paths { discard_working_copy(&path); }
+}
+pub(crate) fn discard_inactive_working_copy(path: &Path, writer_active: bool) {
+    if !writer_active { discard_working_copy(path); }
+}
+pub(crate) fn discard_pending_working_copy(pending: &Path, incoming: Option<&Path>, current: Option<&Path>) {
+    if Some(pending) != incoming && Some(pending) != current {
+        discard_working_copy(pending);
+    }
+}
+const CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const CACHE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+fn cache_size(root: &Path) -> Result<u64> { Ok(cache_usage(root, true)?.0) }
+fn cache_usage(root: &Path, bounded: bool) -> Result<(u64, usize)> {
+    let mut todo = vec![root.to_owned()]; let mut size = 0u64; let mut count = 0;
+    while let Some(path) = todo.pop() {
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => { cache_skip("inspect", &path, error); continue; }
+        };
+        count += 1;
+        ensure!(!bounded || count <= 32768, "{}", crate::i18n::t("main.error.sourceCacheFull"));
+        if meta.file_type().is_symlink() { continue; }
+        if meta.is_dir() {
+            match fs::read_dir(&path) {
+                Ok(entries) => for entry in entries {
+                    match entry { Ok(entry) => todo.push(entry.path()), Err(error) => cache_skip("enumerate", &path, error) }
+                },
+                Err(error) => cache_skip("read", &path, error),
+            }
+        } else if meta.is_file() {
+            size = size.checked_add(meta.len()).context(crate::i18n::t("main.error.sourceCacheFull"))?;
+        }
+    }
+    Ok((size, count))
+}
+#[cfg(windows)]
+fn legacy_owner_alive(pid: u32) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn GetExitCodeProcess(process: *mut std::ffi::c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+    if pid == 0 { return true; }
+    let handle = unsafe { OpenProcess(0x1000, 0, pid) }; // QUERY_LIMITED_INFORMATION
+    if handle.is_null() {
+        // ERROR_INVALID_PARAMETER establishes a nonexistent PID. Access denial
+        // or another query failure is not proof that an old owner stopped.
+        return std::io::Error::last_os_error().raw_os_error() != Some(87);
+    }
+    let mut code = 259; // STILL_ACTIVE
+    let queried = unsafe { GetExitCodeProcess(handle, &mut code) } != 0;
+    unsafe { CloseHandle(handle); }
+    !queried || code == 259
+}
+fn prune_cache(root: &Path) -> Result<usize> {
+    prune_cache_at(root, std::time::SystemTime::now())
+}
+fn prune_cache_at(root: &Path, now: std::time::SystemTime) -> Result<usize> {
+    let mut remaining = 0;
+    for entry in fs::read_dir(root)? {
+        let entry = match entry { Ok(entry) => entry, Err(error) => { cache_skip("enumerate", root, error); remaining += 1; continue; } };
+        if entry.file_name() == ".cache.lock" { continue; }
+        let text = entry.file_name().to_string_lossy().into_owned();
+        let generated = text.split('-').count() == 3
+            && text.split('-').all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+        let ordinary = match entry.file_type() { Ok(kind) => kind.is_dir(), Err(error) => { cache_skip("inspect", &entry.path(), error); remaining += 1; continue; } };
+        if !ordinary { remaining += 1; continue; }
+        // Legacy entries have no lease. Preserve them until their owning process
+        // is known gone; a long-running old version may still be playing them.
+        let marker = entry.path().join(".source-work-active");
+        let legacy = !marker.exists();
+        #[cfg(unix)]
+        let legacy_alive = legacy && text.split('-').next().and_then(|s| s.parse::<i32>().ok())
+            .is_none_or(|pid| pid <= 0 || unsafe { libc::kill(pid, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH));
+        #[cfg(windows)]
+        let legacy_alive = legacy && text.split('-').next().and_then(|s| s.parse::<u32>().ok()).is_none_or(legacy_owner_alive);
+        let expired = legacy || match entry.metadata() {
+            Ok(meta) => meta.modified().ok().and_then(|modified| now.duration_since(modified).ok()).is_some_and(|age| age >= CACHE_MAX_AGE),
+            Err(error) => { cache_skip("inspect age of", &entry.path(), error); remaining += 1; continue; }
+        };
+        if generated && ordinary && !legacy_alive && expired && !entry.path().join(".singz-native-source-retained").exists() {
+            // Never follow a replaced/symlinked ownership marker.
+            if fs::symlink_metadata(&marker).is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
+                remaining += 1;
+                continue;
+            }
+            let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&marker) {
+                Ok(file) => file, Err(error) => { cache_skip("open ownership marker for", &entry.path(), error); remaining += 1; continue; }
+            };
+            match crate::file_lease::Lease::movable(file) {
+                Ok(lease) => {
+                    // Windows cannot remove a directory containing an open file.
+                    // The cache-wide lease excludes cooperating creators/pruners.
+                    drop(lease);
+                    match fs::remove_dir_all(entry.path()) {
+                        Ok(()) => continue,
+                        Err(error) => cache_skip("prune", &entry.path(), error),
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => cache_skip("lock", &entry.path(), error),
+            }
+        }
+        remaining += 1;
+    }
+    Ok(remaining)
+}
+// Called only under the cache-wide lease. In-use marker leases take priority
+// over LRU, across threads and processes. Under pressure, unaccepted abandoned
+// copies are cheapest, then edited copies, then split outputs; each class is LRU.
+fn reclaim_cache(root: &Path, budget: u64, reserve: u64) -> Result<()> {
+    // Reserve the new directory and ownership marker as well as its byte budget.
+    reclaim_cache_limits(root, budget, reserve, 32768 - 2)
+}
+fn reclaim_cache_limits(root: &Path, budget: u64, reserve: u64, entry_limit: usize) -> Result<()> {
+    let capacity = budget.checked_sub(reserve).context(crate::i18n::t("main.error.sourceCacheFull"))?;
+    let (mut size, mut entries) = cache_usage(root, false)?;
+    if size <= capacity && entries <= entry_limit { return Ok(()); }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = match entry { Ok(entry) => entry, Err(error) => { cache_skip("enumerate", root, error); continue; } };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let ordinary = match entry.file_type() { Ok(kind) => kind.is_dir(), Err(error) => { cache_skip("inspect", &entry.path(), error); continue; } };
+        if name.split('-').count() != 3 || !name.split('-').all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit())) || !ordinary { continue; }
+        let path = entry.path(); let active = path.join(".source-work-active");
+        if !fs::symlink_metadata(&active).is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink()) { continue; }
+        let (rank, used) = cache_retention(&path).unwrap_or((0, 0));
+        candidates.push((rank, used, path));
+    }
+    candidates.sort();
+    for (rank, _, path) in candidates {
+        let file = match OpenOptions::new().read(true).write(true).open(path.join(".source-work-active")) {
+            Ok(file) => file, Err(error) => { cache_skip("open ownership marker for", &path, error); continue; }
+        };
+        match crate::file_lease::Lease::movable(file) {
+            Ok(lease) => {
+                let (bytes, removed_entries) = match cache_usage(&path, false) {
+                    Ok(usage) => usage, Err(error) => { cache_skip("measure eviction victim", &path, error); continue; }
+                };
+                let title = (rank > 0).then(|| cache_song_title(&path));
+                let reason = if size > capacity { "cache byte budget exceeded" } else { "cache metadata entry limit exceeded" };
+                drop(lease); // Windows cannot delete an open marker.
+                if let Err(error) = fs::remove_dir_all(&path) {
+                    cache_skip("evict", &path, error);
+                    // Removal may have made partial progress; measure again
+                    // before deciding whether another victim is needed.
+                    (size, entries) = cache_usage(root, false)?;
+                    if size <= capacity && entries <= entry_limit { return Ok(()); }
+                    continue;
+                }
+                if let Some(title) = title {
+                    cache_event(format!("Evicted retained source cache “{title}”: {reason} ({})", if rank == 2 { "split output" } else { "edited copy" }), crate::diagnostics::Level::Info);
+                }
+                size = size.saturating_sub(bytes);
+                entries = entries.saturating_sub(removed_entries);
+                if size <= capacity && entries <= entry_limit { return Ok(()); }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => cache_skip("lock eviction victim", &path, error),
+        }
+    }
+    let (size, entries) = cache_usage(root, false)?;
+    if size <= capacity && entries <= entry_limit { return Ok(()); }
+    anyhow::bail!("{}", crate::i18n::t("main.error.sourceCacheFull"))
+}
+fn allocate_cache(root: &Path) -> Result<PathBuf> { allocate_cache_with_budget(root, CACHE_BYTES, 8 * 1024 * 1024 * 1024) }
+fn allocate_cache_with_budget(root: &Path, budget: u64, reserve: u64) -> Result<PathBuf> {
+    fs::create_dir_all(root)?;
+    ensure!(!fs::symlink_metadata(root)?.file_type().is_symlink(), "{}", crate::i18n::t("main.error.linkedFilesystemPath"));
+    let root = root.canonicalize()?;
+    crate::project_publish::writable_filesystem(&root)?;
+    let lock_path = root.join(".cache.lock");
+    ensure!(!fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()), "{}", crate::i18n::t("main.error.linkedFilesystemPath"));
+    let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path)?;
+    let _lease = crate::file_lease::Lease::acquire(file)?;
+    cache_leases().lock().unwrap_or_else(|e| e.into_inner()).retain(|(path, _)| path.exists());
+    prune_cache(&root)?;
+    cache_values().lock().unwrap_or_else(|e| e.into_inner()).retain(|value| value.path.exists());
+    reclaim_cache(&root, budget, reserve)?;
+    let dir = root.join(token());
+    fs::create_dir(&dir)?;
+    let mut pending = Pending(dir.clone());
+    let file = OpenOptions::new().read(true).write(true).create_new(true).open(dir.join(".source-work-active"))?;
+    let owner = crate::file_lease::Lease::movable(file)?;
+    let mut leases = cache_leases().lock().unwrap_or_else(|e| e.into_inner());
+    leases.retain(|(path, _)| path.exists());
+    leases.push((dir.clone(), owner));
+    pending.0.clear();
+    Ok(dir)
 }
 fn token() -> String {
     static ID: AtomicU64 = AtomicU64::new(1);
@@ -417,6 +800,7 @@ impl Drop for Pending {
         {
             return;
         }
+        discard_working_copy(&self.0);
         let _ = fs::remove_dir_all(&self.0);
     }
 }
@@ -431,17 +815,21 @@ fn copy(from: &Path, to: &Path, serial: &AtomicU64, id: u64) -> Result<()> {
     let mut output = OpenOptions::new().write(true).create_new(true).open(to)?;
     let mut bytes = [0u8; 65536];
     let mut n = 0;
+    let mut digest = Sha256::new();
     loop {
         cancelled(serial, id)?;
+        check_work_budget()?;
         let got = input.read(&mut bytes)?;
         if got == 0 {
             break;
         }
         output.write_all(&bytes[..got])?;
+        digest.update(&bytes[..got]);
         n += got as u64;
         ensure!(n <= before.len(), "Source changed while copying");
     }
     output.sync_all()?;
+    crate::project_store::verify_written_copy(&mut input, to, &digest.finalize(), &|| serial.load(Ordering::Acquire) != id)?;
     let after = input.metadata()?;
     ensure!(
         n == before.len()
@@ -461,7 +849,7 @@ fn clone_project(from: &Path, to: &Path, serial: &AtomicU64, id: u64) -> Result<
             cancelled(serial, id)?;
             let entry = entry?;
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with(".singz-native-")
+            if name == ".source-work-active" || name.to_string_lossy().starts_with(".singz-native-")
                 || name.to_string_lossy().starts_with(".native-split-")
             {
                 continue;
@@ -488,6 +876,12 @@ fn clone_project(from: &Path, to: &Path, serial: &AtomicU64, id: u64) -> Result<
     Ok(())
 }
 fn render(input: &Path, dest: &Path, serial: &AtomicU64, id: u64) -> Result<()> {
+    // Open lifecycle tests exercise the real job without requiring the separately built audio helper.
+    #[cfg(test)]
+    if TEST_OPEN_RENDER.with(|fixture| fixture.get()) {
+        fs::copy(input, dest)?;
+        return Ok(());
+    }
     let mut cmd = Command::new(crate::audio_devices::helper());
     cmd.arg("--render-input").arg(input).arg(dest);
     let bytes = command_observe(
@@ -1164,20 +1558,6 @@ fn execute_with_engine(
             )?;
             return Ok(output);
         }
-        job => job,
-    };
-    fs::create_dir_all(cache())?;
-    let dir = if matches!(&job, Job::Save { target: None, .. }) {
-        let root = crate::integration::library_root();
-        fs::create_dir_all(&root)?;
-        root.join(format!(".native-import-{}", token()))
-    } else {
-        cache().join(token())
-    };
-    fs::create_dir(&dir)?;
-    let dir = dir.canonicalize()?;
-    let mut pending = Pending(dir.clone());
-    let result = match job {
         Job::Open(path) => {
             let path = path.canonicalize()?;
             if path.is_dir() || path.file_name().is_some_and(|s| s == "project.json") {
@@ -1189,18 +1569,9 @@ fn execute_with_engine(
                     target: None,
                 });
             }
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            ensure!(
-                [
-                    "mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aif", "aiff"
-                ]
-                .contains(&ext.as_str()),
-                "Choose an audio file or a SingZ project"
-            );
+            ensure!(path.extension().and_then(|s| s.to_str()).is_some_and(|ext|
+                ["mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aif", "aiff"].iter().any(|e| ext.eq_ignore_ascii_case(e))),
+                "Choose an audio file or a SingZ project");
             if path
                 .parent()
                 .is_some_and(|p| p.join("project.json").is_file())
@@ -1213,6 +1584,58 @@ fn execute_with_engine(
                     target: None,
                 });
             }
+            Job::Open(path)
+        }
+        Job::Save { dir: source, mut raw, custom, target } => {
+            progress("Saving project…", 0.);
+            #[cfg(feature = "ui-tests")]
+            if let Some(gate) = std::env::var_os("SINGZ_GPUI_SOURCE_SAVE_PREPARE_GATE")
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+            {
+                fs::write(gate.with_extension("ready"), b"saving")?;
+                let deadline = Instant::now() + Duration::from_secs(8);
+                while gate.exists() && Instant::now() < deadline {
+                    cancelled(serial, id)?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            if let Some(target) = target {
+                return publish_target(&source, &mut raw, target, &custom, serial, id);
+            }
+            Job::Save { dir: source, raw, custom, target: None }
+        }
+        job => job,
+    };
+    let dir = if matches!(&job, Job::Save { target: None, .. }) {
+        let root = crate::integration::library_root();
+        fs::create_dir_all(&root)?;
+        crate::project_publish::writable_filesystem(&root)?;
+        let dir = root.join(format!(".native-import-{}", token()));
+        fs::create_dir(&dir)?;
+        dir
+    } else {
+        allocate_cache(&cache())?
+    };
+    let dir = dir.canonicalize()?;
+    let mut pending = Pending(dir.clone());
+    WORK_DIRECTORY.with(|path| *path.borrow_mut() = Some(dir.clone()));
+    let _budget = WorkBudget;
+    let completed_split = matches!(&job, Job::Split { .. });
+    let result = match job {
+        Job::Open(path) => {
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            ensure!(
+                [
+                    "mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aif", "aiff"
+                ]
+                .contains(&ext.as_str()),
+                "Choose an audio file or a SingZ project"
+            );
             progress("Reading audio…", 0.);
             let song = format!("song.{ext}");
             copy(&path, &dir.join(&song), serial, id)?;
@@ -1400,25 +1823,8 @@ fn execute_with_engine(
             dir: source,
             mut raw,
             custom,
-            target,
+            target: _,
         } => {
-            raw["name"] = json!(safe_name(raw["name"].as_str().unwrap_or("Song")));
-            progress("Saving project…", 0.);
-            #[cfg(feature = "ui-tests")]
-            if let Some(gate) = std::env::var_os("SINGZ_GPUI_SOURCE_SAVE_PREPARE_GATE")
-                .map(PathBuf::from)
-                .filter(|p| p.exists())
-            {
-                fs::write(gate.with_extension("ready"), b"saving")?;
-                let deadline = Instant::now() + Duration::from_secs(8);
-                while gate.exists() && Instant::now() < deadline {
-                    cancelled(serial, id)?;
-                    thread::sleep(Duration::from_millis(10));
-                }
-            }
-            if let Some(target) = target {
-                return publish_target(&source, &mut raw, target, &custom, serial, id);
-            }
             clone_project(&source, &dir, serial, id)?;
             let materialized = crate::project_store::materialize_custom(
                 &source,
@@ -1455,29 +1861,26 @@ fn execute_with_engine(
                 .open(root.join(".singz-native-import.lock"))?;
             let _lease = crate::file_lease::Lease::acquire(lock)
                 .context("Another song is being saved to the library")?;
-            let name = safe_name(raw["name"].as_str().unwrap_or("Song"));
+            let name = raw["name"].as_str().unwrap_or("Song");
             let mut suffix = 1;
             let destination = loop {
                 cancelled(serial, id)?;
-                let p = root.join(if suffix == 1 {
-                    name.clone()
-                } else {
-                    format!("{name} ({suffix})")
-                });
-                match fs::create_dir(&p) {
+                let candidate = folder_name(name, suffix);
+                validate_component(std::ffi::OsStr::new(&candidate))?;
+                let p = root.join(candidate);
+                match crate::project_library::publish_directory(&dir, &p) {
                     Ok(()) => break p,
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => suffix += 1,
-                    Err(e) => return Err(e.into()),
+                    Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|e|
+                        matches!(e.kind(), std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty)) => suffix += 1,
+                    Err(error) => return Err(error).context(crate::project_publish::publish_error(&p)),
                 }
             };
-            #[cfg(windows)]
-            fs::remove_dir(&destination)?;
-            if let Err(e) = fs::rename(&dir, &destination) {
-                let _ = fs::remove_dir(&destination);
-                return Err(e.into());
-            }
+            // Publication already succeeded. A directory flush failure must not
+            // turn the real saved destination into an apparent failed Save.
             #[cfg(unix)]
-            File::open(&root)?.sync_all()?;
+            if let Err(error) = File::open(&root).and_then(|file| file.sync_all()) {
+                crate::diagnostics::event("projects", format!("Saved project directory flush failed: {error}"), crate::diagnostics::Level::Warn);
+            }
             return Ok(Output {
                 publication_hash: Some(publication_hash),
                 path: destination,
@@ -1489,6 +1892,9 @@ fn execute_with_engine(
     };
     cancelled(serial, id)?;
     crate::integration::read_project(&dir)?;
+    ensure!(cache_size(&dir)? <= 8 * 1024 * 1024 * 1024,
+        "{}", crate::i18n::t("main.error.sourceCacheFull"));
+    if completed_split && result.working { adopt_working_copy_with_value(&dir, true); }
     pending.0.clear();
     Ok(result)
 }
@@ -1523,6 +1929,58 @@ impl SaveSync {
             sync_warning(self.store.mark_project(path, "saved project"));
         }
     }
+}
+// Keep room for collision suffixes and temporary publication filenames.
+// Byte and UTF-16 limits both matter when a library is moved between platforms.
+fn portable_name_error(name: &str) -> String {
+    crate::i18n::tv("main.error.portableName", &[("name", name.into())])
+}
+pub(crate) fn validate_name(name: &str) -> Result<()> {
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    let numbered = ["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|n| matches!(n, "0"|"1"|"2"|"3"|"4"|"5"|"6"|"7"|"8"|"9"|"¹"|"²"|"³"))
+    });
+    ensure!(
+        !name.is_empty() && !name.ends_with(['.', ' ']) && !name.chars().any(char::is_control)
+            && name.len() <= 240 && name.encode_utf16().count() <= 240
+            && !matches!(stem.as_str(), "CON"|"PRN"|"AUX"|"NUL"|"CONIN$"|"CONOUT$") && !numbered,
+        "{}", portable_name_error(name)
+    );
+    Ok(())
+}
+pub(crate) fn validate_component(name: &std::ffi::OsStr) -> Result<()> {
+    let name = name.to_str().with_context(|| portable_name_error(&name.to_string_lossy()))?;
+    validate_name(name)?;
+    ensure!(!name.chars().any(|c| "/\\:*?\"<>|".contains(c)), "{}", portable_name_error(name));
+    Ok(())
+}
+pub(crate) fn checked_name(name: &str) -> Result<String> {
+    validate_name(name)?;
+    let name = safe_name(name);
+    validate_component(std::ffi::OsStr::new(&name))?;
+    Ok(name)
+}
+// New folders are portable independently of their unchanged display title.
+// Fit each collision suffix separately, at UTF-8 character boundaries.
+pub(crate) fn folder_name(title: &str, suffix: usize) -> String {
+    let base = safe_name(title).chars().filter(|c| !c.is_control()).collect::<String>();
+    let mut base = base.trim_end_matches(['.', ' ']).to_owned();
+    if base.is_empty() { base = "Untitled song".into(); }
+    let ending = if suffix == 1 { String::new() } else { format!(" ({suffix})") };
+    while base.len() + ending.len() > 240 || base.encode_utf16().count() + ending.encode_utf16().count() > 240 { base.pop(); }
+    base = base.trim_end_matches(['.', ' ']).to_owned();
+    let mut candidate = format!("{base}{ending}");
+    if validate_component(std::ffi::OsStr::new(&candidate)).is_err() {
+        // A reserved basename can have an extension: prefixing also fixes CON.txt.
+        if base.contains('.') { base.insert(0, '_'); } else { base.push('_'); }
+        while base.len() + ending.len() > 240 || base.encode_utf16().count() + ending.encode_utf16().count() > 240 { base.pop(); }
+        candidate = format!("{base}{ending}");
+    }
+    candidate = candidate.trim_end_matches(['.', ' ']).to_owned();
+    if validate_component(std::ffi::OsStr::new(&candidate)).is_err() {
+        candidate = format!("Untitled song{ending}");
+    }
+    candidate
 }
 pub(crate) fn safe_name(name: &str) -> String {
     let mut name = name;
@@ -1569,6 +2027,358 @@ pub(crate) fn safe_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn c21_prunes_abandoned_copies_but_preserves_live_owners_and_bounds_admission() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("cache");
+        fs::create_dir(&root).unwrap();
+        let dead = root.join("999999-1-1");
+        fs::create_dir(&dead).unwrap();
+        fs::write(dead.join(".source-work-active"), b"").unwrap();
+        fs::write(dead.join("private-audio"), b"abandoned").unwrap();
+        let legacy_live = root.join(format!("{}-1-1", std::process::id()));
+        let legacy_dead = root.join("999999-2-2");
+        fs::create_dir(&legacy_live).unwrap();
+        fs::create_dir(&legacy_dead).unwrap();
+        prune_cache_at(&root, std::time::SystemTime::now() + CACHE_MAX_AGE + Duration::from_secs(1)).unwrap();
+        let first = allocate_cache(&root).unwrap();
+        fs::write(first.join("playing"), b"keep").unwrap();
+        assert!(!dead.exists(), "abandoned work survived pruning");
+        assert!(!legacy_dead.exists(), "dead legacy work survived pruning");
+        assert!(legacy_live.exists(), "live legacy work was evicted");
+        // Unix set_len creates a sparse fixture; Windows needs a separate
+        // sparse-file API before a large logical length is safe to use here.
+        #[cfg(unix)]
+        {
+            let large = first.join("oversized");
+            File::create(&large).unwrap().set_len(CACHE_BYTES - 8 * 1024 * 1024 * 1024 + 1).unwrap();
+            assert!(allocate_cache(&root).is_err(), "cache admitted work beyond its byte budget");
+            fs::remove_file(large).unwrap();
+        }
+        for _ in 0..10 { allocate_cache(&root).unwrap(); }
+        assert_eq!(fs::read(first.join("playing")).unwrap(), b"keep");
+        assert_eq!(prune_cache_at(&root, std::time::SystemTime::now() + CACHE_MAX_AGE + Duration::from_secs(1)).unwrap(), 12);
+    }
+    #[cfg(unix)]
+    struct RestorePermissions(PathBuf);
+    #[cfg(unix)]
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) { use std::os::unix::fs::PermissionsExt; let _=fs::set_permissions(&self.0,fs::Permissions::from_mode(0o700)); }
+    }
+    fn retained_fixture(root:&Path,title:&str,split:bool)->PathBuf {
+        let path=allocate_cache(root).unwrap();
+        fs::write(path.join("project.json"),serde_json::to_vec(&json!({"name":title})).unwrap()).unwrap();
+        fs::write(path.join("payload"),vec![0;1024]).unwrap();
+        adopt_working_copy_with_value(&path,split);
+        if !split { retain_edited_working_copy(&path); }
+        discard_working_copy(&path);path
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_round5_odd_retention_marker_still_counts_as_retained() {
+        use std::os::unix::fs::symlink;
+        let f=Fixture::new();
+        let dir=f.0.join("odd-marker");fs::create_dir(&dir).unwrap();
+        assert_eq!(cache_retention(&dir),None,"no marker means disposable");
+        let target=f.0.join("marker-target");fs::write(&target,b"split 1").unwrap();
+        symlink(&target,dir.join(RETAINED)).unwrap();
+        assert_eq!(cache_retention(&dir),Some((1,0)),"a linked marker must not read as disposable");
+        fs::remove_file(dir.join(RETAINED)).unwrap();fs::create_dir(dir.join(RETAINED)).unwrap();
+        assert_eq!(cache_retention(&dir),Some((1,0)),"a directory marker must not read as disposable");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_round4_symlink_inside_retained_cache_does_not_block_admission() {
+        use std::os::unix::fs::symlink;
+        let f=Fixture::new();let root=f.0.join("linked");
+        let victim=retained_fixture(&root,"Linked Song",false);
+        let outside=f.0.join("outside");fs::create_dir(&outside).unwrap();fs::write(outside.join("keep"),b"keep").unwrap();
+        symlink(&outside,victim.join("link")).unwrap();
+        let incoming=allocate_cache_with_budget(&root,1536,512).expect("symlink poisoned cache admission");
+        assert!(!victim.exists());assert_eq!(fs::read(outside.join("keep")).unwrap(),b"keep");discard_working_copy(&incoming);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_round4_unreadable_entry_does_not_block_admission() {
+        use std::os::unix::fs::PermissionsExt;
+        let f=Fixture::new();let root=f.0.join("unreadable");
+        let victim=retained_fixture(&root,"Unreadable Song",false);
+        let closed=victim.join("closed");fs::create_dir(&closed).unwrap();fs::write(closed.join("hidden"),b"private").unwrap();
+        let _restore=RestorePermissions(closed.clone());fs::set_permissions(&closed,fs::Permissions::from_mode(0)).unwrap();
+        assert!(fs::read_dir(&closed).is_err(),"fixture did not deny directory reads");
+        let _other=retained_fixture(&root,"Other Song",false);
+        let incoming=allocate_cache_with_budget(&root,2048,512).expect("unreadable entry poisoned cache admission");
+        discard_working_copy(&incoming);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_round4_undeletable_victim_does_not_block_next_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+        let f=Fixture::new();let root=f.0.join("locked-victim");
+        let bad=retained_fixture(&root,"Blocked Song",false);
+        let good=retained_fixture(&root,"Removable Song",false);
+        fs::write(bad.join(RETAINED),b"1").unwrap();fs::write(good.join(RETAINED),b"2").unwrap();
+        let _restore=RestorePermissions(bad.clone());fs::set_permissions(&bad,fs::Permissions::from_mode(0o500)).unwrap();
+        let incoming=allocate_cache_with_budget(&root,2048,512).expect("undeletable victim poisoned cache admission");
+        assert!(bad.exists());assert!(!good.exists(),"next candidate was not reclaimed");discard_working_copy(&incoming);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_round4_prune_skips_undeletable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let f=Fixture::new();let root=f.0.join("prune-locked");
+        let bad=allocate_cache(&root).unwrap();let good=allocate_cache(&root).unwrap();fs::write(bad.join("payload"),b"keep").unwrap();
+        cache_leases().lock().unwrap().retain(|(path,_)|path!=&bad&&path!=&good);
+        let _restore=RestorePermissions(bad.clone());fs::set_permissions(&bad,fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(prune_cache_at(&root,std::time::SystemTime::now()+CACHE_MAX_AGE+Duration::from_secs(1)).expect("undeletable directory poisoned age pruning"),1);
+        assert!(bad.exists());assert!(!good.exists());
+    }
+    #[test]
+    fn c21_round4_edits_evicted_before_splits_with_title_and_reason_logged() {
+        let f=Fixture::new();let root=f.0.join("priority");
+        let split=retained_fixture(&root,"Expensive Split Song",true);
+        let edited=retained_fixture(&root,"Edited Song",false);
+        for (path,text,seconds) in [(&split,"split 1",1),(&edited,"edited 2",2)] {
+            fs::write(path.join(RETAINED),text).unwrap();
+            File::options().write(true).open(path.join(RETAINED)).unwrap().set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(seconds))).unwrap();
+        }
+        struct Events;impl Drop for Events {fn drop(&mut self){TEST_CACHE_EVENTS.with(|events|*events.borrow_mut()=None);}}
+        let _events=Events;TEST_CACHE_EVENTS.with(|events|*events.borrow_mut()=Some(Vec::new()));
+        let total=cache_size(&root).unwrap();let incoming=allocate_cache_with_budget(&root,total,512).unwrap();
+        assert!(!edited.exists(),"edited copy was kept while an expensive split was evicted");assert!(split.exists());
+        assert!(TEST_CACHE_EVENTS.with(|events|events.borrow().as_ref().unwrap().iter().any(|line|line.contains("Edited Song")&&line.contains("byte budget"))),"retained eviction omitted song title or reason");
+        discard_working_copy(&incoming);
+    }
+    #[test]
+    fn c21_round3_reserved_limit_cut_at_dot_is_portable() {
+        let title=format!("CON.{}.x","a".repeat(234)); assert_eq!(title.len(),240);
+        let name=folder_name(&title,1);
+        validate_component(std::ffi::OsStr::new(&name)).unwrap();
+        assert!(!name.ends_with(['.',' ']));
+    }
+    #[test]
+    fn c21_round3_edited_and_split_copies_survive_release() {
+        for kind in ["lyrics", "custom", "controls", "split"] {
+            let f=Fixture::new();let root=f.0.join("valuable");let path=allocate_cache(&root).unwrap();
+            adopt_working_copy_with_value(&path,kind == "split");
+            assert!(cache_leases().lock().unwrap().iter().any(|(p,_)|p==&path),"open valuable copy lost its eviction lease");
+            match kind {
+                "lyrics" => fs::write(path.join("lyrics.json"),b"edited lyrics").unwrap(),
+                "custom" => { fs::create_dir(path.join("stems")).unwrap(); fs::write(path.join("stems/custom-piano.flac"),b"lane").unwrap(); }
+                "controls" => retain_edited_working_copy(&path),
+                _ => {}
+            }
+            discard_working_copy(&path);
+            assert!(path.exists(),"valuable copy was deleted");
+            assert!(path.join(".singz-native-source-retained").exists());
+            assert!(!cache_leases().lock().unwrap().iter().any(|(p,_)|p==&path));
+        }
+    }
+    #[test]
+    fn c21_round3_lru_reclaims_retained_but_never_open_copy() {
+        let f=Fixture::new();let root=f.0.join("lru");
+        let old=allocate_cache(&root).unwrap();fs::write(old.join("payload"),vec![0;1024]).unwrap();adopt_working_copy_with_value(&old,true);discard_working_copy(&old);
+        let recent=allocate_cache(&root).unwrap();fs::write(recent.join("payload"),vec![0;1024]).unwrap();adopt_working_copy_with_value(&recent,true);discard_working_copy(&recent);
+        fs::write(old.join(".singz-native-source-retained"),b"1").unwrap();
+        fs::write(recent.join(".singz-native-source-retained"),b"2").unwrap();
+        let open=allocate_cache(&root).unwrap();fs::write(open.join("payload"),vec![0;1024]).unwrap();adopt_working_copy_with_value(&open,true);
+        fs::write(open.join(".singz-native-source-retained"),b"0").unwrap();
+        let total=cache_size(&root).unwrap();
+        let incoming=allocate_cache_with_budget(&root,total,512).unwrap();
+        assert!(!old.exists(),"least recently used retained copy was not evicted");
+        assert!(recent.exists(),"newer retained copy was evicted first");assert!(open.exists(),"open copy was evicted");
+        assert!(cache_size(&root).unwrap()+512<=total);
+        discard_working_copy(&incoming);
+        // Metadata pressure must reclaim too, even with ample byte capacity.
+        reclaim_cache_limits(&root,u64::MAX,0,6).unwrap();
+        assert!(!recent.exists(),"metadata limit bypassed inactive-copy reclamation");
+        assert!(open.exists(),"metadata reclamation evicted the open copy");
+        discard_working_copy(&open);
+    }
+    #[test]
+    fn c21_round3_open_copies_over_budget_refuse_clearly() {
+        let f=Fixture::new();let root=f.0.join("in-use");let open=allocate_cache(&root).unwrap();
+        fs::write(open.join("payload"),vec![0;1024]).unwrap();
+        let error=allocate_cache_with_budget(&root,1024,512).expect_err("admitted work beyond the in-use budget");
+        assert_eq!(error.to_string(),crate::i18n::t("main.error.sourceCacheFull"));
+        assert!(open.exists());discard_working_copy(&open);
+    }
+    #[test]
+    fn c21_rereview_portable_new_folder_candidates() {
+        for title in ["aux.mp3".to_owned(), "CON.wav".into(), "Song.".into(), "界".repeat(100), "a".repeat(241), "Good".into()] {
+            for suffix in [1, 2, 99999] {
+                let name=folder_name(&title,suffix);
+                validate_component(std::ffi::OsStr::new(&name)).unwrap_or_else(|error| panic!("invalid candidate {name:?}: {error}"));
+                if suffix > 1 { assert!(name.ends_with(&format!(" ({suffix})"))); }
+            }
+        }
+        assert_eq!(folder_name("CON.wav",1),"CON_");
+    }
+    #[test]
+    fn c21_rereview_deferred_open_keeps_fresh_output() {
+        let f=Fixture::new();let path=allocate_cache(&f.0.join("deferred")).unwrap();
+        discard_failed_source_open(&path,OpenAttempt::Deferred,None,None);
+        assert!(path.exists(),"deferred output was discarded before any backend open");
+        discard_failed_source_open(&path,OpenAttempt::Failed,None,None);
+        assert!(!path.exists(),"real rejected open retained unused output");
+    }
+    #[test]
+    fn c21_rereview_active_writer_keeps_previous_copy() {
+        let f=Fixture::new();let path=allocate_cache(&f.0.join("writer")).unwrap();
+        discard_inactive_working_copy(&path,true);
+        assert!(path.exists(),"active writer lost its source");
+        assert!(cache_leases().lock().unwrap().iter().any(|(p,_)|p==&path));
+        discard_inactive_working_copy(&path,false);
+        assert!(!path.exists());
+    }
+    #[test]
+    fn c21_rereview_adopted_edits_survive_navigation_quit_and_prune() {
+        let f=Fixture::new();let root=f.0.join("retained");let path=allocate_cache(&root).unwrap();
+        fs::write(path.join("lyrics.json"),b"edited lyrics").unwrap();
+        adopt_working_copy(&path);
+        discard_working_copy(&path);
+        assert!(path.exists(),"accepted unsaved edits were deleted on release");
+        assert!(!cache_leases().lock().unwrap().iter().any(|(p,_)|p==&path),"released copy retained its process lease");
+        prune_cache_at(&root,std::time::SystemTime::now()+CACHE_MAX_AGE*365).unwrap();
+        assert_eq!(fs::read(path.join("lyrics.json")).unwrap(),b"edited lyrics");
+    }
+    #[test]
+    fn c21_review_pending_path_survives_status_replacement_without_losing_incoming_copy() {
+        let f=Fixture::new(); let root=f.0.join("pending-owners");
+        let old=allocate_cache(&root).unwrap();
+        let incoming=allocate_cache(&root).unwrap();
+        let current=allocate_cache(&root).unwrap();
+        // The status can now point at incoming; cleanup must use the recorded old path.
+        discard_pending_working_copy(&old,Some(&incoming),Some(&current));
+        assert!(!old.exists(), "superseded pending path retained its lease and directory");
+        discard_pending_working_copy(&incoming,Some(&incoming),Some(&current));
+        discard_pending_working_copy(&current,Some(&incoming),Some(&current));
+        assert!(incoming.exists(), "incoming working copy was deleted");
+        assert!(current.exists(), "current project was deleted");
+        discard_working_copy(&incoming); discard_working_copy(&current);
+    }
+    #[test]
+    fn c21_review_failed_job_releases_marker_before_removal() {
+        let f=Fixture::new();
+        let path=allocate_cache(&f.0.join("pending-cache")).unwrap();
+        drop(Pending(path.clone()));
+        assert!(!cache_leases().lock().unwrap().iter().any(|(p,_)|p==&path), "failed job retained its marker lease");
+        assert!(!path.exists());
+    }
+    #[test]
+    fn c21_review_recent_abandoned_cache_has_age_grace() {
+        let f=Fixture::new();
+        let root=f.0.join("age-cache");fs::create_dir(&root).unwrap();
+        let path=root.join("999999-2-3");fs::create_dir(&path).unwrap();
+        fs::write(path.join(".source-work-active"),b"").unwrap();
+        prune_cache(&root).unwrap();
+        assert!(path.exists(), "recent abandoned copy lost its grace period");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_review_cache_symlink_error_is_not_capacity() {
+        let f=Fixture::new();
+        let root=f.0.join("linked-cache");std::os::unix::fs::symlink(&f.0,&root).unwrap();
+        let error=allocate_cache(&root).unwrap_err().to_string();
+        assert_ne!(error,crate::i18n::t("main.error.sourceCacheFull"));
+    }
+    #[test]
+    fn c21_review_name_error_identifies_rejected_name() {
+        assert!(checked_name("CON.txt").unwrap_err().to_string().contains("CON.txt"));
+    }
+    #[test]
+    fn c21_review_ten_open_discard_cycles_release_leases() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("cycles");
+        let input = fixture.0.join("raw/audio.wav");
+        fs::create_dir(input.parent().unwrap()).unwrap();
+        let frames=80u32; let rate=8000u32;
+        let mut wav=Vec::new();
+        wav.extend(b"RIFF"); wav.extend((36+frames*2).to_le_bytes());
+        wav.extend(b"WAVEfmt "); wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes()); wav.extend(1u16.to_le_bytes());
+        wav.extend(rate.to_le_bytes()); wav.extend((rate*2).to_le_bytes());
+        wav.extend(2u16.to_le_bytes()); wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data"); wav.extend((frames*2).to_le_bytes());
+        wav.resize(44+frames as usize*2,0); fs::write(&input,wav).unwrap();
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) {
+            TEST_CACHE_ROOT.with(|root| *root.borrow_mut()=None);
+            TEST_OPEN_RENDER.with(|fixture| fixture.set(false));
+        } }
+        TEST_CACHE_ROOT.with(|path| *path.borrow_mut()=Some(root.clone()));
+        TEST_OPEN_RENDER.with(|fixture| fixture.set(true));
+        let _reset=Reset;
+        for _ in 0..10 {
+            let output=execute(&Config::source(), Job::Open(input.clone()), &AtomicU64::new(1), 1, &mut false, |_,_|{}).unwrap();
+            assert!(output.working);
+            let path=output.path;
+            assert_eq!(path.parent(),Some(root.as_path()));
+            assert!(path.join("song.wav").is_file());
+            discard_working_copy(&path);
+            assert!(!path.exists(), "discarded working copy remains");
+            assert!(!cache_leases().lock().unwrap().iter().any(|(p, _)| p == &path));
+        }
+        assert_eq!(fs::read_dir(root).unwrap().count(), 1); // cache lock only
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_round3_twenty_plain_opens_and_discards_do_not_retain() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("cycles");
+        let input = fixture.0.join("raw/audio.wav");
+        fs::create_dir(input.parent().unwrap()).unwrap();
+        let frames=80u32; let rate=8000u32;
+        let mut wav=Vec::new();
+        wav.extend(b"RIFF"); wav.extend((36+frames*2).to_le_bytes());
+        wav.extend(b"WAVEfmt "); wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes()); wav.extend(1u16.to_le_bytes());
+        wav.extend(rate.to_le_bytes()); wav.extend((rate*2).to_le_bytes());
+        wav.extend(2u16.to_le_bytes()); wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data"); wav.extend((frames*2).to_le_bytes());
+        wav.resize(44+frames as usize*2,0); fs::write(&input,wav).unwrap();
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) {
+            TEST_CACHE_ROOT.with(|root| *root.borrow_mut()=None);
+            TEST_OPEN_RENDER.with(|fixture| fixture.set(false));
+        } }
+        TEST_CACHE_ROOT.with(|path| *path.borrow_mut()=Some(root.clone()));
+        TEST_OPEN_RENDER.with(|fixture| fixture.set(true));
+        let _reset=Reset;
+        for _ in 0..20 {
+            let output=execute(&Config::source(), Job::Open(input.clone()), &AtomicU64::new(1), 1, &mut false, |_,_|{}).unwrap();
+            assert!(output.working);
+            let path=output.path;
+            assert_eq!(path.parent(),Some(root.as_path()));
+            assert!(path.join("song.wav").is_file());
+            adopt_working_copy_with_value(&path,false);
+            discard_working_copy(&path);
+            assert!(!path.exists(), "discarded working copy remains");
+            assert!(!cache_leases().lock().unwrap().iter().any(|(p, _)| p == &path));
+        }
+        assert_eq!(fs::read_dir(root).unwrap().count(), 1); // cache lock only
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_review_legacy_titles_and_members_save_and_clone() {
+        for title in ["AUX", "Stay."] {
+            let source = Fixture::new();
+            let target = Fixture::new();
+            let mut raw = crate::project_store::read(&source.0, "project.json").unwrap().0;
+            raw["name"] = json!(title);
+            fs::write(source.0.join("notes."), b"notes").unwrap();
+            fs::write(source.0.join("AUX.txt"), b"aux").unwrap();
+            let clone = source.0.join("clone");
+            // Clone into a sibling to avoid traversing the destination itself.
+            let clone = target.0.join(clone.file_name().unwrap());
+            let cloned = clone_project(&source.0, &clone, &AtomicU64::new(1), 1);
+            let output = execute(&Config::source(), Job::Save { dir: source.0.clone(), raw, custom: vec![], target: Some(target.target()) }, &AtomicU64::new(1), 1, &mut false, |_, _| {});
+            assert!(cloned.is_ok() && output.is_ok(), "legacy clone: {cloned:?}; legacy Save: {output:?}");
+            assert_eq!(fs::read(clone.join("notes.")).unwrap(), b"notes");
+            assert_eq!(fs::read(clone.join("AUX.txt")).unwrap(), b"aux");
+            assert_eq!(crate::project_store::read(&target.0, "project.json").unwrap().0["name"], title);
+        }
+    }
     #[test]
     fn save_marks_survive_sync_captured_during_long_publication() {
         let fixture = Fixture::new();

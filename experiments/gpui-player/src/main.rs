@@ -693,7 +693,7 @@ struct Player {
     focus_after_title: bool,
     source_working: bool,
     source_target: Option<source_jobs::Target>,
-    source_pending: Option<(u64, bool, Option<source_jobs::Target>, Option<SourceResume>)>,
+    source_pending: Option<(u64, bool, Option<source_jobs::Target>, Option<SourceResume>, std::path::PathBuf)>,
     log_panel: Entity<log_panel::LogPanel>,
     diagnostics:Option<diagnostics::Service>,
     diagnostics_revision:u64,
@@ -1304,10 +1304,20 @@ impl Player {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let quit_subscription = cx.on_app_quit(|this, cx| {
+            this.retain_source_edits();
             this.shutdown_desktop(cx);
+            if let Some((_, _, _, _, path)) = this.source_pending.take() { source_jobs::discard_working_copy(&path); }
+            if this.source_working { if let Some(project) = &this.project { source_jobs::discard_working_copy(&project.dir); } }
+            if let Some(output) = this.source_status.result.as_ref().filter(|output| output.working) { source_jobs::discard_working_copy(&output.path); }
             std::future::ready(())
         });
-        let desktop_release_subscription = cx.on_release(|this, cx| this.shutdown_desktop(cx));
+        let desktop_release_subscription = cx.on_release(|this, cx| {
+            this.retain_source_edits();
+            this.shutdown_desktop(cx);
+            if let Some((_, _, _, _, path)) = this.source_pending.take() { source_jobs::discard_working_copy(&path); }
+            if this.source_working { if let Some(project) = &this.project { source_jobs::discard_working_copy(&project.dir); } }
+            if let Some(output) = this.source_status.result.as_ref().filter(|output| output.working) { source_jobs::discard_working_copy(&output.path); }
+        });
         let wake_player=cx.weak_entity();
         let system_wake_subscription=cx.on_system_wake(move |cx| {
             let _=wake_player.update(cx, |player,cx| player.desktop_woke(cx));
@@ -1820,7 +1830,7 @@ impl Player {
                 self.source_split_handoff = Some(handoff);
                 return;
             };
-            self.monitor_actions.retain(|a| !matches!(a, DeferredAudio::SourceOutput(_, _, _)));
+            self.monitor_actions.retain(|a| { if let DeferredAudio::SourceOutput(output, _, _) = a { if output.working && self.project.as_ref().is_none_or(|project| project.dir != output.path) { source_jobs::discard_working_copy(&output.path); } false } else { true } });
             // Reopening the retained original revokes the pending candidate's
             // native epoch. Its late Opened/Error cannot replace this rollback.
             self.open_source_output(output, Some(resume), cx);
@@ -1860,7 +1870,7 @@ impl Player {
         self.source_split_handoff = None;
         self.transport.update(cx, |t, cx| t.set_progress(None, cx));
         self.monitor_actions
-            .retain(|a| !matches!(a, DeferredAudio::SourceOutput(_, _, _)));
+            .retain(|a| { if let DeferredAudio::SourceOutput(output, _, _) = a { if output.working && self.project.as_ref().is_none_or(|project| project.dir != output.path) { source_jobs::discard_working_copy(&output.path); } false } else { true } });
         cx.notify();
     }
     fn source_blocks_player(&self) -> bool { self.rate_busy() || self.source_blocks_except_rate() }
@@ -1946,7 +1956,29 @@ impl Player {
             self.source_split_combined = combined;
         }
     }
+    fn source_writer_busy(&self) -> bool {
+        self.source_job.is_some() || self.source_service.as_ref().is_some_and(|service| service.snapshot().busy)
+    }
+    fn retain_source_edits(&self) {
+        // A new loose-song working copy starts at edit_seq 1; that initial
+        // dirty dot alone does not make a disposable audio copy valuable.
+        if self.source_working && self.edit_seq > 1 {
+            if let Some(project) = &self.project { source_jobs::retain_edited_working_copy(&project.dir); }
+        }
+    }
     fn poll_sources(&mut self, cx: &mut Context<Self>) {
+        self.retain_source_edits();
+        if !self.source_writer_busy() {
+            let mut keep = Vec::new();
+            if let Some(project) = &self.project { keep.push(project.dir.clone()); }
+            if let Some((_, _, _, _, path)) = &self.source_pending { keep.push(path.clone()); }
+            if let Some(handoff) = &self.source_split_handoff { keep.push(handoff.rollback.0.path.clone()); }
+            for action in &self.monitor_actions { if let DeferredAudio::SourceOutput(output, _, _) = action { keep.push(output.path.clone()); } }
+            source_jobs::release_unowned_working_copies(&keep);
+        }
+        if !self.source_writer_busy() && !self.loading && self.project.is_none() {
+            if let Some((_, _, _, _, path)) = self.source_pending.take() { source_jobs::discard_working_copy(&path); }
+        }
         if let Some((epoch, retired_job)) = self.source_combined_next {
             if epoch != self.native_epoch {
                 self.source_combined_next = None;
@@ -1975,6 +2007,7 @@ impl Player {
         if self.source_job.is_some_and(|id| self.source_cancelling == Some(id)
             && self.source_service.as_ref().is_some_and(|service| service.retired(id)))
         {
+            if let Some(output) = self.source_service.as_ref().and_then(|service| service.snapshot().result.clone()).filter(|output| output.working && self.project.as_ref().is_none_or(|project| project.dir != output.path)) { source_jobs::discard_working_copy(&output.path); }
             let accepted_stems = self.source_split_combined && self.source_split == Some(source_jobs::Mode::Vocals);
             self.source_job = None;
             self.source_split = None;
@@ -1990,6 +2023,12 @@ impl Player {
             return;
         };
         let snapshot = service.snapshot();
+        if self.source_job.is_none() && self.source_pending.is_none() {
+            if let Some(output) = snapshot.result.as_ref().filter(|output| output.working
+                && self.project.as_ref().is_none_or(|project| project.dir != output.path)
+                && !self.monitor_actions.iter().any(|action| matches!(action, DeferredAudio::SourceOutput(candidate, _, _) if candidate.path == output.path)))
+            { source_jobs::discard_working_copy(&output.path); }
+        }
         if self.source_job.is_some_and(|id| id != snapshot.generation) {
             return;
         }
@@ -1998,6 +2037,7 @@ impl Player {
         if self.source_job.is_some()
             && !snapshot.busy
             && (self.rate_busy() || self.metronome_pending.is_some()
+                || self.project_delete.read(cx).is_open() || self.delete_pending.is_some()
                 || self.library_import_open || self.stem_export_open
                 || self.import_pending.is_some()
                 || self.lyrics_editor_open
@@ -2024,6 +2064,7 @@ impl Player {
         }
         if self.source_job == Some(snapshot.generation) && !snapshot.busy {
             if self.source_cancelling == Some(snapshot.generation) {
+                if let Some(output) = snapshot.result.as_ref().filter(|output| output.working && self.project.as_ref().is_none_or(|project| project.dir != output.path)) { source_jobs::discard_working_copy(&output.path); }
                 let accepted_stems = self.source_split_combined && self.source_split == Some(source_jobs::Mode::Vocals);
                 self.source_job = None;
                 self.source_split = None;
@@ -2141,15 +2182,21 @@ impl Player {
         let overlay=resume.as_ref().and_then(|resume|self.project.as_ref().map(|project|integration::OpenCustomOverlay{source_dir:project.dir.clone(),mix:resume.mix.clone(),preserve_generated:resume.mode.is_some()}));
         let rate_navigation=self.native_rate_navigation.take();
         let rate_save=std::mem::take(&mut self.native_rate_save_requested);
-        self.open_project_with_overlay(output.path,None,overlay,cx);
+        let pending_path = output.path.clone();
+        let attempt = self.open_project_with_overlay(output.path.clone(),None,overlay,cx);
         self.native_rate_navigation=rate_navigation;
         self.native_rate_save_requested=rate_save;
         if self.native_epoch != epoch {
-            self.source_pending = Some((self.native_epoch, output.working, output.target, resume));
+            self.source_pending = Some((self.native_epoch, output.working, output.target, resume, pending_path));
             if let Some(mut handoff) = handoff {
                 handoff.epoch = self.native_epoch;
                 self.source_split_handoff = Some(handoff);
             }
+        } else if attempt == source_jobs::OpenAttempt::Deferred {
+            // No backend request was issued. Keep the output for a later poll.
+            self.monitor_actions.push_back(DeferredAudio::SourceOutput(output, resume, self.native_epoch));
+        } else {
+            source_jobs::discard_failed_source_open(&pending_path, attempt, self.source_pending.as_ref().map(|(_, _, _, _, path)| path.as_path()), self.project.as_ref().map(|project| project.dir.as_path()));
         }
     }
     fn resume_project_audio(&mut self, resume: SourceResume, cx: &mut Context<Self>) {
@@ -2240,6 +2287,11 @@ impl Player {
         }
     }
     fn rename_title(&mut self, name: String, cx: &mut Context<Self>) {
+        if let Err(error) = source_jobs::checked_name(&name) {
+            self.notice = Some(error.to_string());
+            cx.notify();
+            return;
+        }
         let name = name.trim().to_owned();
         if name.is_empty()
             || name == self.song_title.as_str()
@@ -2560,13 +2612,12 @@ impl Player {
     fn open_project_verified(&mut self, path: std::path::PathBuf, confirmed:Option<project_delete::Target>,cx:&mut Context<Self>) {
         self.open_project_with_overlay(path,confirmed,None,cx);
     }
-    fn open_project_with_overlay(&mut self,path:std::path::PathBuf,confirmed:Option<project_delete::Target>,overlay:Option<integration::OpenCustomOverlay>,cx:&mut Context<Self>){
-        if self.project_delete.read(cx).is_open() || self.delete_pending.is_some() { return; }
+    fn open_project_with_overlay(&mut self,path:std::path::PathBuf,confirmed:Option<project_delete::Target>,overlay:Option<integration::OpenCustomOverlay>,cx:&mut Context<Self>) -> source_jobs::OpenAttempt {
+        if self.project_delete.read(cx).is_open() || self.delete_pending.is_some() { return source_jobs::OpenAttempt::Deferred; }
         if (confirmed.is_some()||overlay.is_some()) && self.monitor_busy() {
-            self.clear_deleted_project(cx);
-            self.notice=Some("Could not restore the project while microphone monitoring cleanup is active. Reopen the original project after cleanup.".into());
-            cx.notify();return;
+            return source_jobs::OpenAttempt::Deferred;
         }
+        self.retain_source_edits();
         self.cancel_delete_inspection();
         diagnostics::event("projects",format!("Opening saved project {}",path.display()),diagnostics::Level::Info);
         self.reset_transport_timing(cx);
@@ -2578,18 +2629,20 @@ impl Player {
         self.cancel_lyrics_alignment(cx);
         self.header.update(cx, |h, cx| h.cancel_title(cx));
         self.disown_source(cx);
-        self.source_pending = None;
         self.rename_pending = None;
         self.stop_training(cx);
         self.training.update(cx, |s, cx| s.clear_song(cx));
         if self.defer_monitor(DeferredAudio::Open(path.clone()), cx) {
-            return;
+            return source_jobs::OpenAttempt::Deferred;
         }
         if let Some(backend) = &self.backend {
             let fallback=self.met_prefs_ready.then(|| self.metronome.clone());
-            let request=backend.open_with_overlay(path,fallback,confirmed,overlay);
-            match request {
+            let request=backend.open_with_overlay(path.clone(),fallback,confirmed,overlay);
+            let attempt = match request {
                 Ok(epoch) => {
+                    if let Some((_, _, _, _, pending_path)) = self.source_pending.take() {
+                        source_jobs::discard_pending_working_copy(&pending_path, Some(&path), self.project.as_ref().map(|project| project.dir.as_path()));
+                    }
                     self.native_epoch = epoch;
                     self.karaoke=false;
                     self.transport.update(cx,|transport,cx|transport.set_karaoke(false,cx));
@@ -2598,11 +2651,16 @@ impl Player {
                     self.playing = false;
                     self.native_anchor = None;
                     self.notice = None;
+                    source_jobs::OpenAttempt::Issued
                 }
-                Err(error) => self.notice = Some(error.to_string()),
-            }
+                Err(error) => {
+                    self.notice = Some(error.to_string());
+                    source_jobs::OpenAttempt::Failed
+                }
+            };
             cx.notify();
-        }
+            attempt
+        } else { source_jobs::OpenAttempt::Failed }
     }
     fn poll_backend(&mut self, cx: &mut Context<Self>) {
         self.sync_audio_provider(cx);
@@ -2835,15 +2893,22 @@ impl Player {
                     self.muted = project.muted;
                     self.solo = project.solo;
                     self.gain = project.gain.map(|v| (v * 100.).round() as u8);
+                    self.retain_source_edits();
                     self.edit_seq = 0;
                     self.saved_seq = 0;
+                    if self.source_working {
+                        if let Some(previous) = self.project.as_ref().filter(|previous| previous.dir != project.dir) { source_jobs::discard_inactive_working_copy(&previous.dir, self.source_writer_busy()); }
+                    }
+                    if let Some((_, _, _, _, pending_path)) = self.source_pending.as_ref() {
+                        source_jobs::discard_pending_working_copy(pending_path, Some(&project.dir), None);
+                    }
                     self.source_working = false;
                     self.source_target = None;
                     let mut resume = None;
-                    if let Some((pending, working, target, handoff)) = self
+                    if let Some((pending, working, target, handoff, _)) = self
                         .source_pending
                         .take()
-                        .filter(|(pending, _, _, _)| *pending == epoch)
+                        .filter(|(pending, _, _, _, _)| *pending == epoch)
                     {
                         let _ = pending;
                         self.source_working = working;
@@ -2852,6 +2917,10 @@ impl Player {
                         if working {
                             self.edit_seq = 1;
                         }
+                    }
+                    if self.source_working {
+                        let split = resume.as_ref().is_some_and(|resume| resume.mode.is_some());
+                        source_jobs::adopt_working_copy_with_value(&project.dir, split);
                     }
                     self.saving = false;
                     // A replacement of this song is not navigation. In particular,
@@ -3269,6 +3338,19 @@ impl Player {
                     self.reset_carry(cx);
                     self.loaded_song = false;
                     self.stop_training(cx);
+                    self.retain_source_edits();
+                    if let Some((_, _, _, _, path)) = self.source_pending.take() {
+                        source_jobs::discard_pending_working_copy(&path, None,
+                            self.project.as_ref().filter(|_| self.source_writer_busy()).map(|project| project.dir.as_path()));
+                    }
+                    if self.source_working {
+                        if let Some(project) = &self.project {
+                            if self.source_writer_busy() {
+                                // Keep a writer's source until that job retires.
+                                self.source_pending = Some((epoch, true, self.source_target.clone(), None, project.dir.clone()));
+                            } else { source_jobs::discard_working_copy(&project.dir); }
+                        }
+                    }
                     self.project = None;
                     self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
                     self.lyric_document = Arc::default();
@@ -3585,6 +3667,7 @@ impl Player {
                 // Open and typed rate preparation complete asynchronously. Keep
                 // later commands until the new connection or accepted rate is
                 // ready instead of popping them into dispatch guards.
+                if self.project_delete.read(cx).is_open() || self.delete_pending.is_some() { break; }
                 if self.loading || self.audio_recovery.is_some() || self.monitor_publication_epoch.is_some() || self.notice.is_some() {
                     break;
                 }

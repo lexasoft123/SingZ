@@ -146,8 +146,9 @@ impl Header {
         }
         self.editing = false;
         cx.emit(HeaderEvent::TitleClosed);
-        let value = self.title_input.read(cx).value().trim().to_owned();
-        if !value.is_empty() && value != self.title.as_str() {
+        // Preserve trailing spaces until rename_title validates the typed name.
+        let value = self.title_input.read(cx).value().to_string();
+        if !value.trim().is_empty() && value != self.title.as_str() {
             cx.emit(HeaderEvent::Rename(value));
         }
         cx.notify();

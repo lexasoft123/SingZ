@@ -1,5 +1,12 @@
 /* English strings for the `main` namespace — see ../index.ts. */
 export const main = {
+  "main.error.copySourceChanged": "The copy source for “{name}” changed. Try again.",
+  "main.error.linkedFilesystemPath": "Linked filesystem paths cannot be used for working copies.",
+  "main.error.portableName": "“{name}”: Choose a name of at most 240 bytes without Windows reserved names, control characters, or a trailing dot or space.",
+  "main.error.networkFilesystem": "Saving or moving projects on a network filesystem is not supported. Choose a local library folder.",
+  "main.error.filesystemPublish": "“{name}”: This filesystem could not safely publish the project. Choose another local library folder and try again.",
+  "main.error.sourceCacheFull": "The working-copy cache is full. Close unused projects and try again later.",
+
   "main.sync.downloadDeferred": "{dir} was not added: {reason}. It remains on Drive; fix the problem and sync again.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/s",

@@ -188,7 +188,8 @@ fn external_preferences_change_during_migration_refuses_root_switch() {
         fs::read(&f.config.preferences).unwrap(),
         b"{\"future\":\"external\"}"
     );
-    assert!(target.join("A/song.wav").is_file());
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    assert_eq!(fs::read(f.config.default_root.join("A/song.wav")).unwrap(), b"source-song");
 }
 #[test]
 fn exclusive_publish_never_replaces_an_existing_empty_directory() {
@@ -324,7 +325,7 @@ fn oversize_metadata_refuses_before_reading_and_sparse_members_before_copying() 
     assert!(!f.config.preferences.exists());
 }
 #[test]
-fn late_external_source_edit_keeps_old_selection_and_complete_copied_project() {
+fn late_external_source_edit_keeps_old_selection_and_rolls_back_copies() {
     let f = Fixture::new();
     let a = f.project("A", "2025");
     let target = f.base.join("new");
@@ -339,7 +340,8 @@ fn late_external_source_edit_keeps_old_selection_and_complete_copied_project() {
     assert!(result.is_err());
     assert!(!f.config.preferences.exists());
     assert_eq!(resolved_root(&f.config).unwrap(), f.config.default_root);
-    assert!(target.join("A/song.wav").exists());
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    assert_eq!(fs::read(a.join("song.wav")).unwrap(), b"source-song");
     assert_eq!(
         fs::read(a.join("lyrics.json")).unwrap(),
         b"newer accepted external text"

@@ -136,14 +136,16 @@ fn validate(input: &Input, source: &Path) -> Result<String> {
         empty || playable_song || has_stems || has_custom,
         "Saved project has no playable original or stems"
     );
-    Ok(crate::source_jobs::safe_name(
+    let name = crate::source_jobs::folder_name(
         raw["name"].as_str().unwrap_or_else(|| {
             source
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Song")
-        }),
-    ))
+        }), 1,
+    );
+    crate::source_jobs::validate_component(std::ffi::OsStr::new(&name))?;
+    Ok(name)
 }
 fn ordinary_media(source: &Path, relative: &Path) -> Result<Option<fs::Metadata>> {
     let mut path = source.to_owned();
@@ -232,6 +234,7 @@ fn run(
     );
     fs::create_dir_all(&input.root)?;
     let root = input.root.canonicalize()?;
+    crate::project_publish::writable_filesystem(&root)?;
     ensure!(
         !source.starts_with(&root),
         "This project is already in the library"
@@ -246,6 +249,7 @@ fn run(
     let source_lease = crate::project_publish::lock(&source)?;
     crate::project_publish::recover_locked(&source)?;
     let name = validate(input, &source)?;
+    crate::source_jobs::validate_component(std::ffi::OsStr::new(&name))?;
     let destination = root.join(name);
     ensure!(
         fs::symlink_metadata(&destination).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
@@ -377,6 +381,35 @@ mod tests;
 #[cfg(test)]
 mod sync_publication_tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn c21_copy_and_move_preserve_legacy_titles_and_members() {
+        for mode in [Mode::Copy, Mode::Move] {
+            for (i, (title, member)) in [("CON.wav", "notes.txt"), ("Title ", "notes.txt"), ("Title", "AUX.txt"), ("Title", "notes.")].iter().enumerate() {
+                let base = std::env::temp_dir().join(format!("singz-c21-import-{}-{mode:?}-{i}", std::process::id()));
+                let source = base.join("outside/Song");
+                fs::create_dir_all(&source).unwrap();
+                fs::write(source.join("project.json"), serde_json::to_vec(&serde_json::json!({"version":2,"name":title,"songFile":"song.wav","settings":{}})).unwrap()).unwrap();
+                fs::write(source.join("song.wav"), b"song").unwrap();
+                fs::write(source.join(member), b"keep").unwrap();
+                let config = crate::project_library::Config {
+                    home:base.join("home"), default_root:base.join("library"),
+                    preferences:base.join("prefs/library.json"), override_root:None, one_drive:None,
+                };
+                let source = source.canonicalize().unwrap();
+                let input = Input { source:source.clone(), root:crate::project_library::resolved_root(&config).unwrap(),
+                    expected_project:crate::project_store::fingerprint(&fs::read(source.join("project.json")).unwrap()),
+                    expected_lyrics:None, mode };
+                let outcome = execute_with_config(&input, &config, &||false, false);
+                assert!(outcome.imported, "legacy import failed: {:?}", outcome.warning);
+                assert_eq!(fs::read(outcome.dir.join(member)).unwrap(), b"keep");
+                crate::source_jobs::validate_component(outcome.dir.file_name().unwrap()).expect("import created a nonportable folder");
+                if *title == "CON.wav" { assert_eq!(outcome.dir.file_name().unwrap(), "CON_"); }
+                assert_eq!(crate::project_store::read(&outcome.dir,"project.json").unwrap().0["name"],*title);
+                fs::remove_dir_all(base).unwrap();
+            }
+        }
+    }
     #[test]
     fn copy_and_move_mark_real_destination_and_move_source() {
         for mode in [Mode::Copy, Mode::Move] {

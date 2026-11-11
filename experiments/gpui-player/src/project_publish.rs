@@ -66,7 +66,63 @@ struct Change {
     old: bool,
     new: bool,
 }
+#[cfg(test)]
+thread_local! { static REMOTE_SOURCE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn with_remote_source<T>(root: &Path, operation: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) { REMOTE_SOURCE.with(|p| *p.borrow_mut()=None); } }
+    REMOTE_SOURCE.with(|p| *p.borrow_mut()=Some(root.to_owned()));
+    let _reset=Reset;
+    operation()
+}
+#[cfg(any(target_os="linux",test))]
+fn network_type(magic: u64) -> bool { matches!(magic, 0xFF534D42 | 0xFE534D42 | 0x6969 | 0x517B | 0x65735546) }
+pub(crate) fn publish_error(path: &Path) -> String {
+    crate::i18n::tv("main.error.filesystemPublish", &[("name", path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned())])
+}
+/// Network filesystems cannot establish our cooperative lock, identity and
+/// atomic-publication guarantees. Refuse before recovery or mutation.
+pub(crate) fn writable_filesystem(dir: &Path) -> Result<()> {
+    #[cfg(test)]
+    ensure!(!REMOTE_SOURCE.with(|p| p.borrow().as_ref().is_some_and(|p| dir.starts_with(p))), "{}", crate::i18n::t("main.error.networkFilesystem"));
+    #[cfg(unix)]
+    let remote = {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let path = CString::new(dir.as_os_str().as_bytes())?;
+        let mut info: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(path.as_ptr(), &mut info) } != 0 {
+            return Err(std::io::Error::last_os_error()).context(publish_error(dir));
+        }
+        #[cfg(target_os = "macos")]
+        { info.f_flags & libc::MNT_LOCAL as u32 == 0 }
+        #[cfg(target_os = "linux")]
+        { network_type(info.f_type as u64) }
+    };
+    #[cfg(windows)]
+    let remote = {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetVolumePathNameW(path: *const u16, volume: *mut u16, size: u32) -> i32;
+            fn GetDriveTypeW(root: *const u16) -> u32;
+        }
+        let path: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut root = vec![0u16; 32768];
+        if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+            return Err(std::io::Error::last_os_error()).context(publish_error(dir));
+        }
+        !matches!(unsafe { GetDriveTypeW(root.as_ptr()) }, 2 | 3 | 6)
+    };
+    ensure!(!remote, "{}", crate::i18n::t("main.error.networkFilesystem"));
+    Ok(())
+}
 pub fn lock(dir: &Path) -> Result<crate::file_lease::Lease> {
+    writable_filesystem(dir)?;
+    source_lock(dir)
+}
+// A copy reads the source under its cooperative lease even on a NAS.
+pub(crate) fn source_lock(dir: &Path) -> Result<crate::file_lease::Lease> {
     let f = OpenOptions::new()
         .read(true)
         .write(true)
@@ -227,6 +283,7 @@ pub fn recover_locked(dir: &Path) -> Result<()> {
     Ok(())
 }
 pub fn commit(dir: &Path, id: &str, files: Vec<(String, bool)>, expected: &str) -> Result<()> {
+    writable_filesystem(dir)?;
     ensure!(
         !files.is_empty() && files.len() <= MAX_MEMBERS,
         "Invalid split publication size"
@@ -551,6 +608,31 @@ mod tests {
             crate::project_store::read(&f.0, "project.json").unwrap().1,
             expected
         );
+    }
+    #[test]
+    fn c21_review_fuse_is_network_for_writes() {
+        assert!(network_type(0x65735546));
+        assert!(network_type(0xFF534D42));
+        assert!(!network_type(0xef53));
+    }
+    #[test]
+    fn c21_review_publish_error_identifies_file() {
+        assert!(publish_error(Path::new("/unavailable/Rejected.flac")).contains("Rejected.flac"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn c21_review_recovers_legacy_custom_member() {
+        let f = Fixture::new();
+        let id = "111-334";
+        let root = stage(&f.0, id);
+        fs::create_dir_all(root.join("previous/stems")).unwrap();
+        fs::create_dir_all(root.join("next/stems")).unwrap();
+        fs::write(f.0.join("stems/custom-notes."), b"new").unwrap();
+        fs::write(root.join("previous/stems/custom-notes."), b"old").unwrap();
+        journal(&f.0, &Journal { version:1, id:id.into(), committed:false, files:vec![Change {file:"stems/custom-notes.".into(), old:true,new:true}] }).unwrap();
+        recover(&f.0).unwrap();
+        assert_eq!(fs::read(f.0.join("stems/custom-notes.")).unwrap(), b"old");
+        assert!(!root.exists());
     }
     #[test]
     fn encoded_custom_members_publish_and_rollback_with_metadata_as_one_transaction() {

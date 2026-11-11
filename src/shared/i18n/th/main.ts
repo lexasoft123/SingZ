@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.error.copySourceChanged": "แหล่งข้อมูลที่คัดลอกของ “{name}” เปลี่ยนไป โปรดลองอีกครั้ง",
+  "main.error.linkedFilesystemPath": "ไม่สามารถใช้เส้นทางลิงก์สัญลักษณ์สำหรับสำเนาการทำงานได้",
+  "main.error.portableName": "“{name}”: เลือกชื่อที่ยาวไม่เกิน 240 ไบต์ โดยไม่มีชื่อสงวนของ Windows อักขระควบคุม หรือจุดหรือช่องว่างท้ายชื่อ",
+  "main.error.networkFilesystem": "ไม่รองรับการบันทึกหรือย้ายโปรเจ็กต์บนระบบไฟล์เครือข่าย โปรดเลือกโฟลเดอร์คลังในเครื่อง",
+  "main.error.filesystemPublish": "“{name}”: ระบบไฟล์นี้ไม่สามารถบันทึกโปรเจ็กต์ได้อย่างปลอดภัย โปรดเลือกโฟลเดอร์คลังอื่นในเครื่องแล้วลองอีกครั้ง",
+  "main.error.sourceCacheFull": "แคชสำเนาการทำงานเต็มแล้ว ปิดโปรเจกต์ที่ไม่ได้ใช้แล้วลองอีกครั้งภายหลัง",
+
   "main.sync.downloadDeferred": "ไม่ได้เพิ่ม {dir}: {reason} เพลงยังอยู่ใน Drive แก้ปัญหาแล้วซิงค์อีกครั้ง",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/วินาที",

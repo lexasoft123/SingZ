@@ -2,6 +2,7 @@
 //! audio decoder, cloud account, or deletion of the previous library is involved.
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, File, Metadata, OpenOptions},
@@ -520,7 +521,7 @@ fn manifest(root: &Path, cancel: &impl Fn() -> bool) -> Result<BTreeMap<PathBuf,
             let entry = entry?;
             let name = entry.file_name();
             let text = name.to_string_lossy();
-            if text.starts_with(".singz-native-") || text.starts_with(".native-split-") {
+            if text == ".source-work-active" || text.starts_with(".singz-native-") || text.starts_with(".native-split-") {
                 continue;
             }
             let path = relative.join(name);
@@ -588,12 +589,21 @@ fn copy_project(
     destination: &Path,
     cancel: &impl Fn() -> bool,
 ) -> Result<CopiedSource> {
-    copy_project_checked(source, destination, cancel, &|_| Ok(()))
+    copy_project_existing_name(source, destination, cancel, &|_| Ok(()))
 }
 pub(crate) fn copy_project_checked(
     source: &Path,
     destination: &Path,
     cancel: &impl Fn() -> bool,
+    validate: &impl Fn(&Path) -> Result<()>,
+) -> Result<CopiedSource> {
+    crate::source_jobs::validate_component(destination.file_name().context("Library destination has no name")?)?;
+    copy_project_existing_name(source, destination, cancel, validate)
+}
+// Root migration preserves names of existing projects. Import callers must use
+// the checked entry point above for their newly derived destination names.
+fn copy_project_existing_name(
+    source: &Path, destination: &Path, cancel: &impl Fn() -> bool,
     validate: &impl Fn(&Path) -> Result<()>,
 ) -> Result<CopiedSource> {
     let meta = fs::symlink_metadata(source)?;
@@ -602,13 +612,15 @@ pub(crate) fn copy_project_checked(
         "Linked migration source folder"
     );
     let source = source.canonicalize()?;
-    let lease = crate::project_publish::lock(&source)?;
+    let lease = crate::project_publish::source_lock(&source)?;
+    if source.join(".singz-native-split.json").exists() { crate::project_publish::writable_filesystem(&source)?; }
     crate::project_publish::recover_locked(&source)?;
     validate(&source)?;
     let before = manifest(&source, cancel)?;
     let parent = destination
         .parent()
         .context("Library destination has no parent")?;
+    crate::project_publish::writable_filesystem(parent)?;
     let staging = parent.join(format!(".singz-adopting-native-{}", unique()));
     fs::create_dir(&staging)?;
     let _pending = Pending(staging.clone());
@@ -643,6 +655,7 @@ pub(crate) fn copy_project_checked(
         let mut output = OpenOptions::new().write(true).create_new(true).open(&to)?;
         let mut buffer = [0u8; 65536];
         let mut length = 0u64;
+        let mut digest = Sha256::new();
         loop {
             check(cancel)?;
             let n = input.read(&mut buffer)?;
@@ -652,7 +665,10 @@ pub(crate) fn copy_project_checked(
             length += n as u64;
             ensure!(length <= stamp.len, "Project grew while copying");
             output.write_all(&buffer[..n])?;
+            digest.update(&buffer[..n]);
         }
+        output.sync_all()?;
+        crate::project_store::verify_written_copy(&mut input, &to, &digest.finalize(), cancel)?;
         ensure!(
             length == stamp.len && same(&opened, &input.metadata()?),
             "Project changed while copying"
@@ -667,7 +683,10 @@ pub(crate) fn copy_project_checked(
     validate(&source)?;
     publish_directory(&staging, destination)?;
     #[cfg(unix)]
-    File::open(parent)?.sync_all()?;
+    if let Err(error) = File::open(parent).and_then(|file| file.sync_all()) {
+        let _ = fs::remove_dir_all(destination);
+        return Err(error.into());
+    }
     Ok(CopiedSource {
         source,
         manifest: before,
@@ -712,6 +731,7 @@ fn opened_inside(file: &File, root: &Path) -> Result<()> {
 }
 #[cfg(target_os = "macos")]
 pub(crate) fn publish_directory(from: &Path, to: &Path) -> Result<()> {
+    let message = crate::project_publish::publish_error(to);
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     unsafe extern "C" {
         fn renamex_np(
@@ -723,12 +743,13 @@ pub(crate) fn publish_directory(from: &Path, to: &Path) -> Result<()> {
     let from = CString::new(from.as_os_str().as_bytes())?;
     let to = CString::new(to.as_os_str().as_bytes())?;
     if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), 4) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+        return Err(std::io::Error::last_os_error()).context(message);
     }
     Ok(())
 }
 #[cfg(target_os = "linux")]
 pub(crate) fn publish_directory(from: &Path, to: &Path) -> Result<()> {
+    let message = crate::project_publish::publish_error(to);
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     unsafe extern "C" {
         fn renameat2(
@@ -742,12 +763,13 @@ pub(crate) fn publish_directory(from: &Path, to: &Path) -> Result<()> {
     let from = CString::new(from.as_os_str().as_bytes())?;
     let to = CString::new(to.as_os_str().as_bytes())?;
     if unsafe { renameat2(-100, from.as_ptr(), -100, to.as_ptr(), 1) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+        return Err(std::io::Error::last_os_error()).context(message);
     }
     Ok(())
 }
 #[cfg(windows)]
 pub(crate) fn publish_directory(from: &Path, to: &Path) -> Result<()> {
+    let message = crate::project_publish::publish_error(to);
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -756,7 +778,7 @@ pub(crate) fn publish_directory(from: &Path, to: &Path) -> Result<()> {
     let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
     if unsafe { MoveFileW(from.as_ptr(), to.as_ptr()) } == 0 {
-        return Err(std::io::Error::last_os_error().into());
+        return Err(std::io::Error::last_os_error()).context(message);
     }
     Ok(())
 }
@@ -791,6 +813,7 @@ pub fn set_root(
     ensure!(new.is_absolute(), "Choose an absolute library folder");
     fs::create_dir_all(&new)?;
     let new = new.canonicalize()?;
+    crate::project_publish::writable_filesystem(&new)?;
     let old = if old.exists() {
         old.canonicalize()?
     } else {
@@ -807,6 +830,13 @@ pub fn set_root(
         "Library folders must not contain each other"
     );
     let mut copied = 0;
+    struct MigrationCopies { paths: Vec<PathBuf>, committed: bool }
+    impl Drop for MigrationCopies {
+        fn drop(&mut self) {
+            if !self.committed { for path in &self.paths { let _ = fs::remove_dir_all(path); } }
+        }
+    }
+    let mut copies = MigrationCopies { paths: vec![], committed: false };
     let mut source_guards = vec![];
     let _import_lease = if old.is_dir() {
         let lock = OpenOptions::new()
@@ -826,6 +856,7 @@ pub fn set_root(
     let _sync_intent = RootSync::new(
         crate::sync_dirty::Store::new(parent.to_owned()), initial_projects.clone(),
     );
+    let mut planned = vec![];
     if old.is_dir() {
         for (index, entry) in fs::read_dir(&old)?.enumerate() {
             check(cancel)?;
@@ -847,9 +878,20 @@ pub fn set_root(
             if fs::symlink_metadata(&dst).is_ok() {
                 continue;
             }
-            source_guards.push(copy_project(&src, &dst, cancel)?);
-            copied += 1;
+            // Recover and validate every source before creating the first copy.
+            let _source_lease = crate::project_publish::source_lock(&src)?;
+            if src.join(".singz-native-split.json").exists() {
+                crate::project_publish::writable_filesystem(&src)?;
+            }
+            crate::project_publish::recover_locked(&src)?;
+            manifest(&src, cancel)?;
+            planned.push((src, dst));
         }
+    }
+    for (src, dst) in planned {
+        source_guards.push(copy_project(&src, &dst, cancel)?);
+        copies.paths.push(dst);
+        copied += 1;
     }
     #[cfg(feature = "ui-tests")]
     if let Some(gate) = std::env::var_os("SINGZ_GPUI_PICKER_MOVE_GATE")
@@ -920,6 +962,7 @@ pub fn set_root(
     #[cfg(unix)]
     let _ = File::open(parent).and_then(|file| file.sync_all());
     // No cancellation after the durable preference publication point.
+    copies.committed = true;
     Ok(Change { snapshot, copied })
 }
 // Root migration copies projects and retains the originals. Preserve those
@@ -976,6 +1019,62 @@ mod tests;
 #[cfg(test)]
 mod root_sync_tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn c21_review_migrate_legacy_third_project_and_cleanup_failure() {
+        let base=std::env::temp_dir().join(format!("singz-c21-root-{}", unique()));
+        let config=Config { home:base.join("home"), default_root:base.join("old"), preferences:base.join("prefs/library.json"), override_root:None, one_drive:None };
+        for name in ["First", "Second", "Stay."] {
+            let dir=config.default_root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("project.json"), br#"{"version":2,"name":"Stay.","settings":{}}"#).unwrap();
+            if name == "Stay." { fs::write(dir.join("notes."), b"legacy").unwrap(); }
+        }
+        let change=set_root(&config,Some(base.join("new")),&||false).unwrap();
+        assert_eq!(change.copied,3);
+        assert_eq!(fs::read(change.snapshot.root.join("Stay./notes.")).unwrap(), b"legacy");
+        for name in ["First", "Second", "Stay."] { assert!(change.snapshot.root.join(name).join("project.json").exists()); }
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn c21_review_migration_rolls_back_after_copy_before_preference_commit() {
+        let base=std::env::temp_dir().join(format!("singz-c21-rollback-{}",unique()));
+        let config=Config {home:base.join("home"),default_root:base.join("old"),preferences:base.join("prefs/library.json"),override_root:None,one_drive:None};
+        for name in ["First","Second"] {
+            let dir=config.default_root.join(name); fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("project.json"),br#"{"version":2,"name":"Song","settings":{}}"#).unwrap();
+        }
+        let destination=base.join("new");
+        let cancel=|| fs::read_dir(&destination).is_ok_and(|entries| entries.filter_map(Result::ok).any(|entry| !entry.file_name().to_string_lossy().starts_with('.') && entry.path().join("project.json").exists()));
+        assert!(set_root(&config,Some(destination.clone()),&cancel).is_err());
+        assert_eq!(fs::read_dir(destination).unwrap().count(),0,"partial library survived failed migration");
+        assert!(!config.preferences.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn c21_rereview_checked_copy_refuses_invalid_new_destination_before_copying() {
+        let base=std::env::temp_dir().join(format!("singz-c21-new-dest-{}",unique()));
+        let source=base.join("source");fs::create_dir_all(&source).unwrap();fs::write(source.join("project.json"),b"{}").unwrap();
+        let destination=base.join("CON");
+        assert!(copy_project_checked(&source,&destination,&||false,&|_|Ok(())).is_err(),"checked copy created a reserved new destination");
+        assert!(!destination.exists());
+        assert_eq!(fs::read_dir(&base).unwrap().count(),1);
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn c21_review_copy_off_network_source() {
+        let base=std::env::temp_dir().join(format!("singz-c21-nas-{}",unique()));
+        let source=base.join("remote");let destination=base.join("local");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("project.json"),b"{}").unwrap();
+        let source=source.canonicalize().unwrap();
+        crate::project_publish::with_remote_source(&source,|| {
+            assert!(crate::project_publish::writable_filesystem(&source).is_err());
+            copy_project(&source,&destination,&||false).unwrap();
+        });
+        assert_eq!(fs::read(destination.join("project.json")).unwrap(),b"{}");
+        fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn moving_root_keeps_old_project_intent_and_foreign_files() {
         let base=std::env::temp_dir().join(format!("singz-root-sync-{}",unique()));

@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.error.copySourceChanged": "“{name}” की कॉपी का स्रोत बदल गया है। फिर से कोशिश करें।",
+  "main.error.linkedFilesystemPath": "वर्किंग कॉपी के लिए सिंबलिक लिंक वाले पाथ इस्तेमाल नहीं किए जा सकते।",
+  "main.error.portableName": "“{name}”: अधिकतम 240 बाइट का नाम चुनें जिसमें Windows के आरक्षित नाम, नियंत्रण वर्ण, या अंत में बिंदु या स्पेस न हो।",
+  "main.error.networkFilesystem": "नेटवर्क फ़ाइल सिस्टम पर प्रोजेक्ट सहेजना या ले जाना समर्थित नहीं है। स्थानीय लाइब्रेरी फ़ोल्डर चुनें।",
+  "main.error.filesystemPublish": "“{name}”: इस फ़ाइल सिस्टम पर प्रोजेक्ट सुरक्षित रूप से सहेजा नहीं जा सका। कोई दूसरा स्थानीय लाइब्रेरी फ़ोल्डर चुनकर फिर कोशिश करें।",
+  "main.error.sourceCacheFull": "वर्किंग कॉपी कैश भर गया है। उपयोग में न होने वाले प्रोजेक्ट बंद करें और बाद में फिर कोशिश करें।",
+
   "main.sync.downloadDeferred": "{dir} नहीं जोड़ा गया: {reason}। गाना Drive पर है; समस्या ठीक करके फिर सिंक करें।",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/सेकंड",

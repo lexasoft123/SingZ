@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.error.copySourceChanged": "Источник копирования «{name}» изменился. Повторите попытку.",
+  "main.error.linkedFilesystemPath": "Пути с символическими ссылками нельзя использовать для рабочих копий.",
+  "main.error.portableName": "“{name}”: Выберите имя длиной до 240 байт без зарезервированных имён Windows, управляющих символов, точки или пробела в конце.",
+  "main.error.networkFilesystem": "Сохранение и перемещение проектов на сетевом диске не поддерживается. Выберите локальную папку библиотеки.",
+  "main.error.filesystemPublish": "“{name}”: Не удалось безопасно сохранить проект в этой файловой системе. Выберите другую локальную папку библиотеки и повторите попытку.",
+  "main.error.sourceCacheFull": "Кэш рабочих копий заполнен. Закройте неиспользуемые проекты и повторите попытку позже.",
+
   "main.sync.downloadDeferred": "Не удалось добавить «{dir}»: {reason}. Песня осталась в Drive; устраните причину и повторите синхронизацию.",
   "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
   "main.sync.downloadBytes": "{got} / {total} · {speed}/с",
