@@ -43,7 +43,7 @@ export const boxSettings = {
   'box.settings.noOutputsTitle': 'No audio outputs found',
   'box.settings.noOutputsBody': 'Connect an output with at least one output channel, then refresh devices.',
   'box.settings.inputs': 'Microphone inputs',
-  'box.settings.inputsHelp': 'Read-only details from the current audio device inventory.',
+  'box.settings.inputsHelp': "Inputs reported by the audio host. Which channels are analysed is chosen for the microphones; monitoring stays on your hardware mixer by default.",
   'box.settings.inputList': 'Connected microphone inputs',
   'box.settings.noInputsTitle': 'No microphone inputs found',
   'box.settings.inputUnavailable': 'Input details are unavailable until audio devices can be read.',

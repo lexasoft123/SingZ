@@ -46,7 +46,7 @@ export const boxSettings: Translation<typeof english> = {
   'box.settings.noOutputsTitle': '未找到音频输出',
   'box.settings.noOutputsBody': '请连接至少有一个输出声道的设备，然后刷新设备列表。',
   'box.settings.inputs': '麦克风输入',
-  'box.settings.inputsHelp': '当前音频设备列表中的只读信息。',
+  'box.settings.inputsHelp': "音频主机报告的输入。为麦克风选择要分析的通道；监听默认仍由硬件调音台处理。",
   'box.settings.inputList': '已连接的麦克风输入',
   'box.settings.noInputsTitle': '未找到麦克风输入',
   'box.settings.inputUnavailable': '读取音频设备后才能显示输入信息。',

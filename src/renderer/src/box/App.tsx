@@ -7,12 +7,13 @@ import { MultitrackEngine } from '../audio/engine'
 import { boxNativePlaybackPolicy } from './playback-policy'
 import { useLocale } from '../i18n'
 import { Catalog, type CatalogRow } from './Catalog'
-import { moveSpatialFocus, remoteScope } from './focus'
+import { moveSpatialFocus, pickMixerFocusId, rangeOwnsArrow, remoteScope } from './focus'
 import { LatestOpenIntent } from './open-intent'
 import { Player } from './Player'
 import { BoxMicrophones } from './microphones'
 import { Mixer, type MixerTab } from './Mixer'
 import { Queue } from './Queue'
+import { playbackStatus } from './playback-status'
 import { RemoteKeyGate, scheduleControlsHide } from './remote'
 import { Settings } from './Settings'
 import { applyBoxMetronomePolicy, boxMetronomePreference, MetronomePolicyError } from './metronome-policy'
@@ -21,7 +22,7 @@ import { restoreRetainedEntry, routeRestoredPlayback } from './retained-playback
 import { closeBoxSession } from './close-session'
 import { t } from './i18n'
 import { tSettings } from './settings-i18n'
-import { BoxSettingsNavigator, detailsReturnRoute, type BoxRoute } from './settings-navigation'
+import { BoxSettingsNavigator, accountReturnFromHub, detailsReturnRoute, overlayReturnRoute, type BoxRoute } from './settings-navigation'
 import { SongDetails } from './SongDetails'
 import { StartupOverlay } from './StartupOverlay'
 import { SwitchDialog } from './SwitchDialog'
@@ -145,6 +146,7 @@ export default function BoxApp(): React.JSX.Element {
   const [remoteVersion, setRemoteVersion] = useState(0)
   const [focusVersion, setFocusVersion] = useState(0)
   const focusTarget = useRef<HTMLElement | null>(null)
+  const mixChannel = useRef<string | null>(null)
   const previousSelected = useRef<CollectionEntry | null>(null)
   const settingsInventoryGeneration = useRef(0)
   const hydrationGeneration = useRef(0)
@@ -399,7 +401,7 @@ export default function BoxApp(): React.JSX.Element {
   const goHub = useCallback((page: JourneyPage = 'home', returnRoute?: BoxRoute) => {
     if (!cancelOpenForNavigation()) return
     if (returnRoute) hubReturn.current = returnRoute
-    else if (latest.current.route !== 'home') hubReturn.current = latest.current.route === 'player' ? 'player' : 'catalog'
+    else hubReturn.current = overlayReturnRoute(latest.current.route, hubReturn.current, 'home')
     setMixOpen(false)
     setRoute('home')
     hubRef.current?.open(page)
@@ -407,7 +409,7 @@ export default function BoxApp(): React.JSX.Element {
 
   const goAccount = useCallback((returnRoute?: BoxRoute) => {
     if (!cancelOpenForNavigation()) return
-    accountReturn.current = returnRoute ?? (latest.current.route === 'home' ? 'home' : 'catalog')
+    accountReturn.current = returnRoute ?? (latest.current.route === 'home' ? accountReturnFromHub(hubReturn.current, accountReturn.current) : overlayReturnRoute(latest.current.route, accountReturn.current, 'account'))
     setAccountError(null)
     setMixOpen(false)
     setRoute('account')
@@ -618,7 +620,7 @@ export default function BoxApp(): React.JSX.Element {
         return
       }
       const target = event.target instanceof HTMLElement ? event.target : null
-      if (target?.matches('input[type="range"]') && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) return
+      if (target && rangeOwnsArrow(target, event.key)) return
       event.preventDefault()
       event.stopPropagation()
       const scope = tvRef.current ? remoteScope(tvRef.current) : null
@@ -718,7 +720,11 @@ export default function BoxApp(): React.JSX.Element {
     const root = tvRef.current
     if (!root) return
     const remember = (event: FocusEvent): void => {
-      if (event.target instanceof HTMLElement) focusTarget.current = event.target
+      if (event.target instanceof HTMLElement) {
+        focusTarget.current = event.target
+        const level = event.target.dataset.mixLevel
+        if (level) mixChannel.current = level
+      }
     }
     root.addEventListener('focusin', remember)
     return () => root.removeEventListener('focusin', remember)
@@ -742,7 +748,12 @@ export default function BoxApp(): React.JSX.Element {
     else if (!hydrated) target = query('[data-surface="policy-startup"] button:not(:disabled)')
     else if (signOutConfirm) target = query('[data-signout-cancel]')
     else if (pendingSwitch) target = query('[data-keep-current]')
-    else if (mixOpen) target = query(snapshot.routingBlocked ? '[data-mix-close]' : '[data-mix-play]')
+    else if (mixOpen) {
+      // Open on the remembered channel (else the first level), never on the transport button.
+      const levels = Array.from(root.querySelectorAll<HTMLElement>('[data-mix-level]')).filter(element => element.getClientRects().length > 0)
+      const levelId = pickMixerFocusId(levels.map(element => element.dataset.mixLevel ?? ''), mixChannel.current)
+      target = snapshot.routingBlocked ? query('[data-mix-close]') : levels.find(element => element.dataset.mixLevel === levelId) ?? query('[data-mix-play]')
+    }
     else if (route === 'catalog') {
       const list = root.querySelector<HTMLElement>('.box-song-list')
       if (list) list.scrollTop = catalogScroll.current
@@ -866,7 +877,14 @@ export default function BoxApp(): React.JSX.Element {
             initialPage={initialHubPage.current}
             activeProjectDir={active?.item.dir ?? null}
             playbackActive={snapshot.playing || snapshot.starting}
-            onBack={() => setRoute(hubReturn.current)}
+            onBack={() => {
+              const target = hubReturn.current
+              if (target === 'player' && !latest.current.snapshot.active) setRoute('catalog')
+              else {
+                setRoute(target)
+                if (target === 'player') { setControlsVisible(true); setFocusVersion(version => version + 1) }
+              }
+            }}
             onOpenAudio={() => {
               if (!cancelOpenForNavigation()) return
               settingsReturn.current = 'home'
@@ -881,7 +899,7 @@ export default function BoxApp(): React.JSX.Element {
         {showNavigation && <BoxNavigation
           section={route === 'settings' || route === 'home' ? 'settings' : route === 'account' ? 'account' : route === 'queue' ? 'queue' : 'catalog'}
           queueCount={queueItems.length}
-          hasCurrent={active !== null}
+          currentName={active?.item.name ?? null}
           onCatalog={goCatalog}
           onQueue={goQueue}
           onCurrent={goCurrent}
@@ -969,6 +987,7 @@ export default function BoxApp(): React.JSX.Element {
           active={active}
           position={snapshot.position}
           playing={snapshot.playing}
+          status={playbackStatus(snapshot)}
           canPlay={canPlay}
           onRemember={setQueueSelectedDir}
           onChoose={chooseQueued}
@@ -983,7 +1002,7 @@ export default function BoxApp(): React.JSX.Element {
           onClose={active ? goCurrent : goCatalog}
           onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }}
         />}
-        {route === 'player' && mixOpen && <Mixer microphones={microphones} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
+        {route === 'player' && mixOpen && <Mixer microphones={microphones} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} status={playbackStatus(snapshot)} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
         {pendingSwitch?.local && <SwitchDialog active={active} target={pendingSwitch.local} onCancel={() => setPendingSwitch(null)} onConfirm={() => void openNow(pendingSwitch, pendingSwitchStart.current)} />}
         {(queueError || queueSnapshot.loading) && route !== 'player' && route !== 'home' && <div className="box-state-toast" role="alert">
           <span>{queueSnapshot.loading ? t('box.queue.loading') : queueError}</span>
