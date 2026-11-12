@@ -23,8 +23,8 @@ describe('mixer private microphone input observation', () => {
     const html = renderToStaticMarkup(createElement(Mixer, { microphoneSnapshot: snapshot(), tab: 'main', tracks: [], masterVolume: 1, playing: true, status: 'playing', canPlay: true,
       onTab: noop, onVolume: noop, onMuted: noop, onSolo: noop, onMasterVolume: noop, onToggle: noop, onClose: noop }))
     expect(html).toContain('data-mix-meter="mic1"'); expect(html).toContain('data-mix-meter="mic2"')
-    expect(html).toContain('aria-valuenow="0.25"'); expect(html).toContain('aria-valuenow="0.5"')
-    expect(html).not.toContain('aria-valuenow="0.9"')
+    expect(html).toContain('data-mic-db="-12.0"'); expect(html).toContain('data-mic-db="-6.0"')
+    expect(html).not.toContain('data-mic-db="-0.9"')
     expect(noop).not.toHaveBeenCalled()
   })
   it('maps the TV microphone slots to the selected noncontiguous physical inputs', () => {
@@ -35,12 +35,12 @@ describe('mixer private microphone input observation', () => {
     value.levels!.channelIndices = [2, 7]
     value.levels!.peak = [0.25, 0.5]
     value.levels!.rms = [0.1, 0.2]
-    expect(row(value, 'mic1')).toContain('aria-valuenow="0.25"')
-    expect(row(value, 'mic2')).toContain('aria-valuenow="0.5"')
+    expect(row(value, 'mic1')).toContain('data-mic-db="-12.0"')
+    expect(row(value, 'mic2')).toContain('data-mic-db="-6.0"')
   })
   it('keeps mic gain/mute/solo unavailable while clearly labeling real analysis input levels', () => {
     const html = row(snapshot())
-    expect(html).toContain('role="meter"'); expect(html).toContain('>Singing<')
+    expect(html).toContain('data-mic-status="level"'); expect(html).toContain('>Singing<')
     // Plain words, not engineering text, on the TV.
     for (const jargon of ['dBFS', 'Hardware monitoring', 'On the mixer', 'Analysis input level']) expect(html).not.toContain(jargon)
     expect(html).not.toContain('<input'); expect(html).not.toContain('<button')
@@ -53,7 +53,7 @@ describe('mixer private microphone input observation', () => {
     if (bad === 'invalid-level') value.levels!.peak[0] = Number.NaN
     if (bad === 'error') { value.phase = 'error'; value.reason = 'internal' }
     const html = row(value)
-    expect(html).not.toContain('role="meter"'); expect(html).toContain('>Unavailable<')
+    expect(html).not.toContain('data-mic-status="level"'); expect(html).toContain('>Unavailable<')
   })
   it.each([
     ['off', { phase: 'off' as const, device: null, active: null, levels: null }, 'Off'],
@@ -61,19 +61,19 @@ describe('mixer private microphone input observation', () => {
     ['waiting', { phase: 'waiting' as const, reason: 'no-device' as const, active: null, levels: null }, 'Not connected']
   ])('says %s instead of Unavailable when nothing is wrong', (_name, patch, text) => {
     const html = row({ ...snapshot(), ...patch })
-    expect(html).not.toContain('role="meter"'); expect(html).toContain(`>${text}<`); expect(html).not.toContain('Unavailable')
+    expect(html).not.toContain('data-mic-status="level"'); expect(html).toContain(`>${text}<`); expect(html).not.toContain('Unavailable')
   })
   it('with one input enabled, Mic 1 meters and Mic 2 is Off', () => {
     const value = snapshot(); value.enabledChannelsByDevice['alsa:flow8'] = [7]
     value.active = { ...value.active!, enabledChannels: [7] }; value.levels = { ...value.levels!, channelIndices: [7], peak: [0.4], rms: [0.1] }
-    expect(row(value, 'mic1')).toContain('aria-valuenow="0.4"')
+    expect(row(value, 'mic1')).toContain('data-mic-db="-8.0"')
     expect(row(value, 'mic2')).toContain('>Off<')
   })
   it('shows one valid input only for a mono device, and treats measured zero as real silence', () => {
     const value = snapshot(); value.active!.channels = 1; value.active!.enabledChannels = [0]; value.enabledChannelsByDevice['alsa:flow8'] = [0]; value.levels!.channelIndices = [0]; value.levels!.peak = [0]; value.levels!.rms = [0]
-    expect(row(value)).toContain('aria-valuenow="0"'); expect(row(value)).toContain('>Quiet<'); expect(row(value)).toContain('scaleX(0)')
-    expect(row(value, 'mic2')).not.toContain('role="meter"')
-    expect(row(undefined)).not.toContain('role="meter"')
+    expect(row(value)).toContain('data-mic-db="-inf"'); expect(row(value)).toContain('>Quiet<');
+    expect(row(value, 'mic2')).not.toContain('data-mic-status="level"')
+    expect(row(undefined)).not.toContain('data-mic-status="level"')
   })
   it.each([['ru', 'Поёте', 'Микрофон 1'], ['zh-CN', '正在演唱', '麦克风 1']] as const)('localizes the plain meter state in %s', async (locale, state, name) => {
     await prepareBoxLocale(locale)

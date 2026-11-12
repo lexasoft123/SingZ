@@ -1,5 +1,5 @@
 import type { DesktopPlaybackStatus, LyricLine, ProjectGraphPayload, ProjectInfo, ProjectListItem } from './types'
-import type { BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from './box-audio'
+import type { BoxMicrophoneLevels, BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from './box-audio'
 
 export type BoxRetainedPlaybackRestore = {
   epoch: string
@@ -163,6 +163,8 @@ export type BoxAPI = {
   routingEdit(edit: { expected: { epoch: string; generation: string }; commands: unknown[] }): Promise<BoxResult<BoxRoutingState>>
   /** Host-owned microphone analysis: read-only snapshot (levels, pitch, phase, selection). */
   microphones(): Promise<BoxResult<BoxMicrophoneSnapshot>>
+  /** Level-only read for visible meters (about 20 Hz). */
+  microphoneLevels(): Promise<BoxResult<BoxMicrophoneLevels>>
   /** Revision compare-and-set of the persisted input selection; applies immediately. */
   setMicrophoneSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxResult<BoxMicrophoneSelectionResult>>
   phoneStart(): Promise<BoxResult<BoxPhoneState>>

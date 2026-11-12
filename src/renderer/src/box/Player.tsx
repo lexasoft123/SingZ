@@ -10,7 +10,7 @@ import { parseSongName } from './song-identity'
 import type { BoxTransportSnapshot } from './transport'
 import { tSettings, tMicrophone } from './settings-i18n'
 import { MicrophoneMeter } from './MicrophoneMeter'
-import { microphoneSlotStatus, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
+import type { BoxMicrophones, MicrophoneSnapshot } from './microphones'
 
 export function Player({
   snapshot,
@@ -119,14 +119,13 @@ export function Player({
   </section>
 }
 
-/** Leaf subscriber: live levels re-render only these meters, never the player. */
-export function PlayerMicrophoneMeters({ microphones, snapshot: snapshotProp }: { microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
-  const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
+/** Leaf: readings are pushed into the kit meters, so they re-render neither the player nor the lyrics. */
+export function PlayerMicrophoneMeters({ microphones, snapshot }: { microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
   return <div className="player-meters" aria-label={tMicrophone('box.microphones.levels')}>
     {[0, 1].map(channel => {
       return <span className="player-microphone-row" key={channel}>
         <span className="player-microphone-name">{t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')}</span>
-        <MicrophoneMeter status={microphoneSlotStatus(snapshot, channel)} channel={channel} />
+        <MicrophoneMeter source={microphones} snapshot={snapshot} slot={channel} mini />
       </span>
     })}
   </div>

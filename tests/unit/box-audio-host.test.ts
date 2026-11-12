@@ -106,6 +106,7 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       const f = fake()
       f.runtime.microphones = {
         snapshot: async () => ({ generation: '77' } as any),
+        levels: async () => ({ generation: '77', levels: null } as any),
         setSelection: async (edit) => { f.calls.push(['edit', edit.expectedRevision]); return { ok: false, code: 'stale', error: 'stale', snapshot: null } }
       }
       return f
@@ -215,12 +216,15 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
     runtime.owner.rendererDetached = (id: number) => { if (id === 2) { generation = '0'; cancelled = true } }
     runtime.microphones = {
       snapshot: async () => ({ generation, revision: '7', levels: { peak: [.2] } } as any),
+      levels: async () => ({ generation, levels: { channelIndices: [0], peak: [.2], rms: [.1] } } as any),
       setSelection: async edit => ({ ok: false, code: 'stale', error: 'stale', snapshot: { revision: '7' } as any })
     }
     const host = await startBoxAudioHost(path, runtime)
     const first = createBoxAudioClient(path), second = createBoxAudioClient(path)
     try {
       expect(await first.call('service', 'microphones', [])).toMatchObject({ generation: '123' })
+      // The 20 Hz level read is a read-only service call stamped with the host epoch.
+      expect(await first.call('service', 'microphoneLevels', [])).toMatchObject({ generation: '123', epoch: host.epoch, levels: { peak: [.2] } })
       await expect(first.call('owner', 'begin', [2, {}, '9', () => {}])).rejects.toThrow('owned by the audio host')
       await expect(first.call('owner', 'cancel', [2, '123'])).rejects.toThrow('owned by the audio host')
       await first.call('owner', 'beginMonitor', [2, {}])

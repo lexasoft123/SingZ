@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, unlink } from 'node:fs/promises'
 import { dirname, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { audioMethodAllowed } from '../audio-process-rpc'
-import { BOX_AUDIO_VERSION, BOX_AUDIO_REQUEST_BYTES, BOX_AUDIO_PENDING, boxAudioCounter, boxAudioMeasurementMethod, type BoxAudioCommand, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
+import { BOX_AUDIO_VERSION, BOX_AUDIO_REQUEST_BYTES, BOX_AUDIO_PENDING, boxAudioCounter, boxAudioMeasurementMethod, type BoxAudioCommand, type BoxMicrophoneLevels, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
 import type { BoxRetainedProjectDescriptor } from '../../shared/box-contract'
 import { retainedProjectDescriptor } from '../../shared/box-retained-playback'
 import type { DesktopPlaybackLaneConfig, DesktopPlaybackPrepareConfig, DesktopPlaybackResult, DesktopPlaybackStatus } from '../../shared/types'
@@ -14,7 +14,7 @@ export interface BoxAudioHostRuntime {
   binding: Record<string, unknown>
   routingRequest(json: string): string
   routingCapabilities(): unknown
-  microphones?: { snapshot(): Promise<BoxMicrophoneSnapshot>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
+  microphones?: { snapshot(): Promise<BoxMicrophoneSnapshot>; levels(): Promise<BoxMicrophoneLevels>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
   shutdown(): void | Promise<void>
 }
 const PUBLIC_OWNER = 1
@@ -201,6 +201,9 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
           } else if (request.target === 'service' && request.method === 'microphones' && args.length === 0) {
             if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
             result = { ...await runtime.microphones.snapshot(), epoch }
+          } else if (request.target === 'service' && request.method === 'microphoneLevels' && args.length === 0) {
+            if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
+            result = { ...await runtime.microphones.levels(), epoch }
           } else if (request.target === 'service' && request.method === 'setMicrophoneSelection' && args.length === 1) {
             if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
             const receipt = await runtime.microphones.setSelection(args[0] as BoxMicrophoneSelectionEdit)

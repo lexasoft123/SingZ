@@ -24,6 +24,7 @@ const box: BoxAPI = {
   stopRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-stop', expected),
   restoreRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-restore', expected),
   microphones: () => ipcRenderer.invoke('box:microphones'),
+  microphoneLevels: () => ipcRenderer.invoke('box:microphone-levels'),
   setMicrophoneSelection: edit => ipcRenderer.invoke('box:microphone-selection-set', edit),
   routingSnapshot: () => ipcRenderer.invoke('box:routing-snapshot'),
   routingEdit: edit => ipcRenderer.invoke('box:routing-edit', edit),

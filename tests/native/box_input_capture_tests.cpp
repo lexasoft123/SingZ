@@ -538,6 +538,11 @@ int main() {
   CHECK(levels.peak[1] > 0.08f && levels.peak[1] < 0.12f);
   CHECK(levels.rms[0] > 0.11f && levels.rms[0] < 0.17f);
   CHECK(levels.rms[1] > 0.05f && levels.rms[1] < 0.09f);
+  // The first read consumed the since-last-read peak; an immediate second read
+  // must still report at least the latest block (never an emptied hold).
+  const auto again = capture.meter();
+  CHECK(again.valid && again.peak[0] > 0.18f && again.peak[0] < 0.22f &&
+        again.peak[1] > 0.08f && again.peak[1] < 0.12f);
   // A private subscription must survive a physical failure: LoopZ reopens
   // underneath the held reader, which publishes no fabricated offline levels.
   const auto opensBeforeLoss = hardware->opens.load();

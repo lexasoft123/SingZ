@@ -213,7 +213,12 @@ device the old UI analysed (the first interface in inventory order). A fresh hos
 profile therefore opens the machine's first capture device; tests that must stay
 device-free seed an absent input in the host profile. Turning every input channel off is the
 only user-facing off; it releases the private reader and persists. Clients only
-read `service.microphones` and edit the selection by revision. Hardware
+read `service.microphones` and edit the selection by revision. Visible meters
+additionally read `service.microphoneLevels` (levels only; the peak is the loudest
+capture block since the previous level read) at 20 Hz, and only while a meter is
+subscribed; the full snapshot is then read once a second, or every 2 s with no
+meter on screen. The renderer feeds the UI-kit `PeakMeter` through
+`PeakMeterHandle.push`, so a reading never renders React. Hardware
 microphone monitoring continues independently, and selection/analysis never
 creates an audible microphone route.
 

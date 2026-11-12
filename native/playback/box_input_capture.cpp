@@ -42,6 +42,9 @@ struct BoxInputCapture::Impl {
   std::string error;
   std::atomic<uint64_t> meterSequence{0}, meterAt{0};
   std::array<std::atomic<float>, 64> peak{}, rms{};
+  // Loudest block peak since the previous meter() read, so a 20 Hz reader does not
+  // miss transients that fall between two blocks it happens to sample.
+  std::array<std::atomic<float>, 64> peakSince{};
   void message(std::string text) {
     std::lock_guard lock(mutex);
     error = std::move(text);
@@ -94,6 +97,8 @@ struct BoxInputCapture::Impl {
               sum += double(value) * value;
             }
             peak[c].store(high, std::memory_order_relaxed);
+            float seen = peakSince[c].load(std::memory_order_relaxed);
+            while (high > seen && !peakSince[c].compare_exchange_weak(seen, high, std::memory_order_relaxed)) {}
             rms[c].store(float(std::sqrt(sum / bus.frames)), std::memory_order_relaxed);
           }
           meterAt.store(current, std::memory_order_relaxed);
@@ -194,6 +199,7 @@ AudioInputResult BoxInputCapture::start(const AudioInputConfig &config,
     impl_->stopping = false;
     impl_->meterAt = 0;
     impl_->meterSequence = 0;
+    for (auto& held : impl_->peakSince) held.store(0, std::memory_order_relaxed);
     impl_->message({});
     impl_->state = AudioInputState::Starting;
     auto result = AudioInputResult::success(AudioInputState::Starting, impl_->tap.native->rate.load(),
@@ -261,8 +267,12 @@ BoxInputMeter BoxInputCapture::meter() const {
     const auto now = nowNs();
     result.valid = updated && now >= updated && now - updated < 500000000;
     std::atomic_thread_fence(std::memory_order_acquire);
-    if (sequence == impl_->meterSequence.load(std::memory_order_acquire))
+    if (sequence == impl_->meterSequence.load(std::memory_order_acquire)) {
+      // Report the loudest block since the last read (never below the latest block).
+      for (uint32_t c = 0; c < result.channels; ++c)
+        result.peak[c] = std::max(result.peak[c], impl_->peakSince[c].exchange(0.0f, std::memory_order_relaxed));
       return result;
+    }
   }
   result.valid = false;
   return result;

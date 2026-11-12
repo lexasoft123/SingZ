@@ -16,7 +16,7 @@ export interface BoxAudioReply {
 export const boxAudioCounter = (value: unknown): value is string =>
   typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value)
 export const boxAudioReadOnly = (target: BoxAudioTarget, method: string): boolean =>
-  target === 'service' && (method === 'reconcile' || method === 'associateRetainedProject' || method === 'microphones') ||
+  target === 'service' && (method === 'reconcile' || method === 'associateRetainedProject' || method === 'microphones' || method === 'microphoneLevels') ||
   target === 'routing' && method === 'capabilities' ||
   target === 'owner' && new Set(['devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus',
     'playbackProviders', 'playbackCapability', 'playbackStatus', 'state', 'stats']).has(method)
@@ -87,6 +87,14 @@ export interface BoxMicrophoneSnapshot {
   levels: { channelIndices: number[]; peak: number[]; rms: number[] } | null
   /** Age on the host monotonic clock. */
   pitch: { frequency: number; clarity: number; ageMs: number } | null
+}
+/** Level-only read for the on-screen meters; much smaller than a snapshot. */
+export interface BoxMicrophoneLevels {
+  epoch: string
+  /** Capture generation the levels belong to; '0' when none. */
+  generation: string
+  /** Null unless the native meter is valid for `generation`. Peak is the loudest block since the previous level read. */
+  levels: { channelIndices: number[]; peak: number[]; rms: number[] } | null
 }
 export interface BoxMicrophoneSelectionEdit {
   expectedRevision: string

@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { tMicrophone } from './settings-i18n'
 import type { BoxAPI } from '../../../shared/box-contract'
-import type { BoxMicrophoneReason, BoxMicrophoneSnapshot } from '../../../shared/box-audio'
+import type { BoxMicrophoneLevels, BoxMicrophoneReason, BoxMicrophoneSnapshot } from '../../../shared/box-audio'
 
 /** The audio host owns microphone analysis and its persisted selection. This
  * store only reads the host snapshot and edits the selection by revision; it
@@ -26,11 +26,14 @@ export type MicrophoneSnapshot = {
   pending: boolean
   error: string | null
 }
-type Api = Pick<BoxAPI, 'microphones' | 'setMicrophoneSelection'>
+type Api = Pick<BoxAPI, 'microphones' | 'microphoneLevels' | 'setMicrophoneSelection'>
 const MAX = (1n << 64n) - 1n
 const COUNTER = /^(0|[1-9][0-9]{0,19})$/
-/** Subscribed surfaces read levels at 5 Hz; with none, the host is read slowly. */
-export const MICROPHONE_LEVEL_POLL_MS = 200
+/** While a meter is visible the host is read for levels at 20 Hz (a small level-only
+ * read) and for phase/selection once a second; with no meter visible only the slow
+ * state read runs, and no fast timer exists at all. */
+export const MICROPHONE_LEVEL_POLL_MS = 50
+export const MICROPHONE_STATE_POLL_MS = 1000
 export const MICROPHONE_IDLE_POLL_MS = 2000
 /** A level or read older than this is never shown. */
 export const MICROPHONE_FRESH_MS = 750
@@ -59,9 +62,9 @@ function readLegacyChannels(storage?: MicrophoneChannelStorage): Record<string, 
 }
 function removeLegacy(storage?: MicrophoneChannelStorage): void { try { storage?.removeItem?.(CHANNEL_KEY) } catch { /* optional */ } }
 
-function validLevels(host: BoxMicrophoneSnapshot): { channelIndices: number[]; peak: number[]; rms: number[] } | null {
-  const value = host.levels, active = host.active
-  if (host.phase !== 'running' || !value || !active || !COUNTER.test(host.generation) || host.generation === '0' || BigInt(host.generation) > MAX) return null
+function validLevels(phase: string, generation: string, active: { deviceChannels: number; enabledChannels: number[] } | null,
+  value: BoxMicrophoneSnapshot['levels']): { channelIndices: number[]; peak: number[]; rms: number[] } | null {
+  if (phase !== 'running' || !value || !active || !COUNTER.test(generation) || generation === '0' || BigInt(generation) > MAX) return null
   const { channelIndices, peak, rms } = value
   if (!Array.isArray(channelIndices) || !Array.isArray(peak) || !Array.isArray(rms) || !channelIndices.length ||
     peak.length !== channelIndices.length || rms.length !== channelIndices.length) return null
@@ -80,21 +83,37 @@ export class BoxMicrophones {
   private disposed = false
   private timer?: ReturnType<typeof setInterval>
   private polling = false
+  private levelPolling = false
+  private levelPollSeq = 0
   private pendingEdit = false
   /** Bumped by every edit so a read that started earlier cannot overwrite it. */
   private editSeq = 0
   private lastPollStartedAt = Number.NEGATIVE_INFINITY
+  private lastLevelPollStartedAt = Number.NEGATIVE_INFINITY
   private lastReadAt = Number.NEGATIVE_INFINITY
   private subscribedAt = Number.NEGATIVE_INFINITY
   private migrated = false
+  private connected = false
   constructor(private readonly api: Api, private readonly now: () => number = Date.now,
     private readonly storage: MicrophoneChannelStorage | undefined = defaultStorage()) {}
 
   getSnapshot = (): MicrophoneSnapshot => this.value
+  private singingAt = new Map<number, number>()
+  /** The state word of one slot, held through brief pauses. A primitive, so a
+   * subscriber that selects it re-renders only when the word changes, never per reading. */
+  slotState = (slot: number): MicrophoneMeterState => {
+    const time = this.now()
+    const raw = microphoneMeterState(microphoneSlotStatus(this.value, slot, time))
+    if (raw === 'singing') this.singingAt.set(slot, time)
+    else if (raw === 'quiet' && time - (this.singingAt.get(slot) ?? Number.NEGATIVE_INFINITY) < MICROPHONE_SINGING_HOLD_MS) return 'singing'
+    return raw
+  }
   subscribe = (listener: () => void): (() => void) => {
-    if (!this.listeners.size) { this.subscribedAt = this.now(); this.lastPollStartedAt = Number.NEGATIVE_INFINITY }
+    const first = !this.listeners.size
+    if (first) { this.subscribedAt = this.now(); this.lastPollStartedAt = Number.NEGATIVE_INFINITY; this.lastLevelPollStartedAt = Number.NEGATIVE_INFINITY }
     this.listeners.add(listener)
-    return () => { this.listeners.delete(listener) }
+    if (first) this.retime()
+    return () => { this.listeners.delete(listener); if (!this.listeners.size) this.retime() }
   }
   private publish(patch: Partial<MicrophoneSnapshot>): void {
     if (Object.entries(patch).every(([key, value]) => Object.is(this.value[key as keyof MicrophoneSnapshot], value))) return
@@ -102,13 +121,27 @@ export class BoxMicrophones {
     for (const listener of this.listeners) listener()
   }
   connect(): void {
-    if (this.disposed || this.timer) return
-    this.timer = setInterval(() => {
-      this.expire()
-      const due = this.now() - this.lastPollStartedAt >= (this.listeners.size ? MICROPHONE_LEVEL_POLL_MS : MICROPHONE_IDLE_POLL_MS)
-      if (due) void this.poll()
-    }, MICROPHONE_LEVEL_POLL_MS)
+    if (this.disposed || this.connected) return
+    this.connected = true
+    this.retime()
     void this.poll()
+  }
+  /** One timer whose period follows demand: 50 ms while a meter is subscribed, the
+   * slow idle period otherwise, so a quiet Box never wakes at 20 Hz. */
+  private retime(): void {
+    if (this.disposed || !this.connected) return
+    clearInterval(this.timer)
+    const watching = this.listeners.size > 0
+    this.timer = setInterval(() => this.tick(), watching ? MICROPHONE_LEVEL_POLL_MS : MICROPHONE_IDLE_POLL_MS)
+    if (watching) this.tick()
+  }
+  private tick(): void {
+    this.expire()
+    const time = this.now()
+    if (this.listeners.size) {
+      if (time - this.lastLevelPollStartedAt >= MICROPHONE_LEVEL_POLL_MS - 5) void this.pollLevels()
+      if (time - this.lastPollStartedAt >= MICROPHONE_STATE_POLL_MS) void this.poll()
+    } else if (time - this.lastPollStartedAt >= MICROPHONE_IDLE_POLL_MS - 5) void this.poll()
   }
   /** Re-read the host now (Settings refresh, stale edit). */
   refresh = (): Promise<void> => this.poll()
@@ -130,13 +163,16 @@ export class BoxMicrophones {
       time - Math.max(this.lastReadAt, this.subscribedAt) > MICROPHONE_FRESH_MS) { patch.phase = 'unreachable'; patch.levels = null; patch.pitch = null }
     if (Object.keys(patch).length) this.publish(patch)
   }
-  private apply(host: BoxMicrophoneSnapshot): void {
+  private apply(host: BoxMicrophoneSnapshot, startedAt = Number.POSITIVE_INFINITY): void {
     const time = this.now()
     this.lastReadAt = time
     const channels: Record<string, number[]> = Object.create(null)
     for (const [uid, list] of Object.entries(host.selection.channels)) channels[uid] = [...list]
-    const raw = validLevels(host)
-    const levels = raw && host.active ? { generation: host.generation, receivedAt: time, ...raw } : null
+    const raw = validLevels(host.phase, host.generation, host.active, host.levels)
+    const fresh = raw && host.active ? { generation: host.generation, receivedAt: time, ...raw } : null
+    // A level read that began after this snapshot request is newer than the snapshot's levels.
+    const current = this.value.levels
+    const levels = current && fresh && current.generation === fresh.generation && current.receivedAt >= startedAt ? current : fresh
     const pitch = host.phase === 'running' && host.pitch && Number.isFinite(host.pitch.ageMs) && host.pitch.ageMs >= 0 && host.pitch.ageMs <= MICROPHONE_FRESH_MS &&
       Number.isFinite(host.pitch.frequency) && host.pitch.frequency > 0 && host.pitch.frequency < 5000 &&
       Number.isFinite(host.pitch.clarity) && host.pitch.clarity >= 0.5 && host.pitch.clarity <= 1
@@ -157,16 +193,48 @@ export class BoxMicrophones {
     this.polling = true
     this.lastPollStartedAt = this.now()
     const seq = this.editSeq
+    const startedAt = this.lastPollStartedAt
     try {
       const result = await this.api.microphones()
       if (this.disposed || seq !== this.editSeq) return
       if (result.ok && this.newer(result.value)) {
-        this.apply(result.value)
+        this.apply(result.value, startedAt)
         void this.migrate(result.value)
       } else if (!result.ok) this.unreachable(result.error)
     } catch (error) {
       if (!this.disposed && seq === this.editSeq) this.unreachable(String(error))
     } finally { this.polling = false }
+  }
+  /** The 20 Hz path: a level-only read that never replaces phase or selection. A
+   * different epoch or capture generation means the host moved on, so resync with
+   * a full read instead of showing levels for a stream that no longer exists. */
+  private async pollLevels(): Promise<void> {
+    if (this.disposed || !this.value.active) return
+    // A read that hangs must not freeze the fast path: after 500 ms a newer read may start and the old one is ignored.
+    if (this.levelPolling && this.now() - this.lastLevelPollStartedAt < 500) return
+    this.levelPolling = true
+    const mine = ++this.levelPollSeq
+    this.lastLevelPollStartedAt = this.now()
+    const seq = this.editSeq
+    try {
+      const result = await this.api.microphoneLevels()
+      if (this.disposed || seq !== this.editSeq || mine !== this.levelPollSeq) return
+      if (!result.ok) { this.unreachable(result.error); return }
+      this.applyLevels(result.value)
+    } catch (error) {
+      if (!this.disposed && seq === this.editSeq && mine === this.levelPollSeq) this.unreachable(String(error))
+    } finally { if (mine === this.levelPollSeq) this.levelPolling = false }
+  }
+  private applyLevels(host: BoxMicrophoneLevels): void {
+    const active = this.value.active
+    if (!active || host.epoch !== this.value.epoch || host.generation !== active.generation) {
+      if (this.now() - this.lastPollStartedAt >= MICROPHONE_LEVEL_POLL_MS * 2) void this.poll()
+      return
+    }
+    this.lastReadAt = this.now()
+    const raw = validLevels('running', host.generation, { deviceChannels: active.channels, enabledChannels: active.enabledChannels }, host.levels)
+    // Null levels from a running host mean no valid input right now; the next state read says why.
+    this.publish({ levels: raw ? { generation: host.generation, receivedAt: this.lastReadAt, ...raw } : null })
   }
   private unreachable(detail: string): void {
     this.publish({ phase: 'unreachable', levels: null, pitch: null, active: null, detail, error: null })
@@ -275,11 +343,13 @@ export function microphoneMeterState(status: MicrophoneSlotStatus): MicrophoneMe
   if (status.kind !== 'level') return status.kind
   return status.level > 1 ? 'loud' : status.level >= MICROPHONE_SINGING_PEAK ? 'singing' : 'quiet'
 }
-/** Meter fill on a −50…0 dBFS scale, so ordinary singing moves the bar visibly. */
-export function microphoneMeterFill(level: number): number {
-  if (!(level > 0)) return 0
-  return Math.max(0, Math.min(1, (20 * Math.log10(level) + 50) / 50))
+/** Linear peak (1.0 = full scale) to dBFS for the kit PeakMeter; silence is -Infinity. */
+export function microphoneLevelDb(level: number): number {
+  return level > 0 && Number.isFinite(level) ? 20 * Math.log10(level) : Number.NEGATIVE_INFINITY
 }
+/** "Singing" keeps showing this long after the last peak above the threshold, so
+ * the word does not flicker between syllables at 20 Hz. */
+export const MICROPHONE_SINGING_HOLD_MS = 500
 export type MicrophoneStateKey = 'box.player.micSinging' | 'box.player.micQuiet' | 'box.player.micLoud' | 'box.player.micOff' | 'box.player.micStarting' | 'box.player.micNotConnected' | 'box.player.unavailable'
 export function microphoneMeterStateKey(state: MicrophoneMeterState): MicrophoneStateKey {
   switch (state) {
@@ -302,4 +372,13 @@ export function useMicrophoneSnapshot(source?: Pick<BoxMicrophones, 'subscribe' 
   const getSnapshot = live?.getSnapshot ?? noSnapshot
   const value = useSyncExternalStore(live?.subscribe ?? noSubscription, getSnapshot, getSnapshot)
   return snapshot ?? value
+}
+
+/** The slot's state word as a primitive: the component re-renders when the word
+ * changes, not on every level reading (those go to the meter by `push`). */
+export function useMicrophoneSlotState(source: Pick<BoxMicrophones, 'subscribe' | 'slotState'> | undefined, snapshot: MicrophoneSnapshot | undefined, slot: number): MicrophoneMeterState {
+  const live = snapshot ? undefined : source
+  const get = (): MicrophoneMeterState => live ? live.slotState(slot) : 'unavailable'
+  const value = useSyncExternalStore(live?.subscribe ?? noSubscription, get, get)
+  return snapshot ? microphoneMeterState(microphoneSlotStatus(snapshot, slot)) : value
 }

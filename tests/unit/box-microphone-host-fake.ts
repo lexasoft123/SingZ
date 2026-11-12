@@ -1,5 +1,5 @@
 import { vi } from 'vitest'
-import type { BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from '../../src/shared/box-audio'
+import type { BoxMicrophoneLevels, BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from '../../src/shared/box-audio'
 import type { BoxResult } from '../../src/shared/box-contract'
 import { BoxMicrophones, type MicrophoneChannelStorage } from '../../src/renderer/src/box/microphones'
 
@@ -35,6 +35,9 @@ export function fakeHost(initial: { origin?: 'default' | 'user'; device?: string
   const api = {
     microphones: vi.fn(async (): Promise<BoxResult<BoxMicrophoneSnapshot>> =>
       reachable ? { ok: true, value: structuredClone(host) } : { ok: false, error: 'ENOENT control socket' }),
+    microphoneLevels: vi.fn(async (): Promise<BoxResult<BoxMicrophoneLevels>> =>
+      reachable ? { ok: true, value: { epoch: host.epoch, generation: host.generation, levels: host.phase === 'running' && host.levels ? structuredClone(host.levels) : null } }
+        : { ok: false, error: 'ENOENT control socket' }),
     setMicrophoneSelection: vi.fn(async (edit: BoxMicrophoneSelectionEdit): Promise<BoxResult<BoxMicrophoneSelectionResult>> => {
       if (!reachable) return { ok: false, error: 'ENOENT control socket' }
       if (edit.expectedRevision !== host.revision) return { ok: true, value: { ok: false, code: 'stale', error: 'stale', snapshot: structuredClone(host) } }
