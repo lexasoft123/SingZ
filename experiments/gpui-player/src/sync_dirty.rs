@@ -18,12 +18,52 @@ const MAX_RETIRE_OPS: usize = 1024;
 const MAX_SEQ: u64 = (1u64 << 53) - 1;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 const SNAPSHOT_ATTEMPTS: usize = 8;
-const WRITER_ATTEMPTS: usize = 26;
-const WRITER_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+// Windows scanners and indexers can hold a ledger for seconds. Like Node's
+// graceful-fs, retry for a long bounded window with backoff from 10 ms to a
+// 100 ms cap. Writers run on job threads, never the UI thread.
+const LEGACY_INTENT_DIR: &str = "pending-sync-intents";
+const WRITER_ATTEMPTS: usize = 1024;
+const WRITER_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+const WRITER_LEASE_MARGIN: std::time::Duration = std::time::Duration::from_secs(5);
 const WRITER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+const WRITER_RETRY_DELAY_CAP: std::time::Duration = std::time::Duration::from_millis(100);
+const ERROR_ACCESS_DENIED: i32 = 5;
+const ERROR_SHARING_VIOLATION: i32 = 32;
+const ERROR_LOCK_VIOLATION: i32 = 33;
+// Set once when the application starts quitting: a busy-ledger retry then
+// gives up at once instead of holding quit for the rest of its 60 s budget.
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn begin_shutdown() {
+    SHUTDOWN.store(true, Ordering::Release);
+}
+fn retry_cancelled(cancel: &dyn Fn() -> bool) -> bool {
+    SHUTDOWN.load(Ordering::Acquire) || cancel()
+}
+fn cancelled_error() -> anyhow::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "Sync intent update was cancelled before it could publish",
+    )
+    .into()
+}
+fn windows_file_busy(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+    )
+}
+// 10, 20, 40, 80, then 100 ms.
+fn writer_retry_delay(retries: usize) -> std::time::Duration {
+    (WRITER_RETRY_DELAY * (1u32 << retries.min(4))).min(WRITER_RETRY_DELAY_CAP)
+}
 
 // Only ledger open/metadata or publication failures may carry this marker. Exhaustion returns
 // the underlying OS error so a persistent ACL denial is never reported as churn.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrashPoint {
+    AfterBytes,
+}
 #[derive(Debug)]
 struct LedgerFileBusy(std::io::Error);
 impl std::fmt::Display for LedgerFileBusy {
@@ -69,6 +109,22 @@ struct WriterFaults {
     directory_error: Option<i32>,
     windows: bool,
     attempt_limit: usize,
+    budget: std::time::Duration,
+    injected: std::sync::atomic::AtomicUsize,
+    stage_opens: std::sync::atomic::AtomicUsize,
+    crash: Option<CrashPoint>,
+}
+// Busy errors from the real filesystem (a scanner), as opposed to injected
+// ones, so tests can account for them separately and stay exact otherwise.
+#[cfg(test)]
+thread_local! {
+    static REAL_BUSY: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn note_real_busy(hook_passed: bool) {
+    if hook_passed {
+        REAL_BUSY.with(|count| count.set(count.get() + 1));
+    }
 }
 
 /// An ordinary bounded ledger was atomically replaced during a snapshot.
@@ -207,6 +263,16 @@ impl Store {
         unreachable!("Snapshot retry loop always returns")
     }
     pub fn mark_project(&self, dir: &Path, reason: &str) -> Result<()> {
+        self.mark_project_until(dir, reason, &|| false)
+    }
+    /// `cancel` ends a Windows busy-file retry window early (shutdown, a
+    /// cancelled job); the original OS error is then returned.
+    pub fn mark_project_until(
+        &self,
+        dir: &Path,
+        reason: &str,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<()> {
         let key = absolute(dir)?;
         ensure!(key.len() <= 16384, "Dirty project path is too long");
         // Downloaded projects are local offline copies, outside writer authority.
@@ -214,7 +280,7 @@ impl Store {
         // not enqueue a writer run either. Linked cache roots confer no exemption.
         if self.is_download_cache_project(dir) { return Ok(()); }
 
-        self.update(|state| {
+        self.update_until(cancel, |state| {
             bump(state)?;
             state.dirs.insert(key.clone(), state.seq);
             if state.dirs.len() > MAX_DIRS {
@@ -226,6 +292,92 @@ impl Store {
         eprintln!("Sync intent marked: {} ({})", key, log_reason(reason));
         Ok(())
     }
+    /// Mark the project dirty on both edges of a write, like Electron's
+    /// `withDirty` (sync-dirty.ts): before the bytes are published and again
+    /// after. The ledger itself is the write-ahead record, so a crash after
+    /// the bytes leaves the project already dirty; the second mark only puts
+    /// it above the sequence a sync captured while the write was running.
+    /// A failed or cancelled first mark publishes nothing and is returned as
+    /// the error (Electron's save throws the same way). The second mark's
+    /// result is returned separately: the bytes are committed and the project
+    /// is already dirty, so it is a warning, not a failure. The second mark is
+    /// attempted even when publishing failed, because the bytes may be partly
+    /// changed (Electron marks in a `finally`).
+    pub fn with_dirty<T>(
+        &self,
+        target: &Path,
+        file: bool,
+        reason: &str,
+        cancel: &dyn Fn() -> bool,
+        publish: impl FnOnce() -> Result<T>,
+    ) -> Result<(T, Result<()>)> {
+        let mark = |reason: &str| {
+            if file {
+                self.mark_file_until(target, reason, cancel)
+            } else {
+                self.mark_project_until(target, reason, cancel)
+            }
+        };
+        mark(reason).context("Pending sync intent could not be recorded; nothing was saved")?;
+        let published = publish();
+        #[cfg(test)]
+        if published.is_ok() {
+            self.crash_at(CrashPoint::AfterBytes)?;
+        }
+        let after = mark(&format!("{reason} (finished)"));
+        match published {
+            Ok(value) => Ok((value, after)),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(test)]
+    fn crash_at(&self, point: CrashPoint) -> Result<()> {
+        match &self.writer_faults {
+            Some(faults) if faults.crash == Some(point) => {
+                anyhow::bail!("simulated kill {point:?}")
+            }
+            _ => Ok(()),
+        }
+    }
+    /// Earlier uncommitted builds kept write-ahead records in
+    /// `pending-sync-intents`. The ledger is the write-ahead record now, so a
+    /// leftover folder is retired: every project a record names is marked
+    /// first, and the folder is deleted only when all of them were handled.
+    /// An unreadable record keeps the folder for the next start.
+    pub fn retire_legacy_intents(&self, cancel: &dyn Fn() -> bool) -> Result<usize> {
+        let folder = self.directory.join(LEGACY_INTENT_DIR);
+        let entries = match fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        };
+        let mut marked = 0;
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            ensure!(!retry_cancelled(cancel), "Retiring legacy sync records was cancelled");
+            let bytes = fs::read(&path)
+                .with_context(|| format!("Legacy sync record {path:?} is unreadable"))?;
+            let named = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
+                let target = v.get("path")?.as_str()?.to_owned();
+                let file = v.get("file").and_then(Value::as_bool);
+                Path::new(&target).is_absolute().then_some((target, file))
+            });
+            if let Some((target, file)) = named {
+                let target = PathBuf::from(target);
+                if file == Some(true) {
+                    self.mark_file_until(&target, "legacy sync record", cancel)?;
+                } else {
+                    self.mark_project_until(&target, "legacy sync record", cancel)?;
+                }
+                marked += 1;
+            }
+        }
+        fs::remove_dir_all(&folder)?;
+        Ok(marked)
+    }
     /// Atomically make a successful local operation authoritative and dirty.
     /// The immutable operation body must already be durable before this call.
     pub fn commit_operation(&self, dirs: &[PathBuf], id: &str, reason: &str) -> Result<u64> {
@@ -236,7 +388,7 @@ impl Store {
                 .map(|dir| {let key=absolute(dir)?;ensure!(key.len()<=16384,"Dirty project path is too long");Ok(key)})
                 .collect::<Result<Vec<_>>>()?;
             ensure!(!keys.is_empty(), "A cache-only operation cannot authorize library retirement");
-            self.update_with_publication_stage(std::time::Duration::from_secs(2),|state| {
+            self.update_with_publication_stage(self.writer_lease_timeout(),|state| {
                 if state.retire_ops.contains_key(id) { return Ok(()); }
                 ensure!(state.retire_ops.len()<MAX_RETIRE_OPS,"Too many unacknowledged local operations");
                 bump(state)?;
@@ -244,7 +396,7 @@ impl Store {
                 if state.dirs.len()>MAX_DIRS {state.dirs.clear();state.all_seq=state.seq;}
                 state.retire_ops.insert(id.into(),state.seq);
                 Ok(())
-            },|started|publication_started=started)
+            },|started|publication_started=started,&|| false)
         })();
         let state=result.map_err(|cause|if publication_started {cause}
             else {anyhow::Error::new(PublicationNotAttempted{cause})})?;
@@ -276,6 +428,14 @@ impl Store {
     /// Cache-only lyrics are not projects. Do not create a ledger entry until
     /// the surrounding project.json exists, matching source markFileDirty.
     pub fn mark_file(&self, path: &Path, reason: &str) -> Result<()> {
+        self.mark_file_until(path, reason, &|| false)
+    }
+    pub fn mark_file_until(
+        &self,
+        path: &Path,
+        reason: &str,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<()> {
         let dir = path.parent().context("Dirty file has no project folder")?;
         match fs::symlink_metadata(dir.join("project.json")) {
             Ok(meta) => ensure!(
@@ -285,7 +445,7 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         }
-        self.mark_project(dir, reason)
+        self.mark_project_until(dir, reason, cancel)
     }
     pub fn mark_library(&self, reason: &str) -> Result<()> {
         self.update(|state| {
@@ -326,7 +486,19 @@ impl Store {
         })
     }
     fn update(&self, change: impl FnMut(&mut Snapshot) -> Result<()>) -> Result<Snapshot> {
-        self.update_with_lock_timeout(std::time::Duration::from_secs(2), change)
+        self.update_until(&|| false, change)
+    }
+    fn update_until(
+        &self,
+        cancel: &dyn Fn() -> bool,
+        change: impl FnMut(&mut Snapshot) -> Result<()>,
+    ) -> Result<Snapshot> {
+        self.update_with_publication_stage(
+            self.writer_lease_timeout(),
+            change,
+            |_| {},
+            cancel,
+        )
     }
     // Callbacks mutate only the supplied candidate and may be replayed after a
     // provably uncommitted Windows file failure. Assign result flags afresh on
@@ -337,26 +509,34 @@ impl Store {
         timeout: std::time::Duration,
         change: impl FnMut(&mut Snapshot) -> Result<()>,
     ) -> Result<Snapshot> {
-        self.update_with_publication_stage(timeout, change, |_| {})
+        self.update_with_publication_stage(timeout, change, |_| {}, &|| false)
     }
     fn update_with_publication_stage(
         &self,
         timeout: std::time::Duration,
         mut change: impl FnMut(&mut Snapshot) -> Result<()>,
         mut publication_stage: impl FnMut(bool),
+        cancel: &dyn Fn() -> bool,
     ) -> Result<Snapshot> {
         fs::create_dir_all(&self.directory)?;
         let dir = self.directory.canonicalize()?;
         let started = std::time::Instant::now();
         let _lease = loop {
             match lease(&dir) {
-                Ok(lease) => break lease,
+                Ok(lease) => {
+                    // A cancelled writer never accepts the lease, even when the
+                    // wait ended because the lease was free at that moment.
+                    if retry_cancelled(cancel) {
+                        return Err(cancelled_error());
+                    }
+                    break lease;
+                }
                 Err(error) => {
                     let busy = error
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock);
                     let remaining = timeout.saturating_sub(started.elapsed());
-                    if !busy || remaining.is_zero() {
+                    if !busy || remaining.is_zero() || retry_cancelled(cancel) {
                         return Err(error);
                     }
                     std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
@@ -367,14 +547,17 @@ impl Store {
         // pending staging file is dropped before sleeping; every attempt reads
         // a fresh document, reapplies the mutation, then checks its own CAS.
         let retry_started = std::time::Instant::now();
+        reclaim_orphaned_staging(&dir, SystemTime::now());
         let windows = self.writer_windows_policy();
         let limit = WRITER_ATTEMPTS;
+        let budget = self.writer_budget();
         #[cfg(test)]
         let limit = self
             .writer_faults
             .as_ref()
             .map_or(limit, |faults| faults.attempt_limit);
-        for attempt in 0..limit {
+        let attempts = std::cell::Cell::new(0usize);
+        while attempts.get() < limit {
             publication_stage(false);
             let result = (|| {
                 let mut document = document(bytes_with_hook(
@@ -400,14 +583,36 @@ impl Store {
                     },
                     &mut |step| self.writer_io(step),
                     windows,
+                    Some(RenameRetry {
+                        started: retry_started,
+                        budget,
+                        cancel,
+                        attempts: &attempts,
+                        limit,
+                    }),
                 )
             })();
             match result {
                 Ok(state) => return Ok(state),
                 Err(error) => {
-                    let remaining = WRITER_RETRY_BUDGET.saturating_sub(retry_started.elapsed());
-                    if error.is::<LedgerFileBusy>() && attempt + 1 < limit && !remaining.is_zero() {
-                        std::thread::sleep(remaining.min(WRITER_RETRY_DELAY));
+                    // Rename retries inside the publisher spend attempts too.
+                    let attempt = attempts.get();
+                    let remaining = budget.saturating_sub(retry_started.elapsed());
+                    if error.is::<LedgerFileBusy>()
+                        && attempt + 1 < limit
+                        && !remaining.is_zero()
+                        && !retry_cancelled(cancel)
+                    {
+                        std::thread::sleep(remaining.min(writer_retry_delay(attempt)));
+                        // A cancel that arrived during the wait must not publish
+                        // a fresh candidate.
+                        if retry_cancelled(cancel) {
+                            return Err(match error.downcast::<LedgerFileBusy>() {
+                                Ok(busy) => busy.0.into(),
+                                Err(error) => error,
+                            });
+                        }
+                        attempts.set(attempt + 1);
                         continue;
                     }
                     return Err(match error.downcast::<LedgerFileBusy>() {
@@ -418,6 +623,37 @@ impl Store {
             }
         }
         unreachable!("Writer retry loop always returns")
+    }
+    /// A store whose ledger replace is denied forever (code 5), so a mark
+    /// retries while holding the real lease until it is cancelled.
+    #[cfg(test)]
+    pub(crate) fn with_persistent_replace_denial(&self, budget: std::time::Duration) -> Store {
+        let mut store = self.clone();
+        store.writer_faults = Some(std::sync::Arc::new(WriterFaults {
+            step: WriterIo::Replace,
+            code: 5,
+            failures: usize::MAX,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            external: None,
+            directory_error: None,
+            windows: true,
+            attempt_limit: WRITER_ATTEMPTS,
+            budget,
+            injected: std::sync::atomic::AtomicUsize::new(0),
+            stage_opens: std::sync::atomic::AtomicUsize::new(0),
+            crash: None,
+        }));
+        store
+    }
+    fn writer_lease_timeout(&self) -> std::time::Duration {
+        self.writer_budget() + WRITER_LEASE_MARGIN
+    }
+    fn writer_budget(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(faults) = &self.writer_faults {
+            return faults.budget;
+        }
+        WRITER_RETRY_BUDGET
     }
     fn writer_windows_policy(&self) -> bool {
         #[cfg(test)]
@@ -439,9 +675,13 @@ impl Store {
                     return Err(std::io::Error::from_raw_os_error(code));
                 }
             }
+            if step == WriterIo::StageOpen {
+                faults.stage_opens.fetch_add(1, Ordering::SeqCst);
+            }
             if step == faults.step {
                 let call = faults.calls.fetch_add(1, Ordering::SeqCst);
                 if call < faults.failures {
+                    faults.injected.fetch_add(1, Ordering::SeqCst);
                     // Emulate an independent publisher between failed attempts.
                     if let Some(bytes) = &faults.external {
                         fs::write(self.directory.join(NAME), bytes)?;
@@ -462,6 +702,24 @@ pub fn mark_project(dir: &Path, reason: &str) -> Result<()> {
 }
 pub fn mark_file(path: &Path, reason: &str) -> Result<()> {
     Store::new(crate::audio_devices::directory()).mark_file(path, reason)
+}
+pub fn mark_project_until(dir: &Path, reason: &str, cancel: &dyn Fn() -> bool) -> Result<()> {
+    Store::new(crate::audio_devices::directory()).mark_project_until(dir, reason, cancel)
+}
+pub fn mark_file_until(path: &Path, reason: &str, cancel: &dyn Fn() -> bool) -> Result<()> {
+    Store::new(crate::audio_devices::directory()).mark_file_until(path, reason, cancel)
+}
+pub fn with_dirty<T>(
+    target: &Path,
+    file: bool,
+    reason: &str,
+    cancel: &dyn Fn() -> bool,
+    publish: impl FnOnce() -> Result<T>,
+) -> Result<(T, Result<()>)> {
+    Store::new(crate::audio_devices::directory()).with_dirty(target, file, reason, cancel, publish)
+}
+pub fn retire_legacy_intents(cancel: &dyn Fn() -> bool) -> Result<usize> {
+    Store::new(crate::audio_devices::directory()).retire_legacy_intents(cancel)
 }
 pub fn mark_library(reason: &str) -> Result<()> {
     Store::new(crate::audio_devices::directory()).mark_library(reason)
@@ -535,7 +793,10 @@ fn ledger_read_io<T>(
     windows_file_races: bool,
     operation: impl FnOnce() -> std::io::Result<T>,
 ) -> Result<T> {
-    let result = before_io(step).and_then(|()| operation());
+    let hook = before_io(step);
+    #[cfg(test)]
+    let hook_passed = hook.is_ok();
+    let result = hook.and_then(|()| operation());
     match result {
         Err(error)
             if windows_file_races
@@ -546,8 +807,10 @@ fn ledger_read_io<T>(
                         | SnapshotIo::OpenedMetadata
                         | SnapshotIo::CurrentMetadata
                 )
-                && matches!(error.raw_os_error(), Some(5 | 32)) =>
+                && windows_file_busy(&error) =>
         {
+            #[cfg(test)]
+            note_real_busy(hook_passed);
             // A ledger's delete-pending handle can deny open/metadata briefly.
             // A denied directory is not a replace race: surface it immediately.
             before_io(SnapshotIo::Directory)?;
@@ -680,7 +943,7 @@ fn document(bytes: Option<Vec<u8>>) -> Result<Document> {
     }
     Ok(Document { raw, bytes, state })
 }
-fn lease(dir: &Path) -> Result<crate::file_lease::Lease> {
+pub(crate) fn lease(dir: &Path) -> Result<crate::file_lease::Lease> {
     let path = dir.join(".sync-dirty.lock");
     let file = match OpenOptions::new()
         .read(true)
@@ -729,7 +992,159 @@ fn publish_with_flush(
     document: Document,
     flush: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<Snapshot> {
-    publish_with_hook(dir, document, flush, &mut |_| Ok(()), false)
+    publish_with_hook(dir, document, flush, &mut |_| Ok(()), false, None)
+}
+// Every staging attempt gets its own name: pid, a per-process counter and a
+// time-derived suffix. A name is never reused, so a scanner still holding the
+// previous attempt's (deleted, "delete pending") file cannot block the next
+// create, and a recycled pid cannot collide with a crashed owner's leftover.
+fn staging_name() -> String {
+    format!(
+        ".sync-dirty-{}-{}-{:x}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    )
+}
+const ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+#[cfg(unix)]
+fn owner_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes the process table.
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    alive || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+#[cfg(windows)]
+fn owner_alive(pid: u32) -> bool {
+    crate::source_jobs::legacy_owner_alive(pid)
+}
+/// Remove staging files a crashed process left behind: only ours by name, only
+/// older than `ORPHAN_AGE`, and only when the owner pid is gone. Best effort.
+fn reclaim_orphaned_staging(dir: &Path, now: SystemTime) -> usize {
+    reclaim_orphaned_staging_with(dir, now, owner_alive)
+}
+fn reclaim_orphaned_staging_with(
+    dir: &Path,
+    now: SystemTime,
+    alive: impl Fn(u32) -> bool,
+) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name.strip_prefix(".sync-dirty-").and_then(|r| r.strip_suffix(".tmp")) else {
+            continue;
+        };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == std::process::id() || alive(pid) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= ORPHAN_AGE);
+        if old && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+// Diagnostic for a long StageOpen denial: creating a fresh uniquely named file
+// is denied for as long as the parent directory is delete-pending (a handle is
+// still open on a removed directory). Logged once per run of denials.
+#[cfg(windows)]
+thread_local! {
+    static STAGE_DENIED: std::cell::Cell<Option<(std::time::Instant, bool)>> =
+        const { std::cell::Cell::new(None) };
+}
+#[cfg(windows)]
+const STAGE_DENIAL_LOG_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(windows)]
+fn note_stage_denial(dir: &Path) {
+    let (since, logged) = STAGE_DENIED
+        .with(|c| c.get())
+        .unwrap_or((std::time::Instant::now(), false));
+    let log = !logged && since.elapsed() >= STAGE_DENIAL_LOG_AFTER;
+    STAGE_DENIED.with(|c| c.set(Some((since, logged || log))));
+    if log {
+        eprintln!(
+            "Sync ledger StageOpen has been denied for {:?}; directory {dir:?} is {}",
+            since.elapsed(),
+            directory_state(dir)
+        );
+    }
+}
+#[cfg(windows)]
+fn note_stage_success() {
+    STAGE_DENIED.with(|c| c.set(None));
+}
+/// Whether `dir` is delete-pending, through a backup-semantics handle and
+/// GetFileInformationByHandleEx(FileStandardInfo).
+#[cfg(windows)]
+fn directory_state(dir: &Path) -> String {
+    use std::os::windows::{
+        fs::OpenOptionsExt,
+        io::AsRawHandle,
+    };
+    #[repr(C)]
+    struct FileStandardInfo {
+        allocation_size: i64,
+        end_of_file: i64,
+        number_of_links: u32,
+        delete_pending: u8,
+        directory: u8,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            file: *mut std::ffi::c_void,
+            class: i32,
+            info: *mut std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    // FILE_FLAG_BACKUP_SEMANTICS, share read/write/delete.
+    let handle = match OpenOptions::new()
+        .read(true)
+        .custom_flags(0x0200_0000)
+        .share_mode(7)
+        .open(dir)
+    {
+        Ok(handle) => handle,
+        // A delete-pending directory refuses new handles with access denied.
+        Err(error) => return format!("not openable ({error}); likely delete-pending"),
+    };
+    let mut info = FileStandardInfo {
+        allocation_size: 0,
+        end_of_file: 0,
+        number_of_links: 0,
+        delete_pending: 0,
+        directory: 0,
+    };
+    // FileStandardInfo = 1
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle().cast(),
+            1,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FileStandardInfo>() as u32,
+        )
+    };
+    if ok == 0 {
+        return format!("unknown ({})", std::io::Error::last_os_error());
+    }
+    if info.delete_pending != 0 {
+        "delete-pending".into()
+    } else {
+        "not delete-pending".into()
+    }
 }
 fn publication_io<T>(
     dir: &Path,
@@ -738,17 +1153,91 @@ fn publication_io<T>(
     windows: bool,
     operation: impl FnOnce() -> std::io::Result<T>,
 ) -> Result<T> {
-    match before_io(step).and_then(|()| operation()) {
+    let hook = before_io(step);
+    #[cfg(test)]
+    let hook_passed = hook.is_ok();
+    match hook.and_then(|()| operation()) {
         Err(error)
             if windows
-                && matches!(step, WriterIo::Create | WriterIo::Replace)
-                && matches!(error.raw_os_error(), Some(5 | 32)) =>
+                && matches!(
+                    step,
+                    WriterIo::Create | WriterIo::Replace | WriterIo::StageOpen
+                )
+                && windows_file_busy(&error) =>
         {
+            #[cfg(test)]
+            note_real_busy(hook_passed);
+            #[cfg(windows)]
+            if step == WriterIo::StageOpen {
+                note_stage_denial(dir);
+            }
             before_io(WriterIo::Directory)?;
             fs::read_dir(dir)?.next().transpose()?;
             Err(LedgerFileBusy(error).into())
         }
         result => Ok(result?),
+    }
+}
+// Windows scanners (Defender, Search) open a just-written file without delete
+// sharing, so renaming the staged ledger candidate fails with 5/32 for as long
+// as the scan lasts. Restaging per attempt restarts that scan, so a busy
+// Create/Replace keeps the already flushed candidate and retries only the
+// publishing step, spending the same attempt count and wall-clock budget as
+// whole transactions. Before each retry the ledger must still equal the
+// document the candidate was built from; otherwise the busy error returns to
+// the caller, which discards the candidate and rebuilds from a fresh read.
+struct RenameRetry<'a> {
+    started: std::time::Instant,
+    budget: std::time::Duration,
+    cancel: &'a dyn Fn() -> bool,
+    attempts: &'a std::cell::Cell<usize>,
+    limit: usize,
+}
+fn publish_candidate(
+    dir: &Path,
+    step: WriterIo,
+    before_io: &mut impl FnMut(WriterIo) -> std::io::Result<()>,
+    windows: bool,
+    expected: &Option<Vec<u8>>,
+    retry: &Option<RenameRetry<'_>>,
+    operation: impl Fn() -> std::io::Result<()>,
+) -> Result<()> {
+    let mut first = true;
+    loop {
+        if first {
+            first = false;
+            if retry.as_ref().is_some_and(|retry| retry_cancelled(retry.cancel)) {
+                return Err(cancelled_error());
+            }
+        }
+        let error = match publication_io(dir, step, before_io, windows, &operation) {
+            Err(error) if error.is::<LedgerFileBusy>() => error,
+            result => return result,
+        };
+        let Some(retry) = retry else {
+            return Err(error);
+        };
+        let tried = retry.attempts.get();
+        let remaining = retry.budget.saturating_sub(retry.started.elapsed());
+        if tried + 1 >= retry.limit || remaining.is_zero() || retry_cancelled(retry.cancel) {
+            return Err(error);
+        }
+        std::thread::sleep(remaining.min(writer_retry_delay(tried)));
+        let current = bytes_with_hook(
+            dir,
+            &mut || {},
+            &mut |step| before_io(WriterIo::Cas(step)),
+            windows,
+        )?;
+        if current != *expected {
+            return Err(error);
+        }
+        // Cancellation during the backoff or the CAS re-read stops here, even
+        // though the next publication would have succeeded.
+        if retry_cancelled(retry.cancel) {
+            return Err(error);
+        }
+        retry.attempts.set(tried + 1);
     }
 }
 fn publish_with_hook(
@@ -757,6 +1246,7 @@ fn publish_with_hook(
     flush: impl FnOnce(&Path) -> Result<()>,
     before_io: &mut impl FnMut(WriterIo) -> std::io::Result<()>,
     windows: bool,
+    rename_retry: Option<RenameRetry<'_>>,
 ) -> Result<Snapshot> {
     let mut dirty = document
         .raw
@@ -781,11 +1271,7 @@ fn publish_with_hook(
         encoded.len() as u64 <= LIMIT,
         "Sync intent exceeds its bound"
     );
-    let path = dir.join(format!(
-        ".sync-dirty-{}-{}.tmp",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let path = dir.join(staging_name());
     struct Pending(PathBuf);
     impl Drop for Pending {
         fn drop(&mut self) {
@@ -799,6 +1285,8 @@ fn publish_with_hook(
             .create_new(true)
             .open(&pending.0)
     })?;
+    #[cfg(windows)]
+    note_stage_success();
     publication_io(dir, WriterIo::StageWrite, before_io, windows, || {
         file.write_all(&encoded)
     })?;
@@ -819,13 +1307,25 @@ fn publish_with_hook(
         // The completed staging file was already flushed through its writable
         // handle above. Avoid project_store::replace's redundant Windows reopen
         // and flush, and classify only the actual atomic rename failure here.
-        publication_io(dir, WriterIo::Replace, before_io, windows, || {
-            fs::rename(&pending.0, dir.join(NAME))
-        })?;
+        publish_candidate(
+            dir,
+            WriterIo::Replace,
+            before_io,
+            windows,
+            &document.bytes,
+            &rename_retry,
+            || fs::rename(&pending.0, dir.join(NAME)),
+        )?;
     } else {
-        publication_io(dir, WriterIo::Create, before_io, windows, || {
-            fs::hard_link(&pending.0, dir.join(NAME))
-        })
+        publish_candidate(
+            dir,
+            WriterIo::Create,
+            before_io,
+            windows,
+            &document.bytes,
+            &rename_retry,
+            || fs::hard_link(&pending.0, dir.join(NAME)),
+        )
         .context("Sync intent appeared during publication")?;
     }
     flush(dir).map_err(|cause|anyhow::Error::new(PublicationUncertain{cause}))?;

@@ -208,12 +208,23 @@ fn backup(dir: &Path, id: &str, name: &str) -> PathBuf {
     stage(dir, id).join("previous").join(name)
 }
 fn journal(dir: &Path, j: &Journal) -> Result<()> {
+    journal_replace(dir, j)?;
+    sync(dir)
+}
+// The journal file now on disk is `j`. After this returns Ok the journal's
+// `committed` flag is the recovery disposition, whether or not the directory
+// sync that follows succeeds.
+fn journal_replace(dir: &Path, j: &Journal) -> Result<()> {
     let temp = stage(dir, &j.id).join("journal.tmp");
     let mut f = File::create(&temp)?;
     f.write_all(&serde_json::to_vec(j)?)?;
     f.sync_all()?;
     crate::project_store::replace(&temp, &dir.join(JOURNAL))?;
-    sync(dir)
+    Ok(())
+}
+#[cfg(test)]
+thread_local! {
+    static FAIL_COMMITTED_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 pub fn recover(dir: &Path) -> Result<()> {
     if dir.join(JOURNAL).exists() {
@@ -333,6 +344,9 @@ pub fn commit(dir: &Path, id: &str, files: Vec<(String, bool)>, expected: &str) 
         }
     }
     journal(dir, &j)?;
+    // Set once the committed journal has replaced the previous one: from then
+    // on recovery keeps the new bytes, whatever fails afterwards.
+    let committed = std::cell::Cell::new(false);
     let result = (|| -> Result<()> {
         for f in &j.files {
             let dest = dir.join(&f.file);
@@ -348,10 +362,40 @@ pub fn commit(dir: &Path, id: &str, files: Vec<(String, bool)>, expected: &str) 
         }
         sync(&dir.join("stems"))?;
         j.committed = true;
-        journal(dir, &j)
+        journal_replace(dir, &j)?;
+        committed.set(true);
+        #[cfg(test)]
+        if FAIL_COMMITTED_SYNC.with(|flag| flag.replace(false)) {
+            anyhow::bail!("Injected directory sync failure after the committed journal replace");
+        }
+        sync(dir)
     })();
     let recovery = recover_locked(dir);
-    result.and(recovery)
+    commit_outcome(result, recovery, committed.get())
+}
+/// The new bytes are published (journal committed) but removing the committed
+/// journal and its staging failed. Callers must not report this as an
+/// uncommitted refusal: the project changed.
+#[derive(Debug)]
+pub struct CommittedCleanupFailed;
+impl std::fmt::Display for CommittedCleanupFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Publication committed, but its journal cleanup did not finish")
+    }
+}
+/// `committed` says the committed journal replaced the previous one, so
+/// recovery keeps the new bytes: any failure after that point (the directory
+/// sync, or the cleanup recovery) is a post-commit failure, not a refusal.
+fn commit_outcome(result: Result<()>, recovery: Result<()>, committed: bool) -> Result<()> {
+    match (result, recovery) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(error.context(CommittedCleanupFailed)),
+        (Err(error), recovery) if committed => {
+            drop(recovery);
+            Err(error.context(CommittedCleanupFailed))
+        }
+        (result, recovery) => result.and(recovery),
+    }
 }
 
 #[cfg(test)]
@@ -566,6 +610,44 @@ mod tests {
             b"old-vocal"
         );
         assert!(f.0.join(JOURNAL).is_file());
+    }
+    #[test]
+    fn committed_cleanup_failure_is_distinguishable_from_an_uncommitted_failure() {
+        let cleanup = commit_outcome(Ok(()), Err(anyhow::anyhow!("remove staging")), true);
+        assert!(cleanup.unwrap_err().downcast_ref::<CommittedCleanupFailed>().is_some());
+        let refused = commit_outcome(Err(anyhow::anyhow!("rolled back")), Ok(()), false);
+        assert!(refused.unwrap_err().downcast_ref::<CommittedCleanupFailed>().is_none());
+        let both = commit_outcome(Err(anyhow::anyhow!("a")), Err(anyhow::anyhow!("b")), false);
+        assert!(both.unwrap_err().downcast_ref::<CommittedCleanupFailed>().is_none());
+        assert!(commit_outcome(Ok(()), Ok(()), true).is_ok());
+        let late = commit_outcome(Err(anyhow::anyhow!("sync")), Ok(()), true);
+        assert!(late.unwrap_err().downcast_ref::<CommittedCleanupFailed>().is_some());
+    }
+    // The committed journal replaced the old one and then the directory sync
+    // failed: recovery keeps the new bytes, so the failure must be classified
+    // as post-commit, not as a refused save.
+    #[test]
+    fn a_directory_sync_failure_after_the_committed_replace_is_reported_as_committed() {
+        let f = Fixture::new();
+        let j = setup(&f.0, false);
+        let expected = crate::project_store::read(&f.0, "project.json").unwrap().1;
+        let root = stage(&f.0, &j.id);
+        fs::write(root.join("next/stems/vocals.wav"), b"new-vocal").unwrap();
+        fs::write(root.join("next/project.json"), b"{\"version\":2,\"new\":true}").unwrap();
+        FAIL_COMMITTED_SYNC.with(|flag| flag.set(true));
+        let error = commit(
+            &f.0,
+            &j.id,
+            vec![("stems/vocals.wav".into(), true), ("project.json".into(), true)],
+            &expected,
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<CommittedCleanupFailed>().is_some(), "{error:#}");
+        assert!(format!("{error:#}").contains("Injected directory sync failure"));
+        // The new bytes are in place and recovery cleaned the journal up.
+        assert_eq!(fs::read(f.0.join("stems/vocals.wav")).unwrap(), b"new-vocal");
+        assert_eq!(fs::read(f.0.join("project.json")).unwrap(), b"{\"version\":2,\"new\":true}");
+        assert!(!f.0.join(JOURNAL).exists());
     }
     #[test]
     fn failed_rollback_retains_its_journal_and_backups_until_repair() {

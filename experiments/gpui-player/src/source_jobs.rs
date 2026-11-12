@@ -626,7 +626,7 @@ fn cache_usage(root: &Path, bounded: bool) -> Result<(u64, usize)> {
     Ok((size, count))
 }
 #[cfg(windows)]
-fn legacy_owner_alive(pid: u32) -> bool {
+pub(crate) fn legacy_owner_alive(pid: u32) -> bool {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;

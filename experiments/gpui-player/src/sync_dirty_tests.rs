@@ -337,6 +337,11 @@ fn outside_library_uses_directory_boundaries_instead_of_string_prefixes() {
     );
 }
 
+// Recovery tests keep the 60 s product budget, so a real scanner denial landing
+// next to an injected fault cannot fail them. Tests that prove the wall-clock
+// bound shorten it so a fault that never clears fails in a quarter of a second.
+const TEST_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
 // Faults are attached to a Store so these tests exercise the public mark, clear,
 // operation and acknowledgement paths, including their result bookkeeping.
 fn writer_fault_store(
@@ -356,10 +361,50 @@ fn writer_fault_store(
         directory_error: None,
         windows: true,
         attempt_limit,
+        budget: WRITER_RETRY_BUDGET,
+        injected: std::sync::atomic::AtomicUsize::new(0),
+        stage_opens: std::sync::atomic::AtomicUsize::new(0),
+        crash: None,
     });
     let mut store = f.store.clone();
     store.writer_faults = Some(faults.clone());
     (store, faults)
+}
+fn short_budget(store: &mut Store, faults: &mut Arc<WriterFaults>, budget: std::time::Duration) {
+    store.writer_faults = None;
+    Arc::get_mut(faults).unwrap().budget = budget;
+    store.writer_faults = Some(faults.clone());
+}
+// Real scanner denials seen by this thread since the last call (and reset).
+fn take_real_denials() -> usize {
+    REAL_BUSY.with(|count| count.replace(0))
+}
+// Exactly the scheduled faults were injected and one further attempt published.
+// The attempt count is exact too. Only when the real filesystem itself denied
+// an operation (counted separately by `take_real_denials`) is the count
+// allowed to exceed the scheduled retries, by the retries those denials cost.
+// `real` must come from the take_real_denials() taken right after the call.
+fn assert_recovered_after(faults: &WriterFaults, failures: usize, real: usize) {
+    assert_eq!(faults.injected.load(Ordering::SeqCst), failures);
+    let calls = faults.calls.load(Ordering::SeqCst);
+    if real == 0 {
+        assert_eq!(calls, failures + 1);
+    } else {
+        eprintln!("accounted for {real} real OS denial(s)");
+        // Each real denial costs at most one extra attempt of this step.
+        assert!((failures + 1..=failures + 1 + real).contains(&calls), "{calls} calls, {real} real");
+    }
+}
+// The staged candidate is written once and survives every in-place retry of
+// its publication; only a real denial elsewhere may restage it.
+fn assert_one_staged_file(faults: &WriterFaults, real: usize) {
+    let opens = faults.stage_opens.load(Ordering::SeqCst);
+    if real == 0 {
+        assert_eq!(opens, 1);
+    } else {
+        // Each real denial may restage at most once.
+        assert!((1..=1 + real).contains(&opens), "{opens} StageOpens, {real} real");
+    }
 }
 fn assert_no_writer_temps(f: &Fixture) {
     assert!(fs::read_dir(&f.store.directory).unwrap().all(|entry| {
@@ -380,6 +425,7 @@ fn check_windows_writer_recovery(code: i32) {
         WriterIo::Cas(SnapshotIo::Metadata),
         WriterIo::Cas(SnapshotIo::OpenedMetadata),
         WriterIo::Cas(SnapshotIo::CurrentMetadata),
+        WriterIo::StageOpen,
         WriterIo::Create,
         WriterIo::Replace,
     ] {
@@ -394,12 +440,17 @@ fn check_windows_writer_recovery(code: i32) {
             let (store, faults) =
                 writer_fault_store(&f, step, code, failures, None, WRITER_ATTEMPTS);
             let path = f.dir("Marked once");
+            take_real_denials();
             store
                 .mark_project(&path, "retry transaction")
                 .unwrap_or_else(|error| {
                     panic!("{step:?}, OS {code}, {failures} failures: {error:#}")
                 });
-            assert_eq!(faults.calls.load(Ordering::SeqCst), failures + 1);
+            let real = take_real_denials();
+            assert_recovered_after(&faults, failures, real);
+            if matches!(step, WriterIo::Create | WriterIo::Replace) {
+                assert_one_staged_file(&faults, real);
+            }
             let state = f.store.snapshot().unwrap();
             assert_eq!(state.seq, initial + 1);
             assert_eq!(state.dirs[path.to_str().unwrap()], initial + 1);
@@ -424,10 +475,12 @@ fn check_windows_writer_recovery(code: i32) {
         Some(external),
         WRITER_ATTEMPTS,
     );
+    take_real_denials();
     store
         .mark_project(&f.dir("Newest"), "rebase mutation")
         .unwrap();
-    assert_eq!(faults.calls.load(Ordering::SeqCst), 3);
+    let real = take_real_denials();
+    assert_recovered_after(&faults, 2, real);
     let state = f.store.snapshot().unwrap();
     assert_eq!(state.seq, 10);
     assert_eq!(state.all_seq, 9);
@@ -465,11 +518,14 @@ fn check_windows_writer_recovery(code: i32) {
     let f = Fixture::new();
     f.store.mark_library("initial").unwrap();
     let (store, faults) = writer_fault_store(&f, WriterIo::Replace, code, 2, None, WRITER_ATTEMPTS);
+    take_real_denials();
     let seq = store
         .commit_operation(&[f.dir("Operation")], "retry-operation", "operation retry")
         .unwrap();
     assert_eq!(seq, 2);
-    assert_eq!(faults.calls.load(Ordering::SeqCst), 3);
+    let real = take_real_denials();
+    assert_recovered_after(&faults, 2, real);
+    assert_one_staged_file(&faults, real);
     let state = f.store.snapshot().unwrap();
     assert_eq!(state.retire_ops["retry-operation"], 2);
     assert_eq!(state.dirs[f.dir("Operation").to_str().unwrap()], 2);
@@ -495,7 +551,7 @@ fn check_windows_writer_recovery(code: i32) {
     assert_eq!(fs::read(f.store.directory.join(NAME)).unwrap(), b"{broken");
     assert_no_writer_temps(&f);
 
-    for other in [13, 87] {
+    for other in [2, 13, 31, 87] {
         let f = Fixture::new();
         f.store.mark_library("initial").unwrap();
         let (store, faults) = writer_fault_store(
@@ -518,10 +574,10 @@ fn check_windows_writer_recovery(code: i32) {
         assert_eq!(f.store.snapshot().unwrap().seq, 1);
     }
 
-    // Only file boundaries qualify: mutation errors, staging errors, directory
-    // errors and the post-publication durability boundary are never replayed.
+    // Only file boundaries qualify: mutation errors, staging write/flush errors,
+    // directory errors and the post-publication durability boundary are never
+    // replayed. Opening the staging file is a retried boundary.
     for step in [
-        WriterIo::StageOpen,
         WriterIo::StageWrite,
         WriterIo::StageFlush,
     ] {
@@ -631,14 +687,33 @@ fn windows_writer_retries_sharing_violation_transactions_without_duplicate_marks
     check_windows_writer_recovery(32);
 }
 #[test]
+fn windows_writer_retries_lock_violation_transactions_without_duplicate_marks() {
+    check_windows_writer_recovery(33);
+}
+#[test]
+fn product_retry_budget_and_backoff_match_graceful_fs() {
+    assert_eq!(WRITER_RETRY_BUDGET, std::time::Duration::from_secs(60));
+    let delays: Vec<u64> = (0..7)
+        .map(|retry| writer_retry_delay(retry).as_millis() as u64)
+        .collect();
+    assert_eq!(delays, [10, 20, 40, 80, 100, 100, 100]);
+    for code in [5, 32, 33] {
+        assert!(windows_file_busy(&std::io::Error::from_raw_os_error(code)));
+    }
+    for code in [2, 3, 6, 13, 31, 87, 112, 1224] {
+        assert!(!windows_file_busy(&std::io::Error::from_raw_os_error(code)));
+    }
+}
+#[test]
 fn windows_writer_persistent_denial_returns_original_error_without_publication() {
     for step in [
         WriterIo::Read(SnapshotIo::Open),
         WriterIo::Cas(SnapshotIo::Open),
+        WriterIo::StageOpen,
         WriterIo::Create,
         WriterIo::Replace,
     ] {
-        for code in [5, 32] {
+        for code in [5, 32, 33] {
             let f = Fixture::new();
             if step != WriterIo::Create {
                 f.store.mark_library("initial").unwrap();
@@ -665,29 +740,418 @@ fn windows_writer_persistent_denial_returns_original_error_without_publication()
             assert_no_writer_temps(&f);
         }
     }
-    // Exercise the real wall-clock budget as well as the shorter attempt cap.
+    // Exercise the wall-clock budget as well as the shorter attempt cap. The
+    // injected budget is short; the product budget is checked separately.
+    for step in [
+        WriterIo::Read(SnapshotIo::Open),
+        WriterIo::StageOpen,
+        WriterIo::Replace,
+    ] {
+        let f = Fixture::new();
+        f.store.mark_library("initial").unwrap();
+        let (mut store, mut faults) =
+            writer_fault_store(&f, step, 5, usize::MAX, None, WRITER_ATTEMPTS);
+        short_budget(&mut store, &mut faults, TEST_RETRY_BUDGET);
+        let started = std::time::Instant::now();
+        let error = store.mark_library("elapsed budget").unwrap_err();
+        assert!(started.elapsed() >= TEST_RETRY_BUDGET, "{step:?}");
+        assert!(started.elapsed() < TEST_RETRY_BUDGET * 8, "{step:?}");
+        assert!((1..=WRITER_ATTEMPTS).contains(&faults.calls.load(Ordering::SeqCst)));
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(5)
+        );
+        assert_eq!(f.store.snapshot().unwrap().seq, 1);
+        assert_no_writer_temps(&f);
+    }
+}
+#[test]
+fn windows_writer_busy_retry_stops_when_cancelled_without_waiting_out_the_budget() {
+    for step in [WriterIo::StageOpen, WriterIo::Replace] {
+        let f = Fixture::new();
+        f.store.mark_library("initial").unwrap();
+        let before = fs::read(f.store.directory.join(NAME)).unwrap();
+        let (mut store, mut faults) =
+            writer_fault_store(&f, step, 32, usize::MAX, None, WRITER_ATTEMPTS);
+        short_budget(&mut store, &mut faults, std::time::Duration::from_secs(60));
+        let started = std::time::Instant::now();
+        let error = store
+            .mark_project_until(&f.dir("Quit"), "shutdown", &|| {
+                faults.calls.load(Ordering::SeqCst) >= 3
+            })
+            .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{step:?}");
+        // Every call is injected and the cancel flips on the third: exactly three.
+        assert_eq!(faults.calls.load(Ordering::SeqCst), 3, "{step:?}");
+        assert_eq!(faults.injected.load(Ordering::SeqCst), 3, "{step:?}");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(32)
+        );
+        assert_eq!(fs::read(f.store.directory.join(NAME)).unwrap(), before);
+        assert_no_writer_temps(&f);
+    }
+}
+#[test]
+fn second_writer_waits_for_a_live_retrying_writer_instead_of_reporting_busy() {
+    assert_eq!(
+        Fixture::new().store.writer_lease_timeout(),
+        WRITER_RETRY_BUDGET + WRITER_LEASE_MARGIN
+    );
     let f = Fixture::new();
     f.store.mark_library("initial").unwrap();
-    let (store, faults) = writer_fault_store(
-        &f,
-        WriterIo::Read(SnapshotIo::Open),
-        5,
-        usize::MAX,
-        None,
-        WRITER_ATTEMPTS,
-    );
+    let (mut slow, mut faults) =
+        writer_fault_store(&f, WriterIo::Replace, 5, usize::MAX, None, WRITER_ATTEMPTS);
+    short_budget(&mut slow, &mut faults, std::time::Duration::from_secs(3));
+    let first = std::thread::spawn(move || slow.mark_library("never clears"));
+    while faults.calls.load(Ordering::SeqCst) == 0 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // The first writer holds the lease for 3 s, longer than the old 2 s wait.
     let started = std::time::Instant::now();
-    let error = store.mark_library("elapsed budget").unwrap_err();
-    assert!(started.elapsed() >= WRITER_RETRY_BUDGET);
-    assert!((1..=WRITER_ATTEMPTS).contains(&faults.calls.load(Ordering::SeqCst)));
-    assert_eq!(
-        error
-            .downcast_ref::<std::io::Error>()
-            .unwrap()
-            .raw_os_error(),
-        Some(5)
-    );
-    assert_eq!(f.store.snapshot().unwrap().seq, 1);
+    let mut second = f.store.clone();
+    second.writer_faults = Some(Arc::new(WriterFaults {
+        step: WriterIo::Replace, code: 5, failures: 0,
+        calls: std::sync::atomic::AtomicUsize::new(0), external: None,
+        directory_error: None, windows: true, attempt_limit: WRITER_ATTEMPTS,
+        budget: std::time::Duration::from_secs(3),
+        injected: std::sync::atomic::AtomicUsize::new(0),
+        stage_opens: std::sync::atomic::AtomicUsize::new(0),
+        crash: None,
+    }));
+    second.mark_project(&f.dir("Waited"), "second writer").unwrap();
+    assert!(started.elapsed() > std::time::Duration::from_secs(2));
+    assert!(first.join().unwrap().is_err());
+    assert!(f.store.snapshot().unwrap().dirs.keys().any(|k| k.ends_with("Waited")));
+}
+// The cancel closure reports false until it has seen the injected failure, then
+// stays false for 5 ms (the pre-sleep check right after the failure) and turns
+// true afterwards, i.e. it flips during the 10 ms backoff. Every retry that
+// would have succeeded must then be abandoned without publishing.
+#[test]
+fn cancel_flipping_during_the_backoff_never_publishes_the_next_attempt() {
+    for step in [
+        WriterIo::Replace,
+        WriterIo::Create,
+        WriterIo::StageOpen,
+        WriterIo::Read(SnapshotIo::Open),
+        WriterIo::Cas(SnapshotIo::Open),
+    ] {
+        let f = Fixture::new();
+        if step != WriterIo::Create {
+            f.store.mark_library("initial").unwrap();
+        }
+        let before = fs::read(f.store.directory.join(NAME)).ok();
+        let (store, faults) = writer_fault_store(&f, step, 5, 1, None, WRITER_ATTEMPTS);
+        let seen = std::sync::Mutex::new(None::<std::time::Instant>);
+        let cancel = || {
+            if faults.injected.load(Ordering::SeqCst) == 0 {
+                return false;
+            }
+            let mut seen = seen.lock().unwrap();
+            let first = *seen.get_or_insert_with(std::time::Instant::now);
+            first.elapsed() >= std::time::Duration::from_millis(5)
+        };
+        let error = store
+            .mark_project_until(&f.dir("Cancelled"), "cancel in backoff", &cancel)
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().raw_os_error(),
+            Some(5),
+            "{step:?}: {error:#}"
+        );
+        assert_eq!(faults.injected.load(Ordering::SeqCst), 1, "{step:?}");
+        assert_eq!(
+            faults.calls.load(Ordering::SeqCst),
+            1,
+            "{step:?}: no attempt may run after the cancel"
+        );
+        assert_eq!(fs::read(f.store.directory.join(NAME)).ok(), before, "{step:?}");
+        assert_no_writer_temps(&f);
+    }
+}
+#[test]
+fn cancelled_writer_does_not_accept_a_lease_that_frees_up() {
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let before = fs::read(f.store.directory.join(NAME)).unwrap();
+    let dir = f.store.directory.canonicalize().unwrap();
+    let held = lease(&dir).unwrap();
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = {
+        let flag = flag.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            flag.store(true, Ordering::SeqCst);
+            drop(held);
+        })
+    };
+    let error = f
+        .store
+        .mark_project_until(&f.dir("Late"), "cancelled before lease", &|| {
+            flag.load(Ordering::SeqCst)
+        })
+        .unwrap_err();
+    release.join().unwrap();
+    assert!(!error.to_string().is_empty());
+    assert_eq!(fs::read(f.store.directory.join(NAME)).unwrap(), before);
+    assert_no_writer_temps(&f);
+}
+fn crash_store(f: &Fixture, point: CrashPoint) -> Store {
+    let (mut store, mut faults) =
+        writer_fault_store(f, WriterIo::Replace, 5, 0, None, WRITER_ATTEMPTS);
+    store.writer_faults = None;
+    Arc::get_mut(&mut faults).unwrap().crash = Some(point);
+    store.writer_faults = Some(faults);
+    store
+}
+fn project_with_metadata(f: &Fixture, name: &str) -> PathBuf {
+    let project = f.dir(name);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("project.json"), b"{}").unwrap();
+    project
+}
+// Electron's withDirty: the ledger is marked before and after the write.
+#[test]
+fn with_dirty_marks_on_both_edges_and_returns_the_value() {
+    let f = Fixture::new();
+    let project = project_with_metadata(&f, "Song");
+    for file in [false, true] {
+        let target = if file { project.join("lyrics.json") } else { project.clone() };
+        let seen = std::cell::Cell::new(0);
+        let (value, after) = f
+            .store
+            .with_dirty(&target, file, "normal", &|| false, || {
+                // The first edge is already durable when the bytes are written.
+                seen.set(f.store.snapshot().unwrap().seq);
+                Ok(7)
+            })
+            .unwrap();
+        assert_eq!(value, 7);
+        after.unwrap();
+        assert!(seen.get() >= 1);
+    }
+    let state = f.store.snapshot().unwrap();
+    assert_eq!(state.seq, 4, "two edges for each of two writes");
+    assert!(state.dirs.contains_key(project.to_str().unwrap()));
+    assert_no_writer_temps(&f);
+}
+#[test]
+fn a_kill_after_the_bytes_but_before_the_after_mark_leaves_the_project_dirty() {
+    let f = Fixture::new();
+    let project = project_with_metadata(&f, "Song");
+    let payload = project.join("payload");
+    let store = crash_store(&f, CrashPoint::AfterBytes);
+    let error = store
+        .with_dirty(&project, false, "crash", &|| false, || {
+            fs::write(&payload, b"new").map_err(Into::into)
+        })
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("simulated kill"), "{error:#}");
+    assert_eq!(fs::read(&payload).unwrap(), b"new");
+    // The ledger itself was the write-ahead record: nothing to replay.
+    let state = f.store.snapshot().unwrap();
+    assert!(state.dirs.contains_key(project.to_str().unwrap()));
+    assert_eq!(state.seq, 1, "only the first edge ran");
+}
+#[test]
+fn a_failed_before_mark_publishes_nothing_and_reports_the_original_error() {
+    for code in [5, 32, 33] {
+        let f = Fixture::new();
+        f.store.mark_library("initial").unwrap();
+        let project = project_with_metadata(&f, "Song");
+        let payload = project.join("payload");
+        let (mut store, mut faults) =
+            writer_fault_store(&f, WriterIo::Replace, code, usize::MAX, None, WRITER_ATTEMPTS);
+        short_budget(&mut store, &mut faults, TEST_RETRY_BUDGET);
+        let published = std::cell::Cell::new(false);
+        let error = store
+            .with_dirty(&project, false, "refused", &|| false, || {
+                published.set(true);
+                fs::write(&payload, b"new").map_err(Into::into)
+            })
+            .unwrap_err();
+        assert!(!published.get(), "OS {code}: the bytes must not be published");
+        assert!(!payload.exists());
+        assert!(format!("{error:#}").contains("nothing was saved"), "{error:#}");
+        let raw = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .and_then(std::io::Error::raw_os_error);
+        assert_eq!(raw, Some(code));
+        assert!(!f.store.snapshot().unwrap().dirs.contains_key(project.to_str().unwrap()));
+    }
+}
+#[test]
+fn a_cancelled_before_mark_publishes_nothing() {
+    let f = Fixture::new();
+    let project = project_with_metadata(&f, "Song");
+    let published = std::cell::Cell::new(false);
+    f.store
+        .with_dirty(&project, false, "cancelled", &|| true, || {
+            published.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(!published.get());
+    assert!(f.store.snapshot().unwrap().dirs.is_empty());
+}
+#[test]
+fn a_failed_after_mark_warns_and_the_project_stays_dirty() {
+    let f = Fixture::new();
+    let project = project_with_metadata(&f, "Song");
+    let flag = std::sync::atomic::AtomicBool::new(false);
+    // Cancellation arrives while the bytes are written: the second edge fails.
+    let (value, after) = f
+        .store
+        .with_dirty(&project, false, "late quit", &|| flag.load(Ordering::SeqCst), || {
+            flag.store(true, Ordering::SeqCst);
+            Ok(9)
+        })
+        .unwrap();
+    assert_eq!(value, 9);
+    assert!(after.is_err());
+    let state = f.store.snapshot().unwrap();
+    assert!(state.dirs.contains_key(project.to_str().unwrap()));
+    assert_eq!(state.seq, 1);
+}
+#[test]
+fn a_failed_publish_still_marks_the_second_edge_like_electrons_finally() {
+    let f = Fixture::new();
+    let project = project_with_metadata(&f, "Song");
+    f.store
+        .with_dirty(&project, false, "failing", &|| false, || -> Result<()> {
+            anyhow::bail!("publish failed")
+        })
+        .unwrap_err();
+    assert_eq!(f.store.snapshot().unwrap().seq, 2);
+}
+#[test]
+fn legacy_intent_records_are_marked_then_retired() {
+    let f = Fixture::new();
+    let one = project_with_metadata(&f, "One");
+    let two = project_with_metadata(&f, "Two");
+    let folder = f.store.directory.join(LEGACY_INTENT_DIR);
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("1.json"),
+        serde_json::to_vec(&json!({"path": one.to_str().unwrap(), "file": false})).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        folder.join("2.json"),
+        serde_json::to_vec(&json!({"path": two.join("lyrics.json").to_str().unwrap(), "file": true}))
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(folder.join(".3.tmp"), b"staged").unwrap();
+    assert_eq!(f.store.retire_legacy_intents(&|| false).unwrap(), 2);
+    let dirs = f.store.snapshot().unwrap().dirs;
+    assert!(dirs.contains_key(one.to_str().unwrap()));
+    assert!(dirs.contains_key(two.to_str().unwrap()));
+    assert!(!folder.exists());
+    assert_eq!(f.store.retire_legacy_intents(&|| false).unwrap(), 0);
+}
+#[test]
+fn a_cancelled_legacy_retirement_keeps_the_records_for_the_next_start() {
+    let f = Fixture::new();
+    let one = project_with_metadata(&f, "One");
+    let folder = f.store.directory.join(LEGACY_INTENT_DIR);
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("1.json"),
+        serde_json::to_vec(&json!({"path": one.to_str().unwrap(), "file": false})).unwrap(),
+    )
+    .unwrap();
+    f.store.retire_legacy_intents(&|| true).unwrap_err();
+    assert!(folder.join("1.json").exists());
+}
+#[test]
+fn every_staging_attempt_gets_a_new_name() {
+    let names: std::collections::HashSet<_> = (0..64).map(|_| staging_name()).collect();
+    assert_eq!(names.len(), 64);
+    assert!(names.iter().all(|n| n.starts_with(".sync-dirty-") && n.ends_with(".tmp")));
+}
+#[test]
+fn orphaned_staging_files_are_reclaimed_only_when_old_and_their_owner_is_gone() {
+    let f = Fixture::new();
+    let dir = &f.store.directory;
+    fs::create_dir_all(dir).unwrap();
+    let make = |name: &str, age_secs: u64| {
+        let path = dir.join(name);
+        let file = fs::File::create(&path).unwrap();
+        file.set_modified(SystemTime::now() - std::time::Duration::from_secs(age_secs))
+            .unwrap();
+        path
+    };
+    let own = make(&format!(".sync-dirty-{}-1-0.tmp", std::process::id()), 7200);
+    let dead_old = make(".sync-dirty-4000001-1-0.tmp", 7200);
+    let dead_young = make(".sync-dirty-4000002-1-0.tmp", 60);
+    let live_old = make(".sync-dirty-4000003-1-0.tmp", 7200);
+    let foreign = make("notes.tmp", 7200);
+    let removed = reclaim_orphaned_staging_with(dir, SystemTime::now(), |pid| pid == 4000003);
+    assert_eq!(removed, 1);
+    assert!(!dead_old.exists());
+    for kept in [&own, &dead_young, &live_old, &foreign] {
+        assert!(kept.exists(), "{kept:?}");
+    }
+}
+// A scanner that still holds a deleted staging file open (delete pending)
+// must never block the next stage: attempts use fresh names.
+#[cfg(windows)]
+#[test]
+fn a_delete_pending_staging_file_does_not_block_the_next_stage() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    f.store.mark_library("initial").unwrap();
+    let held = f.store.directory.join(staging_name());
+    fs::write(&held, b"previous attempt").unwrap();
+    // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    let _scanner = OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .open(&held)
+        .unwrap();
+    fs::remove_file(&held).unwrap();
+    let started = std::time::Instant::now();
+    let (store, faults) = writer_fault_store(&f, WriterIo::Replace, 5, 0, None, WRITER_ATTEMPTS);
+    store.mark_project(&f.dir("After delete pending"), "unique staging name").unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(faults.injected.load(Ordering::SeqCst), 0);
+}
+// Scratch directories are unique per process and per fixture (pid plus a
+// process-wide counter), so one test can never remove or reuse another's.
+#[test]
+fn fixtures_never_share_a_scratch_directory() {
+    let fixtures: Vec<Fixture> = (0..32).map(|_| Fixture::new()).collect();
+    let roots: std::collections::HashSet<_> = fixtures.iter().map(|f| f.root.clone()).collect();
+    assert_eq!(roots.len(), 32);
+}
+#[cfg(windows)]
+#[test]
+fn directory_state_diagnostic_distinguishes_delete_pending_directories() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    assert_eq!(directory_state(&f.root), "not delete-pending");
+    let doomed = f.root.join("doomed");
+    fs::create_dir(&doomed).unwrap();
+    // A scanner-like handle with delete sharing keeps the removed directory alive.
+    let _held = OpenOptions::new()
+        .read(true)
+        .custom_flags(0x0200_0000)
+        .share_mode(7)
+        .open(&doomed)
+        .unwrap();
+    fs::remove_dir(&doomed).unwrap();
+    let state = directory_state(&doomed);
+    assert!(state.contains("delete-pending"), "{state}");
+    assert!(!state.starts_with("not delete-pending"), "{state}");
 }
 #[cfg(windows)]
 #[test]

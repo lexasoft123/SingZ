@@ -730,7 +730,7 @@ fn lyrics_client()->crate::lrclib::Client {
     }
     crate::lrclib::Client::default()
 }
-fn publish_resolved_lyrics(project:&Project,mut proposal:crate::lyrics_resolution::Proposal,text:&Arc<gpui_kit::TextSystem>,cancel:&impl Fn()->bool)->std::result::Result<ResolvedLyrics,crate::lyrics_align::Failure>{
+fn publish_resolved_lyrics(project:&Project,mut proposal:crate::lyrics_resolution::Proposal,text:&Arc<gpui_kit::TextSystem>,cancel:&impl Fn()->bool,quit:&impl Fn()->bool)->std::result::Result<ResolvedLyrics,crate::lyrics_align::Failure>{
     use crate::lyrics_align::Failure;
     let result=(||->Result<ResolvedLyrics>{
         anyhow::ensure!(!cancel(),"Lyrics request cancelled");
@@ -741,10 +741,14 @@ fn publish_resolved_lyrics(project:&Project,mut proposal:crate::lyrics_resolutio
         anyhow::ensure!(crate::lyrics_store::identity(&project.dir)?==project.lyrics_fingerprint,"Lyrics changed outside this app. Reopen the song before continuing.");
         anyhow::ensure!(!cancel(),"Lyrics request cancelled");
         let fingerprint=if proposal.write {
-            crate::lyrics_store::backup_before_replace_locked(&project.dir,project.lyrics_fingerprint.as_deref(),true)?;
-            anyhow::ensure!(!cancel(),"Lyrics request cancelled");
-            let hash=crate::project_store::commit_expected_locked(&project.dir,"lyrics.json",project.lyrics_fingerprint.as_deref(),&proposal.raw)?;
-            if let Err(e)=crate::sync_dirty::mark_file(&project.dir.join("lyrics.json"),"lyrics") {proposal.warnings.push(format!("Lyrics were saved, but the pending-sync record could not be written: {e:#}. Save again to retry."));}
+            // Electron's withDirty: marked before the bytes (a failed mark refuses the
+            // write) and again after (a failure only warns; it is already dirty).
+            let (hash,marked)=crate::sync_dirty::with_dirty(&project.dir.join("lyrics.json"),true,"lyrics",quit,||{
+                crate::lyrics_store::backup_before_replace_locked(&project.dir,project.lyrics_fingerprint.as_deref(),true)?;
+                anyhow::ensure!(!cancel(),"Lyrics request cancelled");
+                crate::project_store::commit_expected_locked(&project.dir,"lyrics.json",project.lyrics_fingerprint.as_deref(),&proposal.raw)
+            })?;
+            if let Err(e)=marked {proposal.warnings.push(format!("Lyrics were saved, but the pending-sync mark could not be refreshed (the project is already marked): {e:#}"));}
             Some(hash)
         }else{project.lyrics_fingerprint.clone()};
         #[cfg(feature="ui-tests")]
@@ -928,6 +932,8 @@ impl Drop for Backend {
         // Capture yields to their memory intents even during application quit.
         self.saves.finish();
         self.alive.store(false, Ordering::Release);
+        // Unit tests share one process, so only a real quit may stop ledger retries.
+        if !cfg!(test) {crate::sync_dirty::begin_shutdown();}
         let _=self.requests.transport.try_send(Request::Wake);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -2323,13 +2329,71 @@ mod tests {
         for (case,bytes) in [("broken",b"{broken".as_slice()),("edited",br#"{"source":"edited","lines":[{"start":1,"end":2,"text":"My original words"}]}"#)] {
             let root=fixture(&format!("lyrics-backup-{source}-{case}"));
             let project=lyrics_review_project(&root,bytes);
-            let result=publish_resolved_lyrics(&project,replacement_proposal(source),cx.text_system(),&||false).unwrap();
+            let result=publish_resolved_lyrics(&project,replacement_proposal(source),cx.text_system(),&||false,&||false).unwrap();
             assert!(result.written);
             assert_eq!(result.raw["source"],source);
             assert_eq!(fs::read(root.join("lyrics.json.bak")).unwrap(),bytes);
             assert_ne!(fs::read(root.join("lyrics.json")).unwrap(),bytes);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[test]
+    fn lyrics_refused_when_the_before_mark_is_cancelled_publish_nothing() {
+        isolated_publication_test("lyrics_refused_when_the_before_mark_is_cancelled_publish_nothing",||{
+            let cx=gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(103),None);
+            let root=fixture("lyrics-before-mark");
+            let project=lyrics_review_project(&root,b"{broken");
+            fs::write(root.join("project.json"),br#"{"version":2,"settings":{}}"#).unwrap();
+            // Quit is already requested: the first mark is cancelled, so nothing is written.
+            let result=publish_resolved_lyrics(&project,replacement_proposal("whisper"),cx.text_system(),&||false,&||true);
+            assert!(result.is_err());
+            assert_eq!(fs::read(root.join("lyrics.json")).unwrap(),b"{broken");
+            assert!(!root.join("lyrics.json.bak").exists());
+            assert!(!crate::sync_dirty::snapshot().unwrap().dirs.contains_key(project.dir.to_str().unwrap()));
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+    #[test]
+    fn lyrics_after_mark_failure_warns_and_the_project_stays_dirty() {
+        isolated_publication_test("lyrics_after_mark_failure_warns_and_the_project_stays_dirty",||{
+            let cx=gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(104),None);
+            let root=fixture("lyrics-after-mark");
+            let project=lyrics_review_project(&root,b"{broken");
+            fs::write(root.join("project.json"),br#"{"version":2,"settings":{}}"#).unwrap();
+            // Quit arrives once the lyrics bytes changed: the first mark ran, the second is cancelled.
+            let lyrics=root.join("lyrics.json");
+            let quit=||fs::read(&lyrics).is_ok_and(|bytes|bytes!=b"{broken");
+            let result=publish_resolved_lyrics(&project,replacement_proposal("whisper"),cx.text_system(),&||false,&quit).unwrap();
+            assert!(result.written);
+            assert!(result.warnings.iter().any(|w|w.contains("already marked")),"{:?}",result.warnings);
+            assert!(crate::sync_dirty::snapshot().unwrap().dirs.contains_key(project.dir.to_str().unwrap()));
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+    #[test]
+    fn explicit_lyrics_save_superseded_while_the_first_mark_waits_publishes_nothing() {
+        isolated_publication_test("explicit_lyrics_save_superseded_while_the_first_mark_waits_publishes_nothing",||{
+            let root=fixture("lyrics-superseded-wait");
+            let project=lyrics_review_project(&root,b"{broken");
+            fs::write(root.join("project.json"),br#"{"version":2,"settings":{}}"#).unwrap();
+            crate::sync_dirty::mark_library("initial").unwrap();
+            let ledger=crate::audio_devices::directory().canonicalize().unwrap();
+            let held=crate::sync_dirty::lease(&ledger).unwrap();
+            let latest=std::sync::atomic::AtomicU64::new(1);
+            let lines=serde_json::json!([{"start":1,"end":2,"text":"New words"}]);
+            let result=thread::scope(|scope|{
+                let job=scope.spawn(||super::jobs::save_lyrics_marked(&project.dir,None,&lines,None,&||false,&||latest.load(Ordering::Acquire)!=1));
+                // The first mark is blocked on the live ledger lease; the epoch advances meanwhile.
+                thread::sleep(Duration::from_millis(200));
+                latest.store(2,Ordering::Release);
+                drop(held);
+                job.join().unwrap()
+            });
+            let error=result.err().expect("superseded save must be refused");
+            assert!(format!("{error:#}").contains("superseded"),"{error:#}");
+            assert_eq!(fs::read(root.join("lyrics.json")).unwrap(),b"{broken");
+            fs::remove_dir_all(root).unwrap();
+        });
     }
     #[test]
     fn transcribe_publication_backs_up_unreadable_and_edited_lyrics() {
@@ -2355,7 +2419,7 @@ mod tests {
             // step itself to fail (this test runs in its own isolated process).
             use std::sync::atomic::Ordering::SeqCst;
             crate::lyrics_store::FAIL_BACKUP_FOR_TESTS.store(true,SeqCst);
-            let result=publish_resolved_lyrics(&project,replacement_proposal(source),cx.text_system(),&||false);
+            let result=publish_resolved_lyrics(&project,replacement_proposal(source),cx.text_system(),&||false,&||false);
             crate::lyrics_store::FAIL_BACKUP_FOR_TESTS.store(false,SeqCst);
             let error=format!("{:#}",result.expect_err("a failed backup must block publication"));
             assert!(error.contains(&crate::i18n::t("lyrics.editor.backupFailed")),"{source}: not the backup failure: {error}");
@@ -2374,7 +2438,7 @@ mod tests {
         let project = lyrics_review_project(&root, &bytes);
         let result = crate::lyrics_resolution::run(&project, crate::lyrics_resolution::Intent::Auto,
             &crate::lrclib::Client::with_base_url("http://127.0.0.1:9").unwrap(), &||false, &|_|{})
-            .and_then(|proposal| publish_resolved_lyrics(&project, proposal, cx.text_system(), &||false)).unwrap();
+            .and_then(|proposal| publish_resolved_lyrics(&project, proposal, cx.text_system(), &||false,&||false)).unwrap();
         assert!(!result.written && result.cached);
         assert_eq!(result.raw, raw);
         assert_eq!(result.warnings, vec![crate::i18n::t("lyrics.panel.autoPreservedEdited")]);
@@ -2383,7 +2447,7 @@ mod tests {
             let project = lyrics_review_project(&root, bytes);
             let result = crate::lyrics_resolution::run(&project, crate::lyrics_resolution::Intent::Auto,
                 &crate::lrclib::Client::with_base_url("http://127.0.0.1:9").unwrap(), &||false, &|_|{})
-                .and_then(|proposal| publish_resolved_lyrics(&project, proposal, cx.text_system(), &||false));
+                .and_then(|proposal| publish_resolved_lyrics(&project, proposal, cx.text_system(), &||false,&||false));
             assert_eq!(result.unwrap_err().to_string(),crate::i18n::t("lyrics.panel.autoPreservedUnreadable"));
             assert_eq!(fs::read(root.join("lyrics.json")).unwrap(), bytes);
         }
@@ -2431,7 +2495,7 @@ mod tests {
             assert_eq!(player.lyrics_editor.read(cx).notice.as_deref(),Some(crate::i18n::tv("lyrics.editor.skippedRows",&[("n","1".into())]).as_str()));
             let proposal=crate::lyrics_resolution::run(&project,crate::lyrics_resolution::Intent::Auto,
                 &crate::lrclib::Client::with_base_url("http://127.0.0.1:9").unwrap(),&||false,&|_|{}).unwrap();
-            let result=publish_resolved_lyrics(&project,proposal,cx.text_system(),&||false).unwrap();
+            let result=publish_resolved_lyrics(&project,proposal,cx.text_system(),&||false,&||false).unwrap();
             player.sidebar_resolved(Ok(result),cx);
             assert!(player.lyrics_sidebar.read(cx).is_ready());
             assert_eq!(player.notice.as_deref(),Some(crate::i18n::t("lyrics.panel.autoPreservedEdited").as_str()));

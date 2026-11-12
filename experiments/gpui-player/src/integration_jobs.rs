@@ -455,7 +455,12 @@ pub(super) fn run(
                                 .send(Event::LyricsAlignmentProgress(epoch, serial, progress));
                         },
                     )
-                    .and_then(|p| publish_resolved_lyrics(&project, p, &text, &cancel));
+                    .and_then(|p| {
+                        // Quit alone stops the ledger retry: a superseded job still
+                        // owes its pending-sync mark for the lyrics it just wrote.
+                        let quit = || !alive.load(Ordering::Acquire);
+                        publish_resolved_lyrics(&project, p, &text, &cancel, &quit)
+                    });
                     let _ = events.send(Event::LyricsResolved(epoch, serial, result));
                     #[cfg(feature = "ui-tests")]
                     let _ = events.send(Event::LyricsJobSettled(epoch, serial));
@@ -665,7 +670,8 @@ pub(super) fn run(
                     let (_,mut document)=crate::lyrics_store::edited_value(None,&lines,credit.as_deref())?;
                     crate::project_lyrics::prepare_masks(&mut document,&text,||!alive.load(Ordering::Acquire)||latest.load(Ordering::Acquire)!=epoch)?;
                     anyhow::ensure!(alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch,"Lyrics Save superseded");
-                    let saved=crate::lyrics_store::save(&dir,expected.as_deref(),&lines,credit.as_deref())?;
+                    // Electron's withDirty: marked before and after the bytes.
+                    let (saved,marked)=save_lyrics_marked(&dir,expected.as_deref(),&lines,credit.as_deref(),&||!alive.load(Ordering::Acquire),&||latest.load(Ordering::Acquire)!=epoch)?;
                     // The explicit editor snapshot owns source and credit;
                     // keep prepared masks while retaining its published metadata.
                     if let Some(persisted)=saved.document {
@@ -680,7 +686,7 @@ pub(super) fn run(
                     }
                     let raw=saved.raw.context("Saved lyrics metadata is missing")?;
                     let mut warnings=vec![];
-                    if let Err(e)=crate::sync_dirty::mark_file(&dir.join("lyrics.json"),"lyrics") {warnings.push(format!("Lyrics were saved, but the pending-sync record could not be written: {e:#}. Save again to retry."));}
+                    if let Err(e)=marked {warnings.push(format!("Lyrics were saved, but the pending-sync mark could not be refreshed (the project is already marked): {e:#}"));}
                     Ok(ResolvedLyrics{document:Arc::new(document),fingerprint:saved.fingerprint,raw,check:None,written:true,cached:false,warnings})
                 })().map_err(|e|format!("{e:#}"));
                 let _ = events.send(Event::LyricsSaved(epoch, serial, result));
@@ -721,4 +727,14 @@ impl Job {
             _ => false,
         }
     }
+}
+
+/// The explicit lyrics write between its two dirty marks. The first mark can
+/// wait for a busy ledger for a long time, so supersession is checked again
+/// inside the write, immediately before any lyrics byte is published.
+pub(super) fn save_lyrics_marked(dir:&Path,expected:Option<&str>,lines:&Value,credit:Option<&str>,quit:&dyn Fn()->bool,superseded:&dyn Fn()->bool)->Result<(crate::lyrics_store::Snapshot,Result<()>)> {
+    crate::sync_dirty::with_dirty(&dir.join("lyrics.json"),true,"lyrics",quit,||{
+        anyhow::ensure!(!quit()&&!superseded(),"Lyrics Save superseded");
+        crate::lyrics_store::save(dir,expected,lines,credit)
+    })
 }
