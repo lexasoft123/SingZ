@@ -85,7 +85,7 @@ class CaptureInput {
     if (normal_) normal_->stop(retain);
   }
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
-  singz::BoxInputMeter meter() const { return box_ ? box_->meter() : singz::BoxInputMeter{}; }
+  singz::BoxInputMeter meter(bool consumePeak = false) const { return box_ ? box_->meter(consumePeak) : singz::BoxInputMeter{}; }
 #endif
   singz::AudioInputStats stats() const {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
@@ -734,6 +734,36 @@ napi_value state(napi_env env, napi_callback_info) {
   return result;
 }
 
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+napi_value microphoneLevelsValue(napi_env env, const singz::BoxInputMeter& levels) {
+  napi_value meter, peak, rms;
+  napi_create_object(env, &meter);
+  set(env, meter, "valid", boolValue(env, levels.valid));
+  set(env, meter, "channels", uintValue(env, levels.channels));
+  setU64(env, meter, "ownershipGeneration", owner.generation);
+  napi_create_array_with_length(env, levels.channels, &peak);
+  napi_create_array_with_length(env, levels.channels, &rms);
+  for (uint32_t channel = 0; channel < levels.channels; ++channel) {
+    napi_set_element(env, peak, channel, numberValue(env, levels.peak[channel]));
+    napi_set_element(env, rms, channel, numberValue(env, levels.rms[channel]));
+  }
+  if (levels.channels) {
+    napi_value indices;
+    napi_create_array_with_length(env, levels.channels, &indices);
+    for (uint32_t channel = 0; channel < levels.channels; ++channel)
+      napi_set_element(env, indices, channel, uintValue(env, levels.channelIndices[channel]));
+    set(env, meter, "channelIndices", indices);
+  }
+  set(env, meter, "peak", peak); set(env, meter, "rms", rms);
+  return meter;
+}
+// Host supervisor only: the public stats path never drains interval peaks.
+napi_value takeMicrophoneLevels(napi_env env, napi_callback_info) {
+  std::lock_guard<std::mutex> lock(owner.mutex);
+  return microphoneLevelsValue(env, owner.input ? owner.input->meter(true) : singz::BoxInputMeter{});
+}
+#endif
+
 napi_value stats(napi_env env, napi_callback_info) {
   std::lock_guard<std::mutex> lock(owner.mutex);
   const auto value = owner.input ? owner.input->stats() : owner.lastStats;
@@ -752,25 +782,7 @@ napi_value stats(napi_env env, napi_callback_info) {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   if (singz::boxRoutingOwnsCapture()) {
     const auto levels = owner.input ? owner.input->meter() : singz::BoxInputMeter{};
-    napi_value meter, peak, rms;
-    napi_create_object(env, &meter);
-    set(env, meter, "valid", boolValue(env, levels.valid));
-    set(env, meter, "channels", uintValue(env, levels.channels));
-    setU64(env, meter, "ownershipGeneration", owner.generation);
-    napi_create_array_with_length(env, levels.channels, &peak);
-    napi_create_array_with_length(env, levels.channels, &rms);
-    for (uint32_t channel = 0; channel < levels.channels; ++channel) {
-      napi_set_element(env, peak, channel, numberValue(env, levels.peak[channel]));
-      napi_set_element(env, rms, channel, numberValue(env, levels.rms[channel]));
-    }
-    if (levels.channels) {
-      napi_value indices;
-      napi_create_array_with_length(env, levels.channels, &indices);
-      for (uint32_t channel = 0; channel < levels.channels; ++channel)
-        napi_set_element(env, indices, channel, uintValue(env, levels.channelIndices[channel]));
-      set(env, meter, "channelIndices", indices);
-    }
-    set(env, meter, "peak", peak); set(env, meter, "rms", rms);
+    const auto meter = microphoneLevelsValue(env, levels);
     set(env, result, "microphoneLevels", meter);
   }
 #endif
@@ -1381,6 +1393,9 @@ napi_value init(napi_env env, napi_value exports) {
       {"captureState", nullptr, state, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureRecording", nullptr, captureRecording, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureStats", nullptr, stats, nullptr, nullptr, nullptr, napi_default, nullptr},
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+      {"takeMicrophoneLevels", nullptr, takeMicrophoneLevels, nullptr, nullptr, nullptr, napi_default, nullptr},
+#endif
       {"audioHostProviders", nullptr, audioHostProviders, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostDevices", nullptr, audioHostDevices, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"beginMonitor", nullptr, beginMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -80,11 +80,13 @@ const empty = (): MicrophoneSnapshot => ({ phase: 'connecting', reason: '', deta
 export class BoxMicrophones {
   private value: MicrophoneSnapshot = empty()
   private listeners = new Set<() => void>()
+  private fastListeners = new Set<() => void>()
   private disposed = false
   private timer?: ReturnType<typeof setInterval>
   private polling = false
   private levelPolling = false
-  private levelPollSeq = 0
+  private nextLevelAttempt = 0
+  private levelFailures = 0
   private pendingEdit = false
   /** Bumped by every edit so a read that started earlier cannot overwrite it. */
   private editSeq = 0
@@ -94,6 +96,7 @@ export class BoxMicrophones {
   private subscribedAt = Number.NEGATIVE_INFINITY
   private migrated = false
   private connected = false
+  private unwatchVisibility?: () => void
   constructor(private readonly api: Api, private readonly now: () => number = Date.now,
     private readonly storage: MicrophoneChannelStorage | undefined = defaultStorage()) {}
 
@@ -108,13 +111,21 @@ export class BoxMicrophones {
     else if (raw === 'quiet' && time - (this.singingAt.get(slot) ?? Number.NEGATIVE_INFINITY) < MICROPHONE_SINGING_HOLD_MS) return 'singing'
     return raw
   }
-  subscribe = (listener: () => void): (() => void) => {
-    const first = !this.listeners.size
-    if (first) { this.subscribedAt = this.now(); this.lastPollStartedAt = Number.NEGATIVE_INFINITY; this.lastLevelPollStartedAt = Number.NEGATIVE_INFINITY }
+  /** State-only observers keep the slow poll; visible meters explicitly own fast demand. */
+  subscribeState = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
-    if (first) this.retime()
-    return () => { this.listeners.delete(listener); if (!this.listeners.size) this.retime() }
+    return () => { this.listeners.delete(listener) }
   }
+  subscribe = (listener: () => void): (() => void) => {
+    const first = !this.fastListeners.size
+    if (first) { this.subscribedAt = this.now(); this.lastPollStartedAt = Number.NEGATIVE_INFINITY; this.lastLevelPollStartedAt = Number.NEGATIVE_INFINITY }
+    this.fastListeners.add(listener)
+    const unsubscribe = this.subscribeState(listener)
+    if (first) this.retime()
+    return () => { unsubscribe(); this.fastListeners.delete(listener); if (!this.fastListeners.size) this.retime() }
+  }
+  private watching = (): boolean => this.fastListeners.size > 0 && (typeof document === 'undefined' || !document.hidden)
+  private visibilityChanged = (): void => { this.retime() }
   private publish(patch: Partial<MicrophoneSnapshot>): void {
     if (Object.entries(patch).every(([key, value]) => Object.is(this.value[key as keyof MicrophoneSnapshot], value))) return
     this.value = { ...this.value, ...patch }
@@ -123,6 +134,11 @@ export class BoxMicrophones {
   connect(): void {
     if (this.disposed || this.connected) return
     this.connected = true
+    if (typeof document !== 'undefined') {
+      const page = document
+      page.addEventListener('visibilitychange', this.visibilityChanged)
+      this.unwatchVisibility = () => page.removeEventListener('visibilitychange', this.visibilityChanged)
+    }
     this.retime()
     void this.poll()
   }
@@ -131,14 +147,14 @@ export class BoxMicrophones {
   private retime(): void {
     if (this.disposed || !this.connected) return
     clearInterval(this.timer)
-    const watching = this.listeners.size > 0
+    const watching = this.watching()
     this.timer = setInterval(() => this.tick(), watching ? MICROPHONE_LEVEL_POLL_MS : MICROPHONE_IDLE_POLL_MS)
     if (watching) this.tick()
   }
   private tick(): void {
     this.expire()
     const time = this.now()
-    if (this.listeners.size) {
+    if (this.watching()) {
       if (time - this.lastLevelPollStartedAt >= MICROPHONE_LEVEL_POLL_MS - 5) void this.pollLevels()
       if (time - this.lastPollStartedAt >= MICROPHONE_STATE_POLL_MS) void this.poll()
     } else if (time - this.lastPollStartedAt >= MICROPHONE_IDLE_POLL_MS - 5) void this.poll()
@@ -149,7 +165,8 @@ export class BoxMicrophones {
   dispose(): void {
     this.disposed = true
     clearInterval(this.timer); this.timer = undefined
-    this.listeners.clear()
+    this.listeners.clear(); this.fastListeners.clear()
+    this.unwatchVisibility?.(); this.unwatchVisibility = undefined
   }
   enabledChannels = (uid: string): number[] => this.value.device === uid && Object.hasOwn(this.value.enabledChannelsByDevice, uid) ? [...this.value.enabledChannelsByDevice[uid]] : []
 
@@ -159,7 +176,7 @@ export class BoxMicrophones {
     if (this.value.levels && time - this.value.levels.receivedAt > MICROPHONE_FRESH_MS) patch.levels = null
     if (this.value.pitch && time - this.value.pitch.receivedAt > MICROPHONE_FRESH_MS) patch.pitch = null
     // A subscribed surface must not keep showing a state the host has not confirmed lately.
-    if (this.listeners.size && this.value.phase !== 'connecting' && this.value.phase !== 'unreachable' &&
+    if (this.watching() && this.value.phase !== 'connecting' && this.value.phase !== 'unreachable' &&
       time - Math.max(this.lastReadAt, this.subscribedAt) > MICROPHONE_FRESH_MS) { patch.phase = 'unreachable'; patch.levels = null; patch.pitch = null }
     if (Object.keys(patch).length) this.publish(patch)
   }
@@ -210,20 +227,24 @@ export class BoxMicrophones {
    * a full read instead of showing levels for a stream that no longer exists. */
   private async pollLevels(): Promise<void> {
     if (this.disposed || !this.value.active) return
-    // A read that hangs must not freeze the fast path: after 500 ms a newer read may start and the old one is ignored.
-    if (this.levelPolling && this.now() - this.lastLevelPollStartedAt < 500) return
+    // The transport settles/times out the real request before a retry may start.
+    if (this.levelPolling || this.now() < this.nextLevelAttempt) return
     this.levelPolling = true
-    const mine = ++this.levelPollSeq
     this.lastLevelPollStartedAt = this.now()
     const seq = this.editSeq
     try {
       const result = await this.api.microphoneLevels()
-      if (this.disposed || seq !== this.editSeq || mine !== this.levelPollSeq) return
-      if (!result.ok) { this.unreachable(result.error); return }
+      if (this.disposed || seq !== this.editSeq) return
+      if (!result.ok) { this.levelFailed(result.error); return }
+      this.levelFailures = 0; this.nextLevelAttempt = 0
       this.applyLevels(result.value)
     } catch (error) {
-      if (!this.disposed && seq === this.editSeq && mine === this.levelPollSeq) this.unreachable(String(error))
-    } finally { if (mine === this.levelPollSeq) this.levelPolling = false }
+      if (!this.disposed && seq === this.editSeq) this.levelFailed(String(error))
+    } finally { this.levelPolling = false }
+  }
+  private levelFailed(detail: string): void {
+    this.nextLevelAttempt = this.now() + [1000, 2000, 4000, 5000][Math.min(this.levelFailures++, 3)]
+    this.unreachable(detail)
   }
   private applyLevels(host: BoxMicrophoneLevels): void {
     const active = this.value.active
@@ -376,9 +397,9 @@ export function useMicrophoneSnapshot(source?: Pick<BoxMicrophones, 'subscribe' 
 
 /** The slot's state word as a primitive: the component re-renders when the word
  * changes, not on every level reading (those go to the meter by `push`). */
-export function useMicrophoneSlotState(source: Pick<BoxMicrophones, 'subscribe' | 'slotState'> | undefined, snapshot: MicrophoneSnapshot | undefined, slot: number): MicrophoneMeterState {
+export function useMicrophoneSlotState(source: Pick<BoxMicrophones, 'subscribe' | 'subscribeState' | 'slotState'> | undefined, snapshot: MicrophoneSnapshot | undefined, slot: number, visible = true): MicrophoneMeterState {
   const live = snapshot ? undefined : source
   const get = (): MicrophoneMeterState => live ? live.slotState(slot) : 'unavailable'
-  const value = useSyncExternalStore(live?.subscribe ?? noSubscription, get, get)
+  const value = useSyncExternalStore((visible ? live?.subscribe : live?.subscribeState) ?? noSubscription, get, get)
   return snapshot ? microphoneMeterState(microphoneSlotStatus(snapshot, slot)) : value
 }

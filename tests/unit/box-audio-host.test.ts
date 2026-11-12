@@ -23,6 +23,35 @@ function fake() {
   return { runtime, calls }
 }
 describe.skipIf(process.platform === 'win32')('persistent Box audio control', () => {
+  it('bounds and coalesces stalled meter reads while transport controls remain available', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-meter-stall-'))
+    const { runtime } = fake()
+    let release!: (value: any) => void
+    const levels = vi.fn(() => new Promise<any>(resolve => { release = resolve }))
+    runtime.microphones = { levels, snapshot: async () => ({} as any), setSelection: async () => ({} as any) }
+    const host = await startBoxAudioHost(join(dir, 'audio.sock'), runtime)
+    const client = createBoxAudioClient(join(dir, 'audio.sock'), { timeoutMs: 700 })
+    try {
+      for (let retry = 0; retry < 3; ++retry) {
+        let meterSettled = false
+        const reading = expect(client.call('service', 'microphoneLevels', []).finally(() => { meterSettled = true })).rejects.toThrow('levels timed out')
+        await vi.waitFor(() => expect(levels).toHaveBeenCalledTimes(1))
+        // This must complete while the meter's underlying native promise is unresolved.
+        expect(await client.call('owner', 'startPlayback', [1, '1'])).toEqual({ ok: true })
+        expect(meterSettled).toBe(false)
+        await reading
+      }
+      expect(levels).toHaveBeenCalledTimes(1)
+      release({ generation: '1', levels: null })
+      await new Promise<void>(resolve => setImmediate(resolve))
+      levels.mockResolvedValueOnce({ generation: '1', levels: null })
+      expect(await client.call('service', 'microphoneLevels', [])).toMatchObject({ generation: '1', levels: null })
+      expect(levels).toHaveBeenCalledTimes(2)
+      runtime.owner.takeMicrophoneLevels = vi.fn()
+      await expect(client.call('owner', 'takeMicrophoneLevels', [])).rejects.toThrow('Unknown Box audio command')
+      expect(runtime.owner.takeMicrophoneLevels).not.toHaveBeenCalled()
+    } finally { release?.({ generation: '1', levels: null }); await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
   it('preserves optional trailing arguments through the real JSON client/server boundary', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-audio-optional-'))
     const { runtime } = fake()

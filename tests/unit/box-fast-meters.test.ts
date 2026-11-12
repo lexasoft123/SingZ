@@ -4,6 +4,9 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { prepareBoxLocale } from '../../src/renderer/src/box/i18n'
+import SongOutput from '../../src/renderer/src/components/SongOutput'
+import { PlayerMicrophoneMeters } from '../../src/renderer/src/box/Player'
+import type { MultitrackEngine } from '../../src/renderer/src/audio/engine'
 import { MicrophoneMeter } from '../../src/renderer/src/box/MicrophoneMeter'
 import { MICROPHONE_LEVEL_POLL_MS, MICROPHONE_SINGING_HOLD_MS, microphoneLevelDb, microphoneSlotLevel, useMicrophoneSnapshot } from '../../src/renderer/src/box/microphones'
 import { MicrophoneAnalysisSupervisor, type MicrophoneAnalysisOwner } from '../../src/main/box-audio/microphones'
@@ -15,11 +18,13 @@ import { device, fakeHost, newStore } from './box-microphone-host-fake'
 let frames = new Map<number, FrameRequestCallback>(), frameId = 0, clock = 0
 beforeEach(async () => {
   vi.useFakeTimers(); vi.setSystemTime(1_000_000); await prepareBoxLocale('en')
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+  document.body.classList.remove('modal-open')
   frames = new Map(); frameId = 0; clock = 0
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
 })
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); document.body.classList.remove('modal-open') })
 /** Run the meter's rAF loop for `ms`, 16 ms a frame. */
 function paint(ms: number): void {
   for (let spent = 0; spent < ms; spent += 16) {
@@ -73,17 +78,90 @@ describe('fresh level reads (no 1 s staleness)', () => {
 const microphoneChannelPeak = (store: ReturnType<typeof newStore>, channel: number): number | null => microphoneSlotLevel(store.getSnapshot(), channel)
 
 describe('stalled and stale level reads', () => {
-  it('recovers 20 Hz levels after one level read hangs', async () => {
-    const host = fakeHost(); const store = newStore(host)
+  it('backs off repeated settled failures instead of retrying with every state recovery', async () => {
+    const host = fakeHost(), store = newStore(host)
+    const attempts: number[] = []
+    host.api.microphoneLevels.mockImplementation(async () => { attempts.push(Date.now()); return { ok: false, error: 'timeout' } })
     store.connect(); await vi.advanceTimersByTimeAsync(0)
     const unsubscribe = store.subscribe(() => undefined)
-    await vi.advanceTimersByTimeAsync(200)
-    host.api.microphoneLevels.mockImplementationOnce(() => new Promise(() => undefined))
-    await vi.advanceTimersByTimeAsync(1500)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(attempts).toHaveLength(3)
+    expect(attempts[1] - attempts[0]).toBeGreaterThanOrEqual(1000)
+    expect(attempts[2] - attempts[1]).toBeGreaterThanOrEqual(2000)
+    unsubscribe(); store.dispose()
+  })
+  it('keeps one real read in flight and retries only after settlement with backoff', async () => {
+    const host = fakeHost(); const store = newStore(host)
+    store.connect(); await vi.advanceTimersByTimeAsync(0)
+    let reject!: (reason: Error) => void
+    host.api.microphoneLevels.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
+    const unsubscribe = store.subscribe(() => undefined)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(host.api.microphoneLevels).toHaveBeenCalledTimes(1)
+    reject(new Error('timeout')); await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(950)
+    expect(host.api.microphoneLevels).toHaveBeenCalledTimes(1)
     host.patch({ levels: { channelIndices: [0, 1], peak: [0.7, 0.5], rms: [0.1, 0.1] } })
-    await vi.advanceTimersByTimeAsync(60)
+    await vi.advanceTimersByTimeAsync(1100)
     expect(microphoneChannelPeak(store, 0)).toBe(0.7)
     unsubscribe(); store.dispose()
+  })
+
+})
+
+describe('meter visibility demand and cleanup', () => {
+  it('keeps hidden state-only observers running across the slow polling interval', async () => {
+    const host = fakeHost(), store = newStore(host)
+    store.connect(); await vi.advanceTimersByTimeAsync(0)
+    const phases: string[] = []
+    const unsubscribe = store.subscribeState(() => phases.push(store.getSnapshot().phase))
+    await vi.advanceTimersByTimeAsync(6100)
+    expect(phases).not.toContain('unreachable')
+    expect(host.api.microphoneLevels).not.toHaveBeenCalled()
+    unsubscribe(); store.dispose()
+  })
+  it('auto-hide keeps slow state reads, mixer demand resumes fast reads, and document hiding stops them', async () => {
+    const host = fakeHost(), store = newStore(host)
+    store.connect(); await vi.advanceTimersByTimeAsync(0)
+    const container = document.createElement('div'); document.body.append(container)
+    const root = createRoot(container)
+    const render = (visible: boolean) => act(() => root.render(createElement(PlayerMicrophoneMeters, { microphones: store, visible })))
+    render(true); await read(150); paint(150)
+    expect(host.api.microphoneLevels).toHaveBeenCalled(); expect(frames.size).toBeGreaterThan(0)
+    render(false); host.api.microphoneLevels.mockClear(); host.api.microphones.mockClear()
+    await read(4100); paint(100)
+    expect(host.api.microphoneLevels).not.toHaveBeenCalled()
+    expect(host.api.microphones).toHaveBeenCalled(); expect(frames.size).toBe(0)
+    // A visible mixer uses the same explicit fast-demand subscription.
+    const closeMixer = store.subscribe(() => undefined)
+    await read(100); expect(host.api.microphoneLevels).toHaveBeenCalled()
+    closeMixer(); render(true)
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    host.api.microphoneLevels.mockClear(); await read(4100); paint(100)
+    expect(host.api.microphoneLevels).not.toHaveBeenCalled(); expect(frames.size).toBe(0)
+    hidden.mockReturnValue(false)
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    await read(100); paint(100)
+    expect(host.api.microphoneLevels).toHaveBeenCalled(); expect(frames.size).toBeGreaterThan(0)
+    act(() => root.unmount()); store.dispose(); container.remove()
+    expect(frames.size).toBe(0); expect(vi.getTimerCount()).toBe(0)
+  })
+  it('suspends the output meter immediately while a modal covers the app', async () => {
+    const container = document.createElement('div'); document.body.append(container)
+    const root = createRoot(container)
+    const engine = { readOutputPeak: vi.fn(() => ({ peak: .9, clipped: false })) } as unknown as MultitrackEngine
+    act(() => root.render(createElement(SongOutput, { engine, volume: 1, onVolume: () => {} })))
+    await read(100); paint(100); expect(frames.size).toBeGreaterThan(0)
+    await act(async () => { document.body.classList.add('modal-open') })
+    const count = vi.mocked(engine.readOutputPeak).mock.calls.length
+    expect(frames.size).toBe(0)
+    await read(2000); paint(2000)
+    expect(vi.mocked(engine.readOutputPeak).mock.calls.length).toBe(count); expect(frames.size).toBe(0)
+    await act(async () => { document.body.classList.remove('modal-open') })
+    await read(100); paint(100); expect(frames.size).toBeGreaterThan(0)
+    act(() => root.unmount()); container.remove()
+    expect(frames.size).toBe(0); expect(vi.getTimerCount()).toBe(0)
   })
 })
 
@@ -151,6 +229,7 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
       begin: vi.fn(async (_id, config, next) => { generation = next; return { ok: true, state: 'running', deviceUid: config.deviceUid, inputChannel: config.inputChannel } as CaptureStartResult }),
       cancel: vi.fn(async () => { generation = ''; return { ok: true, cancelled: true } }),
       state: vi.fn(async () => ({ state: 'running' as const, ownershipGeneration: generation, error: '' })),
+      takeMicrophoneLevels: vi.fn(async () => ({ ...meters, ownershipGeneration: generation })),
       stats: vi.fn(async () => ({ microphoneLevels: { ...meters, ownershipGeneration: generation } }) as unknown as CaptureStats)
     } satisfies MicrophoneAnalysisOwner
     const supervisor = new MicrophoneAnalysisSupervisor({ epoch: 'epoch', owner, store: { load: async () => structuredClone(doc), save: async () => {} }, now: Date.now })
@@ -158,14 +237,14 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
   }
   it('reads native levels fresh on every call, with no 1 s cache and no state read', async () => {
     const f = fixture(); await f.supervisor.ready
-    f.owner.state.mockClear(); f.owner.stats.mockClear()
+    f.owner.state.mockClear(); f.owner.stats.mockClear(); f.owner.takeMicrophoneLevels.mockClear()
     const first = await f.supervisor.levels()
     expect(first).toMatchObject({ epoch: 'epoch', generation: f.generation(), levels: { channelIndices: [0, 1], peak: [.5, .4] } })
     f.meters.peak = [.9, .8]
     // 50 ms later, well inside the old 1 s supervisor tick.
     await vi.advanceTimersByTimeAsync(50)
     expect((await f.supervisor.levels()).levels?.peak).toEqual([.9, .8])
-    expect(f.owner.stats).toHaveBeenCalledTimes(2); expect(f.owner.state).not.toHaveBeenCalled()
+    expect(f.owner.takeMicrophoneLevels).toHaveBeenCalledTimes(2); expect(f.owner.stats).not.toHaveBeenCalled(); expect(f.owner.state).not.toHaveBeenCalled()
     await f.supervisor.dispose()
   })
   it('keeps the loudest peak since the last fast read even when a snapshot read lands in between', async () => {
@@ -187,7 +266,7 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
   })
   it('returns no levels for a foreign generation, an invalid meter or a different channel width', async () => {
     const f = fixture(); await f.supervisor.ready
-    f.owner.stats.mockResolvedValueOnce({ microphoneLevels: { ...f.meters, ownershipGeneration: 'old' } } as never)
+    f.owner.takeMicrophoneLevels.mockResolvedValueOnce({ ...f.meters, ownershipGeneration: 'old' })
     expect((await f.supervisor.levels()).levels).toBeNull()
     f.meters.valid = false
     expect((await f.supervisor.levels()).levels).toBeNull()

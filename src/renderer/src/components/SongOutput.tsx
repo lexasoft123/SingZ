@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, PeakMeter, type PeakMeterHandle } from '@singz/ui'
 import type { MultitrackEngine } from '../audio/engine'
 import { formatSongVolume, SONG_VOLUME_MAX_DB, SONG_VOLUME_MIN_DB, songVolumeFromDb, songVolumeToDb } from '../audio/song-volume'
-import { modalCoversApp } from '../model'
+import { useMeterVisibility } from '../meter-visibility'
 import { t } from '../i18n'
 
 function Speaker({ muted = false }: { muted?: boolean }): React.JSX.Element {
@@ -19,6 +19,7 @@ export default function SongOutput({ engine, volume, onVolume }: {
   onVolume: (gain: number) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
+  const meterVisible = useMeterVisibility(true, true)
   const root = useRef<HTMLDivElement>(null)
   const preMute = useRef(1)
   const clipped = useRef(false)
@@ -28,11 +29,11 @@ export default function SongOutput({ engine, volume, onVolume }: {
   if (volume > 0) preMute.current = volume
 
   useEffect(() => {
+    if (!meterVisible) return
     let held = 0
     const timer = window.setInterval(() => {
       const el = root.current
       if (!el) return
-      if (modalCoversApp()) { miniMeter.current?.push(-Infinity); fullMeter.current?.push(-Infinity); return }
       const reading = engine.readOutputPeak()
       if (reading.clipped || (reading.clipCount !== undefined && reading.clipCount !== previousCount.current && reading.clipCount > 0)) clipped.current = true
       previousCount.current = reading.clipCount ?? 0
@@ -51,7 +52,7 @@ export default function SongOutput({ engine, volume, onVolume }: {
       if (clip) clip.setAttribute('aria-pressed', String(clipped.current))
     }, 50)
     return () => window.clearInterval(timer)
-  }, [engine])
+  }, [engine, meterVisible])
 
   useEffect(() => {
     if (!open) return
@@ -72,7 +73,7 @@ export default function SongOutput({ engine, volume, onVolume }: {
       title={t('player.transport.volumeAt', { db: formatSongVolume(volume) })} onClick={() => setOpen(!open)}>
       <Speaker muted={volume === 0} />
       <span className="song-output-trigger-value">{formatSongVolume(volume)}</span>
-      <span className="output-mini-track"><PeakMeter ref={miniMeter} db={-Infinity} mini /></span>
+      <span className="output-mini-track"><PeakMeter ref={miniMeter} db={-Infinity} enabled={meterVisible} mini /></span>
       <span className="output-clip-dot" />
     </Button>
     {open && <div className="train-pop vol-pop song-output-pop" role="dialog" aria-label={t('player.volume.title')}>
@@ -104,7 +105,7 @@ export default function SongOutput({ engine, volume, onVolume }: {
           <button type="button" className="output-clip-reset" aria-pressed="false" title={t('player.volume.peakTitle')}
             onClick={() => { clipped.current = false; previousCount.current = engine.readOutputPeak().clipCount ?? 0; root.current?.classList.remove('has-clip') }}><i />{t('player.volume.clipped')}</button>
         </div>
-        <div className="output-meter-track"><PeakMeter ref={fullMeter} db={-Infinity} /></div>
+        <div className="output-meter-track"><PeakMeter ref={fullMeter} db={-Infinity} enabled={meterVisible} /></div>
         <div className="output-meter-ticks"><span>−60</span><span>−36</span><span>−18</span><span>−6</span><span>0</span></div>
       </div>
       <p className="output-help">{t('player.volume.caption')}</p>

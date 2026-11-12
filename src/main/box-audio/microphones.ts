@@ -11,6 +11,7 @@ export interface MicrophoneAnalysisOwner {
   cancel(id: number, generation: string): Awaitable<{ ok: boolean; cancelled?: boolean; error?: string }>
   state(): Awaitable<{ state: CaptureStateName; ownershipGeneration: string; error: string }>
   stats(): Awaitable<CaptureStats>
+  takeMicrophoneLevels(): Awaitable<CaptureStats['microphoneLevels']>
 }
 interface Options {
   epoch: string
@@ -20,8 +21,8 @@ interface Options {
   now?: () => number
   log?: (message: string) => void
 }
-/** Analysis owns a private tap only. All control operations, including reads,
- * share one queue; native cancel joins the reader before the next begin. */
+/** Analysis owns a private tap only. Controls and full snapshots share one
+ * queue; fast levels are generation-fenced. Native cancel joins before begin. */
 export class MicrophoneAnalysisSupervisor {
   readonly ready: Promise<void>
   private chain: Promise<unknown> = Promise.resolve()
@@ -97,8 +98,8 @@ export class MicrophoneAnalysisSupervisor {
     this.value.generation = '0'; this.value.active = null; this.value.levels = null; this.value.pitch = null
     this.pitch = null; this.peakSinceFast = null; this.runningAt = null; this.offlineAt = null; this.startedRunning = false
   }
-  /** Validated copy of a native level read for `generation`, else null. Native
-   * `peak` is the loudest block since the previous native read; every read also
+  /** Validated copy of a native level read for `generation`, else null. The fast native
+   * read drains interval peaks; diagnostics/snapshots observe only the latest block. Every read also
    * folds into `peakSinceFast`, so a snapshot or tick read can never swallow a
    * transient that the 20 Hz level path has not delivered yet. */
   private readLevels(levels: CaptureStats['microphoneLevels'], generation: string): MicrophoneLevelValues | null {
@@ -110,7 +111,7 @@ export class MicrophoneAnalysisSupervisor {
     this.peakSinceFast = { generation, peak: peak.slice(), at: this.now() }
     return { channelIndices: [...levels.channelIndices], peak, rms: [...levels.rms] }
   }
-  /** Fresh level read for the renderer's 20 Hz meters: one native stats read, no
+  /** Fresh level read for the renderer's 20 Hz meters: one native meter read, no
    * state/selection/pitch work and no whole-snapshot clone. It is read-only, so it
    * does not join the control queue; a generation change during the await is
    * caught by the ownership-generation check. Peak is the loudest block since the
@@ -120,7 +121,7 @@ export class MicrophoneAnalysisSupervisor {
     const empty = { epoch: this.options.epoch, generation, levels: null }
     if (this.disposed || generation === '0' || this.value.phase !== 'running' || !this.value.active) return empty
     const width = this.value.active.enabledChannels.length
-    const levels = this.readLevels((await this.options.owner.stats()).microphoneLevels, generation)
+    const levels = this.readLevels(await this.options.owner.takeMicrophoneLevels(), generation)
     if (this.value.generation !== generation || !levels || levels.peak.length !== width) return empty
     this.peakSinceFast = null
     return { epoch: this.options.epoch, generation, levels }

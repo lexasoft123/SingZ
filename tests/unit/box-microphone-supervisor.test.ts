@@ -19,6 +19,7 @@ function fixture(document: MicrophoneDocument | null = doc()) {
     }),
     cancel: vi.fn(async (id, next) => { expect(id).toBe(2); expect(next).toBe(generation); calls.push('cancel'); generation = ''; return { ok: true, cancelled: true } }),
     state: vi.fn(async () => ({ state, ownershipGeneration: generation, error: '' })),
+    takeMicrophoneLevels: vi.fn(async () => ({ ...meters, ownershipGeneration: generation })),
     stats: vi.fn(async () => ({ microphoneLevels: { ...meters, ownershipGeneration: generation } }) as unknown as CaptureStats),
     beginMonitor: vi.fn(), configureMicrophoneMix: vi.fn(), routingRequest: vi.fn()
   } satisfies MicrophoneAnalysisOwner & Record<string, unknown>

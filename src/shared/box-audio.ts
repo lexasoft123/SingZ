@@ -3,6 +3,8 @@ export const BOX_AUDIO_VERSION = 1
 export const BOX_AUDIO_REQUEST_BYTES = 1024 * 1024
 export const BOX_AUDIO_REPLY_BYTES = 16 * 1024 * 1024
 export const BOX_AUDIO_PENDING = 64
+/** Meter queries must settle quickly without occupying the transport control queue. */
+export const BOX_MICROPHONE_LEVEL_TIMEOUT_MS = 500
 export type BoxAudioTarget = 'owner' | 'binding' | 'export' | 'routing' | 'service'
 export interface BoxAudioCommand {
   version: 1; type: 'request'; epoch: string; id: string

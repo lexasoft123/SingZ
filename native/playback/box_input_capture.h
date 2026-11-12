@@ -30,7 +30,8 @@ class BoxInputCapture final {
                         std::span<const uint32_t> enabledChannels = {});
   void stop(bool retainPrepared = false);
   AudioInputStats stats() const;
-  BoxInputMeter meter() const;
+  // Diagnostics observe the latest block; only the fast meter drains the hold.
+  BoxInputMeter meter(bool consumePeak = false) const;
   AudioInputState state() const;
   std::string lastError() const;
  private:

@@ -277,6 +277,7 @@ struct Hardware {
   std::atomic<unsigned> opens{0}, stops{0}, live{0}, maximumLive{0},
       outputOpens{0};
   std::atomic<bool> supply{true}, offline{false};
+  std::atomic<float> amplitude{0.2f};
 };
 class Host final : public AudioHostBackend {
 public:
@@ -379,7 +380,7 @@ private:
         for (uint32_t sample = 0; sample < kFrames; ++sample) {
           const double time = double(frame + sample) / kRate;
           pcm[0][sample] =
-              float(0.2 * std::sin(2 * 3.141592653589793 * 440 * time));
+              float(hardware_->amplitude.load() * std::sin(2 * 3.141592653589793 * 440 * time));
           pcm[1][sample] =
               float(0.1 * std::sin(2 * 3.141592653589793 * 220 * time));
           for (uint32_t channel = 2; channel < kChannels; ++channel)
@@ -538,11 +539,27 @@ int main() {
   CHECK(levels.peak[1] > 0.08f && levels.peak[1] < 0.12f);
   CHECK(levels.rms[0] > 0.11f && levels.rms[0] < 0.17f);
   CHECK(levels.rms[1] > 0.05f && levels.rms[1] < 0.09f);
-  // The first read consumed the since-last-read peak; an immediate second read
-  // must still report at least the latest block (never an emptied hold).
-  const auto again = capture.meter();
-  CHECK(again.valid && again.peak[0] > 0.18f && again.peak[0] < 0.22f &&
-        again.peak[1] > 0.08f && again.peak[1] < 0.12f);
+  // Prime the consuming reader, then let a transient finish before it polls.
+  CHECK(capture.meter(true).valid);
+  hardware->amplitude.store(.95f);
+  eventually([&] { return capture.meter().peak[0] > .9f; });
+  hardware->amplitude.store(.01f);
+  eventually([&] { const auto m = capture.meter(); return m.valid && m.peak[0] < .02f; });
+  // Snapshot/tick/diagnostic observations must never drain the fast reader's peak.
+  for (unsigned reader = 0; reader < 8; ++reader)
+    CHECK(capture.meter().peak[0] < .02f);
+  const auto transient = capture.meter(true);
+  CHECK(transient.valid && transient.peak[0] > .9f && transient.peak[0] < .96f);
+  const auto quiet = capture.meter(true);
+  CHECK(quiet.valid && quiet.peak[0] < .02f && quiet.peak[1] > .08f);
+  // A stopped fast reader must not replay an ancient transient on return.
+  hardware->amplitude.store(.95f);
+  eventually([&] { return capture.meter().peak[0] > .9f; });
+  hardware->amplitude.store(.01f);
+  eventually([&] { return capture.meter().peak[0] < .02f; });
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  CHECK(capture.meter(true).peak[0] < .02f);
+  hardware->amplitude.store(.2f);
   // A private subscription must survive a physical failure: LoopZ reopens
   // underneath the held reader, which publishes no fabricated offline levels.
   const auto opensBeforeLoss = hardware->opens.load();

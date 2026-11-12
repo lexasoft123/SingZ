@@ -40,9 +40,9 @@ struct BoxInputCapture::Impl {
   mutable std::mutex mutex;
   std::condition_variable changed;
   std::string error;
-  std::atomic<uint64_t> meterSequence{0}, meterAt{0};
+  std::atomic<uint64_t> meterSequence{0}, meterAt{0}, meterReadAt{0};
   std::array<std::atomic<float>, 64> peak{}, rms{};
-  // Loudest block peak since the previous meter() read, so a 20 Hz reader does not
+  // Loudest block peak since the previous consuming meter read, so a 20 Hz reader does not
   // miss transients that fall between two blocks it happens to sample.
   std::array<std::atomic<float>, 64> peakSince{};
   void message(std::string text) {
@@ -85,6 +85,8 @@ struct BoxInputCapture::Impl {
           previousEpoch = slot->epoch; previousSerial = slot->serial;
           meterSequence.fetch_add(1, std::memory_order_acq_rel);
           std::atomic_thread_fence(std::memory_order_release);
+          const auto readAt = meterReadAt.load(std::memory_order_relaxed);
+          const bool holding = current >= readAt && current - readAt < 250000000;
           for (uint32_t c = 0; c < enabledCount; ++c) {
             float high = 0;
             double sum = 0;
@@ -97,6 +99,8 @@ struct BoxInputCapture::Impl {
               sum += double(value) * value;
             }
             peak[c].store(high, std::memory_order_relaxed);
+            // With no fast reader, retain only current input rather than replaying old transients.
+            if (!holding) peakSince[c].store(high, std::memory_order_relaxed);
             float seen = peakSince[c].load(std::memory_order_relaxed);
             while (high > seen && !peakSince[c].compare_exchange_weak(seen, high, std::memory_order_relaxed)) {}
             rms[c].store(float(std::sqrt(sum / bus.frames)), std::memory_order_relaxed);
@@ -199,6 +203,7 @@ AudioInputResult BoxInputCapture::start(const AudioInputConfig &config,
     impl_->stopping = false;
     impl_->meterAt = 0;
     impl_->meterSequence = 0;
+    impl_->meterReadAt = 0;
     for (auto& held : impl_->peakSince) held.store(0, std::memory_order_relaxed);
     impl_->message({});
     impl_->state = AudioInputState::Starting;
@@ -248,7 +253,7 @@ AudioInputStats BoxInputCapture::stats() const {
   return {impl_->blocks.load(), impl_->delivered.load(), impl_->missed.load(),
           impl_->wakeups.load()};
 }
-BoxInputMeter BoxInputCapture::meter() const {
+BoxInputMeter BoxInputCapture::meter(bool consumePeak) const {
   BoxInputMeter result;
   if (!impl_->tap.id ||
       impl_->state.load(std::memory_order_acquire) != AudioInputState::Running)
@@ -268,9 +273,12 @@ BoxInputMeter BoxInputCapture::meter() const {
     result.valid = updated && now >= updated && now - updated < 500000000;
     std::atomic_thread_fence(std::memory_order_acquire);
     if (sequence == impl_->meterSequence.load(std::memory_order_acquire)) {
-      // Report the loudest block since the last read (never below the latest block).
-      for (uint32_t c = 0; c < result.channels; ++c)
-        result.peak[c] = std::max(result.peak[c], impl_->peakSince[c].exchange(0.0f, std::memory_order_relaxed));
+      // Report the loudest block since the last consuming read (never below the latest block).
+      if (consumePeak && result.valid) {
+        impl_->meterReadAt.store(now, std::memory_order_relaxed);
+        for (uint32_t c = 0; c < result.channels; ++c)
+          result.peak[c] = std::max(result.peak[c], impl_->peakSince[c].exchange(0.0f, std::memory_order_relaxed));
+      }
       return result;
     }
   }
