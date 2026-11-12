@@ -11,6 +11,7 @@ import { catalogFocusTarget, focusPrimaryNavigation, moveSpatialFocus, pickMixer
 import { LatestOpenIntent } from './open-intent'
 import { Player } from './Player'
 import { BoxMicrophones } from './microphones'
+import { clampTranspose } from './key-change'
 import { Mixer, type MixerTab } from './Mixer'
 import { Queue } from './Queue'
 import { playbackStatus } from './playback-status'
@@ -537,6 +538,21 @@ export default function BoxApp(): React.JSX.Element {
     if (!result.ok && !result.cancelled && result.error) setActionError(result.error)
   }, [collection])
 
+  /** Optimistic key while a change is being saved, so quick presses stack instead of reading a stale saved value. */
+  const [keyDraft, setKeyDraft] = useState<{ dir: string; value: number } | null>(null)
+  const changeKey = useCallback(async (entry: CollectionEntry, semitones: number) => {
+    const local = entry.local
+    const settings = collection.getSnapshot().rows[entry.id]?.inspection?.project?.settings
+    if (!local || !settings) return
+    const value = clampTranspose(semitones)
+    setActionError(null)
+    setKeyDraft({ dir: local.dir, value })
+    const result = await transport.saveSongTranspose(local, settings, value)
+    if (!result.ok) setActionError(result.error)
+    else if (transport.getSnapshot().active?.item.dir !== local.dir) await collection.verifyCached(entry.id)
+    setKeyDraft(current => current?.dir === local.dir && current.value === value ? null : current)
+  }, [collection, transport])
+
   const commitQueue = useCallback(async (refs: BoxQueueRef[]): Promise<boolean> => {
     if (!queueStore.commit(refs)) return false
     phoneProjection.update(refs, true)
@@ -985,7 +1001,7 @@ export default function BoxApp(): React.JSX.Element {
           entry={selectedEntry}
           inspection={selectedRow?.inspection}
           metadata={selectedRow?.metadata}
-          transpose={active?.item.dir === selectedEntry.local?.dir ? snapshot.transpose : selectedRow?.inspection?.project?.settings.transpose ?? 0}
+          transpose={keyDraft && keyDraft.dir === selectedEntry.local?.dir ? keyDraft.value : active?.item.dir === selectedEntry.local?.dir ? snapshot.transpose : selectedRow?.inspection?.project?.settings.transpose ?? 0}
           queued={queueHasEntry(collectionSnapshot.entries, queueRefs, selectedEntry)}
           busy={busyDir === selectedEntry.local?.dir || snapshot.loadingName === selectedEntry.name}
           error={snapshot.lastError}
@@ -997,6 +1013,7 @@ export default function BoxApp(): React.JSX.Element {
           onVerify={() => { void prepare(selectedEntry) }}
           onCancelDownload={() => { void collection.cancelDownload() }}
           onToggleQueue={() => toggleQueue(selectedEntry)}
+          onTranspose={semitones => { void changeKey(selectedEntry, semitones) }}
         />}
         {route === 'account' && <Account
           auth={collectionSnapshot.auth}

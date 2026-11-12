@@ -14,6 +14,7 @@ import { desktopLaneMeasureApplies, readLanes } from '../audio/lane-measure'
 import { orderedStems } from '../model'
 import { sanitizeSongVolume } from '../audio/song-volume'
 import { PlaybackOutputArbiter, PlaybackOutputSelectionError } from '../audio/output-routing'
+import { clampTranspose } from './key-change'
 import { t } from './i18n'
 import { tSettings } from './settings-i18n'
 import { inspectBoxProject, projectMetadata, settingsWithTracks, type BoxProjectMetadata } from './project'
@@ -804,6 +805,26 @@ export class BoxTransport {
 
   setMasterVolume(volume: number): void {
     void this.recordControl(() => this.engine.setMasterVolumeAccepted(sanitizeSongVolume(volume))).catch(() => undefined)
+  }
+
+  /** Key change for the loaded song: same engine path and project save as the mixer. */
+  setTranspose(semitones: number): Promise<void> {
+    const target = clampTranspose(semitones)
+    return this.recordControl(() => this.engine.setTranspose(target), true)
+  }
+
+  /** Key change for a song that is not loaded: saves its project settings only. */
+  async saveSongTranspose(item: ProjectListItem, settings: ProjectSettings, semitones: number): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (this.active?.item.dir === item.dir) {
+      try { await this.setTranspose(semitones); return { ok: true } } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
+    }
+    const next = { ...settings, transpose: clampTranspose(semitones) }
+    return this.enqueueSave(async () => {
+      try {
+        const result = await this.api.saveProject(item.songPath, item.name, next)
+        return result.ok ? { ok: true as const } : { ok: false as const, error: result.error }
+      } catch (error) { return { ok: false as const, error: error instanceof Error ? error.message : String(error) } }
+    })
   }
 
   async controllerMix(command: { type: 'volume'; target: string; value: number } | { type: 'mute' | 'solo'; target: string; value: boolean }): Promise<void> {

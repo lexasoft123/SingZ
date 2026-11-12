@@ -40,9 +40,10 @@ describe('mixer private microphone input observation', () => {
   })
   it('keeps mic gain/mute/solo unavailable while clearly labeling real analysis input levels', () => {
     const html = row(snapshot())
-    expect(html).toContain('role="meter"'); expect(html).toContain('-12.0 dBFS')
-    expect(html).toContain('Hardware monitoring'); expect(html).toContain('On the mixer'); expect(html).toContain('Analysis input level')
-    expect(html).not.toContain('<input'); expect(html).not.toContain('<button'); expect(html).not.toContain('No meter available')
+    expect(html).toContain('role="meter"'); expect(html).toContain('>Singing<')
+    // Plain words, not engineering text, on the TV.
+    for (const jargon of ['dBFS', 'Hardware monitoring', 'On the mixer', 'Analysis input level']) expect(html).not.toContain(jargon)
+    expect(html).not.toContain('<input'); expect(html).not.toContain('<button')
   })
   it.each(['absent', 'stale', 'generation', 'invalid-level', 'error'] as const)('shows unavailable instead of fabricated silence for %s', bad => {
     const value = snapshot()
@@ -52,12 +53,12 @@ describe('mixer private microphone input observation', () => {
     if (bad === 'invalid-level') value.levels!.peak[0] = Number.NaN
     if (bad === 'error') { value.phase = 'error'; value.reason = 'internal' }
     const html = row(value)
-    expect(html).not.toContain('role="meter"'); expect(html).toContain('>Unavailable<'); expect(html).toContain('No meter available')
+    expect(html).not.toContain('role="meter"'); expect(html).toContain('>Unavailable<')
   })
   it.each([
     ['off', { phase: 'off' as const, device: null, active: null, levels: null }, 'Off'],
     ['starting', { phase: 'starting' as const, active: null, levels: null }, 'Starting…'],
-    ['waiting', { phase: 'waiting' as const, reason: 'no-device' as const, active: null, levels: null }, 'No input']
+    ['waiting', { phase: 'waiting' as const, reason: 'no-device' as const, active: null, levels: null }, 'Not connected']
   ])('says %s instead of Unavailable when nothing is wrong', (_name, patch, text) => {
     const html = row({ ...snapshot(), ...patch })
     expect(html).not.toContain('role="meter"'); expect(html).toContain(`>${text}<`); expect(html).not.toContain('Unavailable')
@@ -70,14 +71,14 @@ describe('mixer private microphone input observation', () => {
   })
   it('shows one valid input only for a mono device, and treats measured zero as real silence', () => {
     const value = snapshot(); value.active!.channels = 1; value.active!.enabledChannels = [0]; value.enabledChannelsByDevice['alsa:flow8'] = [0]; value.levels!.channelIndices = [0]; value.levels!.peak = [0]; value.levels!.rms = [0]
-    expect(row(value)).toContain('aria-valuenow="0"'); expect(row(value)).toContain('−∞ dBFS')
+    expect(row(value)).toContain('aria-valuenow="0"'); expect(row(value)).toContain('>Quiet<'); expect(row(value)).toContain('scaleX(0)')
     expect(row(value, 'mic2')).not.toContain('role="meter"')
     expect(row(undefined)).not.toContain('role="meter"')
   })
-  it.each([['ru', 'Аппаратный мониторинг', 'На микшере', 'Уровень входа для анализа'], ['zh-CN', '硬件监听', '请在调音台调整', '分析输入电平']] as const)('localizes observation versus hardware controls in %s', async (locale, body, hardware, input) => {
+  it.each([['ru', 'Поёте', 'Микрофон 1'], ['zh-CN', '正在演唱', '麦克风 1']] as const)('localizes the plain meter state in %s', async (locale, state, name) => {
     await prepareBoxLocale(locale)
     const html = row(snapshot())
-    expect(html).toContain(body); expect(html).toContain(hardware); expect(html).toContain(input)
-    expect(html).not.toContain('Analysis input level')
+    expect(html).toContain(`>${state}<`); expect(html).toContain(name)
+    expect(html).not.toContain('Singing')
   })
 })

@@ -2,6 +2,7 @@ import { Button } from '@singz/ui'
 import { Icon } from '@singz/ui/icons'
 import { t } from './i18n'
 import { parseSongName } from './song-identity'
+import { signedSemitones, stepTranspose, TRANSPOSE_MAX, TRANSPOSE_MIN } from './key-change'
 import { bpmText, durationText, keyText, rangeText } from './metadata'
 import type { BoxProjectInspection, BoxProjectMetadata } from './project'
 import type { CollectionDownloadState, CollectionEntry } from './collection/types'
@@ -21,7 +22,8 @@ export function SongDetails({
   onPrepare,
   onVerify,
   onCancelDownload,
-  onToggleQueue
+  onToggleQueue,
+  onTranspose
 }: {
   entry: CollectionEntry
   inspection?: BoxProjectInspection
@@ -38,11 +40,14 @@ export function SongDetails({
   onVerify: () => void
   onCancelDownload: () => void
   onToggleQueue: () => void
+  /** Absolute semitone offset; the caller applies and saves it. */
+  onTranspose: (semitones: number) => void
 }): React.JSX.Element {
   const readiness = inspection?.readiness
   const identity = parseSongName(entry.name)
   const ready = entry.local !== null && readiness === 'ready'
   const downloading = download !== null
+  const keyEditable = ready && !busy && !downloading
   const title = downloading ? t('box.details.downloading')
     : entry.unavailable ? t('box.state.unavailable')
       : !entry.local ? t('box.details.downloadRequired')
@@ -85,8 +90,12 @@ export function SongDetails({
       </section>
       <section className="detail-key" aria-label={t('box.details.playbackKey')}>
         <div className="detail-key-heading"><h2>{t('box.details.playbackKey')}</h2><span>{metadata ? keyText(metadata, transpose) : '—'}</span></div>
-        <p>{t('box.details.appliedOffset', { offset: transpose > 0 ? `+${transpose}` : String(transpose) })}</p>
-        <p>{t('box.details.originalAnalysis')}</p>
+        <div className="detail-key-controls">
+          <Button data-key-down aria-label={t('box.details.keyLower')} disabled={!keyEditable || transpose <= TRANSPOSE_MIN} onClick={() => onTranspose(stepTranspose(transpose, -1))}>−</Button>
+          <span className="detail-key-offset" data-key-offset={transpose} aria-live="polite">{transpose === 0 ? t('box.details.keyOriginal') : t('box.details.keyOffset', { offset: signedSemitones(transpose) })}</span>
+          <Button data-key-up aria-label={t('box.details.keyHigher')} disabled={!keyEditable || transpose >= TRANSPOSE_MAX} onClick={() => onTranspose(stepTranspose(transpose, 1))}>+</Button>
+        </div>
+        <p>{t('box.details.keySaved')}</p>
         <p>{t('box.details.noPreparation')}</p>
       </section>
     </div>

@@ -4,8 +4,8 @@ import { formatSongVolume, songVolumeFromDb, songVolumeToDb } from '../../../sha
 import { laneLabel, stemLabel, TRACK_META } from '../model'
 import { t } from './i18n'
 import { playbackStatusKey, type PlaybackStatus } from './playback-status'
-import { microphoneSlotStatus, microphoneStatusKey, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
-import { tMicrophone } from './settings-i18n'
+import { MicrophoneMeter } from './MicrophoneMeter'
+import { microphoneSlotStatus, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 
 export type MixerTab = 'main' | 'stems'
 
@@ -75,10 +75,10 @@ export function Mixer({
         <h2>{t('box.player.mix')}</h2>
         <SegmentedControl aria-label={t('box.mix.view')} options={[{ value: 'main', label: t('box.mix.main') }, { value: 'stems', label: t('box.mix.stems') }]} value={tab} onChange={value => onTab(value as MixerTab)} />
         <span className="mixer-play-state">{t(playbackStatusKey[status])}</span>
+        <span className="mixer-hints"><b>↑ ↓</b>{t('box.hints.channel')}<b>← →</b>{t('box.hints.level')}<b>OK</b>{t('box.hints.muteSolo')}<b>Back</b>{t('box.mix.back')}</span>
         <Button data-mix-play disabled={!canPlay} onClick={onToggle}>{playing ? t('box.player.pause') : t('box.player.play')}</Button>
         <Button data-mix-close onClick={onClose}>{t('box.mix.back')}</Button>
       </header>
-      <div className="mixer-column-labels"><span>{t('box.mix.channel')}</span><span>{t('box.mix.level')}</span><span>{t('box.mix.muteSolo')}</span><span>{t('box.mix.state')}</span></div>
       <div className="mixer-rows" data-count={ids.length}>{ids.map(id => {
         if (id === 'mic1' || id === 'mic2') {
           return <MixerMicrophoneRow id={id} microphones={microphones} snapshot={microphoneSnapshot} key={id} />
@@ -90,7 +90,7 @@ export function Mixer({
         const solo = track?.solo ?? false
         const status = !track && id !== 'master' ? t('box.mix.absent') : muted ? t('box.mix.muted') : anySolo && !solo && id !== 'master' ? t('box.mix.soloExcluded') : solo ? t('box.mix.soloed') : t('box.mix.applied')
         return <div className={`mixer-row${!track && id !== 'master' ? ' unavailable' : ''}`} data-mix-row={id} key={id} style={{ '--mix-color': color } as React.CSSProperties}>
-          <div className="mixer-channel"><i /><div><strong>{label}</strong><small>{id === 'master' ? t('box.mix.masterBody') : track ? t('box.mix.stemBody') : t('box.mix.absent')}</small></div></div>
+          <div className="mixer-channel"><i /><div><strong>{label}</strong></div></div>
           {id === 'master'
             ? <Level id={id} label={label} volume={masterVolume} master onChange={onMasterVolume} />
             : track
@@ -103,7 +103,6 @@ export function Mixer({
           <small>{status}</small>
         </div>
       })}</div>
-      <footer className="mixer-footer"><span><b>↑ ↓</b>{t('box.hints.channel')}<b>← →</b>{t('box.hints.level')}<b>OK</b>{t('box.hints.muteSolo')}<b>Back</b>{t('box.mix.back')}</span><span>{t('box.mix.noMicrophones')}</span></footer>
     </div>
   </Modal>
 }
@@ -113,21 +112,9 @@ export function MixerMicrophoneRow({ id, microphones, snapshot: snapshotProp }: 
   const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
   const channel = id === 'mic1' ? 0 : 1
   const status = microphoneSlotStatus(snapshot, channel)
-  const level = status.kind === 'level' ? status.level : null
   const label = t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')
-  return <div className={`mixer-row${level === null ? ' unavailable' : ''}`} data-mix-row={id}>
-    <div className="mixer-channel"><i /><div><strong>{label}</strong><small>{t('box.mix.micBody')}</small></div></div>
-    {level === null ? <span className="mixer-unavailable" data-mic-status={status.kind}>{t(microphoneStatusKey(status))}</span> : <div className="mixer-level">
-      <span className="settings-input-meter" data-mix-meter={id} role="meter"
-        aria-label={tMicrophone('box.microphones.channelLevel', { channel: channel + 1 })}
-        aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.min(1, level)}
-        aria-valuetext={level > 1 ? tMicrophone('box.microphones.clipping') : tMicrophone('box.microphones.percent', { value: Math.round(level * 100) })}
-        style={{ width: '100%', flex: '1' }}>
-        <span style={{ transform: `scaleX(${Math.min(1, level)})` }} />
-      </span>
-      <output>{level === 0 ? '−∞' : (20 * Math.log10(level)).toFixed(1)} dBFS</output>
-    </div>}
-    <span className="mixer-unavailable">{t('box.mix.hardwareControls')}</span>
-    <small>{t(level === null ? 'box.mix.noMeter' : 'box.mix.inputMeter')}</small>
+  return <div className={`mixer-row mixer-mic-row${status.kind === 'level' ? '' : ' unavailable'}`} data-mix-row={id}>
+    <div className="mixer-channel"><i /><div><strong>{label}</strong></div></div>
+    <div className="mixer-level"><MicrophoneMeter status={status} channel={channel} meterId={id} /></div>
   </div>
 }
