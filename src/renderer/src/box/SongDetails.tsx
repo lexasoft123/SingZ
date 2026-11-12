@@ -1,6 +1,6 @@
 import { Button } from '@singz/ui'
 import { Icon } from '@singz/ui/icons'
-import { t } from './i18n'
+import { t, tn } from './i18n'
 import { parseSongName } from './song-identity'
 import { signedSemitones, stepTranspose, TRANSPOSE_MAX, TRANSPOSE_MIN } from './key-change'
 import { bpmText, durationText, keyText, rangeText } from './metadata'
@@ -90,16 +90,16 @@ export function SongDetails({
       </section>
       <section className="detail-key" aria-label={t('box.details.playbackKey')}>
         <div className="detail-key-heading"><h2>{t('box.details.playbackKey')}</h2><span>{metadata ? keyText(metadata, transpose) : '—'}</span></div>
-        <div className="detail-key-controls">
-          <Button data-key-down aria-label={t('box.details.keyLower')} disabled={!keyEditable || transpose <= TRANSPOSE_MIN} onClick={() => onTranspose(stepTranspose(transpose, -1))}>−</Button>
-          <span className="detail-key-offset" data-key-offset={transpose} aria-live="polite">{transpose === 0 ? t('box.details.keyOriginal') : t('box.details.keyOffset', { offset: signedSemitones(transpose) })}</span>
-          <Button data-key-up aria-label={t('box.details.keyHigher')} disabled={!keyEditable || transpose >= TRANSPOSE_MAX} onClick={() => onTranspose(stepTranspose(transpose, 1))}>+</Button>
+        <div className="detail-key-controls" data-remote-down="[data-detail-primary]">
+          <Button data-key-down data-key-control aria-label={t('box.details.keyLower')} disabled={!keyEditable || transpose <= TRANSPOSE_MIN} onClick={() => onTranspose(stepTranspose(transpose, -1))}>−</Button>
+          <span className="detail-key-offset" data-key-offset={transpose} aria-live="polite">{transpose === 0 ? t('box.details.keyOriginal') : tn('box.details.keyOffset', transpose, { offset: signedSemitones(transpose) })}</span>
+          <Button data-key-up data-key-control aria-label={t('box.details.keyHigher')} disabled={!keyEditable || transpose >= TRANSPOSE_MAX} onClick={() => onTranspose(stepTranspose(transpose, 1))}>+</Button>
         </div>
         <p>{t('box.details.keySaved')}</p>
         <p>{t('box.details.noPreparation')}</p>
       </section>
     </div>
-    <div className="detail-actions">
+    <div className="detail-actions" data-remote-up="[data-key-control]">
       {downloading ? <Button variant="primary" data-detail-primary onClick={onCancelDownload} disabled={download.phase === 'cancelling'}>
         {download.phase === 'cancelling' ? t('box.details.cancellingDownload') : t('box.details.cancelDownload')}
       </Button> : !entry.local && entry.remoteId && !entry.unavailable ? <Button variant="primary" data-detail-primary disabled={busy} onClick={onPrepare}>

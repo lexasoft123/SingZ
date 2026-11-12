@@ -1,6 +1,7 @@
+import type { Translation } from '../types'
 import type { box as english } from '../en/box'
 
-export const box: Record<keyof typeof english | 'box.catalog.songs_few' | 'box.catalog.songs_many', string> = {
+export const box: Translation<typeof english> = {
   'box.navigation.label': 'Навигация SingZ Box',
   'box.navigation.catalog': 'Песни',
   'box.navigation.queue': 'Очередь',
@@ -66,13 +67,19 @@ export const box: Record<keyof typeof english | 'box.catalog.songs_few' | 'box.c
   'box.details.lyricsMissing': 'Текста пока нет',
   'box.details.sourceMissing': 'Исходной записи нет на этом Box. Вместо неё будут использованы минусовки.',
   'box.details.playbackKey': 'Тональность воспроизведения',
-  'box.details.appliedOffset': 'Сохранённая транспозиция: {offset} полутонов. Исходный анализ не изменён.',
+  'box.details.appliedOffset_one': 'Сохранённая транспозиция: {offset} полутон. Исходный анализ не изменён.',
+  'box.details.appliedOffset_few': 'Сохранённая транспозиция: {offset} полутона. Исходный анализ не изменён.',
+  'box.details.appliedOffset_many': 'Сохранённая транспозиция: {offset} полутонов. Исходный анализ не изменён.',
+  'box.details.appliedOffset_other': 'Сохранённая транспозиция: {offset} полутонов. Исходный анализ не изменён.',
   'box.details.originalAnalysis': 'Исходный анализ показан отдельно от изменений воспроизведения.',
   'box.details.noPreparation': 'Подготавливайте и восстанавливайте песни и редактируйте текст в SingZ на компьютере. Box воспроизводит готовый результат.',
   'box.details.keyLower': 'Понизить тональность на полтона',
   'box.details.keyHigher': 'Повысить тональность на полтона',
   'box.details.keyOriginal': 'Исходная тональность',
-  'box.details.keyOffset': '{offset} полутонов',
+  'box.details.keyOffset_one': '{offset} полутон',
+  'box.details.keyOffset_few': '{offset} полутона',
+  'box.details.keyOffset_many': '{offset} полутонов',
+  'box.details.keyOffset_other': '{offset} полутонов',
   'box.details.keySaved': 'Тональность сохраняется вместе с песней и применится при следующем исполнении.',
   'box.details.keyOpening': 'Песня открывается. Измените тональность после открытия.',
   'box.details.sing': 'Петь',

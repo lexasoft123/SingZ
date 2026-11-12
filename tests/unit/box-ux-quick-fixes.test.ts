@@ -37,6 +37,8 @@ class Fake {
     if (selector === 'input[type="range"]') return this.tagName === 'input' && this.attributes.type === 'range'
     if (selector === '[data-mix-row]') return this.dataset.mixRow !== undefined
     if (['[data-remote-down]', '[data-remote-up]', '[data-remote-right]', '[data-remote-left]'].includes(selector)) return this.attr(selector.slice(1, -1)) !== undefined
+    const bare = /^\[(data-[a-z-]+)\]$/.exec(selector)
+    if (bare) return this.attr(bare[1]) !== undefined
     const exact = /^\[(data-[a-z-]+)="([^"]+)"\]$/.exec(selector)
     if (exact) return this.attr(exact[1]) === exact[2]
     const text = /^\[data-control='?([a-z]+)'?\]$/.exec(selector)
@@ -112,6 +114,35 @@ describe('item 12: player seek is not in the Left/Right chain', () => {
     expect(activeElement).toBe(seek)
     moveSpatialFocus(as(scope), 'ArrowDown')
     expect(activeElement).toBe(play)
+  })
+})
+
+describe('step 6: Song details key controls stay on the vertical remote path', () => {
+  it('moves Sing/Add to queue Up to a key button, Down to Sing, and Up again to the header', () => {
+    const scope = el('main', 'details', 0, 0, 1600, 900)
+    const header = el('button', 'header', 1000, 40)
+    const keys = el('div', 'key controls', 850, 400, 400, 100)
+    keys.dataset.remoteDown = '[data-detail-primary]'
+    const lower = el('button', 'lower', 900, 430)
+    const higher = el('button', 'higher', 1100, 430)
+    lower.dataset.keyControl = ''; higher.dataset.keyControl = ''
+    keys.append(lower, higher)
+    const actions = el('div', 'actions', 40, 700, 500, 100)
+    actions.dataset.remoteUp = '[data-key-control]'
+    const sing = el('button', 'Sing', 60, 730)
+    sing.dataset.detailPrimary = ''
+    const queue = el('button', 'Add to queue', 260, 730)
+    actions.append(sing, queue)
+    scope.append(header, keys, actions)
+
+    sing.focus(); moveSpatialFocus(as(scope), 'ArrowUp')
+    expect(activeElement).toBe(lower)
+    higher.focus(); moveSpatialFocus(as(scope), 'ArrowDown')
+    expect(activeElement).toBe(sing)
+    queue.focus(); moveSpatialFocus(as(scope), 'ArrowUp')
+    expect(activeElement).toBe(lower)
+    moveSpatialFocus(as(scope), 'ArrowUp')
+    expect(activeElement).toBe(header)
   })
 })
 

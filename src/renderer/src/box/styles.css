@@ -166,9 +166,9 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .player-tools .pill { padding: 7px 12px; font-size: 15px; }
 .player-meters { display: flex; flex-direction: column; justify-content: center; gap: 4px; margin-left: 4px; white-space: nowrap; }
 .player-microphone-row { display: flex; align-items: center; gap: 10px; }
-.player-microphone-name { width: 54px; font-size: 16px; line-height: 20px; font-weight: 600; color: var(--sz-text); }
-.player-meters .mic-meter-bar { width: 120px; height: 12px; }
-.player-meters .mic-meter-state { width: 92px; font-size: 16px; line-height: 20px; }
+.player-microphone-name { width: 54px; font-size: 18px; line-height: 24px; font-weight: 600; color: var(--sz-text); }
+.player-meters .mic-meter-bar { width: 120px; height: 16px; }
+.player-meters .mic-meter-state { width: 92px; font-size: 18px; line-height: 24px; }
 .player-hints { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; font-size: 14px; color: var(--sz-dim); min-height: 18px; }
 .player-hints b { font: 12px var(--sz-font-mono); color: var(--sz-text); margin-left: 16px; margin-right: 5px; }
 .player-wake { position: absolute; inset: 0; border: 0; background: transparent; outline: none !important; }

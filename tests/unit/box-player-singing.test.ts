@@ -24,6 +24,7 @@ function oldKeyChanger(deps: { dirOf(e: { dir: string }): string; save(): Promis
 }
 
 const css = readFileSync('src/renderer/src/box/styles.css', 'utf8')
+const settingsCss = readFileSync('src/renderer/src/box/settings.css', 'utf8')
 const rule = (selector: string): string => {
   const line = css.split('\n').reverse().find(entry => entry.startsWith(`${selector} {`))
   if (!line) throw new Error(`missing CSS rule ${selector}`)
@@ -32,6 +33,17 @@ const rule = (selector: string): string => {
 const px = (line: string, property: string): number => Number(new RegExp(`(?:^|[ {;])${property}: (\\d+)px`).exec(line)?.[1])
 
 beforeAll(async () => { await prepareBoxLocale('en') })
+
+describe('player microphone meter readability', () => {
+  it('keeps two couch-readable meter rows inside the transport bar without later shrink overrides', () => {
+    expect(settingsCss).not.toMatch(/\.player-meters > \.player-microphone-row|\.player-microphone-row > span:first-child|\.player-microphone-level/)
+    expect(px(rule('.player-microphone-name'), 'font-size')).toBeGreaterThanOrEqual(18)
+    expect(px(rule('.player-meters .mic-meter-state'), 'font-size')).toBeGreaterThanOrEqual(18)
+    expect(px(rule('.player-meters .mic-meter-bar'), 'height')).toBeGreaterThanOrEqual(16)
+    const rowsHeight = 2 * px(rule('.player-microphone-name'), 'line-height') + px(rule('.player-meters'), 'gap')
+    expect(rowsHeight).toBeLessThanOrEqual(px(rule('.player-transport'), 'height'))
+  })
+})
 
 describe('mixer leaves the lyric rows visible', () => {
   it('stays a strip below the lyric viewport at the 1600x900 TV coordinate system', () => {
@@ -141,6 +153,15 @@ describe('song details key controls', () => {
     expect(html).toContain('data-key-down'); expect(html).toContain('data-key-up')
     expect(html).toContain('+2 semitones')
     expect(html).toContain('<span>D major</span>')
+  })
+  it('connects Sing and Add to queue vertically to the key controls and back', () => {
+    const html = render(2)
+    expect(html.match(/data-key-control="true"/g)).toHaveLength(2)
+    expect(html).toContain('data-remote-up="[data-key-control]"')
+    expect(html).toContain('data-remote-down="[data-detail-primary]"')
+  })
+  it('uses the singular for one semitone', () => {
+    expect(render(1)).toContain('>+1 semitone</span>')
   })
   it('disables the buttons at the range ends and while the song is not ready', () => {
     expect(render(12)).toMatch(/data-key-up="true"[^>]*disabled=""/)
