@@ -277,7 +277,7 @@ mod ui_native_lyrics;
 mod ui_quick_start;
 #[cfg(all(feature = "ui-tests", target_os = "macos"))]
 mod ui_accessibility;
-#[cfg(all(feature = "ui-tests", target_os = "macos"))]
+#[cfg(all(feature = "ui-tests", any(target_os = "macos", target_os = "windows")))]
 mod ui_accessibility_routes;
 #[cfg(feature = "ui-tests")]
 mod ui_review;
@@ -6422,7 +6422,7 @@ fn main() {
             assert!(background && std::env::var_os("SINGZ_MUTE").is_some());
             ui_accessibility::run(window_handle, view.clone(), directory.into(), cx);
         }
-        #[cfg(all(feature = "ui-tests", target_os = "macos"))]
+        #[cfg(all(feature = "ui-tests", any(target_os = "macos", target_os = "windows")))]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_ACCESSIBILITY_ROUTES_TEST") { assert!(background && std::env::var_os("SINGZ_MUTE").is_some()); ui_accessibility_routes::run(window_handle, view.clone(), directory.into(), cx); }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_GUIDE_TEST") {

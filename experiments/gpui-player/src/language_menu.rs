@@ -150,7 +150,8 @@ impl Render for LanguageMenu {
             let d=ui::language_menu_row(id.clone(),tag,row.label.clone(),row.hint.clone(),row.value==self.language,
                 self.keyboard.get()&&focus.is_focused(window),window)
                 .track_focus(&focus)
-                .role(gpui_kit::accesskit::Role::MenuItemRadio).accessibility_id(id.clone()).aria_label(row.label.clone()).aria_selected(row.value==self.language)
+                .role(gpui_kit::accesskit::Role::MenuItemRadio).accessibility_id(id.clone()).aria_label(row.label.clone());
+            let d=crate::a11y::chosen(d,row.value==self.language)
                 .on_mouse_down(MouseButton::Left,cx.listener(move |s,_,w,cx| {s.keyboard.set(false);mouse_focus.focus(w,cx);cx.stop_propagation();}))
                 .on_click(cx.listener(move |s,_,w,cx| {s.pick(index,w,cx);cx.stop_propagation();}));
             list=list.child(self.probe(id,d));

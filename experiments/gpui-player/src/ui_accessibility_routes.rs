@@ -9,15 +9,20 @@
 //! deliberately unnamed, as the auditor's negative control.
 use super::*;
 use super::ui_training_run::draw;
-use std::{collections::HashSet, ffi::{CStr, CString, c_char, c_void}, path::{Path, PathBuf}, time::Duration};
+use std::{path::{Path, PathBuf}, time::Duration};
+#[cfg(target_os = "macos")]
+use std::{collections::HashSet, ffi::{CStr, CString, c_char, c_void}};
 
+#[cfg(target_os = "macos")]
 type Obj = *mut c_void;
+#[cfg(target_os = "macos")]
 #[link(name = "objc")]
 unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Obj;
     fn sel_registerName(name: *const c_char) -> Obj;
     fn objc_msgSend();
 }
+#[cfg(target_os = "macos")]
 /// One typed `objc_msgSend` call: `send!(ret(args...) receiver, "selector", args)`.
 macro_rules! send {
     ($ret:ty, $recv:expr, $sel:expr $(, $arg:expr => $ty:ty)*) => {{
@@ -26,30 +31,37 @@ macro_rules! send {
         unsafe { call($recv, sel_registerName(name.as_ptr()) $(, $arg)*) }
     }};
 }
+#[cfg(target_os = "macos")]
 fn responds(receiver: Obj, method: &str) -> bool {
     !receiver.is_null() && {
         let name = CString::new(method).unwrap();
         send!(bool, receiver, "respondsToSelector:", unsafe { sel_registerName(name.as_ptr()) } => Obj)
     }
 }
+#[cfg(target_os = "macos")]
 fn object(receiver: Obj, method: &str) -> Obj {
     if responds(receiver, method) { send!(Obj, receiver, method) } else { std::ptr::null_mut() }
 }
+#[cfg(target_os = "macos")]
 fn text(receiver: Obj) -> Option<String> {
     if !responds(receiver, "UTF8String") { return None; }
     let bytes: *const c_char = send!(*const c_char, receiver, "UTF8String");
     (!bytes.is_null()).then(|| unsafe { CStr::from_ptr(bytes) }.to_string_lossy().into_owned())
 }
+#[cfg(target_os = "macos")]
 fn number(receiver: Obj) -> Option<f64> {
     if receiver.is_null() { return None; }
     let class = unsafe { objc_getClass(c"NSNumber".as_ptr()) };
     (send!(bool, receiver, "isKindOfClass:", class => Obj)).then(|| send!(f64, receiver, "doubleValue"))
 }
+#[cfg(target_os = "macos")]
 fn string_property(receiver: Obj, method: &str) -> Option<String> { text(object(receiver, method)) }
+#[cfg(target_os = "macos")]
 fn flag(receiver: Obj, method: &str) -> bool { responds(receiver, method) && send!(bool, receiver, method) }
 /// Reads this process's own windows through `NSView.accessibilityChildren`,
 /// which activates the real AccessKit macOS adapter. It neither enables
 /// VoiceOver nor needs a global accessibility permission, and activates nothing.
+#[cfg(target_os = "macos")]
 fn native_ax() -> Vec<serde_json::Value> {
     let app = send!(Obj, unsafe { objc_getClass(c"NSApplication".as_ptr()) }, "sharedApplication");
     let windows = object(app, "windows");
@@ -82,6 +94,27 @@ fn native_ax() -> Vec<serde_json::Value> {
         }
     }
     rows
+}
+
+/// Windows has no in-process readback: an out-of-process UI Automation client
+/// (`tests/test_native_accessibility_windows.py`) reads the window and writes the file.
+/// Asking for it is what makes AccessKit's adapter activate, so the client is the other half
+/// of `is_a11y_active`.
+#[cfg(not(target_os = "macos"))]
+fn native_ax() -> Vec<serde_json::Value> { vec![] }
+
+/// Tells the UIA client the state is on screen and waits, without blocking the window's
+/// thread, for it to write `<tag>.native.json`. The wait is bounded by the step budget.
+#[cfg(target_os = "windows")]
+async fn await_uia_readback(cx: &mut AsyncApp, out: &Path, tag: &str, state: &str, width: u32, step: Duration) -> anyhow::Result<()> {
+    progress(out, state, width, "uia");
+    let file = out.join(format!("{tag}.native.json"));
+    let deadline = Instant::now() + step;
+    while !file.exists() {
+        anyhow::ensure!(Instant::now() < deadline, "the UIA client did not deliver the readback of {tag} within the step budget");
+        cx.background_executor().timer(Duration::from_millis(25)).await;
+    }
+    Ok(())
 }
 
 fn key(w: &mut Window, cx: &mut App, value: &'static str) {
@@ -391,7 +424,15 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         let p = view.read(cx);
                         let (screen, dialog) = (p.screen as u8, any_dialog(p, cx));
                         std::fs::write(out.join(format!("{tag}.tree.json")), w.debug_a11y_tree_json().unwrap_or_default())?;
+                        #[cfg(target_os = "macos")]
                         std::fs::write(out.join(format!("{tag}.native.json")), serde_json::to_vec_pretty(&native_ax())?)?;
+                        Ok(serde_json::json!({"state": s.name, "width": width as u32, "reached": true, "screen": screen, "dialogOpen": dialog,
+                            "viewport": [f32::from(w.viewport_size().width), f32::from(w.viewport_size().height)]}))
+                    })??;
+                    // Before the Tab walks, which move focus: the readback is of the state as opened.
+                    #[cfg(target_os = "windows")]
+                    await_uia_readback(cx, &out, &tag, s.name, width as u32, step).await?;
+                    handle.update(cx, |_, w, cx| -> anyhow::Result<()> {
                         // A page walk starts from the app root, so its ring is the same whatever ran before.
                         // An overlay keeps the focus it opened with: that is what proves its trap.
                         if !s.name.starts_with("dialog-") && !s.name.starts_with("popover-") && !matches!(s.name, "settings" | "log" | "models") {
@@ -403,8 +444,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         // Shift+Tab from where the forward walk wrapped must retrace the same ring.
                         let back = tab_walk(w, cx, 90, "shift-tab", &|w, cx| view.read(cx).lyrics_editor.read(cx).focused_control_name(w))?;
                         std::fs::write(out.join(format!("{tag}.shifttab.json")), serde_json::to_vec_pretty(&back)?)?;
-                        Ok(serde_json::json!({"state": s.name, "width": width as u32, "reached": true, "screen": screen, "dialogOpen": dialog,
-                            "viewport": [f32::from(w.viewport_size().width), f32::from(w.viewport_size().height)]}))
+                        Ok(())
                     })??;
                     let mut row = row;
                     if s.closes_on_escape {

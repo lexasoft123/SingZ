@@ -44,9 +44,32 @@ pub fn button(control: Stateful<Div>, name: impl Into<SharedString>) -> Stateful
     ButtonSurface::a11y_button(control, name)
 }
 
+/// The selected state of a radio or menu radio. AccessKit's Windows adapter builds the UIA SelectionItem
+/// pattern (IsSelected, Select) for these roles only from the *toggled* state, and without it a radio is a
+/// button with no state that Narrator cannot say is selected. macOS reads `selected`, so both are set on
+/// Windows; elsewhere the node is unchanged.
+pub fn chosen<E: AccessibleChoice>(option: E, selected: bool) -> E {
+    let option = option.choice_selected(selected);
+    #[cfg(target_os = "windows")]
+    let option = option.choice_toggled(selected);
+    option
+}
+pub trait AccessibleChoice: Sized {
+    fn choice_selected(self, selected: bool) -> Self;
+    #[cfg(target_os = "windows")]
+    fn choice_toggled(self, on: bool) -> Self;
+}
+impl AccessibleChoice for Stateful<Div> {
+    fn choice_selected(self, selected: bool) -> Self { self.aria_selected(selected) }
+    #[cfg(target_os = "windows")]
+    fn choice_toggled(self, on: bool) -> Self {
+        self.aria_toggled(if on { gpui_kit::accesskit::Toggled::True } else { gpui_kit::accesskit::Toggled::False })
+    }
+}
+
 /// One option of a choice group (segmented control, radio row): radio role, name and selection.
 pub fn radio(option: Stateful<Div>, name: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
-    expose_id(option.role(Role::RadioButton).aria_label(name).aria_selected(selected))
+    chosen(expose_id(option.role(Role::RadioButton).aria_label(name)), selected)
 }
 
 fn modal(node: &mut gpui_kit::accesskit::Node) {

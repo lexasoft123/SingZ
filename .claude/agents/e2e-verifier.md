@@ -234,6 +234,7 @@ drive_retirement 300 s, lyrics_live 1200 s, lyrics_real 3900 s, Qwen drivers 900
 | `test_native_analysis.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
 | `test_native_analysis_lyrics_races.py` | <app> <out> | --case --tools | hidden | unmeasured |
 | `test_native_audio.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+| `test_native_accessibility_windows.py` | <app> <out> | --step --deadline --self-test | hidden | 900 s |
 | `test_native_audio_provider_ui.py` | <app> <out> | - | hidden | unmeasured |
 | `test_native_audio_recovery.py` | <app> <out> | --publication-fault --live-publication-fault | hidden | unmeasured |
 | `test_native_bar_edit_ui.py` | <app> <out> | --sample | hidden | unmeasured |
@@ -372,6 +373,10 @@ ceiling column is the driver's own deadline and the script deadline above bounds
 | `test_native_training_recording_recovery.py` | <app> <out> | - | hidden | unmeasured |
 | `test_native_training_recovery.py` | <app> <out> | --song-backed | hidden | unmeasured |
 | `test_native_training_run.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
+
+`test_native_accessibility_windows.py` (C-61) is not a `run_windows_ui.ps1` case: run it by hand in the
+interactive session (a one-off `schtasks /it` task) with a **debug** `ui-tests` build and a venv that has
+`comtypes` (no admin). It is the out-of-process UIA client and judge for the whole app, 28 states at both sizes.
 
 Other drivers are macOS-only or helper-level and are listed under native-mac only.
 `test_native_updater.py` also has a Windows leg (visible muted window; flags `--binary
