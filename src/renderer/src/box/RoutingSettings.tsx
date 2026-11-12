@@ -77,7 +77,7 @@ export function RoutingSettings({ preview, controller }: { preview: RoutingPrevi
     </div>
     {(error || preview.error) && <div className="settings-alert" role="alert"><p>{error || preview.error}</p></div>}
     {state && physicalInventoryIssue(state) && <p role="status">{physicalInventoryIssue(state)}</p>}
-    {state && <p className="routing-status" aria-live="polite">{preview.receivedAt === null || preview.error ? tSettings('box.settings.routing.statusUnavailable') : routingActivationText(state)} {tSettings('box.settings.routing.revisions', { saved: state.snapshot.restoration.desiredGeneration, active: state.snapshot.restoration.activeGeneration })}</p>}
+    {state && <p className="routing-status" aria-live="polite">{preview.receivedAt === null || preview.error ? tSettings('box.settings.routing.statusUnavailable') : routingActivationText(state)}</p>}
     {!state && !error && <p>{tSettings('box.settings.routing.connecting')}</p>}
     <div className="routing-list">
       {state && <div className="routing-route">

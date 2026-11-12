@@ -50,6 +50,26 @@ Local splitting belongs to normal desktop SingZ; a full TV editing surface is no
 assumed. The placement of import/split controls on Box versus its phone controller
 is an open product decision, not permission to duplicate desktop logic.
 
+### Singer-facing terms
+
+One name per concept on the TV, in English, Russian and Simplified Chinese. The
+spec's internal words (catalog, collection, library, preparation) stay in
+engineering text and keys; they never appear on screen.
+
+| Concept | On screen (EN / RU / zh-CN) | Retired names |
+| --- | --- | --- |
+| The list of songs on this Box (S07) | Songs / Песни / 歌曲 | Catalog, Your projects, SingZ library, Collection, Browse collection |
+| The Drive sign-in and offline storage (S06, S20) | Google Drive / Google Drive / Google Drive | Collection & account, Account, Local projects |
+| Output, inputs and microphones (S12) | Audio & microphones / Звук и микрофоны / 音频和麦克风 | Sound settings, Sound & microphones |
+| The singer's voice track on the Main and Stems tabs | Vocals / Вокал / 人声 | Lead vocal |
+| Stems ready for singing | Backing tracks ready / Минусовки готовы / 伴奏已就绪 | Prepared stems, Prepared local stems |
+| The desktop app that prepares songs | SingZ on your computer | Desktop SingZ |
+| Back hint on the song list | Menu | Navigation |
+
+Diagnostics values (saved/active revision, routing source, sample-rate detail)
+belong on the Diagnostics page only. Counts take the locale's plural forms
+(Russian has three) and an empty count is a word ("None paired"), never "0".
+
 ## 2 Customers and success criteria
 
 | Customer | Goal | Constraints | Success |

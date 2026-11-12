@@ -88,7 +88,7 @@ export function Mixer({
         const color = TRACK_META[id]?.color ?? 'var(--sz-accent)'
         const muted = track?.muted ?? false
         const solo = track?.solo ?? false
-        const status = !track && id !== 'master' ? t('box.mix.absent') : muted ? t('box.mix.muted') : anySolo && !solo && id !== 'master' ? t('box.mix.soloExcluded') : solo ? t('box.mix.soloed') : t('box.mix.applied')
+        const status = !track && id !== 'master' ? t('box.mix.absent') : muted ? t('box.mix.muted') : anySolo && !solo && id !== 'master' ? t('box.mix.soloExcluded') : solo ? t('box.mix.soloed') : ''
         return <div className={`mixer-row${!track && id !== 'master' ? ' unavailable' : ''}`} data-mix-row={id} key={id} style={{ '--mix-color': color } as React.CSSProperties}>
           <div className="mixer-channel"><i /><div><strong>{label}</strong></div></div>
           {id === 'master'

@@ -1,6 +1,6 @@
 import { Button } from '@singz/ui'
 import type { BoxPhoneState, BoxPlatformSnapshot, BoxStorageSnapshot } from '../../../../shared/box-contract'
-import { formatBytes } from './format'
+import { formatBytes, phonesStatus } from './format'
 import { tJourney } from './i18n'
 import { cacheRemovalIssue, systemCommandIssue } from './model'
 import type { DriveStatus } from './useInventory'
@@ -36,7 +36,7 @@ export function PrivacyPage({ drive, phones, storage, platform, activeProjectDir
     </section>
     <section className="journey-section">
       <h2>{tJourney('journey.privacy.stopPhones')}</h2><p>{tJourney('journey.privacy.stopPhonesHelp')}</p>
-      <p className="journey-note">{phones ? tJourney('journey.count', { count: phones.sessions.length }) : tJourney('journey.unavailable')}</p>
+      <p className="journey-note">{phones ? phonesStatus(phones.sessions.length) : tJourney('journey.unavailable')}</p>
       <Button disabled={busy || (!phones?.running && !phones?.sessions.length)} onClick={onStopPhones}>{tJourney('journey.privacy.stopPhones')}</Button>
     </section>
     <section className="journey-section">
