@@ -1,7 +1,7 @@
 """Saved graph topology on real DSP with a fake output device only; no Node."""
 import argparse, copy, hashlib, json, os, queue, struct, subprocess, tempfile, threading, time, wave
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('helper',type=Path);p.add_argument('out',type=Path);a=p.parse_args();helper=a.helper.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
+p=argparse.ArgumentParser();p.add_argument('helper',type=Path);p.add_argument('out',type=Path);p.add_argument('--no-stream-lanes',action='store_true');a=p.parse_args();helper=a.helper.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
 graph=json.loads((Path(__file__).resolve().parents[3]/'tests/shared/native-playback-graph.json').read_text());receipts=[];measurements={}
 def wire(g):
  h=lambda s:s.encode().hex();rows=[f"SingZGraph1 {len(g['nodes'])} {len(g['connections'])}"]
@@ -16,7 +16,7 @@ def wire(g):
 class Session:
  def __init__(self,manifest,audio):
   env={k:v for k,v in os.environ.items() if k!='SINGZ_MUTE'}
-  self.child=subprocess.Popen([str(helper),'--test-fake-host','--graph-manifest',str(manifest),'vocals',str(audio)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env);self.lines=queue.Queue()
+  self.child=subprocess.Popen([str(helper),'--test-fake-host',*(['--no-stream-lanes'] if a.no_stream_lanes else []),'--graph-manifest',str(manifest),'vocals',str(audio)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env);self.lines=queue.Queue()
   def reader():
    for line in self.child.stdout:self.lines.put(line)
    self.lines.put(None)
@@ -51,9 +51,22 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-') as tmp:
     if value['graphGeneration']>generation and value['playing'] and value['position']>.6:break
     assert time.monotonic()<deadline,value;time.sleep(.04)
    assert value['explicitGraph'] and value['graphNodeCount']==14,value
-   session.command('loop 1 3');session.command('seek 1.5');session.command('unloop')
+   generation=value['graphGeneration'];session.command('rate .8 -2');deadline=time.monotonic()+6
+   while True:
+    value=session.command('status')
+    if value['graphGeneration']>generation and value['playing']:break
+    assert time.monotonic()<deadline,value;time.sleep(.04)
+   session.command('loop 1 3');session.command('seek 1.5')
    parked=session.command('park');assert parked['physicalOutputReleased'] and parked['explicitGraph'],parked
+   assert (parked['parkedLaneBytes']>0 and not parked['lanes'][0]['streamed']) if a.no_stream_lanes else (parked['parkedLaneBytes']==0 and parked['lanes'][0]['streamed']),parked
+   repeated=session.command('park');assert repeated['position']==parked['position'] and repeated['parkedLaneBytes']==parked['parkedLaneBytes'],(parked,repeated)
+   for command in ('play','seek 2','rate 1 0','loop 0 2','master 1'):
+    refused=session.command(command,False);assert refused['parked'] and refused['physicalOutputReleased'],refused
    restored=session.command('unpark');assert not restored['parked'] and restored['explicitGraph'],restored
+   assert not restored['playing'] and restored['looping'] and restored['transpose']==-2 and abs(restored['playbackRate']-.8)<.001,restored
+   assert abs(restored['position']-parked['position'])<.03, (parked,restored)
+   if a.no_stream_lanes: assert restored['parkedPcmAdopted'],restored
+   else: assert not restored['parkedPcmAdopted'],restored
    session.command('play');session.command('pause')
   finally:session.close()
  assert abs(measurements['0.5']/measurements['1']-.5)<.04,measurements
@@ -69,4 +82,4 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-') as tmp:
    session.child.wait(timeout=8);assert session.child.returncode!=0
   finally:
    if session.child.poll() is None:session.child.kill();session.child.wait(timeout=10)
-(out/'result.json').write_text(json.dumps({'passed':True,'helperSha256':hashlib.sha256(helper.read_bytes()).hexdigest(),'fakeHostOnly':True,'measurements':measurements,'malformedAndSemanticRefusals':len(invalid),'receipts':receipts},indent=2))
+(out/'result.json').write_text(json.dumps({'passed':True,'helperSha256':hashlib.sha256(helper.read_bytes()).hexdigest(),'fakeHostOnly':True,'streamLanes':not a.no_stream_lanes,'measurements':measurements,'malformedAndSemanticRefusals':len(invalid),'receipts':receipts},indent=2))

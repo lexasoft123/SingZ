@@ -57,7 +57,32 @@ impl Player {
         if status.empty_project != self.project.as_ref().is_some_and(|p| p.empty_tracks) {
             return;
         }
+        if let Some(project) = self.project.as_ref() {
+            let expected: Option<Vec<String>> = project.lanes.iter()
+                .map(|(slot, _)| project.lane_id(*slot).map(str::to_owned))
+                .collect();
+            if !expected.as_deref().is_some_and(|ids| integration::lane_ids_match(ids, &status.lane_ids)) {
+                return;
+            }
+        }
         if !self.playhead.admit((&status).into(), Instant::now()) { return; }
+        let peak_token = waveform::ProjectPeakToken {
+            epoch,
+            graph_generation: status.graph_generation,
+        };
+        if waveform::admit_project_peak_generation(peak_token) {
+            if let Some(project) = self.project.as_ref() {
+                waveform::update_project_peaks(peak_token, project.lanes.iter().enumerate().filter_map(
+                    |(lane, (slot, _))| {
+                        status
+                            .waveform_peaks
+                            .get(lane)
+                            .filter(|peaks| !peaks.is_empty())
+                            .map(|peaks| (*slot, peaks.clone()))
+                    },
+                ));
+            }
+        }
         self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
         self.transport_flight.timing_status=Some(status.clone());
         #[cfg(feature = "ui-tests")]

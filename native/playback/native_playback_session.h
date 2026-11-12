@@ -285,6 +285,8 @@ struct NativePlaybackResult {
   AudioHostFormat format{};
   AudioHostLatency latency{};
   std::string message;
+  // True when prepare reused the full parked decoded lane set instead of decoding it again.
+  bool adoptedParkedLanes{false};
 };
 
 enum class NativePlaybackDeliveryCommand : uint32_t {

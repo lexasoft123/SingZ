@@ -174,6 +174,18 @@ impl Player {
                 if epoch != self.native_epoch || self.loading || self.project.is_none() {
                     return;
                 }
+                let project = self.project.as_ref().unwrap();
+                let expected_lane_ids: Option<Vec<String>> = project.lanes.iter()
+                    .map(|(slot, _)| project.lane_id(*slot).map(str::to_owned))
+                    .collect();
+                if !expected_lane_ids.as_deref().is_some_and(|ids| integration::lane_ids_match(ids, &status.lane_ids)) {
+                    let error = format!("Recovered playback lane IDs did not match the loaded project (expected {}, received {})", expected_lane_ids.as_ref().map_or(0, Vec::len), status.lane_ids.len());
+                    self.settings.update(cx, |s, cx| s.route_failed(error.clone(), cx));
+                    self.transport_failed(epoch, error, cx);
+                    return;
+                }
+                self.playhead.reset(status.position);
+                if !self.playhead.admit((&status).into(), Instant::now()) { return; }
                 self.tracks_audio_failed = false;
                 self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
                 self.native_graph = status.graph_generation;
@@ -197,12 +209,13 @@ impl Player {
                             envelopes[*slot] = peaks.clone();
                         }
                     }
-                    waveform::set_project_peaks(envelopes);
+                    waveform::set_project_peaks(envelopes, waveform::ProjectPeakToken {
+                        epoch: self.native_epoch,
+                        graph_generation: status.graph_generation,
+                    });
                     self.pitch_strip
                         .update(cx, |p, cx| p.set_native(project.pitch.clone(), cx));
                 }
-                self.playhead.reset(status.position);
-                self.playhead.admit((&status).into(), Instant::now());
                 self.transport_flight.timing_status = Some(status.clone());
                 self.transport_flight.counting_in = false;
                 self.transport_flight.count_in_anchor = None;

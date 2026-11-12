@@ -44,11 +44,13 @@ def record(completed=False):
 
 
 class Session:
-    def __init__(self, lanes=None, output=None):
+    def __init__(self, lanes=None, output=None, *, stream_lanes=True):
         environment = dict(os.environ)
         environment.pop('SINGZ_MUTE', None)
         arguments = ['--empty-project'] if lanes is None else [
             value for identifier, path in lanes for value in (identifier, str(path))]
+        if not stream_lanes:
+            arguments.insert(0, '--no-stream-lanes')
         if output is not None:
             assert lanes is None, 'Output preference regression uses the explicit empty startup mode'
             arguments = ['--empty-project', '--output', output]
@@ -262,12 +264,36 @@ with tempfile.TemporaryDirectory(prefix='singz-native-empty-') as directory:
             assert abs(added['masterGain'] - .63) < 1e-6 and added['playbackRate'] == .8 and added['transpose'] == -2, added
             assert added['laneIds'] == ['custom-b'] and len(added['peaks']) == 1 and max(added['peaks'][0]) > 0, added
             prior_generation = added['graphGeneration']
-        # Park retains PCM normally; final removal must release that cache too.
+        # Streamed lanes retain no decoded PCM while parked; final removal
+        # must still release the source graph and its file handles.
         parked = session.command('park')
-        assert parked['parked'] and parked['parkedLaneBytes'] > 0, parked
+        assert parked['parked'] and parked['parkedLaneBytes'] == 0 and parked['lanes'][0]['streamed'], parked
         removed = session.replace([])
         empty(removed, never_claimed=False)
         no_source_handles(session, (first, second))
+    finally:
+        session.close()
+    # Keep the decoded-PCM retention contract covered independently of the
+    # desktop streaming default: Park retains PCM, unpark adopts it, and a
+    # subsequent removal releases the cache.
+    session = Session([('custom-only', first)], stream_lanes=False)
+    try:
+        assert not session.initial['lanes'][0]['streamed'], session.initial
+        parked = session.command('park')
+        assert parked['parked'] and parked['parkedLaneBytes'] > 0, parked
+        repeated = session.command('park')
+        assert repeated['parkedLaneBytes'] == parked['parkedLaneBytes'] > 0, repeated
+        restored = session.command('unpark')
+        assert not restored['parked'] and restored['graphGeneration'] > parked['graphGeneration'], restored
+        assert restored['parkedLaneBytes'] == 0 and not restored['lanes'][0]['streamed'], restored
+        assert restored['parkedPcmAdopted'], restored
+        parked = session.command('park')
+        assert parked['parkedLaneBytes'] > 0, parked
+        removed = session.replace([])
+        empty(removed, never_claimed=False)
+        assert removed['cleanupProof']['parkedLaneBytes'] == 0, removed
+        # Releasing parked decoded PCM must also drop the source descriptors.
+        no_source_handles(session, (first,))
     finally:
         session.close()
     # A normal argv graph can also retire straight from Prepared with no
@@ -282,4 +308,4 @@ with tempfile.TemporaryDirectory(prefix='singz-native-empty-') as directory:
     finally:
         session.close()
 record(completed=True)
-print('PASS native empty project: real Release, lease re-add, zero graph, standalone PCM, source descriptor lifetimes')
+print('PASS native empty project: real Release, lease re-add, zero graph, decoded PCM adoption, standalone PCM, source descriptor lifetimes')

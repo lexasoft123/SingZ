@@ -406,6 +406,7 @@ pub struct Status {
     pub training_only: bool,
     pub empty_project: bool,
     pub lane_revision: u64,
+    pub lane_ids: Vec<String>,
     pub carry_revision:u64,
     pub cue: crate::training_audio::Status,
     pub graph_generation: u64,
@@ -424,6 +425,9 @@ pub struct Status {
     pub position: f64,
     pub duration: f64,
     pub playing: bool,
+    /// Per-lane waveform envelopes that the native streaming feeder has
+    /// finished measuring. Pending streamed lanes are empty until ready.
+    pub waveform_peaks: Vec<Vec<f32>>,
 }
 #[cfg(feature="ui-tests")]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -472,10 +476,25 @@ impl Status {
         }
         Self::reported(v)
     }
+    /// Initial prepare receipts from older desktop helpers may predate the
+    /// explicit peak-validity mask. Status and all later command replies must
+    /// carry it whenever they include waveform rows.
+    fn parse_prepare(v: &Value) -> Result<Self> {
+        if v["protocol"] != 1 {
+            bail!("Unsupported native audio protocol")
+        }
+        if v["ok"] != true {
+            bail!("{}", v["error"].as_str().unwrap_or("Native audio failed"))
+        }
+        Self::reported_with_peak_compat(v, true)
+    }
     /// Parse actual state independently of command acceptance, solely to
     /// classify an explicit rejection before a subsequent successful status
     /// proves the old graph. Never returned as an accepted command receipt.
     fn reported(v:&Value)->Result<Self>{
+        Self::reported_with_peak_compat(v, false)
+    }
+    fn reported_with_peak_compat(v:&Value, allow_legacy_peaks:bool)->Result<Self>{
         anyhow::ensure!(v["protocol"]==1,"Unsupported native audio protocol");
         if matches!(v["state"].as_u64(), Some(6 | 7)) {
             crate::diagnostics::event(
@@ -496,6 +515,7 @@ impl Status {
         }
         let empty_project=v["emptyProject"]==true;
         let lane_revision=v["laneSetRevision"].as_u64().unwrap_or(0);
+        let lane_ids=lane_ids_from(v)?;
         if empty_project{validate_empty_status(v,position,duration)?;}
         if duration <= 0. && v["trainingOnly"] != true && !empty_project {
             bail!("Native engine returned no audio duration")
@@ -550,6 +570,7 @@ impl Status {
             training_only: v["trainingOnly"] == true,
             empty_project,
             lane_revision,
+            lane_ids,
             carry_revision:v["carryRevision"].as_u64().unwrap_or(0),
             cue: crate::training_audio::Status::parse(v)?,
             graph_generation: v["graphGeneration"].as_u64().unwrap_or(0),
@@ -580,6 +601,7 @@ impl Status {
             position,
             duration,
             playing: v["playing"].as_bool().unwrap_or(false),
+            waveform_peaks: peaks_from(v,allow_legacy_peaks)?,
         })
     }
 }
@@ -1667,13 +1689,52 @@ fn lane_transaction(candidate:&Project)->Result<Vec<String>> {
         commands.push(format!("lanes-add {} {}",hex_utf8(&id),hex_utf8(path)));
     }Ok(commands)
 }
-fn peaks_from(value:&Value)->Vec<Vec<f32>>{value["peaks"].as_array().map(|rows|rows.iter().map(|row|row.as_array().map(|values|values.iter().map(|n|n.as_f64().unwrap_or(0.) as f32).collect()).unwrap_or_default()).collect()).unwrap_or_default()}
+fn lane_ids_from(value:&Value)->Result<Vec<String>>{
+    let Some(ids)=value.get("laneIds") else {return Ok(Vec::new());};
+    let ids=ids.as_array().context("Invalid native lane IDs")?;
+    anyhow::ensure!(ids.len()<=crate::tracks::MAX_ACTIVE_LANES,"Too many native lane IDs");
+    let mut unique=std::collections::HashSet::new();
+    ids.iter().map(|id|{
+        let id=id.as_str().filter(|id|!id.is_empty()&&id.len()<=128).context("Invalid native lane ID")?.to_owned();
+        anyhow::ensure!(unique.insert(id.clone()),"Duplicate native lane ID");
+        Ok(id)
+    }).collect()
+}
+pub(super) fn lane_ids_match(expected:&[String],actual:&[String])->bool{
+    let matches=expected==actual;
+    if !matches {
+        crate::diagnostics::event(
+            "audio",
+            format!("Rejected native status with lane identity mismatch (expected {}, received {})",expected.len(),actual.len()),
+            crate::diagnostics::Level::Warn,
+        );
+    }
+    matches
+}
+fn peaks_from(value:&Value,allow_legacy:bool)->Result<Vec<Vec<f32>>>{
+    let Some(rows)=value["peaks"].as_array()else{return Ok(Vec::new());};
+    if rows.is_empty(){return Ok(Vec::new());}
+    let Some(validity)=value["peaksValid"].as_array()else{
+        anyhow::ensure!(allow_legacy,"Native waveform rows have no validity mask");
+        return Ok(rows.iter().map(parse_peak_row).collect());
+    };
+    anyhow::ensure!(validity.len()==rows.len(),"Native waveform validity mask has the wrong lane count");
+    rows.iter().zip(validity).map(|(row,valid)|{
+        match valid.as_bool().context("Invalid native waveform validity mask")? {
+            true=>Ok(parse_peak_row(row)),
+            false=>Ok(Vec::new()),
+        }
+    }).collect()
+}
+fn parse_peak_row(row:&Value)->Vec<f32>{
+    row.as_array().map(|values|values.iter().map(|n|n.as_f64().unwrap_or(0.) as f32).collect()).unwrap_or_default()
+}
 enum LaneReplaceFailure {Refused(String),Disconnected(String),Committed(String)}
 fn lane_stage_reply(value:Value)->std::result::Result<(),LaneReplaceFailure> {
     if value["protocol"]==1&&value["ok"]==false&&!matches!(value["state"].as_u64(),Some(6|7)) {
         return Err(LaneReplaceFailure::Refused(value["error"].as_str().filter(|s|!s.is_empty()).unwrap_or("Native track staging was refused").into()));
     }
-    Status::parse(&value).map(|_|()).map_err(|error|LaneReplaceFailure::Disconnected(format!("Native playback could not be confirmed before track replacement: {error:#}")))
+    Status::parse_prepare(&value).map(|_|()).map_err(|error|LaneReplaceFailure::Disconnected(format!("Native playback could not be confirmed before track replacement: {error:#}")))
 }
 fn accepted_analysis_snapshot(requested:&Project,lanes:&[crate::tracks::Lane],stamps:&[(u64,std::time::SystemTime)])->Option<Project> {
     if lanes.len()!=stamps.len(){return None;}
@@ -1717,7 +1778,7 @@ fn replacement_reply(value:Value,expected_ids:&[String])->std::result::Result<(S
         let result=(||->Result<_>{
             let ids=value["laneIds"].as_array().context("Missing committed native lane IDs")?;
             anyhow::ensure!(ids.len()==expected_ids.len()&&ids.iter().zip(expected_ids).all(|(actual,expected)|actual.as_str()==Some(expected.as_str())),"Committed native lanes differ from the requested tracks");
-            Ok((Status::parse(&value)?,peaks_from(&value),vocal_lane_duration(&value)?))
+            Ok((Status::parse_prepare(&value)?,peaks_from(&value,true)?,vocal_lane_duration(&value)?))
         })();
         return result.map_err(|error|LaneReplaceFailure::Committed(format!("Playback lanes were committed, but playback failed: {error:#}. Save and reopen this project.")));
     }
@@ -1874,7 +1935,10 @@ impl Connection {
             copy_handoff,
         };
         let value = connection.read(Duration::from_secs(120))?;
-        let status = Status::parse(&value)?;
+        let status = Status::parse_prepare(&value)?;
+        let expected_lane_ids: Vec<String> = connection.loaded_lanes.iter().map(|lane| lane.id.clone()).collect();
+        anyhow::ensure!(lane_ids_match(&expected_lane_ids, &status.lane_ids),
+            "Native prepared lane IDs differ from the requested project");
         anyhow::ensure!(status.explicit_graph==project.is_some_and(|p|p.graph.is_some())
             && (!status.explicit_graph||(status.graph_nodes>0&&status.graph_nodes<=128&&status.graph_connections<=256)),
             "Native graph admission differs from the saved project request");
@@ -2377,7 +2441,30 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     fn captured_lane_reply()->Value {
-        serde_json::from_str(include_str!("../../../tests/shared/gpui-first-lane-default-reply.json")).unwrap()
+        let mut value:Value=serde_json::from_str(include_str!("../../../tests/shared/gpui-first-lane-default-reply.json")).unwrap();
+        let peak_count=value["peaks"].as_array().map_or(0,Vec::len);
+        value["peaksValid"]=serde_json::json!(vec![true;peak_count]);
+        value
+    }
+    #[test]
+    fn status_waveform_mask_is_required_and_must_cover_every_lane() {
+        let mut packet = captured_lane_reply();
+        packet["peaks"] = serde_json::json!([[0.25], [0.75]]);
+        packet["laneIds"] = serde_json::json!(["vocals", "bass"]);
+        packet.as_object_mut().unwrap().remove("peaksValid");
+        assert!(Status::parse(&packet).is_err(), "status must not trust unmasked peaks");
+        assert_eq!(Status::parse_prepare(&packet).unwrap().waveform_peaks, vec![vec![0.25], vec![0.75]]);
+
+        packet["peaksValid"] = serde_json::json!([true]);
+        assert!(Status::parse(&packet).is_err(), "a short validity mask cannot be paired by index");
+
+        packet["peaksValid"] = serde_json::json!([true, false]);
+        let status = Status::parse(&packet).unwrap();
+        assert_eq!(status.waveform_peaks, vec![vec![0.25], vec![]]);
+        assert_eq!(status.lane_ids, vec!["vocals", "bass"]);
+        assert!(lane_ids_match(&status.lane_ids, &["vocals".into(), "bass".into()]));
+        assert!(!lane_ids_match(&status.lane_ids, &["bass".into(), "vocals".into()]));
+        assert_eq!(status.waveform_peaks, vec![vec![0.25], vec![]]);
     }
     #[test]
     fn invalid_visualization_metadata_does_not_revoke_valid_audio_status() {

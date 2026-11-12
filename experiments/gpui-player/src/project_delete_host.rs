@@ -361,7 +361,10 @@ impl Player {
         self.lyrics_sidebar
             .update(cx, |sidebar, cx| sidebar.idle(cx));
         self.transport.update(cx, |t, cx| t.set_karaoke(false, cx));
-        waveform::set_project_peaks(std::array::from_fn(|_| vec![0.]));
+        waveform::set_project_peaks(std::array::from_fn(|_| vec![0.]), waveform::ProjectPeakToken {
+            epoch: self.native_epoch,
+            graph_generation: self.native_graph,
+        });
         self.screen = Screen::Library;
         self.previous_screen = Screen::Library;
     }

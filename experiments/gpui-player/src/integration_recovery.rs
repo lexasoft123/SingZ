@@ -121,9 +121,9 @@ pub(super) fn prepare(
         handoff,
         uid,provider,provider_retired,manifest,
     )?;
-    let initial = Status::parse(&receipt)?;
+    let initial = Status::parse_prepare(&receipt)?;
     let media = RecoveredMedia {
-        peaks: peaks_from(&receipt),
+        peaks: peaks_from(&receipt, true)?,
         vocal_duration: vocal_lane_duration(&receipt)?,
     };
     child.command(&format!("master {}", project.master))?;

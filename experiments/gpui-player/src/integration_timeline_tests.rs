@@ -4,6 +4,8 @@ fn packet(minutes: u32) -> Value {
         "../../../tests/shared/gpui-first-lane-default-reply.json"
     ))
     .unwrap();
+    let peak_count = p["peaks"].as_array().map_or(0, Vec::len);
+    p["peaksValid"] = serde_json::json!(vec![true; peak_count]);
     p["duration"] = serde_json::json!(minutes as f64 * 60. + 0.123456);
     p["position"] = serde_json::json!(minutes as f64 * 60. - 0.123456);
     p["playing"] = serde_json::json!(false);

@@ -47,6 +47,7 @@ fn status(seconds: f64, total: usize, per_bar: usize, pre: f64) -> Status {
         training_only: false,
         empty_project: false,
         lane_revision: 1,
+        lane_ids: vec!["vocals".into()],
         carry_revision: 1,
         cue: crate::training_audio::Status {
             generation: 0,
@@ -73,6 +74,7 @@ fn status(seconds: f64, total: usize, per_bar: usize, pre: f64) -> Status {
         position: 0.,
         duration: 10.,
         playing: true,
+        waveform_peaks: vec![],
     }
 }
 #[test]

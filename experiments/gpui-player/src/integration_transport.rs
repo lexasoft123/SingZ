@@ -868,7 +868,14 @@ pub(super) fn run(
                     if epoch != latest.load(Ordering::Acquire) {
                         bail!("Project load superseded")
                     }
-                    let status = Status::parse(&value)?;
+                    let status = Status::parse_prepare(&value)?;
+                    let expected_lane_ids: Vec<String> = project.lanes.iter()
+                        .filter_map(|(slot, _)| project.lane_id(*slot).map(str::to_owned))
+                        .collect();
+                    anyhow::ensure!(
+                        crate::integration::lane_ids_match(&expected_lane_ids, &status.lane_ids),
+                        "Native prepared lane IDs differ from the requested project"
+                    );
                     project.vocal_duration = vocal_lane_duration(&value)?;
                     Arc::make_mut(&mut project.pitch)
                         .bind_duration_for_lane(status.duration, project.vocal_duration);
@@ -879,7 +886,7 @@ pub(super) fn run(
                         };
                         child.command(&target.command(status.duration))?;
                     }
-                    let peaks = peaks_from(&value);
+                    let peaks = peaks_from(&value, true)?;
                     let status = if let Some(carry) =
                         open_carry_plan(&mut project, status.duration as f64)?
                     {
@@ -1524,6 +1531,22 @@ pub(super) fn run(
                             continue;
                         };
                         if (owned_epoch, owned_serial) != (epoch, serial) {
+                            continue;
+                        }
+                        let expected_lane_ids: Vec<String> = child.loaded_lanes.iter().map(|lane| lane.id.clone()).collect();
+                        if !lane_ids_match(&expected_lane_ids, &recovered.status.lane_ids) {
+                            child.retire();
+                            if pending_adoption == Some(PendingAdoption::Recovery(epoch, serial)) {
+                                reject_deferred(
+                                    &mut deferred,
+                                    retire_adoption(&mut pending_adoption, &mut pending_lane_met),
+                                    &events,
+                                );
+                            }
+                            drop(connection.take());
+                            *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                            let error = format!("Recovered playback lane IDs differed from the loaded project (expected {}, received {})", expected_lane_ids.len(), recovered.status.lane_ids.len());
+                            let _ = events.send(Event::OutputRecovered(epoch, serial, uid, Err(error)));
                             continue;
                         }
                         connection = Some(child);

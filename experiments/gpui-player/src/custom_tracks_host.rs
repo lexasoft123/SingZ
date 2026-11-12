@@ -98,7 +98,10 @@ impl Player {
         }
         self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
         self.edit_seq += 1;
-        waveform::set_project_peaks(std::array::from_fn(|_| vec![0.]));
+        waveform::set_project_peaks(std::array::from_fn(|_| vec![0.]), waveform::ProjectPeakToken {
+            epoch: self.native_epoch,
+            graph_generation: self.native_graph,
+        });
         self.notice = Some(format!(
             "{error} Your requested tracks are retained. Save the project or retry the output route in Settings to resume playback."
         ));
@@ -413,7 +416,10 @@ impl Player {
                         envelopes[*slot] = p.clone();
                     }
                 }
-                waveform::set_project_peaks(envelopes);
+                waveform::set_project_peaks(envelopes, waveform::ProjectPeakToken {
+                    epoch,
+                    graph_generation: status.graph_generation,
+                });
                 self.transport
                     .update(cx, |t, cx| t.set_duration(status.duration, cx));
                 if !added.is_empty() {

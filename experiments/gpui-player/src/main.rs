@@ -3075,7 +3075,10 @@ impl Player {
                             envelopes[*i] = peaks.clone();
                         }
                     }
-                    waveform::set_project_peaks(envelopes);
+                    waveform::set_project_peaks(envelopes, waveform::ProjectPeakToken {
+                        epoch,
+                        graph_generation: status.graph_generation,
+                    });
                     self.transport.update(cx, |transport, cx| {
                         transport.set_duration(status.duration, cx);
                         transport.set_audio_available(project.has_audio(),cx);

@@ -6,6 +6,7 @@ from pathlib import Path
 audio=Path(sys.argv[1]).resolve();capture=Path(sys.argv[2]).resolve();out=Path(sys.argv[3]).resolve();out.mkdir(parents=True,exist_ok=True)
 hardware='--hardware' in sys.argv[4:]
 hardware_monitor='--hardware-monitor' in sys.argv[4:]
+decoded='--no-stream-lanes' in sys.argv[4:]
 assert not hardware_monitor or hardware,'Real monitoring requires real playback parking'
 class Session:
     def __init__(self,args):
@@ -25,12 +26,13 @@ with tempfile.TemporaryDirectory(prefix='singz-monitor-') as folder:
     source=Path(folder)/'voice.wav'
     with wave.open(str(source),'wb') as stream:
         stream.setparams((1,2,48000,0,'NONE','not compressed'));stream.writeframes(b''.join(struct.pack('<h',int(4000*math.sin(i*math.tau*220/48000))) for i in range(48000*8)))
-    playback=Session([str(audio),*([] if hardware else ['--test-fake-host']),'vocals',str(source)])
+    playback=Session([str(audio),*([] if hardware else ['--test-fake-host']),*(['--no-stream-lanes'] if decoded else []),'vocals',str(source)])
     try:
         assert playback.read()['ok'];playback.command('lane 0 0.37 0 1');playback.command('rate 0.8 -2')
         playback.command('loop 1 7');playback.command('seek 2');playback.command('play')
         if hardware:time.sleep(.2)
-        parked=playback.command('park');assert parked['parked'] and parked['physicalOutputReleased'] and not parked['playing'];assert parked['parkedLaneBytes']>0
+        parked=playback.command('park');assert parked['parked'] and parked['physicalOutputReleased'] and not parked['playing']
+        assert (parked['parkedLaneBytes']>0 and not parked['lanes'][0]['streamed']) if decoded else (parked['parkedLaneBytes']==0 and parked['lanes'][0]['streamed']),parked
         assert parked['looping'] and parked['transpose']==-2 and parked['playbackRate']==.8
         for _ in range(3):
             repeated=playback.command('park');assert repeated['position']==parked['position'] and repeated['parkedLaneBytes']==parked['parkedLaneBytes']
@@ -58,6 +60,8 @@ with tempfile.TemporaryDirectory(prefix='singz-monitor-') as folder:
         restored=playback.command('unpark');assert not restored['parked'] and not restored['playing'];assert restored['graphGeneration']>parked['graphGeneration']
         assert abs(restored['position']-parked['position'])<.03,(parked,restored)
         assert restored['looping'] and restored['transpose']==-2 and restored['playbackRate']==.8
+        if decoded: assert restored['parkedPcmAdopted'] and restored['parkedLaneBytes']==0,restored
+        else: assert not restored['parkedPcmAdopted'],restored
         assert restored['lanes'][0]['solo'] and abs(restored['lanes'][0]['gain']-.37)<.001
         playback.command('play')
         if hardware:
@@ -69,4 +73,15 @@ with tempfile.TemporaryDirectory(prefix='singz-monitor-') as folder:
                 time.sleep(.025)
         (out/'result.json').write_text(json.dumps({'hardwarePlayback':hardware,'hardwareMonitoring':hardware_monitor,'parked':parked,'restored':restored,'monitorStopped':True},indent=2))
     finally:playback.close()
-print('PASS: physical output park, retained PCM/config/position, no controls while parked, muted monitor lifetime, paused restore and explicit Play')
+    for injection in ('--test-fail-unpark-prepare-once','--test-fail-unpark-before-lease-claim-once'):
+        retry=Session([str(audio),'--test-fake-host',injection,*(['--no-stream-lanes'] if decoded else []),'vocals',str(source)])
+        try:
+            assert retry.read()['ok']
+            first_park=retry.command('park')
+            assert first_park['parked'] and (first_park['parkedLaneBytes']>0 if decoded else first_park['parkedLaneBytes']==0),first_park
+            failed=retry.command('unpark',False)
+            assert failed['parked'] and failed['parkedLaneBytes']==first_park['parkedLaneBytes'],failed
+            restored=retry.command('unpark')
+            assert not restored['parked'] and restored['graphGeneration']>first_park['graphGeneration'],restored
+        finally:retry.close()
+print('PASS: physical output park, '+('retained/adopted PCM' if decoded else 'stream release')+'/config/position, no controls while parked, muted monitor lifetime, paused restore and explicit Play')

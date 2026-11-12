@@ -624,6 +624,7 @@ int run(int argc, char** argv) {
   const bool muted = std::getenv("SINGZ_MUTE") != nullptr;
   if(argc==2 && std::string(argv[1])=="--providers") {singz::tools::writeGpuiAudioProviders(std::cout);std::cout<<'\n'<<std::flush;return 0;}
   bool fake=false,trainingOnly=false,emptyProject=false,devicesOnly=false,explicitProvider=false;
+  bool forceDecodedLanes=false,testFailUnparkPrepareOnce=false,testFailUnparkBeforeLeaseClaimOnce=false;
   std::string requestedProvider;
   int first=1;
   auto providerFailure=[&](const std::string& id,const std::string& code,const std::string& message,int exitCode=1) {
@@ -635,6 +636,9 @@ int run(int argc, char** argv) {
   while(first<argc) {
     const std::string option=argv[first];
     if(option=="--test-fake-host") {if(fake)return providerFailure(requestedProvider,"invalid-arguments","Duplicate fake host option",2);fake=true;++first;}
+    else if(option=="--no-stream-lanes") {if(forceDecodedLanes)return providerFailure(requestedProvider,"invalid-arguments","Duplicate decoded-lane override",2);forceDecodedLanes=true;++first;}
+    else if(option=="--test-fail-unpark-prepare-once") {if(testFailUnparkPrepareOnce)return providerFailure(requestedProvider,"invalid-arguments","Duplicate unpark failure injection",2);testFailUnparkPrepareOnce=true;++first;}
+    else if(option=="--test-fail-unpark-before-lease-claim-once") {if(testFailUnparkBeforeLeaseClaimOnce)return providerFailure(requestedProvider,"invalid-arguments","Duplicate unpark failure injection",2);testFailUnparkBeforeLeaseClaimOnce=true;++first;}
     else if(option=="--provider") {
       if(explicitProvider || first+1>=argc)return providerFailure(requestedProvider,"invalid-provider","Expected one explicit Windows provider",2);
       requestedProvider=argv[first+1];explicitProvider=true;first+=2;
@@ -643,6 +647,8 @@ int run(int argc, char** argv) {
     else if(option=="--devices") {if(trainingOnly||emptyProject||devicesOnly)return providerFailure(requestedProvider,"invalid-arguments","Conflicting native helper modes",2);devicesOnly=true;++first;}
     else break;
   }
+  if((forceDecodedLanes||testFailUnparkPrepareOnce||testFailUnparkBeforeLeaseClaimOnce)&&!fake)
+    return providerFailure(requestedProvider,"invalid-arguments","Native test options require the fake host",2);
   singz::tools::GpuiAudioProviderSelection providerSelection;
   singz::tools::GpuiAudioProviderInfo unavailableProvider;
   if(!singz::tools::selectGpuiAudioProvider(requestedProvider,explicitProvider,fake,providerSelection,unavailableProvider))
@@ -724,6 +730,7 @@ int run(int argc, char** argv) {
   // Windows. Linux remains opt-in until its session path is qualified.
   config.streamLanes = true;
 #endif
+  if(forceDecodedLanes)config.streamLanes=false;
   config.graphDocument=std::move(graphDocument);
   const auto inventory=engine.enumerate();
   const AudioHostDeviceInfo* output=nullptr;
@@ -774,6 +781,8 @@ int run(int argc, char** argv) {
   bool parked=false,physicalReleased=emptyProject;
   NativePlaybackStatus parkedStatus{};
   size_t parkedBytes=0;
+  uint64_t parkedHandoffLease=0;
+  bool unparkAdoptedParkedPcm=false;
   std::optional<NativePlaybackInitialLoop> loopIntent;
   std::optional<NativePlaybackInitialLoop> regionIntent;
   std::optional<PlaybackCuePlanRequest> metronome;
@@ -841,6 +850,7 @@ int run(int argc, char** argv) {
       << ",\"parked\":" << (parked?"true":"false")
       << ",\"physicalOutputReleased\":" << (physicalReleased?"true":"false")
       << ",\"parkedLaneBytes\":" << parkedBytes
+      << ",\"parkedPcmAdopted\":" << (unparkAdoptedParkedPcm?"true":"false")
         << ",\"graphGeneration\":" << generation
         << ",\"explicitGraph\":" << (config.graphDocument.has_value()?"true":"false")
         << ",\"graphNodeCount\":" << s.graphNodeCount
@@ -929,15 +939,23 @@ int run(int argc, char** argv) {
     std::cout<<",\"laneIds\":[";for(size_t i=0;i<ids.size();++i){if(i)std::cout<<',';std::cout<<singz::tools::jsonString(ids[i]);}std::cout<<']';
     std::cout<<",\"laneDurations\":[";for(size_t i=0;i<laneDurations.size();++i){if(i)std::cout<<',';std::cout<<(rate>0?std::floor(laneDurations[i]*rate+0.5)/rate:laneDurations[i]);}std::cout<<']';
     std::cout<<",\"cueNotes\":[";for(size_t i=0;i<cueNotes.size();++i){if(i)std::cout<<',';const auto& note=cueNotes[i];std::cout<<"{\"midi\":"<<note.midi<<",\"cueIndex\":"<<note.cueIndex<<",\"start\":"<<note.start<<",\"end\":"<<note.end<<'}';}std::cout<<']';
-    if (emptyProject) std::cout << ",\"peaks\":[]";
+    if (emptyProject) std::cout << ",\"peaks\":[],\"peaksValid\":[]";
     else if (peaks) {
       const auto summaries = engine.lanePeaks(generation);
+      std::vector<bool> peakIncluded(ids.size(),false);
       std::cout << ",\"peaks\":[";
-      for (size_t i=0;i<summaries.lanes.size();++i) {
+      for (size_t i=0;i<ids.size();++i) {
         if(i) std::cout << ',';
         std::cout << '[';
-        for(size_t b=0;b<summaries.lanes[i].peaks.size();++b) { if(b)std::cout<<','; std::cout<<summaries.lanes[i].peaks[b]; }
+        const bool publish=i<summaries.lanes.size()&&summaries.lanes[i].valid;
+        peakIncluded[i]=publish;
+        if(publish)for(size_t b=0;b<summaries.lanes[i].peaks.size();++b) { if(b)std::cout<<','; std::cout<<summaries.lanes[i].peaks[b]; }
         std::cout << ']';
+      }
+      std::cout << "],\"peaksValid\":[";
+      for (size_t i=0;i<ids.size();++i) {
+        if(i) std::cout << ',';
+        std::cout << (peakIncluded[i] ? "true" : "false");
       }
       std::cout << ']';
     }
@@ -1372,19 +1390,41 @@ int run(int argc, char** argv) {
         parkedStatus.state=NativePlaybackState::Unloaded;parkedStatus.audibleProjectionQuality=NativePlaybackAudibleProjectionQuality::Unavailable;
         // Freeze at the last audible position, including latency compensation.
         parkedStatus.renderedProjectFrame=audibleFrame();
-        parkedBytes=cleanup.cleanup.parkedLaneBytes;countInPending=false;countInSeen=false;countInLandingSeconds=-1.;parked=true;started=false;songStarted=false;wantsPlaying=false;completionParked=false;}
+        parkedBytes=cleanup.cleanup.parkedLaneBytes;parkedHandoffLease=cleanup.cleanup.handoffLease;countInPending=false;countInSeen=false;countInLandingSeconds=-1.;parked=true;started=false;songStarted=false;wantsPlaying=false;completionParked=false;}
       reply(result);continue;
     }
     if(command=="unpark" && validEnd()) {
       if(!parked){result.ok=true;reply(result);continue;}
       if(trainingOnly){parked=false;physicalReleased=false;result.ok=true;reply(result);continue;}
       auto replacement=baseConfig;replacement.playbackRate=before.playbackRate;replacement.transposeSemitones=before.transposeSemitones;if(replacement.cuePlan)replacement.cuePlan->playbackRate=replacement.playbackRate;
+      // A streamed graph has no decoded PCM for Park to retain. Its cleanup
+      // therefore returns the process fallback lease; consume that lease to
+      // reclaim native playback ownership for this session's replacement.
+      replacement.handoffLease=parkedHandoffLease;
       replacement.masterGain=muted?0.F:before.masterGain;if(replacement.cuePlan)replacement.referenceGainOverride=static_cast<float>(replacement.cuePlan->volume*replacement.masterGain);replacement.initialTransport.startPaused=true;replacement.initialTransport.loop=loopIntent;replacement.initialTransport.region=regionIntent;replacement.initialTransport.regionStopArmed=before.regionStopArmed;
       replacement.preparedStartProjectFrame=before.renderedProjectFrame;
       std::vector<NativePlaybackLaneSource> sources;result.ok=true;
       for(size_t j=0;j<ids.size();++j){NativePlaybackLaneSource lane;lane.id=ids[j];lane.sourceKey=sourceKeys[j];lane.descriptor=OwnedFileDescriptor(duplicateSource(pinned[j].get()));if(!lane.descriptor.valid()){result.ok=false;result.message="Cannot duplicate retained audio source";break;}for(const auto& control:before.lanes)if(control.id==lane.id){lane.gain=control.gain;lane.muted=control.muted;lane.solo=control.solo;break;}sources.push_back(std::move(lane));}
-      if(result.ok){const auto candidate=nextGeneration++;result=engine.prepare(std::move(replacement),std::move(sources),candidate);if(result.ok){generation=candidate;parked=false;physicalReleased=false;parkedBytes=0;}}
-      reply(result);continue;
+      if(result.ok){
+        if(testFailUnparkPrepareOnce){replacement.maximumRetainedBytes=1;testFailUnparkPrepareOnce=false;}
+        if(testFailUnparkBeforeLeaseClaimOnce){replacement.handoffLease=9007199254740992ULL;testFailUnparkBeforeLeaseClaimOnce=false;}
+        const auto candidate=nextGeneration++;
+        const bool hadParkedPcm=parkedBytes>0;
+        result=engine.prepare(std::move(replacement),std::move(sources),candidate);
+        if(result.ok){generation=candidate;parked=false;physicalReleased=false;parkedBytes=0;parkedHandoffLease=0;unparkAdoptedParkedPcm=result.adoptedParkedLanes&&hadParkedPcm;}
+        else {
+          // Prepare may have consumed the old fallback lease before rejecting
+          // its candidate. Retire that failed generation and retain its fresh
+          // cleanup lease so a later unpark retry can reclaim ownership.
+          const auto failed=engine.unloadWithCleanup(candidate,NativePlaybackLaneRetention::Release);
+          if(failed.cleanup.handoffLease!=0)parkedHandoffLease=failed.cleanup.handoffLease;
+        }
+      }
+      reply(result);
+      // Adoption describes this unpark only; a later rebuild re-decodes, so
+      // no later reply may still claim the parked PCM was adopted.
+      unparkAdoptedParkedPcm=false;
+      continue;
     }
     if(parked && command!="status"){result.message="Playback is parked for microphone monitoring";reply(result);continue;}
     if(command=="cue" || command=="cue-timed") {
@@ -1452,7 +1492,7 @@ int run(int argc, char** argv) {
         if(candidate==cueGeneration){cueGain=muted?0:a;cueMixer.setGain(candidate,static_cast<float>(cueGain));}result.ok=true;
       }
     }
-    else if(command=="status" && validEnd()) { result.ok=true; }
+    else if(command=="status" && validEnd()) { result.ok=true;reply(result,true);continue; }
     else if(trainingOnly && command=="output") {std::string token,uid;if(input>>token && validEnd() && decodeUid(token,uid))result=changeOutput(uid);}
     else if(trainingOnly){result.message="No song is loaded in this training session";}
     else if(command=="met-begin") {

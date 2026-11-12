@@ -7012,7 +7012,9 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       impl_->lastTerminal = {};
       impl_->lastError.clear();
       impl_->prepareMutationGeneration = 0;
-      return impl_->success(generation);
+      NativePlaybackResult result = impl_->success(generation);
+      result.adoptedParkedLanes = adoptedParkedLanes;
+      return result;
     }
   }
   // Decoded owners can be hundreds of megabytes and graph shutdown may wait
@@ -8956,7 +8958,7 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
   const std::shared_ptr<StreamingLaneGroup> &streaming =
       impl_->prepared->streaming;
   for (size_t index = 0; index < impl_->prepared->lanes.size(); ++index) {
-    const PreparedPlaybackGraph::Lane &lane = impl_->prepared->lanes[index];
+    PreparedPlaybackGraph::Lane &lane = impl_->prepared->lanes[index];
     NativePlaybackLanePeaks peaks = lane.peaks;
     bool valid = lane.peaksValid;
     // A streamed lane has no decoded PCM to summarize, so its envelope comes
@@ -8965,10 +8967,13 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
     // as invalid until then is honest: the bar draws when the answer exists.
     if (!valid && streaming != nullptr) {
       valid = streaming->waveform(index, peaks.data(), peaks.size());
-      // Remembered for the next generation of this song. This is the only
-      // place that sees a finished lane, and a rebuild is usually seconds away.
-      if (valid)
+      // Cache the completion on the lane so repeated status polls do not
+      // reread the feeder envelope or rewrite the measured-waveform memo.
+      if (valid) {
+        lane.peaks = peaks;
+        lane.peaksValid = true;
         impl_->rememberMeasuredWaveform(lane.waveformKey, peaks);
+      }
     }
     result.lanes.push_back({lane.id, valid, peaks});
   }

@@ -54,8 +54,22 @@ with tempfile.TemporaryDirectory(prefix='singz-gpui-native-') as folder:
         prepared = reply()
         assert prepared['ok'] and not prepared['playing'], prepared
         assert abs(prepared['duration'] - 4) < .001, prepared
-        assert len(prepared['peaks']) == 1 and len(prepared['peaks'][0]) == 96
-        assert max(prepared['peaks'][0]) > .01, 'Decoded waveform is missing'
+        assert prepared.get('peaksValid') in ([False], [True]), prepared
+        assert len(prepared.get('peaks', [])) == 1, prepared
+        if prepared['peaksValid'] == [True]:
+            assert len(prepared['peaks'][0]) == 96, prepared
+        else:
+            assert prepared['peaks'] == [[]], prepared
+        measured = prepared if prepared.get('peaksValid') == [True] else eventually(
+            lambda status: len(status.get('peaks', [])) == 1 and
+            len(status['peaks'][0]) == 96 and
+            status.get('peaksValid') == [True] and
+            max(status['peaks'][0]) > .01)
+        assert max(measured['peaks'][0]) > .01, 'Decoded waveform is missing'
+        dropped = command('status')  # Deliberately do not admit this status in the host.
+        repeated = command('status')
+        assert repeated.get('peaksValid') == [True] and len(repeated.get('peaks', [[]])[0]) == 96, (dropped, repeated)
+        assert repeated['peaks'] == measured['peaks'], repeated
         command('master 4')  # Mute must survive subsequent volume changes.
         command('lane 0 0.4 1 0')
         for invalid in ['master nan', 'master 5', 'lane 6 1 0 0', 'lane 0 1 2 0', 'seek -1', 'seek 20', 'status junk', 'loop 2 1', 'rate nan 0', 'rate 0.1 0', 'rate 5 0', 'rate 1 25', 'rate 1 1.5']:

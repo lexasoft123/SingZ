@@ -71,6 +71,7 @@ pub fn metrics() -> Metrics {
 thread_local! {
     static PROJECT_PEAKS: RefCell<Option<[Arc<Vec<f32>>;crate::tracks::LANE_SLOTS]>> = const {RefCell::new(None)};
     static PROJECT_REVISION: Cell<u64> = const { Cell::new(0) };
+    static PROJECT_PEAK_TOKEN: Cell<Option<ProjectPeakToken>> = const { Cell::new(None) };
     // One current raster per lane; pan, zoom, resize and fades cannot grow this.
     static LAYERS: RefCell<[Option<Layers>; crate::tracks::LANE_SLOTS]> = const { RefCell::new([const {None};crate::tracks::LANE_SLOTS]) };
     static PENDING: RefCell<[Option<Pending>; crate::tracks::LANE_SLOTS]> = const { RefCell::new([const {None};crate::tracks::LANE_SLOTS]) };
@@ -81,8 +82,54 @@ thread_local! {
     static RELEASE_QUEUE: RefCell<Vec<Arc<RenderImage>>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn set_project_peaks(peaks: [Vec<f32>; crate::tracks::LANE_SLOTS]) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectPeakToken {
+    pub epoch: u64,
+    pub graph_generation: u64,
+}
+
+pub fn set_project_peaks(peaks: [Vec<f32>; crate::tracks::LANE_SLOTS], token: ProjectPeakToken) {
     PROJECT_PEAKS.with_borrow_mut(|p| *p = Some(peaks.map(Arc::new)));
+    PROJECT_PEAK_TOKEN.set(Some(token));
+    invalidate_project_peak_layers();
+}
+
+/// Advance the current song's admitted native graph without replacing its
+/// envelopes. A late reply from an older graph will no longer match afterward.
+pub fn admit_project_peak_generation(token: ProjectPeakToken) -> bool {
+    PROJECT_PEAK_TOKEN.get().is_some_and(|current| {
+        if current.epoch != token.epoch || token.graph_generation < current.graph_generation {
+            return false;
+        }
+        PROJECT_PEAK_TOKEN.set(Some(token));
+        true
+    })
+}
+
+/// Merge envelopes from asynchronous native streaming measurements. Pending
+/// lanes are omitted, so their current data stays in place until the feeder is
+/// finished. Identical status polls do not evict cached waveform textures.
+pub fn update_project_peaks(token: ProjectPeakToken, updates: impl IntoIterator<Item = (usize, Vec<f32>)>) -> bool {
+    if PROJECT_PEAK_TOKEN.get() != Some(token) { return false; }
+    let changed = PROJECT_PEAKS.with_borrow_mut(|project| {
+        let Some(project) = project.as_mut() else { return false; };
+        let mut changed = false;
+        for (slot, peaks) in updates {
+            if slot >= project.len() || peaks.is_empty() || project[slot].as_ref() == &peaks {
+                continue;
+            }
+            project[slot] = Arc::new(peaks);
+            changed = true;
+        }
+        changed
+    });
+    if changed {
+        invalidate_project_peak_layers();
+    }
+    changed
+}
+
+fn invalidate_project_peak_layers() {
     PROJECT_REVISION.with(|revision| revision.set(revision.get().wrapping_add(1)));
     // Evict every lane's textures; a raster still in flight is fenced out by
     // its generation and by the revision in its key.
@@ -614,6 +661,35 @@ mod tests {
     }
 
     #[test]
+    fn delayed_measurement_from_previous_song_or_graph_cannot_replace_current_peaks() {
+        let current = super::ProjectPeakToken { epoch: 9, graph_generation: 4 };
+        super::set_project_peaks(std::array::from_fn(|_| vec![0.75]), current);
+        assert!(!super::update_project_peaks(
+            super::ProjectPeakToken { epoch: 8, graph_generation: 9 },
+            [(0, vec![0.25])],
+        ));
+        assert!(!super::update_project_peaks(
+            super::ProjectPeakToken { epoch: 9, graph_generation: 3 },
+            [(0, vec![0.25])],
+        ));
+        let peaks = super::PROJECT_PEAKS.with_borrow(|project| {
+            project.as_ref().unwrap()[0].as_ref().clone()
+        });
+        assert_eq!(peaks, vec![0.75], "a delayed song-A measurement must not paint on song B");
+    }
+
+    #[test]
+    fn a_pending_lane_mask_does_not_overwrite_existing_waveform_data() {
+        let token = super::ProjectPeakToken { epoch: 1, graph_generation: 1 };
+        super::set_project_peaks(std::array::from_fn(|_| vec![0.75]), token);
+        assert!(!super::update_project_peaks(token, [(0, Vec::new())]));
+        let peaks = super::PROJECT_PEAKS.with_borrow(|project| {
+            project.as_ref().unwrap()[0].as_ref().clone()
+        });
+        assert_eq!(peaks, vec![0.75]);
+    }
+
+    #[test]
     fn overscan_is_whole_columns_around_the_view() {
         let raster = plan_raster((0.4, 0.5), 800, 2.);
         assert_eq!(raster.cols, 2400);
@@ -739,7 +815,7 @@ mod tests {
         let image = || Arc::new(RenderImage::new(vec![image::Frame::new(RgbaImage::new(1, 1))]));
         let layers = |n: u64| Layers { key: WaveformKey { project_revision: n, ..key() }, raster: plan_raster((0.4, 0.5), 800, 2.), base: image(), muted_bright: image(), audible_bright: image() };
         LAYERS.with_borrow_mut(|cache| { cache[0] = Some(layers(1)); cache[1] = Some(layers(2)); });
-        super::set_project_peaks(std::array::from_fn(|_| vec![0.]));
+        super::set_project_peaks(std::array::from_fn(|_| vec![0.]), super::ProjectPeakToken { epoch: 1, graph_generation: 1 });
         // The old path left these queued until the next song's Base paint.
         let mut released = 0;
         let drained = drain_with(|_| released += 1);
