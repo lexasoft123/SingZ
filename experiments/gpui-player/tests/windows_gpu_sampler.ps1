@@ -168,12 +168,16 @@ function Get-PresentedTimes($rows){
   $cols=@(); if($rows.Count -gt 0){$cols=$rows[0].PSObject.Properties.Name}
   $isV2=($cols -contains 'CPUStartTime') -and ($cols -contains 'DisplayLatency')
   $isV1=($cols -contains 'TimeInSeconds') -and ($cols -contains 'msUntilDisplayed')
-  if($rows.Count -gt 0 -and -not $isV2 -and -not $isV1){throw "unrecognised PresentMon CSV columns: $($cols -join ',')"}
+  # PresentMon 2.3.1's console CSV: TimeInMs (the present call) + MsUntilDisplayed, both in milliseconds.
+  $isV3=($cols -contains 'TimeInMs') -and ($cols -contains 'MsUntilDisplayed')
+  if($rows.Count -gt 0 -and -not $isV2 -and -not $isV1 -and -not $isV3){throw "unrecognised PresentMon CSV columns: $($cols -join ',')"}
   $out=New-Object System.Collections.ArrayList;$segment=New-Object System.Collections.ArrayList
   foreach($r in $rows){
     $t=0.0
     if($isV2){
       if($r.DisplayLatency -ne 'NA' -and $r.DisplayedTime -ne 'NA'){$t=(([double]$r.CPUStartTime)+([double]$r.DisplayLatency))/1000.0}
+    }elseif($isV3){
+      if($r.MsUntilDisplayed -ne 'NA'){$t=(([double]$r.TimeInMs)+([double]$r.MsUntilDisplayed))/1000.0}
     }else{
       if($r.msUntilDisplayed -ne 'NA'){$t=([double]$r.TimeInSeconds)+([double]$r.msUntilDisplayed)/1000.0}
     }
@@ -242,8 +246,10 @@ $presentedTimes=@();$presentMonVersion=$null;$frames=$null
 if($Hidden){
   $frames=Get-NullFrames $HiddenReason 0
 }else{
-  if(-not (Test-Path -LiteralPath $csv)){throw 'PresentMon wrote no CSV'}
-  $rows=@(Import-Csv -LiteralPath $csv|Where-Object{$tree -contains [int]$_.ProcessID})
+  # PresentMon creates the CSV at the first present it sees: after a clean exit, no file means
+  # nothing presented (an idle window), which is a measurement; a failed exit is an error.
+  if(-not (Test-Path -LiteralPath $csv) -and $monProc.ExitCode -ne 0){throw "PresentMon exited $($monProc.ExitCode) and wrote no CSV"}
+  $rows=if(Test-Path -LiteralPath $csv){@(Import-Csv -LiteralPath $csv|Where-Object{$tree -contains [int]$_.ProcessID})}else{@()}
   $presentedTimes=Get-PresentedTimes $rows
   $period=if($ExpectedHz -gt 0){1.0/$ExpectedHz}else{0.0}
   if($presentedTimes.Count -eq 0){ $frames=Get-NullFrames 'no presents captured: window not presenting (hidden, occluded or idle)' 0 }
@@ -262,7 +268,7 @@ $result=[ordered]@{
   gpu=[ordered]@{perAdapter=(Format-Adapters $procTicks);error=$gpuError;note='UtilizationPercentage summed over the process tree engines per 500 ms tick; per adapter by LUID'}
   dwm=[ordered]@{pids=$dwm;cpuPercent=Get-CpuPercent $dwmCpu0 $dwmCpu1 $elapsed;gpuPerAdapter=(Format-Adapters $dwmTicks)}
   adapters=@(Get-CimInstance Win32_VideoController|ForEach-Object{[ordered]@{name=$_.Name;driver=$_.DriverVersion;refreshHz=$_.CurrentRefreshRate}})
-  presentMon=[ordered]@{path=if($presentMonPath){Split-Path -Leaf $presentMonPath}else{$null};version=$presentMonVersion;columns='v2: CPUStartTime + DisplayLatency'}
+  presentMon=[ordered]@{path=if($presentMonPath){Split-Path -Leaf $presentMonPath}else{$null};version=$presentMonVersion;columns='v2: CPUStartTime + DisplayLatency; 2.3.1 console: TimeInMs + MsUntilDisplayed'}
   captureSeconds=$elapsed
   presentedTimes=@($presentedTimes)
 }

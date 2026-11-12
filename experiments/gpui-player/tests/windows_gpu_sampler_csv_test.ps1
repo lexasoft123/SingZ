@@ -14,6 +14,15 @@ function Write-Csv($name,$slots,$skippedSlots){
   }
   $path=Join-Path $dir $name;Set-Content -LiteralPath $path -Value $lines -Encoding ASCII;return $path
 }
+# PresentMon 2.3.1's console CSV has TimeInMs and MsUntilDisplayed instead (a real capture's header).
+function Write-CsvV3($name,$slots,$skippedSlots){
+  $lines=@('Application,ProcessID,SwapChainAddress,PresentRuntime,SyncInterval,PresentFlags,AllowsTearing,PresentMode,TimeInMs,MsBetweenSimulationStart,MsBetweenPresents,MsBetweenDisplayChange,MsInPresentAPI,MsRenderPresentLatency,MsUntilDisplayed')
+  foreach($i in $slots){
+    $t=$i*$period
+    if($skippedSlots -contains $i){$lines+="app.exe,1,0x1,DXGI,0,0,0,Composed: Flip,$t,NA,1,NA,0.5,1,NA"}else{$lines+="app.exe,1,0x1,DXGI,0,0,0,Composed: Flip,$t,NA,1,16.6,0.5,1,5.0"}
+  }
+  $path=Join-Path $dir $name;Set-Content -LiteralPath $path -Value $lines -Encoding ASCII;return $path
+}
 function Get-Stats($csv){
   $out=Join-Path $dir 'out.json'
   & powershell -NoProfile -ExecutionPolicy Bypass -File $sampler -CsvInput $csv -CsvOut $out -CsvExpectedHz 60|Out-Null
@@ -35,5 +44,8 @@ Expect 'two skipped frames' (Get-Stats (Write-Csv 'skip3.csv' $all @(60,61))).dr
 Expect 'missing frame counts once' (Get-Stats (Write-Csv 'gone.csv' ($all|Where-Object{$_ -ne 60}) @())).dropped 1
 # A skipped frame plus a separate missing frame: two.
 Expect 'skipped and missing' (Get-Stats (Write-Csv 'both.csv' ($all|Where-Object{$_ -ne 90}) @(30))).dropped 2
+Expect 'v3 clean run drops' (Get-Stats (Write-CsvV3 'v3clean.csv' $all @())).dropped 0
+Expect 'v3 skipped frame counts once' (Get-Stats (Write-CsvV3 'v3skip.csv' $all @(60))).dropped 1
+Expect 'v3 fps' ([Math]::Round((Get-Stats (Write-CsvV3 'v3fps.csv' $all @())).fps)) 60
 Remove-Item -LiteralPath $dir -Recurse -Force
 Write-Host 'all expectations hold'

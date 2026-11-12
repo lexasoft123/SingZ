@@ -63,8 +63,8 @@ def journals(preferences):
     for path in root.rglob('*.json'):
         try:
             value = json.loads(path.read_text())
-        except (ValueError, UnicodeError):
-            continue
+        except (ValueError, UnicodeError, FileNotFoundError, PermissionError):
+            continue  # the app replaces or retires a journal between the listing and the read (a sharing violation on Windows)
         if isinstance(value, dict) and isinstance(value.get('transaction'), str) and 'phase' in value:
             result.setdefault(value['transaction'], []).append({'path': str(path), 'value': value})
     return result

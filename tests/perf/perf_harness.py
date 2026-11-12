@@ -486,7 +486,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if proc.poll() is not None:
                 raise RuntimeError(f"app exited before {phase}")
             begin = time.monotonic()
-            record_frames = control_dir and args.app == "native" and phase == "play"
+            record_frames = control_dir and args.app == "native" and phase == "play" and os.name != "nt"  # the present observer does not exist on Windows; Windows frames come from PresentMon (frames_visible_windows.py)
             if record_frames:
                 details["framesStart"] = request_action(control_dir, "frames", deadlines[phase], {"op": "start"})
             if control_dir:
@@ -555,7 +555,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.app != "native" or not control_dir:
         frames_metric = frames_null("presented-frame capture is not wired for this driver (Electron: ScreenCaptureKit/PresentMon leg)")
     else:
-        frames_metric = frame_slots(details.get("frames", {}).get("detail"))
+        frames_metric = frame_slots(details.get("frames", {}).get("detail")) if os.name != "nt" else frames_null(HIDDEN_REASON)
         if args.display == "hidden" and frames_metric["fps"] is not None:
             raise ValueError("a hidden run cannot have presented frames")
     report = {"schema": SCHEMA, "run": metadata, "phases": phases,

@@ -1,0 +1,676 @@
+{
+  "schema": "singz.perf.baseline.v1",
+  "platform": "windows",
+  "app": "native",
+  "kind": "baseline",
+  "tag": null,
+  "commit": "492fb67d",
+  "machine": "Dell XPS 15 9530 (Intel Core i7-4712HQ 4C/8T, 16 GiB, Intel HD 4600 + NVIDIA GT 750M, Windows 10 22H2 build 19045)",
+  "machineIdentity": {
+    "model": "XPS 15 9530",
+    "cpu": "Intel(R) Core(TM) i7-4712HQ CPU @ 2.30GHz",
+    "cores": "4 cores, 8 threads",
+    "memoryBytes": "17078218752",
+    "windows": "10.0.19045 build 19045",
+    "gpus": [
+      "Intel(R) HD Graphics 4600 (driver 20.19.15.5058)",
+      "NVIDIA GeForce GT 750M (driver 25.21.14.2531)"
+    ],
+    "display": "3200x1800 @ 59 Hz"
+  },
+  "buildProfile": "release+ui-tests",
+  "packageBuildProfile": "release",
+  "reference": {
+    "reference": "synthetic 5-minute reference; 12-minute cycle partner",
+    "stemCount": 6,
+    "durationS": 300,
+    "lyricsPresent": true,
+    "storedPitchLine": true
+  },
+  "runs": 3,
+  "cells": {
+    "idleCpuPercent": {
+      "unit": "percent of one core",
+      "runs": [
+        1.1428571428571428,
+        1.5571428571428572,
+        1.55
+      ],
+      "median": 1.55,
+      "worst": 1.5571428571428572
+    },
+    "playingCpuPercent": {
+      "unit": "percent of one core",
+      "runs": [
+        2.3823529411764706,
+        2.0,
+        2.48125
+      ],
+      "median": 2.3823529411764706,
+      "worst": 2.48125
+    },
+    "steadyFootprintBytes": {
+      "unit": "bytes",
+      "runs": [
+        164626432,
+        147849216,
+        152043520
+      ],
+      "median": 152043520,
+      "worst": 164626432
+    },
+    "memoryGrowth": {
+      "unit": "bytes",
+      "runs": [
+        {
+          "growthBytes": -8167926.371285953,
+          "noiseBytes": 20933900.066776335,
+          "growing": false,
+          "samples": 5,
+          "reason": null
+        },
+        {
+          "growthBytes": -124658575.00212736,
+          "noiseBytes": 53801657.51565242,
+          "growing": false,
+          "samples": 5,
+          "reason": null
+        },
+        {
+          "growthBytes": -54188221.67707528,
+          "noiseBytes": 32287824.406790942,
+          "growing": false,
+          "samples": 5,
+          "reason": null
+        }
+      ],
+      "closeExposed": false,
+      "closeReceipts": [
+        null,
+        null,
+        null
+      ],
+      "noiseRule": "rise must stay within max(2.0 x residual stdev, 1% of steady footprint)"
+    },
+    "startupMs": {
+      "unit": "ms",
+      "runs": [
+        11718.000000109896,
+        11686.999999918044,
+        11702.99999997951
+      ],
+      "median": 11702.99999997951,
+      "worst": 11718.000000109896
+    },
+    "songOpenMs": {
+      "unit": "ms",
+      "runs": [
+        968.9999998081475,
+        1063.0000000819564,
+        1062.0000001508743
+      ],
+      "median": 1062.0000001508743,
+      "worst": 1063.0000000819564
+    },
+    "starvedBlocks": [
+      {
+        "lanes": {
+          "vocals": 0,
+          "drums": 0,
+          "bass": 0,
+          "guitar": 0,
+          "piano": 0,
+          "other": 0
+        },
+        "total": 0,
+        "reason": null,
+        "burstS": 60.15599999995902
+      },
+      {
+        "lanes": {
+          "vocals": 0,
+          "drums": 0,
+          "bass": 0,
+          "guitar": 0,
+          "piano": 0,
+          "other": 0
+        },
+        "total": 0,
+        "reason": null,
+        "burstS": 60.139999999897555
+      },
+      {
+        "lanes": {
+          "vocals": 0,
+          "drums": 0,
+          "bass": 0,
+          "guitar": 0,
+          "piano": 0,
+          "other": 0
+        },
+        "total": 0,
+        "reason": null,
+        "burstS": 60.45299999997951
+      }
+    ],
+    "frames": {
+      "static": {
+        "runs": [
+          {
+            "fps": 59.965251163352995,
+            "p99Ms": 16.74320000000762,
+            "dropped": 1,
+            "presentedSamples": 3594,
+            "timeSource": "presentedTime",
+            "gate": "fail",
+            "panelHz": 60.0,
+            "seconds": 60.0,
+            "failures": [
+              "1 dropped frames, expected 0",
+              "frame time p99 16.74 ms exceeds 16.70 ms"
+            ],
+            "displays": null,
+            "startedQuiet": null,
+            "appGpuPercent": 81.5,
+            "dwmGpuPercent": 61,
+            "dwmCpuPercent": 10.73,
+            "appCpuPercent": 37.13,
+            "gpuError": null
+          },
+          {
+            "fps": 59.94859641510064,
+            "p99Ms": 16.75199999999999,
+            "dropped": 2,
+            "presentedSamples": 3595,
+            "timeSource": "presentedTime",
+            "gate": "fail",
+            "panelHz": 60.0,
+            "seconds": 60.0,
+            "failures": [
+              "2 dropped frames, expected 0",
+              "frame time p99 16.75 ms exceeds 16.70 ms"
+            ],
+            "displays": null,
+            "startedQuiet": null,
+            "appGpuPercent": 86.22,
+            "dwmGpuPercent": 62.51,
+            "dwmCpuPercent": 10.16,
+            "appCpuPercent": 42.37,
+            "gpuError": null
+          },
+          {
+            "fps": 59.98196755800683,
+            "p99Ms": 16.744000000002757,
+            "dropped": 0,
+            "presentedSamples": 3595,
+            "timeSource": "presentedTime",
+            "gate": "fail",
+            "panelHz": 60.0,
+            "seconds": 60.0,
+            "failures": [
+              "frame time p99 16.74 ms exceeds 16.70 ms"
+            ],
+            "displays": null,
+            "startedQuiet": null,
+            "appGpuPercent": 85.6,
+            "dwmGpuPercent": 62.24,
+            "dwmCpuPercent": 9.63,
+            "appCpuPercent": 40.15,
+            "gpuError": null
+          }
+        ],
+        "gates": [
+          "fail",
+          "fail",
+          "fail"
+        ]
+      },
+      "idle": {
+        "runs": [
+          {
+            "fps": 0.1097230607502354,
+            "p99Ms": 9886.168399999999,
+            "dropped": 0,
+            "presentedSamples": 4,
+            "timeSource": "presentedTime",
+            "gate": "fail",
+            "panelHz": 60.0,
+            "seconds": 60.0,
+            "failures": [
+              "idle window presented 4 frames, expected 0"
+            ],
+            "displays": null,
+            "startedQuiet": null,
+            "appGpuPercent": 0.52,
+            "dwmGpuPercent": 0.41,
+            "dwmCpuPercent": 3.98,
+            "appCpuPercent": 2.42,
+            "gpuError": null
+          },
+          {
+            "fps": 0.11954549007899302,
+            "p99Ms": 8969.3817,
+            "dropped": 0,
+            "presentedSamples": 5,
+            "timeSource": "presentedTime",
+            "gate": "fail",
+            "panelHz": 60.0,
+            "seconds": 60.0,
+            "failures": [
+              "idle window presented 5 frames, expected 0"
+            ],
+            "displays": null,
+            "startedQuiet": null,
+            "appGpuPercent": 1.52,
+            "dwmGpuPercent": 0.27,
+            "dwmCpuPercent": 3.65,
+            "appCpuPercent": 2.52,
+            "gpuError": null
+          },
+          {
+            "fps": 0.1479469362443581,
+            "p99Ms": 13420.765599999999,
+            "dropped": 0,
+            "presentedSamples": 8,
+            "timeSource": "presentedTime",
+            "gate": "fail",
+            "panelHz": 60.0,
+            "seconds": 60.0,
+            "failures": [
+              "idle window presented 8 frames, expected 0"
+            ],
+            "displays": null,
+            "startedQuiet": null,
+            "appGpuPercent": 2.11,
+            "dwmGpuPercent": 0.61,
+            "dwmCpuPercent": 3.94,
+            "appCpuPercent": 2.68,
+            "gpuError": null
+          }
+        ],
+        "gates": [
+          "fail",
+          "fail",
+          "fail"
+        ]
+      }
+    }
+  },
+  "harnessPackage": {
+    "name": "singz-native-setup.exe",
+    "bytes": [
+      40337311,
+      40337311,
+      40337311
+    ]
+  },
+  "shippedPackage": {
+    "name": "singz-native-setup.exe",
+    "bytes": 40337311,
+    "sha256": "dc4c5986edfb85a3e6b43559da0a0371faadd9c7c46d283ffc5d6bd552e68dae"
+  },
+  "caveats": [
+    "Measured at 492fb67d, which predates 1706b685 (Bring paused CPU under 1% of one core) and d2bc946c (the Drive UI driver's empty-project expectation): N5 and N6 are pre-fix figures, to be re-measured at the tip.",
+    "Hidden and visible runs use the release ui-tests build of this tip (cargo build --release --locked --features ui-tests) with the three helpers built against the verified FFmpeg codec pack (a local snapshot of the pack built for this commit on the same laptop; inspect passed), so codecs are the full matrix. Engines are the same snapshot's statically linked llama-server and crispasr; the player and helpers import no VC runtime.",
+    "N14 is the unsigned NSIS installer from scripts/package-gpui-desktop.py over a separate plain release build (no ui-tests), the same helpers, and those engines.",
+    "Same measurement method and idle machine as the Q-01 Windows file; memory is summed working set (see there). The native process tree includes its helpers.",
+    "Visible runs: the native visible scenario drives an empty animating window (static) and an idle window; it cannot open or play a song, so N1-N3 and N8 are judged only on the empty window and the Electron playback figures cannot be compared like for like. Presented times come from PresentMon (TimeInMs + MsUntilDisplayed of 2.3.1), which fills them on this machine, so these timings are validated, unlike the Mac handler-callback times. The static gate failed on p99 by 0.04-0.05 ms (16.74-16.75 ms against 16.70) in all three runs and on 1-2 dropped frames in two; the limit is not relaxed.",
+    "Native startup (N12) is the process spawn to the interactive receipt and includes the launch-time catalog scan; it measured about 11.7 s on all three runs on this 2013-class laptop."
+  ],
+  "deferred": {
+    "120Hz": "deferred until a 120 Hz panel exists; not failed"
+  },
+  "gaps": [
+    {
+      "id": "N1",
+      "area": "Frame rate",
+      "budget": "panel refresh (60 Hz interim; 120 Hz deferred) presented FPS, reference playback",
+      "status": "unvalidated",
+      "native": [
+        {
+          "fps": 59.965251163352995,
+          "p99Ms": 16.74320000000762,
+          "dropped": 1,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        },
+        {
+          "fps": 59.94859641510064,
+          "p99Ms": 16.75199999999999,
+          "dropped": 2,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        },
+        {
+          "fps": 59.98196755800683,
+          "p99Ms": 16.744000000002757,
+          "dropped": 0,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        }
+      ],
+      "electron": null,
+      "note": "Reference-playback frames are not captured: the native visible scenario is an empty animating window (figures shown from PresentMon presented times, an empty-window diagnostic, not a pass), because it cannot open or play a song. Electron's presented frames are in its own file. The 120 Hz probe is deferred (no panel)."
+    },
+    {
+      "id": "N2",
+      "area": "Frame time",
+      "budget": "p99 <= one refresh period, reference playback",
+      "status": "unvalidated",
+      "native": [
+        {
+          "fps": 59.965251163352995,
+          "p99Ms": 16.74320000000762,
+          "dropped": 1,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        },
+        {
+          "fps": 59.94859641510064,
+          "p99Ms": 16.75199999999999,
+          "dropped": 2,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        },
+        {
+          "fps": 59.98196755800683,
+          "p99Ms": 16.744000000002757,
+          "dropped": 0,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        }
+      ],
+      "electron": null,
+      "note": "Reference-playback frames are not captured: the native visible scenario is an empty animating window (figures shown from PresentMon presented times, an empty-window diagnostic, not a pass), because it cannot open or play a song. Electron's presented frames are in its own file. The 120 Hz probe is deferred (no panel)."
+    },
+    {
+      "id": "N3",
+      "area": "Dropped frames",
+      "budget": "0 dropped presented frames over 3 minutes of playback",
+      "status": "unvalidated",
+      "native": [
+        {
+          "fps": 59.965251163352995,
+          "p99Ms": 16.74320000000762,
+          "dropped": 1,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        },
+        {
+          "fps": 59.94859641510064,
+          "p99Ms": 16.75199999999999,
+          "dropped": 2,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        },
+        {
+          "fps": 59.98196755800683,
+          "p99Ms": 16.744000000002757,
+          "dropped": 0,
+          "timeSource": "presentedTime",
+          "gate": "fail"
+        }
+      ],
+      "electron": null,
+      "note": "Reference-playback frames are not captured: the native visible scenario is an empty animating window (figures shown from PresentMon presented times, an empty-window diagnostic, not a pass), because it cannot open or play a song. Electron's presented frames are in its own file. The 120 Hz probe is deferred (no panel)."
+    },
+    {
+      "id": "N4",
+      "area": "Input latency",
+      "budget": "pan and zoom reach the screen within one frame",
+      "status": "unvalidated",
+      "native": null,
+      "electron": null,
+      "note": "No input-latency measurement exists in the harness."
+    },
+    {
+      "id": "N5",
+      "area": "Idle redraw",
+      "budget": "no presented frames when nothing changes",
+      "status": "fail",
+      "native": [
+        4,
+        5,
+        8
+      ],
+      "electron": null,
+      "note": "Presented samples while idle, window on its launch screen 25 s after launch (presence count, clock-independent). A paused song and an open modal are not covered. Electron not measured."
+    },
+    {
+      "id": "N6",
+      "area": "Idle CPU",
+      "budget": "app + helpers < 1% of one core, paused and idle, 60 s",
+      "status": "fail",
+      "native": {
+        "unit": "percent of one core",
+        "runs": [
+          1.1428571428571428,
+          1.5571428571428572,
+          1.55
+        ],
+        "median": 1.55,
+        "worst": 1.5571428571428572
+      },
+      "electron": {
+        "unit": "percent of one core",
+        "runs": [
+          3.5,
+          2.914285714285714,
+          1.6714285714285715
+        ],
+        "median": 2.914285714285714,
+        "worst": 3.5
+      },
+      "note": "Mean CPU over the 60 s pause phase, whole process tree; the song is paused, not unloaded."
+    },
+    {
+      "id": "N7",
+      "area": "Playing CPU",
+      "budget": "app + helpers <= Electron all-process total (target half)",
+      "status": "pass",
+      "native": {
+        "unit": "percent of one core",
+        "runs": [
+          2.3823529411764706,
+          2.0,
+          2.48125
+        ],
+        "median": 2.3823529411764706,
+        "worst": 2.48125
+      },
+      "electron": {
+        "unit": "percent of one core",
+        "runs": [
+          3.575,
+          3.19375,
+          3.7
+        ],
+        "median": 3.575,
+        "worst": 3.7
+      },
+      "note": "Mean CPU over the 3-minute play phase, medians compared; target (half of Electron) not applied here."
+    },
+    {
+      "id": "N8",
+      "area": "GPU, Windows",
+      "budget": "app GPU and DWM share each <= Electron",
+      "status": "unvalidated",
+      "native": {
+        "static": {
+          "appGpuPercent": 85.6,
+          "dwmGpuPercent": 62.24,
+          "dwmCpuPercent": 10.16,
+          "appCpuPercent": 40.15
+        },
+        "idle": {
+          "appGpuPercent": 1.52,
+          "dwmGpuPercent": 0.41,
+          "dwmCpuPercent": 3.94,
+          "appCpuPercent": 2.52
+        }
+      },
+      "electron": {
+        "playing": {
+          "appGpuPercent": 17.49,
+          "dwmGpuPercent": 0.86,
+          "dwmCpuPercent": 8.5,
+          "appCpuPercent": 29.9
+        },
+        "idle": {
+          "appGpuPercent": 0,
+          "dwmGpuPercent": 0.04,
+          "dwmCpuPercent": 1.57,
+          "appCpuPercent": 2.43
+        }
+      },
+      "note": "GPU and DWM share are measured in a visible window, but reference playback was not captured for both apps (the native visible scenario cannot open or play a song), so the shares shown are for the scenarios each app has and are diagnostic, not judged."
+    },
+    {
+      "id": "N9",
+      "area": "Memory",
+      "budget": "steady footprint <= Electron all-process total, 3 minutes in",
+      "status": "pass",
+      "native": {
+        "unit": "bytes",
+        "runs": [
+          164626432,
+          147849216,
+          152043520
+        ],
+        "median": 152043520,
+        "worst": 164626432
+      },
+      "electron": {
+        "unit": "bytes",
+        "runs": [
+          499122176,
+          484442112,
+          495976448
+        ],
+        "median": 495976448,
+        "worst": 499122176
+      },
+      "note": "Physical footprint of the process tree at the end of the 3-minute play phase."
+    },
+    {
+      "id": "N10",
+      "area": "Memory growth",
+      "budget": "no growth across 20 open/close cycles",
+      "status": "unvalidated",
+      "native": {
+        "growing": [
+          false,
+          false,
+          false
+        ],
+        "growthBytes": [
+          -8167926.371285953,
+          -124658575.00212736,
+          -54188221.67707528
+        ]
+      },
+      "electron": {
+        "growing": [
+          false,
+          false,
+          false
+        ],
+        "growthBytes": [
+          -17785192.092342637,
+          -68586741.36379266,
+          -41851330.508538224
+        ]
+      },
+      "note": "Cycles alternate two songs, but neither app can close a project, so these are open/open cycles (closed = null in the receipts); the figures are measured, the budget is not judged."
+    },
+    {
+      "id": "N11",
+      "area": "Audio",
+      "budget": "starvedBlocks = 0 on every lane under pan/zoom/resize",
+      "status": "pass",
+      "native": [
+        0,
+        0,
+        0
+      ],
+      "electron": null,
+      "note": "60 s burst."
+    },
+    {
+      "id": "N12",
+      "area": "Startup",
+      "budget": "cold launch to interactive <= Electron",
+      "status": "pass",
+      "native": {
+        "unit": "ms",
+        "runs": [
+          11718.000000109896,
+          11686.999999918044,
+          11702.99999997951
+        ],
+        "median": 11702.99999997951,
+        "worst": 11718.000000109896
+      },
+      "electron": {
+        "unit": "ms",
+        "runs": [
+          13115.3843,
+          13088.9587,
+          13105.0213
+        ],
+        "median": 13105.0213,
+        "worst": 13115.3843
+      },
+      "note": "Native: process spawn to interactive receipt. Electron: driver launch to library ready and welcome dismissed. Definitions are close, not identical."
+    },
+    {
+      "id": "N13",
+      "area": "Song open",
+      "budget": "reference song open <= Electron",
+      "status": "pass",
+      "native": {
+        "unit": "ms",
+        "runs": [
+          968.9999998081475,
+          1063.0000000819564,
+          1062.0000001508743
+        ],
+        "median": 1062.0000001508743,
+        "worst": 1063.0000000819564
+      },
+      "electron": {
+        "unit": "ms",
+        "runs": [
+          2391.0000000614673,
+          2375.0,
+          2438.0000000819564
+        ],
+        "median": 2391.0000000614673,
+        "worst": 2438.0000000819564
+      },
+      "note": "First open of the 5-minute reference song, hidden."
+    },
+    {
+      "id": "N14",
+      "area": "Package size",
+      "budget": "installer <= Electron",
+      "status": "pass",
+      "native": {
+        "name": "singz-native-setup.exe",
+        "bytes": 40337311,
+        "sha256": "dc4c5986edfb85a3e6b43559da0a0371faadd9c7c46d283ffc5d6bd552e68dae"
+      },
+      "electron": {
+        "name": "SingZ-0.26.7-win-x64.exe",
+        "bytes": 107443347,
+        "sha256": "c49e45a8ac00e2650870294927de2f98453d99204b13816abf70ca61d5c4ee79"
+      },
+      "note": "Shipped installer sizes. Native is the NSIS installer built here, unsigned; Electron is the published release asset."
+    }
+  ],
+  "electronBaseline": {
+    "tag": "v0.26.7",
+    "commit": "2f0dd909",
+    "machine": "Dell XPS 15 9530 (Intel Core i7-4712HQ 4C/8T, 16 GiB, Intel HD 4600 + NVIDIA GT 750M, Windows 10 22H2 build 19045)"
+  }
+}

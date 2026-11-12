@@ -119,6 +119,17 @@ def load_runs(paths: list[Path], app: str) -> list[dict[str, Any]]:
     return runs
 
 
+def windows_share(sampler: dict[str, Any]) -> dict[str, Any]:
+    """App and DWM GPU/CPU share from a windows_gpu_sampler.ps1 capture (N8): GPU engine utilisation
+    summed over the process tree's engines and over adapters, mean per 500 ms tick."""
+    def adapters(block: Any) -> float | None:
+        rows = (block or {}).get("perAdapter", (block or {}).get("gpuPerAdapter")) or []
+        return round(sum(r["meanPercent"] for r in rows), 2) if rows else None
+    gpu, dwm, process = sampler.get("gpu") or {}, sampler.get("dwm") or {}, sampler.get("process") or {}
+    return {"appGpuPercent": adapters(gpu), "dwmGpuPercent": adapters({"gpuPerAdapter": dwm.get("gpuPerAdapter")}),
+            "dwmCpuPercent": dwm.get("cpuPercent"), "appCpuPercent": process.get("cpuPercent"), "gpuError": gpu.get("error")}
+
+
 def frames_cells(paths: list[Path]) -> dict[str, Any]:
     """Visible presented-frame runs from frames_visible.py, three per scenario."""
     by_scenario: dict[str, list[dict[str, Any]]] = {}
@@ -134,16 +145,20 @@ def frames_cells(paths: list[Path]) -> dict[str, Any]:
         runs = []
         for doc in docs:
             f = doc["frames"]
-            runs.append({"fps": f.get("fps"), "p99Ms": (f.get("frameTimeMs") or {}).get("p99"), "dropped": f.get("dropped"),
-                         "presentedSamples": f.get("presentedSamples"), "timeSource": f.get("timeSource"), "gate": doc["gate"],
-                         "panelHz": doc["panelHz"], "seconds": doc["seconds"], "failures": doc["failures"],
-                         "displays": doc["environment"].get("displays"), "startedQuiet": doc["environment"].get("startedQuiet")})
+            environment = doc.get("environment") or {}
+            run = {"fps": f.get("fps"), "p99Ms": (f.get("frameTimeMs") or {}).get("p99"), "dropped": f.get("dropped"),
+                   "presentedSamples": f.get("presentedSamples"), "timeSource": f.get("timeSource"), "gate": doc["gate"],
+                   "panelHz": doc["panelHz"], "seconds": doc["seconds"], "failures": doc["failures"],
+                   "displays": environment.get("displays"), "startedQuiet": environment.get("startedQuiet")}
+            if doc.get("sampler"):
+                run.update(windows_share(doc["sampler"]))
+            runs.append(run)
         cells[scenario] = {"runs": runs, "gates": [r["gate"] for r in runs]}
     return cells
 
 
 def aggregate(app: str, run_paths: list[Path], shipped_package: Path | None, frame_paths: list[Path], notes: list[str],
-              identity: dict[str, Any] | None = None, tag: str | None = None) -> dict[str, Any]:
+              identity: dict[str, Any] | None = None, tag: str | None = None, platform: str = "mac") -> dict[str, Any]:
     runs = load_runs(run_paths, app)
     meta = runs[0]["run"]
     closed = [r["actionReceipts"].get("cycles", {}).get("detail", {}).get("closed") for r in runs]
@@ -164,12 +179,15 @@ def aggregate(app: str, run_paths: list[Path], shipped_package: Path | None, fra
         if not shipped_package.is_file() or shipped_package.stat().st_size <= 0:
             raise ValueError("shipped package must be an existing file")
         package = {"name": shipped_package.name, "bytes": shipped_package.stat().st_size, "sha256": sha256(shipped_package)}
-    return {"schema": SCHEMA, "app": app, "kind": "baseline", "tag": tag, "commit": meta["commit"], "machine": meta["machine"],
+    deferred = {"120Hz": "deferred until a 120 Hz panel exists; not failed"}
+    if platform == "mac":
+        deferred["windows"] = "Windows legs are a separate task (see the summary)"
+    return {"schema": SCHEMA, "platform": platform, "app": app, "kind": "baseline", "tag": tag, "commit": meta["commit"], "machine": meta["machine"],
             "machineIdentity": identity, "buildProfile": meta["buildProfile"], "packageBuildProfile": meta["packageBuildProfile"],
             "reference": meta.get("reference"), "runs": len(runs), "cells": cells,
             "harnessPackage": {"name": runs[0].get("packageArtifact"), "bytes": [r["metrics"]["packageSizeBytes"] for r in runs]},
             "shippedPackage": package, "caveats": notes,
-            "deferred": {"120Hz": "deferred until a 120 Hz panel exists; not failed", "windows": "Windows legs are a separate task (see the summary)"}}
+            "deferred": deferred}
 
 
 def _scalar(doc: dict[str, Any], key: str) -> float | None:
@@ -182,8 +200,31 @@ def _verdict(native: float | None, ceiling: float | None) -> str:
     return "pass" if native <= ceiling else "fail"
 
 
+def n8_row(nc: dict[str, Any], ec: dict[str, Any]) -> tuple[str, Any, Any, str]:
+    """N8 from the Windows sampler: app GPU share and DWM share, native against Electron, in the
+    reference-playback scenario (`playing`). Other scenarios are shown but never judged."""
+    def medians(cell: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not cell:
+            return None
+        out = {}
+        for key in ("appGpuPercent", "dwmGpuPercent", "dwmCpuPercent", "appCpuPercent"):
+            values = [r.get(key) for r in cell["runs"]]
+            out[key] = None if any(v is None for v in values) else statistics.median(values)
+        return out
+    shown_n = {name: medians(cell) for name, cell in nc["frames"].items() if medians(cell) and medians(cell)["appGpuPercent"] is not None}
+    shown_e = {name: medians(cell) for name, cell in ec["frames"].items() if medians(cell) and medians(cell)["appGpuPercent"] is not None}
+    native, electron = shown_n.get("playing"), shown_e.get("playing")
+    if native and electron and native["dwmGpuPercent"] is not None and electron["dwmGpuPercent"] is not None:
+        ok = native["appGpuPercent"] <= electron["appGpuPercent"] and native["dwmGpuPercent"] <= electron["dwmGpuPercent"]
+        return ("pass" if ok else "fail"), native, electron, "Median GPU engine share of the app process tree and of DWM during visible reference playback (PresentMon capture window)."
+    return ("unvalidated", shown_n or None, shown_e or None,
+            "GPU and DWM share are measured in a visible window, but reference playback was not captured for both apps (the native visible scenario cannot open or play a song), "
+            "so the shares shown are for the scenarios each app has and are diagnostic, not judged.")
+
+
 def gaps(native: dict[str, Any], electron: dict[str, Any]) -> list[dict[str, Any]]:
     """Native against Electron for each budget N1-N14: pass, fail, unvalidated or deferred."""
+    windows = native.get("platform") == "windows"
     nc, ec = native["cells"], electron["cells"]
     rows: list[dict[str, Any]] = []
 
@@ -194,6 +235,8 @@ def gaps(native: dict[str, Any], electron: dict[str, Any]) -> list[dict[str, Any
     shown = None if not static else [{k: r[k] for k in ("fps", "p99Ms", "dropped", "timeSource", "gate")} for r in static["runs"]]
     for n in ("N1", "N2", "N3"):
         row(n, "unvalidated", shown, None,
+            ("Reference-playback frames are not captured: the native visible scenario is an empty animating window (figures shown from PresentMon presented times, an empty-window "
+             "diagnostic, not a pass), because it cannot open or play a song. Electron's presented frames are in its own file. The 120 Hz probe is deferred (no panel).") if windows else
             "Reference-playback frames are not captured: the visible scenarios are an empty animating window (figures shown, diagnostic) and this Mac's presentedTime is 0, "
             "so timing is handler-callback-based. Electron has no macOS presented-frame capture. Re-run at 60 Hz on a display that fills presentedTime; the 120 Hz probe is deferred (no panel).")
     row("N4", "unvalidated", None, None, "No input-latency measurement exists in the harness.")
@@ -209,7 +252,11 @@ def gaps(native: dict[str, Any], electron: dict[str, Any]) -> list[dict[str, Any
         "Mean CPU over the 60 s pause phase, whole process tree; the song is paused, not unloaded.")
     row("N7", _verdict(_scalar(native, "playingCpuPercent"), _scalar(electron, "playingCpuPercent")), nc["playingCpuPercent"], ec["playingCpuPercent"],
         "Mean CPU over the 3-minute play phase, medians compared; target (half of Electron) not applied here.")
-    row("N8", "deferred", None, None, "Windows only: GPU and DWM share need the field laptop (PresentMon).")
+    if windows:
+        status, nat, ele, why = n8_row(nc, ec)
+        row("N8", status, nat, ele, why)
+    else:
+        row("N8", "deferred", None, None, "Windows only: GPU and DWM share need the field laptop (PresentMon).")
     row("N9", _verdict(_scalar(native, "steadyFootprintBytes"), _scalar(electron, "steadyFootprintBytes")), nc["steadyFootprintBytes"], ec["steadyFootprintBytes"],
         "Physical footprint of the process tree at the end of the 3-minute play phase.")
     g = [r["growing"] for r in nc["memoryGrowth"]["runs"]]
@@ -230,7 +277,9 @@ def gaps(native: dict[str, Any], electron: dict[str, Any]) -> list[dict[str, Any
         "Native: process spawn to interactive receipt. Electron: driver launch to library ready and welcome dismissed. Definitions are close, not identical.")
     row("N13", _verdict(_scalar(native, "songOpenMs"), _scalar(electron, "songOpenMs")), nc["songOpenMs"], ec["songOpenMs"], "First open of the 5-minute reference song, hidden.")
     npkg, epkg = native.get("shippedPackage"), electron.get("shippedPackage")
-    row("N14", _verdict(npkg and npkg["bytes"], epkg and epkg["bytes"]), npkg, epkg, "Shipped dmg sizes. Native is ad hoc signed and built locally; Electron is the published release asset.")
+    row("N14", _verdict(npkg and npkg["bytes"], epkg and epkg["bytes"]), npkg, epkg,
+        "Shipped installer sizes. Native is the NSIS installer built here, unsigned; Electron is the published release asset." if windows else
+        "Shipped dmg sizes. Native is ad hoc signed and built locally; Electron is the published release asset.")
     return rows
 
 
@@ -261,7 +310,8 @@ def markdown(doc: dict[str, Any], rows: list[dict[str, Any]] | None) -> str:
     c = doc["cells"]
     title = "Q-01 Electron baseline" if doc["app"] == "electron" else "Q-02 native release baseline"
     ident = doc.get("machineIdentity") or {}
-    out = [f"# {title} (Mac)", "",
+    windows = doc.get("platform") == "windows"
+    out = [f"# {title} ({'Windows' if windows else 'Mac'})", "",
            f"- App: {doc['app']} {doc.get('tag') or ''} at commit `{doc['commit']}`, build `{doc['buildProfile']}` (package profile `{doc['packageBuildProfile']}`).",
            f"- Machine: {doc['machine']}" + (f" ({', '.join(f'{k}: {v}' for k, v in ident.items())})" if ident else "") + ".",
            f"- {doc['runs']} hidden runs per cell, plus visible runs where listed; reference: {json.dumps(doc.get('reference'))}.", "",
@@ -272,12 +322,13 @@ def markdown(doc: dict[str, Any], rows: list[dict[str, Any]] | None) -> str:
     out += [f"Memory growth over the cycles phase (N10): " + ", ".join(_fmt(g["growthBytes"], "bytes") + (" (growing)" if g["growing"] else " (within noise)") if g["growthBytes"] is not None else "n/a" for g in growths)
             + f". Rule: {c['memoryGrowth']['noiseRule']}. Close exposed by the app: {c['memoryGrowth']['closeExposed']}.", ""]
     if c["frames"]:
-        out += ["Visible presented-frame runs (diagnostic, `frames_visible.py`):", ""]
+        out += [("Visible presented-frame runs (PresentMon, `frames_visible_windows.py`):" if windows else "Visible presented-frame runs (diagnostic, `frames_visible.py`):"), ""]
         for scenario, cell in c["frames"].items():
-            out.append(f"- {scenario}: " + "; ".join(f"fps {_fmt(r['fps'])}, p99 {_fmt(r['p99Ms'])} ms, dropped {r['dropped']}, samples {r['presentedSamples']}, {r['gate']} ({r['timeSource']})" for r in cell["runs"]))
+            out.append(f"- {scenario}: " + "; ".join(f"fps {_fmt(r['fps'])}, p99 {_fmt(r['p99Ms'])} ms, dropped {r['dropped']}, samples {r['presentedSamples']}, {r['gate']} ({r['timeSource']})"
+                                                     + (f", app GPU {_fmt(r.get('appGpuPercent'))} %, DWM GPU {_fmt(r.get('dwmGpuPercent'))} %" if r.get('appGpuPercent') is not None else "") for r in cell["runs"]))
         out.append("")
     else:
-        out += ["Presented frames: not measured for this app on this Mac (no macOS presented-frame capture exists for it).", ""]
+        out += ["Presented frames: not measured for this app on this machine.", ""]
     for key, label in (("shippedPackage", "Shipped package (N14)"),):
         p = doc.get(key)
         out.append(f"{label}: " + (f"`{p['name']}`, {p['bytes']:,} bytes ({p['bytes'] / 1048576:.1f} MiB), sha256 `{p['sha256']}`" if p else "n/a"))
@@ -294,7 +345,8 @@ def markdown(doc: dict[str, Any], rows: list[dict[str, Any]] | None) -> str:
                     return ", ".join(_fmt(g, "bytes") + (" (growing)" if grew else "") for g, grew in zip(v["growthBytes"], v["growing"]))
                 return "n/a" if v is None else json.dumps(v)
             out.append(f"| {r['id']} | {r['area']} | **{r['status']}** | {show(r['native'])} | {show(r['electron'])} | {r['note']} |")
-    out += ["", WINDOWS_STEPS]
+    if not windows:
+        out += ["", WINDOWS_STEPS]
     return "\n".join(out)
 
 
@@ -317,11 +369,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--note", action="append", default=[], help="caveat to record (repeatable)")
     parser.add_argument("--tag")
     parser.add_argument("--collect-identity", action="store_true", help="record this Mac's model, chip, memory and OS")
+    parser.add_argument("--platform", choices=("mac", "windows"), default="mac")
+    parser.add_argument("--identity-json", type=Path, help="machine identity recorded as-is (for a machine this script is not running on)")
     parser.add_argument("--out-json", type=Path, required=True)
     parser.add_argument("--out-md", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        doc = aggregate(args.app, args.runs, args.shipped_package, args.frames, args.note, mac_identity() if args.collect_identity else None, args.tag)
+        identity = json.loads(args.identity_json.read_text(encoding="utf-8-sig")) if args.identity_json else (mac_identity() if args.collect_identity else None)
+        doc = aggregate(args.app, args.runs, args.shipped_package, args.frames, args.note, identity, args.tag, args.platform)
         rows = None
         if args.app == "native":
             if not args.electron_baseline:
@@ -332,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
             rows = gaps(doc, electron)
             doc["gaps"] = rows
             doc["electronBaseline"] = {"tag": electron.get("tag"), "commit": electron["commit"], "machine": electron["machine"]}
+            if electron.get("platform", "mac") != doc["platform"]:
+                raise ValueError("native and Electron baselines are for different platforms")
             if electron["machine"] != doc["machine"]:
                 raise ValueError("native and Electron baselines were measured on different machines")
         args.out_json.parent.mkdir(parents=True, exist_ok=True)

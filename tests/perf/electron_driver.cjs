@@ -13,6 +13,8 @@ const timeout = Number(process.env.SINGZ_PERF_STEP_TIMEOUT || 120) * 1000
 const burst = Number(process.env.SINGZ_PERF_BURST_SECONDS || 5) * 1000
 const cycles = Number(process.env.SINGZ_PERF_CYCLES || 20)
 const cycleDelay = Number(process.env.SINGZ_PERF_CYCLE_DELAY || 0) * 1000
+// SINGZ_PERF_VISIBLE=1: a visible (still muted) window, for the presented-frame runs of frames_visible_windows.py.
+const visible = process.env.SINGZ_PERF_VISIBLE === '1'
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 function receipt(action, completed, detail) {
   const temp = path.join(dir, 'receipt.tmp')
@@ -22,7 +24,7 @@ function receipt(action, completed, detail) {
 async function main() {
   fs.mkdirSync(dir, { recursive: true })
   const launchStarted = process.hrtime.bigint()
-  const app = await _electron.launch({ executablePath: require('electron'), args: [path.join(root, 'out/main/index.js')], env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_E2E_HOOKS: '1' } })
+  const app = await _electron.launch({ executablePath: require('electron'), args: [path.join(root, 'out/main/index.js')], env: { ...process.env, SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1', ...(visible ? {} : { SINGZ_E2E_HIDDEN: '1' }) } })
   try {
     await quietLaunch(app)
     const win = await app.firstWindow()
@@ -65,13 +67,16 @@ async function main() {
           : timeout / 1000
         const detail = await watchdog.run(action, budget, async () => {
           const hidden = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().every(window => !window.isVisible() && !window.isFocused()))
-          if (!hidden) throw new Error('scenario window became visible or focused')
+          if (!visible && !hidden) throw new Error('scenario window became visible or focused')
           if (action === 'launch') { await ready(); await dismissWelcome(); return { interactive: true, pid: app.process().pid, startupMs: Number(process.hrtime.bigint() - launchStarted) / 1e6 } }
           if (action === 'open') { await open(songs[0]); return { opened: true } }
           if (action === 'play') {
             await win.evaluate(() => __test.engine.play({ countIn: false }))
             await win.waitForFunction(() => __test.engine.playing && __test.engine.position > 0.05, null, { timeout })
-            return { playing: true }
+            // A baseline of the shipped app plays through the native engine; Web Audio (addon not loaded) is a different, cheaper-to-measure product.
+            const native = await win.evaluate(() => Boolean(__test.engine.nativeActive))
+            if (process.env.SINGZ_PERF_REQUIRE_NATIVE === '1' && !native) throw new Error('native playback is not active: the capture addon did not load (see the app log)')
+            return { playing: true, native }
           }
           if (action === 'burst') {
             await dismissWelcome()

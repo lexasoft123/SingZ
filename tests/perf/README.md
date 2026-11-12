@@ -133,8 +133,10 @@ the hidden reason). `-ExpectedHz` fixes the period used for dropped frames (defa
 the median present delta); the sampler assumes continuous animation demand, so use
 it on a static animation or playback, or pass `-NoDemand` to skip drop accounting.
 The legacy poll mode (`-App -Flag -Out`, used by `run_windows_ui.ps1`) is unchanged.
-Presented time is `CPUStartTime + DisplayLatency` from the PresentMon 2.x CSV;
-frames with no display time count as dropped. Not yet run on a Windows machine. `windows_gpu_sampler_csv_test.ps1` checks the frame statistics on synthetic CSVs (skipped frame counted once); also unrun.
+Presented time is `CPUStartTime + DisplayLatency` from the PresentMon 2.x CSV, or `TimeInMs + MsUntilDisplayed` from
+PresentMon 2.3.1's console CSV (the layout the field laptop produced);
+frames with no display time count as dropped. A capture in which nothing presented (an idle window) writes no CSV;
+after a clean PresentMon exit that is zero presents. `windows_gpu_sampler_csv_test.ps1` checks the frame statistics on synthetic CSVs (skipped frame counted once, both layouts).
 
 ## Perf smoke gate (C-35)
 
@@ -200,3 +202,22 @@ images/s, p95 2.0 ms, song open 176 ms, startup 297 ms, 0 frames demanded, 0 all
 starved blocks). With `--inject-frame-sleep-ms 40` it **failed** with
 `offscreenFramesPerSecond: 20.5 images/s, limit >= 30, 9.5 images/s past the limit` and
 `offscreenPrepareDrawP95Ms: 47.1 ms, limit <= 25, 22.1 ms past the limit`.
+
+## Windows legs (Q-01 / Q-02)
+
+Run in the logged-in desktop session (a one-off `schtasks /create ... /it` task, then `/run`, `/end`, `/delete`:
+session zero has no audio endpoint and paints no window). PresentMon needs an elevated token: add `/rl highest` to the
+task that runs the visible runs, not to the hidden ones. Put `git` on `PATH` and run Electron from its own tree: the
+Electron app finds its capture addon relative to its working directory and reads its git index, and without them it
+silently plays through Web Audio. `electron_driver.cjs` refuses to play unless `SINGZ_PERF_REQUIRE_NATIVE=1` is satisfied
+(`windows_baseline_run.py` and `frames_visible_windows.py` set it).
+
+- `make_reference.cjs` needs ffmpeg, which the laptop lacks: generate the library once elsewhere, copy it over as
+  `<template>/library` + `<template>/reference.json`, and give every run `stage_reference_copy.py <template> <fresh-dir>`.
+- `windows_baseline_run.py` runs one hidden `--run-kind baseline` run of either app (60 s burst, so N11 is judged).
+- `frames_visible_windows.py` is the Windows `frames_visible.py`: it drives the native visible scenario (`static`, `idle`)
+  or, with `--app electron`, a visible muted Electron that opens and plays the reference song (`playing`, `idle`), records
+  60 s with `windows_gpu_sampler.ps1`, and writes a `singz.perf.frames-live.v1` document that carries the sampler's
+  GPU and DWM share. The native visible scenario cannot open or play a song, so N1-N3 and N8 are judged only on the empty window.
+- `baseline_aggregate.py --platform windows --identity-json <file>` writes the Windows sections as sibling files
+  (`Q-01-electron-baseline-windows.*`, `Q-02-native-baseline-windows.*`); N8 is judged when both apps have `playing` runs.
