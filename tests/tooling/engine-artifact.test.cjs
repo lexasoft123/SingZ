@@ -141,7 +141,6 @@ function toolFixture(t) {
   const log = join(directory, 'tools.log')
   // Portability is independently tested; these fake executables are not Mach-O.
   writeFileSync(join(root, 'scripts/assert-portable-binary.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
-  writeFileSync(join(root, 'scripts/assert-native-build-lock.cjs'), `if (!process.env.SINGZ_NATIVE_BUILD_LOCK_HELD) process.exit(19)\n`)
   writeFileSync(join(root, 'scripts/analyze-source-hash.sh'), '#!/bin/sh\ncat "$(dirname "$0")/../source-hash"\n', { mode: 0o755 })
   writeFileSync(join(root, 'source-hash'), 'fixture-current-hash\n')
   writeFileSync(join(bin, 'git'), `#!${process.execPath}
@@ -170,7 +169,7 @@ if (args.includes('-B')) {
 `, { mode: 0o755 })
   const environment = {
     ...process.env, PATH: `${bin}${require('node:path').delimiter}${process.env.PATH}`,
-    TMPDIR: directory, SINGZ_NATIVE_BUILD_LOCK_HELD: 'fixture-inherited-lock-token',
+    TMPDIR: directory,
     FIXTURE_LOG: log, FIXTURE_ROOT: root,
   }
   delete environment.SINGZ_NATIVE_JOBS
@@ -197,7 +196,7 @@ for (const engine of ['llama', 'crispasr']) {
     assert.ok(commands.some(args => args.includes('checkout') && args.at(-1) === 'FETCH_HEAD'))
     assert.ok(commands.some(args => args.includes('--parallel') && args[args.indexOf('--parallel') + 1] === '4'))
     rmSync(log)
-    const cached = spawnSync('bash', [join(root, 'scripts', `vendor-${engine}.sh`), '--check-cache', target, root], { env: { ...environment, SINGZ_NATIVE_BUILD_LOCK_HELD: '' }, encoding: 'utf8' })
+    const cached = spawnSync('bash', [join(root, 'scripts', `vendor-${engine}.sh`), '--check-cache', target, root], { env: environment, encoding: 'utf8' })
     assert.equal(cached.status, 0, cached.stderr)
     assert.equal(existsSync(log), false, 'cache check must not run git, build, or lock commands')
     environment[engine === 'llama' ? 'SINGZ_LLAMA_REF' : 'SINGZ_CRISPASR_REF'] = 'requested-v3'

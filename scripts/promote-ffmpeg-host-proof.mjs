@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import {
   cpSync,
   existsSync,
@@ -29,18 +29,6 @@ const receiptPath = resolve(valueAfter('--receipt'))
 if (!/^(?:darwin-(?:arm64|x64)|win32-x64)$/.test(target))
   throw new Error(`Host proof promotion does not support ${target}`)
 
-if (!process.env.SINGZ_NATIVE_BUILD_LOCK_HELD) {
-  const locked = spawnSync(process.execPath, [
-    join(root, 'scripts', 'with-native-build-lock.mjs'),
-    '--owner', `ffmpeg-host-proof-promotion:${target}`,
-    '--', process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2),
-  ], { cwd: process.cwd(), stdio: 'inherit' })
-  if (locked.error) throw locked.error
-  process.exit(locked.status ?? 1)
-}
-execFileSync(process.execPath, [join(root, 'scripts', 'assert-native-build-lock.cjs')], {
-  stdio: 'inherit',
-})
 
 const output = join(root, 'vendor', 'ffmpeg-codec', target)
 const manifestPath = join(output, 'manifest.json')

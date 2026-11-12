@@ -34,8 +34,6 @@ on:
       - 'tests/tooling/ci-android-cache.test.cjs'
       - 'scripts/ccache-launcher.*'
       - 'scripts/restore-audio-api-prebuilts.cjs'
-      - 'scripts/native-build-lock.cjs'
-      - 'scripts/assert-native-build-lock.cjs'
       - 'scripts/with-native-build-lock.mjs'
       # editing the release notes should check the store text they generate
       - 'docs/release-notes/**'
@@ -77,8 +75,6 @@ on:
       - 'tests/tooling/ci-android-cache.test.cjs'
       - 'scripts/ccache-launcher.*'
       - 'scripts/restore-audio-api-prebuilts.cjs'
-      - 'scripts/native-build-lock.cjs'
-      - 'scripts/assert-native-build-lock.cjs'
       - 'scripts/with-native-build-lock.mjs'
       - 'docs/release-notes/**'
       - 'scripts/store-notes.cjs'

@@ -531,7 +531,7 @@ scripts/worktree-setup.sh --desktop-only  # skip mobile deps and Pods
 Bootstrap validates its mode and required tools before changing dependencies.
 On macOS, full mobile setup requires CocoaPods; it fails with an actionable
 message if `pod` is missing. Other hosts skip iOS downloads and integration.
-It holds the shared native build lock throughout provisioning, installs the
+It installs the
 Git review hook, links machine-local OAuth/Android configuration when available,
 and runs `npm ci` in the selected roots. Dependency directories, generated
 sources, Pods, Gradle state and native build products remain checkout-local.
@@ -551,7 +551,7 @@ After completing native tests, the capture producer can reuse that checkout's
 configured CMake build with `SINGZ_CAPTURE_BUILD_DIR=build/native/<name>`.
 The directory must be a real local directory under `build/`, with a regular cache
 naming this exact checkout; escapes and shared links are rejected. The producer
-still holds the native build lock, applies its own configuration and verifies
+applies its own configuration and verifies
 immutable output identity. Finish CTest first because addon configuration changes
 the enabled targets in the reused build. This avoids recompiling the same core
 under ARM64 emulation without sharing build state across checkouts.
@@ -574,28 +574,12 @@ Capture publishes immutable generations to local `build/capture-runtime/` and
 packaging snapshots to `build/capture-package/`; build it with
 `npm run capture:addon` when needed.
 
-### Shared native build lock
+### Native build lock (removed)
 
-The lock is `<git-common-dir>/singz-native-build.lock` for every worktree of a
-repository, independent of `TMPDIR`, `TEMP`, and task scratch directories.
-Exported trees without Git use `<root>/.singz-native-build.lock`. Producers
-validate inherited lock tokens rather than acquiring a second lock. Direct
-native commands (including Gradle and Xcode) must use the same wrapper:
-
-```bash
-node scripts/with-native-build-lock.mjs --owner android-feature -- bash -c 'cd mobile/android && ./gradlew :app:assembleDebug'
-```
-
-Ordinary core/engine producers accept at most four compile edges; capture and
-codec producers retain their stricter limits. Compiler-cache settings stay
-per build as described above. A busy or interrupted lock fails with owner
-information; confirm that owner and its children have stopped before removing
-it. On Windows, interrupted builds retain the lock even after `taskkill /T`
-so the recorded owner/tree can be inspected. Normal direct commands must await
-all descendants before returning. On POSIX, the wrapper forwards signals to
-the complete child process group and retains the lock while that group exists.
-Stop all builds using the old temporary-directory lock scheme before switching
-versions. Never remove a live lock to make a second build start.
+The shared native build lock was removed so builds in different worktrees never
+wait on each other; `scripts/with-native-build-lock.mjs` remains only as a
+pass-through. Each build keeps its own compile-edge limit (four for ordinary
+core/engine producers; capture and codec producers are stricter).
 
 ### Review in Claude Code and Codex
 

@@ -12,11 +12,6 @@
 # their full PASS listing stays in the canary's log, the way it always has.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
-  exec node "$ROOT/scripts/with-native-build-lock.mjs" \
-    --owner core-host-tests -- bash "$ROOT/scripts/run-core-host-tests.sh" "$@"
-fi
-node "$ROOT/scripts/assert-native-build-lock.cjs"
 # Per-worktree builds retain matching relative paths for cross-tree cache hits.
 BUILD="${SINGZ_CORE_BUILD_DIR:-$ROOT/build/native/host-tests}"
 case "$BUILD" in

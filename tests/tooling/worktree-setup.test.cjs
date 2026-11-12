@@ -48,7 +48,7 @@ function fixture(t) {
   execFileSync('git', ['clone', '--no-checkout', '-q', moduleOrigin, path.join(root, 'third_party/loopz')])
   git(path.join(root, 'third_party/loopz'), 'checkout', '--detach', moduleRevision)
   fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, '.githooks')); fs.mkdirSync(path.join(root, 'mobile/android'), { recursive: true })
-  for (const name of ['native-build-lock.cjs', 'with-native-build-lock.mjs', 'assert-native-build-lock.cjs', 'install-git-hooks.cjs', 'check-staged-review.cjs', 'verify-zcore-submodule.py'])
+  for (const name of ['with-native-build-lock.mjs', 'install-git-hooks.cjs', 'check-staged-review.cjs', 'verify-zcore-submodule.py'])
     fs.copyFileSync(path.join(source, 'scripts', name), path.join(root, 'scripts', name))
   for (const name of fs.readdirSync(path.join(source, '.githooks')))
     fs.copyFileSync(path.join(source, '.githooks', name), path.join(root, '.githooks', name))
@@ -58,7 +58,6 @@ function fixture(t) {
   writeScript(path.join(root, 'scripts/vendor-analyze.sh'), `#!/bin/sh
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
-node "$root/scripts/assert-native-build-lock.cjs"
 mkdir -p "$root/vendor/$1"
 cat > "$root/vendor/$1/singz-analyze" <<'ANALYZER'
 #!/bin/sh
@@ -73,14 +72,12 @@ printf '%s\\n' fixture-current-hash > "$root/vendor/$1/singz-analyze.source-hash
     writeScript(path.join(root, `scripts/vendor-${engine}.sh`), `#!/bin/sh\n[ "$1" = --check-cache ] || exit 1\n[ -f "$3/vendor/$2/${binary}" ] && [ "$(cat "$3/vendor/$2/${binary}.receipt.json" 2>/dev/null)" = valid ]\n`)
   writeScript(path.join(bin, 'npm'), `#!/bin/sh
 set -eu
-node "$PWD/scripts/assert-native-build-lock.cjs"
 mkdir -p node_modules/electron
 printf '%s\\n' electron > node_modules/electron/path.txt
 `)
   writeScript(path.join(bin, 'cmake'), '#!/bin/sh\nexit 0\n')
   writeScript(path.join(bin, 'uname'), '#!/bin/sh\necho Darwin\n')
   const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` }
-  delete env.SINGZ_NATIVE_BUILD_LOCK_HELD
   const run = (args, extra = {}) => spawnSync('/bin/bash', [path.join(root, 'scripts/worktree-setup.sh'), ...args], { cwd: root, env: { ...env, ...extra }, encoding: 'utf8' })
   return { main, root, bin, dir, git, env, run }
 }

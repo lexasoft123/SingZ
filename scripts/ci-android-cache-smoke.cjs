@@ -78,14 +78,9 @@ if (require.main === module) {
   if (process.argv.length > 2) {
     console.error('Usage: node scripts/ci-android-cache-smoke.cjs')
     process.exitCode = 2
-  } else if (!process.env.SINGZ_NATIVE_BUILD_LOCK_HELD) {
-    const result = spawnSync(process.execPath, [path.join(__dirname, 'with-native-build-lock.mjs'),
-      '--owner', 'ci-android-cache-smoke', '--', process.execPath, __filename], { stdio: 'inherit' })
-    process.exitCode = result.status ?? 1
   } else {
     try {
       const root = path.resolve(__dirname, '..')
-      require('./native-build-lock.cjs').assertNativeBuildLockHeld(root, process.env.SINGZ_NATIVE_BUILD_LOCK_HELD)
       const result = exerciseAndroidCaches({ repoRoot: root })
       console.log(`Android cache proof: ORT FROM-CACHE and configuration graph reused (${result.runs.length} runs)`)
     } catch (error) {

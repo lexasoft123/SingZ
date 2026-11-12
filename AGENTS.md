@@ -77,14 +77,12 @@ reboots, credential access or external publication.
   Share npm/CocoaPods/compiler caches. Reuse third-party binaries only as local
   snapshots with matching revision, target, producer, and checksum receipts;
   never write through or execute mutable sibling artifact links.
-- Serialize native builds/bootstrap across worktrees: use self-locking producers
-  or `node scripts/with-native-build-lock.mjs --owner <task> -- <command> <args>`.
-  Never forge tokens or split lock identity with task temp directories. Stop
-  older locking implementations before upgrading; prove the owner and its
-  descendants stopped before removing a stale lock.
-- Ordinary core/engine builds allow at most four compile edges; stricter producer
-  limits apply. Stop above the eight-clang-process ceiling. Keep compiler-cache
-  settings per build, never in machine config; see the development runbook.
+- Native builds in different worktrees may run in parallel; keep each build
+  within its compile-edge limit. Ordinary core/engine builds allow at most four
+  compile edges; stricter producer limits apply. Stop a build above eight clang
+  processes. Never run two of the same vendor producer (`vendor-llama.sh`,
+  `vendor-crispasr.sh`) at once. Keep compiler-cache settings per build, never
+  in machine config; see the development runbook.
 
 ## Verification and commits
 
