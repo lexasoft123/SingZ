@@ -1751,7 +1751,7 @@ export interface SingzApi {
   gdriveDeviceStatus(id: string): Promise<import('./drive-device').DriveDeviceStatus>
   gdriveDeviceCancel(id?: string): Promise<{ ok: boolean; complete?: boolean }>
   gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }>
-  gdriveSignOut(): Promise<{ ok: boolean }>
+  gdriveSignOut(): Promise<{ ok: true } | { ok: false; error: string }>
   gdriveCancelSync(): Promise<{ ok: boolean }>
   gdriveSync(): Promise<{
     ok: boolean

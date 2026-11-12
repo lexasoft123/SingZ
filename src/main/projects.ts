@@ -43,7 +43,7 @@ import { markLibraryDirty, markProjectDirty, withDirty } from './sync-dirty'
 import { allowRoot, stemsRoot } from './media'
 import { hashFile } from './separation'
 import { isIssuedLead } from './vocal-separation'
-import { readSettings, writeSettings } from './settings'
+import { readSettings, writeSettingsStrict } from './settings'
 import { AUDIO_EXT } from './source'
 import { readAudioDurationSec } from './audio-header-duration'
 import { productProfileDir } from '../shared/product-identity'
@@ -142,7 +142,7 @@ export async function setProjectsRoot(
         log('app', `project copied to new library: ${entry.name}`)
       }
     }
-    writeSettings({ projectsRoot: path ?? undefined })
+    writeSettingsStrict({ projectsRoot: path ?? undefined }, { durable: true })
     // the sync's whole scope moved; nothing about the old marks still applies
     markLibraryDirty('library moved')
     log('app', `project library is now ${newRoot}${copied ? ` (${copied} copied over)` : ''}`)

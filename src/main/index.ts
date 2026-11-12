@@ -34,7 +34,7 @@ import {
   writeProjectGraph
 } from './projects'
 import { gdriveProjects, gdriveDownload, gdriveCancelDownload, gdriveDeviceConfigured, gdriveBrowserConfigured, gdriveSignInMode, gdriveDeviceStart, gdriveDeviceStatus, gdriveDeviceCancel, gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync, gdriveCancelSync } from './gdrive'
-import { readSettings, writeSettings } from './settings'
+import { flushSettingsBackupSync, readSettings, settingsShutdown, writeSettings } from './settings'
 import { registerLocale } from './locale'
 import { registerWhatsNew } from './whats-new'
 import { loadTrainingProgress, recordTrainingCompletion, saveTrainingPreferences } from './training-progress'
@@ -44,7 +44,7 @@ import { allowRoot, isAllowed, stemsRoot } from './media'
 import { t } from '../shared/i18n'
 import { registerSource, registerTrack } from './source'
 import { attachRendererLogs, log, logEntries, logSessions, readLogSession, saveLog, startSessionLog } from './log'
-import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
+import { clearDirty, flushDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
 import { syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
 import { logHardwareInfo, readGpuOnce } from './hwinfo'
@@ -636,8 +636,7 @@ function registerIpc(): void {
     return { ok, complete: ok && complete }
   })
   ipcMain.handle('gdrive:signout', () => {
-    gdriveSignOut()
-    return { ok: true }
+    return gdriveSignOut()
   })
   ipcMain.handle('gdrive:sync', () => scheduler.syncNow())
   ipcMain.handle('gdrive:cancel-sync', () => gdriveCancelSync())
@@ -1109,16 +1108,40 @@ app.whenReady().then(async () => {
   // Back from sleep: whatever backoff is armed was sized for a network that is
   // probably now fine, and waiting 30 minutes to find out is the wrong answer.
   powerMonitor.on('resume', () => scheduler.notifyWake())
+  powerMonitor.on('shutdown', flushSettingsNow)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
+// the settings backup is written off-thread; make sure the last save reaches it
+// will-quit is the last resort; the orderly path drains in before-quit below.
+const flushSettingsNow = (): void => { flushDirty(true); flushSettingsBackupSync() }
+app.on('will-quit', flushSettingsNow)
+// Windows logout, restart and shutdown end the session without will-quit.
+app.on('browser-window-created', (_event, win) => { win.on('session-end', flushSettingsNow) })
+let settingsQuitStarted = false
+let settingsQuitDrained = false
+
 let audioQuitPending = false
 let audioQuitComplete = false
 app.on('before-quit', event => {
   void boxCec?.dispose()
+  if (!settingsQuitDrained) {
+    // Let the settings backup publisher finish its job and write the newest
+    // generation before anything else shuts down; then quit again.
+    event.preventDefault()
+    if (!settingsQuitStarted) {
+      settingsQuitStarted = true
+      flushDirty(true)
+      void settleWithin(settingsShutdown(), 3000, () => log('app', 'settings backup shutdown exceeded 3 seconds; quitting', 'warn')).finally(() => {
+        settingsQuitDrained = true
+        app.quit()
+      })
+    }
+    return
+  }
   if (audioQuitComplete) return
   if (shouldDeferBoxApplicationQuit(requestedRendererSurface(process.argv), boxQuit.cleanupFinished) &&
       boxQuit.beforeQuit(BrowserWindow.getAllWindows())) {

@@ -13,6 +13,7 @@ import {
   dirtyDirs,
   dirtyOutsideLibrary,
   dirtySeq,
+  flushDirty,
   isDirty,
   markFileDirty,
   markLibraryDirty,
@@ -31,6 +32,7 @@ const project = (root: string, name: string): string => {
 let root: string
 
 beforeEach(() => {
+  flushDirty() // a closing mark from the previous test may still be waiting for its write
   writeSettings({ gdriveDirty: undefined })
   root = mkdtempSync(join(tmpdir(), 'singz-dirty-'))
 })

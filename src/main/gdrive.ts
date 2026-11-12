@@ -39,7 +39,7 @@ import {
   type LocalEntry,
   type ProjectPlan
 } from './sync-plan'
-import { readSettings, writeSettings } from './settings'
+import { readSettings, writeSettings, writeSettingsStrict } from './settings'
 import { driveLineage, inertLineage, type DriveLineage } from './drive-lineage'
 import { syncLog } from './sync-log'
 import type { ProjectGraphHash } from '../shared/types'
@@ -106,9 +106,18 @@ function readTokens(): Tokens | null {
   return s.gdrive ?? null
 }
 
-function writeTokens(t: Tokens | null): void {
+/** Throws if the tokens could not be made durable: a sign-in must not report
+ *  success, nor a sign-out keep the credentials, on a failed save. */
+function writeTokens(t: Tokens | null, durable = true): void {
   // Settings merges patches: explicit undefined removes a field; omission preserves it.
-  writeSettings({ gdrive: t ?? undefined })
+  // Sign-in, sign-out and clearing a dead session are power-loss durable; a routine
+  // access-token renewal is not worth a directory fsync.
+  writeSettingsStrict({ gdrive: t ?? undefined }, { durable })
+}
+
+/** Drop dead credentials without letting a failed save mask the real error. */
+function dropTokens(): void {
+  try { writeTokens(null) } catch (err) { log('gdrive', `could not clear expired sign-in: ${String(err)}`, 'error') }
 }
 
 export const gdriveDeviceConfigured = (): boolean => Boolean(cfg?.tvClientId && cfg?.tvClientSecret)
@@ -131,7 +140,16 @@ export const gdriveDeviceStart = () => gdriveDeviceConfigured()
   : Promise.resolve({ ok: false as const, code: 'not-configured' as const })
 export const gdriveDeviceStatus = (id: string) => deviceAuthorization.status(id)
 export const gdriveDeviceCancel = (id?: string): boolean => deviceAuthorization.cancel(id)
-export const gdriveSignOut = (): void => { deviceAuthorization.cancel(); readerDownload?.abort(); writeTokens(null) }
+export function gdriveSignOut(): { ok: true } | { ok: false; error: string } {
+  deviceAuthorization.cancel()
+  readerDownload?.abort()
+  try {
+    writeTokens(null)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
 
 /** Browser + loopback sign-in; resolves once Google redirects back. */
 export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -241,22 +259,27 @@ async function accessToken(renew = false, signal = syncController?.signal): Prom
       `&client_secret=${encodeURIComponent(client.clientSecret)}&grant_type=refresh_token`
   }, async (res) => {
     if (res.status === 400 || res.status === 401) {
-      writeTokens(null)
+      dropTokens()
       throw new Error('Google Drive session expired — sign in again')
     }
     if (!res.ok) throw new Error(`Drive API ${res.status} renewing session`)
     return await res.json() as { access_token?: string; expires_in?: number }
   }, signal)
   if (!tok.access_token) {
-    writeTokens(null)
+    dropTokens()
     throw new Error('Google Drive session expired — sign in again')
   }
-  writeTokens({
-    ...t,
-    access: tok.access_token,
-    refresh: t.refresh,
-    expiresAt: Date.now() + (tok.expires_in ?? 3600) * 1000 - 60000
-  })
+  try {
+    writeTokens({
+      ...t,
+      access: tok.access_token,
+      refresh: t.refresh,
+      expiresAt: Date.now() + (tok.expires_in ?? 3600) * 1000 - 60000
+    }, false)
+  } catch (err) {
+    // the renewed access token in hand is still good for this run; the next one renews again
+    log('gdrive', `could not save the renewed access token: ${String(err)}`, 'error')
+  }
   return tok.access_token
 }
 
@@ -1421,9 +1444,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         (trashed ? `, ${trashed} trashed` : '') +
         (adopted.length ? `, ${adopted.length} taken in from a phone` : '')
     )
-    const s = readSettings() as Record<string, unknown>
-    s.gdriveLastSync = Date.now()
-    writeSettings(s)
+    writeSettings({ gdriveLastSync: Date.now() }) // a patch, not a rewrite of what we read: stale fields must not travel back
     return { ok: true, uploaded, unchanged, projects: projectDirs.length, outsideLibrary: outside, adopted, warnings }
   } catch (err) {
     const cancelled = syncController?.signal.aborted ?? false

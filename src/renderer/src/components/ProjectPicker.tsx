@@ -177,7 +177,8 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
                 className="pill ghost small"
                 disabled={moving}
                 onClick={() => {
-                  void window.singz.gdriveSignOut().then(() => {
+                  void window.singz.gdriveSignOut().then((res) => {
+                    if (!res.ok) { setGdriveMsg(res.error); return }
                     setGdrive({ configured: true, signedIn: false })
                     setGdriveMsg(t('library.projectPicker.signedOut'))
                   })

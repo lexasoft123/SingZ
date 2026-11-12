@@ -42,7 +42,7 @@ describe('persisted Google Drive sign-out', () => {
     expect(Object.hasOwn(readSettings(), 'gdrive')).toBe(false)
     const persisted = JSON.parse(await readFile(join(fixture.userData, 'settings.json'), 'utf8'))
     expect(Object.hasOwn(persisted, 'gdrive')).toBe(false)
-    expect(persisted).toEqual(preferences)
+    expect(persisted).toEqual({ ...preferences, _gen: expect.any(Number) }) // the commit generation lives in the file
 
     vi.resetModules()
     const restartedDrive = await import('../../src/main/gdrive')
