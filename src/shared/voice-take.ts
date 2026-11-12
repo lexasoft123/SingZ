@@ -85,6 +85,7 @@ export type VoicePlayTakeRequest = {
   takeId: string
   /** 'take' = take alone; 'with-song' = alongside the song (renderer sets the song to the take's settings first). */
   mode: 'take' | 'with-song'
+  gain?: number
 }
 
 /** Live input level, polled or pushed ~30 Hz while the input is live. dBFS, -Infinity clamped to -120. */

@@ -20,6 +20,9 @@ import type {
   VoiceRecordStopResult,
   VoiceTakeSummary
 } from '../../../shared/voice-take'
+import { stableVoiceSongId } from './voice-song-id'
+
+export { stableVoiceSongId }
 
 export const VOICE_STATES = [
   'idle',
@@ -63,6 +66,9 @@ export interface VoiceEnginePort {
   seek(t: number): void
   setTempo(rate: number): Promise<void>
   setTranspose(st: number): Promise<void>
+  /** Stem mute control, used to solo the take against the song. */
+  getTrackStates?(): { id: string; muted: boolean }[]
+  setMuted?(id: string, muted: boolean): void
 }
 
 export interface VoiceInputOption {
@@ -194,6 +200,14 @@ const STORAGE_KEY = 'singz.voice.input'
 const SONG_START_TIMEOUT_MS = 3000
 const BRIDGE_MISSING = 'voice bridge unavailable'
 
+/**
+ * Stems this feature muted for a soloed Listen with song, per engine. It lives
+ * outside any controller so that a controller torn down mid-listen (the host
+ * unmounts, the song changes) cannot strand the stems muted: the next
+ * controller for the same engine restores them on startup.
+ */
+const MUTED_BY_SOLO = new WeakMap<object, string[]>()
+
 export class VoiceController {
   private model: VoiceModel = INITIAL_VOICE_MODEL
   private readonly listeners = new Set<() => void>()
@@ -212,10 +226,12 @@ export class VoiceController {
   private songEpoch = 0
   private disposed = false
   private startToken = 0
+  private soloedStems: string[] | null = null
   private readonly now: () => number
 
   constructor(private readonly deps: VoiceControllerDeps) {
     this.now = deps.now ?? (() => Date.now())
+    this.restoreStems(MUTED_BY_SOLO.get(deps.engine) ?? null)
     const saved = this.readStored()
     if (saved) this.model = { ...this.model, input: saved }
   }
@@ -248,6 +264,22 @@ export class VoiceController {
   }
 
   // ── lifecycle ──
+  /** Follow the song on screen (null = none): metadata, takes, input devices. Returns the cleanup. */
+  bindSong(src: { path: string; projectDir: string | null; title: string; artist: string } | null): () => void {
+    this.songMeta = { title: src?.title ?? '', artist: src?.artist ?? '' }
+    const id = src ? stableVoiceSongId(src) : null
+    void this.setSong(id)
+    if (id === null) return () => this.dispose()
+    void this.refreshInputs()
+    const md = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
+    const onChange = (): void => void this.refreshInputs()
+    md?.addEventListener?.('devicechange', onChange)
+    return () => {
+      md?.removeEventListener?.('devicechange', onChange)
+      this.dispose()
+    }
+  }
+
   dispose(): void {
     this.clearTimers()
     void this.abortActivity()
@@ -286,11 +318,13 @@ export class VoiceController {
   private async abortActivity(): Promise<void> {
     // An in-flight start undoes itself when it resolves (see startRecording).
     this.startToken++
+    // A listen ends synchronously here, before any await: stems restored, song
+    // paused, listen state cleared (stopListening does all three).
+    if (this.model.listen) await this.stopListening()
     if (this.model.recording && this.recordingId) {
       this.recordingId = null
       await this.deps.api.recordStop().catch(() => undefined)
     }
-    if (this.model.listen) await this.deps.api.stopPlay().catch(() => undefined)
   }
 
   /** Re-read capture devices; also the "Check again" action. */
@@ -539,30 +573,44 @@ export class VoiceController {
     const tk = this.model.take
     const { engine, api } = this.deps
     if (!tk || this.model.recording || this.model.listen) return
-    if (mode === 'take') {
-      if (engine.playing) engine.pause()
-    } else {
-      try {
+    let startedSong = false
+    try {
+      if (mode === 'take') {
+        if (engine.playing) engine.pause()
+      } else {
         await engine.setTempo(tk.tempo)
         await engine.setTranspose(tk.transpose)
+        // Play first, then seek: a seek on a paused, never-played song asks the
+        // native engine to prepare a route before Play (see report, D1), and
+        // that can throw. Cost: the song is audible from its current position
+        // for an instant before the seek lands.
+        if (!engine.playing) {
+          await engine.play()
+          startedSong = true
+        }
         engine.seek(tk.startSec)
-        if (!engine.playing) await engine.play()
-      } catch {
-        return
       }
+    } catch {
+      // Never hide a failure: show it, and leave the song as we found it.
+      if (startedSong && engine.playing) engine.pause()
+      this.set({ error: 'error' })
+      return
     }
+    const soloed = mode === 'with-song' && this.model.solo ? this.muteStems() : null
     let ok = true
     try {
-      const res = await api.play({ takeId: tk.takeId, mode })
+      const res = await api.play({ takeId: tk.takeId, mode, gain: takeGain(this.model.level, this.model.takeMuted) })
       ok = !res || res.ok !== false
     } catch {
       ok = false
     }
     if (!ok) {
+      this.restoreStems(soloed)
       if (mode === 'with-song') engine.pause()
       this.set({ error: 'error' })
       return
     }
+    this.soloedStems = soloed
     this.listenStartedMs = this.now()
     this.listenSawPlaying = engine.playing
     this.set({ listen: mode })
@@ -572,8 +620,25 @@ export class VoiceController {
     if (!this.model.listen) return
     const mode = this.model.listen
     this.set({ listen: null })
+    this.restoreStems(this.soloedStems)
+    this.soloedStems = null
     if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
     await this.deps.api.stopPlay().catch(() => undefined)
+  }
+
+  /** Mute every stem that is not already muted; returns what to restore. */
+  private muteStems(): string[] | null {
+    const { engine } = this.deps
+    if (!engine.getTrackStates || !engine.setMuted) return null
+    const ids = engine.getTrackStates().filter((tr) => !tr.muted).map((tr) => tr.id)
+    for (const id of ids) engine.setMuted(id, true)
+    MUTED_BY_SOLO.set(engine, ids)
+    return ids
+  }
+  private restoreStems(ids: string[] | null): void {
+    if (!ids) return
+    for (const id of ids) this.deps.engine.setMuted?.(id, false)
+    MUTED_BY_SOLO.delete(this.deps.engine)
   }
 
   // ── time-driven checks (setInterval while recording or listening) ──
@@ -612,7 +677,14 @@ export class VoiceController {
       const heard = (nowMs - this.listenStartedMs) / 1000
       if (engine.playing) this.listenSawPlaying = true
       const songStopped = m.listen === 'with-song' && this.listenSawPlaying && !engine.playing
-      if (heard >= m.take.durationSec || songStopped) void this.stopListening()
+      // With the song, the take is anchored to the song timeline (native
+      // re-anchors it on a seek), so it ends where the SONG passes its end, not
+      // after a wall-clock length. The span is in song time: the take's seconds
+      // times the tempo it was recorded at, which Listen with song restores.
+      const songPastEnd =
+        m.listen === 'with-song' && engine.position >= m.take.startSec + m.take.durationSec * m.take.tempo
+      const aloneDone = m.listen === 'take' && heard >= m.take.durationSec
+      if (aloneDone || songPastEnd || songStopped) void this.stopListening()
     }
   }
 
@@ -707,6 +779,25 @@ export class VoiceController {
   }
 }
 
+/** Native clamps take gain here (about -1 dB of headroom); above it nothing changes. */
+export const TAKE_GAIN_MAX = 0.891
+/**
+ * The Level fader as take gain: 100 is the native maximum (-1 dB), falling
+ * 60 dB over the scale to silence at 0. There is no boost above unity to offer:
+ * the native side would clamp it. Level, M and S changes while a take plays
+ * apply to the NEXT Listen (native setGain ignores take voices), so they are
+ * read when a play request is built, never pushed live.
+ */
+export function takeGainDb(level: number): number {
+  if (level <= 0) return -Infinity
+  return 20 * Math.log10(TAKE_GAIN_MAX) - 60 * (1 - Math.min(100, level) / 100)
+}
+/** Linear gain sent with a play request; the M chip forces silence. */
+export function takeGain(level: number, muted: boolean): number {
+  if (muted || level <= 0) return 0
+  return Math.min(TAKE_GAIN_MAX, 10 ** (takeGainDb(level) / 20))
+}
+
 /** dBFS (-60..0) to a 0..1 meter fraction. */
 export const meterFraction = (db: number): number => Math.max(0, Math.min(1, (db + 60) / 60))
 
@@ -735,23 +826,3 @@ export function createBridgeVoiceApi(
   }
 }
 
-/**
- * A song identity that survives restarts (the per-launch load token does not):
- * the project's full directory path for a project, else the source path, hashed
- * to a slug that is safe as a directory name. Projects carry no id of their own
- * (project.json has none), so renaming or moving a project folder starts it with
- * no takes; two folders with the same name in different parents stay distinct.
- */
-export function stableVoiceSongId(src: { path: string; projectDir: string | null }): string {
-  const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/(.)\/+$/, '$1')
-  const key = src.projectDir ? `project:${norm(src.projectDir)}` : `file:${norm(src.path)}`
-  // FNV-1a, two 32-bit lanes with different multipliers: 64 bits, no crypto needed.
-  let h1 = 0x811c9dc5
-  let h2 = 0x01000193
-  for (let i = 0; i < key.length; i++) {
-    const c = key.charCodeAt(i)
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0
-    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0
-  }
-  return `song-${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`
-}

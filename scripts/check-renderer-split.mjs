@@ -161,7 +161,10 @@ for (const chunk of [
 // assets remain in their separate renderer tree. Keep 4.6 kB of headroom so
 // small shared behavior additions do not require code golfing, while a lazy
 // feature pulled into the entry still exceeds this bounded limit.
-const ENTRY_RAW_BUDGET = 1_430_000
+// The Voice strip (ADR 0014) is one lazy chunk (controller, strip, Record button,
+// R shortcut, English strings); only its mount (lazy + Suspense + chunk map) is
+// eager, ~530 B. main measured 1,429,687 B, so the feature needs a small allowance.
+const ENTRY_RAW_BUDGET = 1_431_500
 // Desktop programs, their seven-day path, and explicit interval-set controls.
 const TRAINING_RAW_BUDGET = 94_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size

@@ -116,7 +116,7 @@
   box-shadow: 0 0 6px color-mix(in srgb, var(--voice) 60%, transparent);
 }
 .vs-vol:focus-visible, .vs-ib:focus-visible, .vs-chip:focus-visible, .vs-btn:focus-visible,
-.vs-clip-led:focus-visible, .vs-select select:focus-visible, .vs-rec-t:focus-visible {
+.vs-clip-led:focus-visible, .vs-select select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -199,7 +199,19 @@
 .vs-clip-tag { position: absolute; left: -1px; top: -19px; font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }
 .vs-clip-tag.changed { color: var(--accent); border-color: var(--accent); }
 
-/* transport record button */
+/* a take playing alone: the stems are not playing, so they read as off */
+.main-col.voice-listening-alone .lane-controls,
+.main-col.voice-listening-alone .lane-wave { opacity: 0.35; }
+
+/* Infinite animations pause under a modal (PROJECT-RULES perf rules). */
+body.modal-open .voice-row[data-phase='recording'] .vs-arm.active { animation-play-state: paused; }
+
+@keyframes vs-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .voice-row, .voice-row * { animation: none !important; transition: none !important; }
+}
+
+/* Voice strip: the transport Record button (eager; the strip itself is a lazy chunk). */
 .vs-rec-t { width: 36px; height: 36px; flex: none; border-radius: 50%; border: 2px solid var(--line-strong); background: none; display: grid; place-items: center; cursor: pointer; transition: border-color 0.12s, background 0.12s; }
 .vs-rec-core { width: 14px; height: 14px; border-radius: 50%; background: var(--danger); }
 .vs-rec-t:hover:not(:disabled) { border-color: var(--danger); }
@@ -210,16 +222,9 @@
 .vs-rec-t.recording .vs-rec-core { background: #2b0f08; border-radius: 3px; animation: vs-pulse 1s ease-in-out infinite; }
 .vs-rec-time { font-family: var(--font-mono); font-size: 11px; color: var(--danger); min-width: 44px; }
 
-/* a take playing alone: the stems are not playing, so they read as off */
-.main-col.voice-listening-alone .lane-controls,
-.main-col.voice-listening-alone .lane-wave { opacity: 0.35; }
-
-/* Infinite animations pause under a modal (PROJECT-RULES perf rules). */
-body.modal-open .voice-row[data-phase='recording'] .vs-arm.active,
 body.modal-open .vs-rec-t.armed .vs-rec-core,
 body.modal-open .vs-rec-t.recording .vs-rec-core { animation-play-state: paused; }
-
-@keyframes vs-pulse { 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) {
-  .voice-row, .voice-row *, .vs-rec-t, .vs-rec-t * { animation: none !important; transition: none !important; }
-}
+@media (prefers-reduced-motion: reduce) { .vs-rec-t, .vs-rec-t * { animation: none !important; transition: none !important; } }
+.vs-rec-t:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.voice-host { display: contents; }
+.voice-record-slot { display: contents; }

@@ -6,7 +6,6 @@ import { lyrics } from './lyrics'
 import { player } from './player'
 import { library } from './library'
 import { main } from './main'
-import { voice } from './voice'
 
 export const ru: Record<string, string> = {
   ...common,
@@ -16,6 +15,5 @@ export const ru: Record<string, string> = {
   ...lyrics,
   ...player,
   ...library,
-  ...main,
-  ...voice
+  ...main
 }

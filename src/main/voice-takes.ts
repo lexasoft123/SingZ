@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { fsyncDirectorySync, writeAllSync } from './atomic-file'
 import type {
@@ -75,14 +75,18 @@ const summary = (sidecar: VoiceTakeSidecar): VoiceTakeSummary => ({
 
 const wavDuration = (bytes: number, sampleRate: number): number => Math.max(0, bytes - 44) / 2 / sampleRate
 
-const readWavInfo = async (path: string): Promise<{ sampleRate: number; dataBytes: number }> => {
-  const bytes = await readFile(path)
-  if (bytes.length < 44 || bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE')
-    throw new Error('Invalid WAV header')
+const readWavInfo = async (path: string): Promise<{ sampleRate: number; dataBytes: number; frames: number }> => {
+  const file = await stat(path)
+  const bytes = Buffer.alloc(44)
+  const handle = await open(path, 'r')
+  try { const read = await handle.read(bytes, 0, 44, 0); if (read.bytesRead < 44) throw new Error('Invalid WAV header') } finally { await handle.close() }
+  if (bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE') throw new Error('Invalid WAV header')
   const sampleRate = bytes.readUInt32LE(24)
-  const dataBytes = bytes.toString('ascii', 36, 40) === 'data' ? bytes.readUInt32LE(40) : Math.max(0, bytes.length - 44)
   if (!sampleRate) throw new Error('Invalid WAV sample rate')
-  return { sampleRate, dataBytes }
+  const available = Math.max(0, file.size - 44)
+  const declared = bytes.toString('ascii', 36, 40) === 'data' ? bytes.readUInt32LE(40) : 0
+  const dataBytes = Math.max(0, Math.min(available, declared === 0 || declared > available ? available : declared)) & ~1
+  return { sampleRate, dataBytes, frames: dataBytes / 2 }
 }
 
 export class VoiceTakeStore {
@@ -113,14 +117,15 @@ export class VoiceTakeStore {
 
   async start(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult> {
     if (this.active || this.starting) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
+    this.finalizedTake = null
     if (!validId(request.songId) || !request.input || !Number.isFinite(request.input.channelIndex) || request.input.channelIndex < 0 || !Number.isFinite(request.tempo) || !Number.isFinite(request.transposeSemitones)) return { ok: false, reason: 'error', message: 'Invalid recording request.' }
     const takeId = randomUUID()
     const paths = this.takePaths(request.songId, takeId)
-    await mkdir(paths.dir, { recursive: true })
     const generation = BigInt(`0x${takeId.replace(/-/g, '').slice(0, 15)}`)
     let captureAttempted = false
     this.starting = true
     try {
+      await mkdir(paths.dir, { recursive: true })
       captureAttempted = true
       const result = await this.options.native.recordTake({ dir: paths.dir, takeId, generation, deviceName: request.input.deviceName, channelIndex: request.input.channelIndex })
       if (!result.ok) return { ok: false, reason: 'error', message: result.error ?? 'Recording could not start.' }
@@ -157,6 +162,17 @@ export class VoiceTakeStore {
           }
           if (active.placementFault) active.latencySource = 'measured-trim'
         }
+      }
+      if (!active.placementFault && active.firstSampleHostNs && active.sampleRate) {
+        await this.writeSidecar(active.dir, active.takeId, {
+          version: VOICE_TAKE_SIDECAR_VERSION, takeId: active.takeId, songId: request.songId,
+          songTitle: request.songTitle, songArtist: request.songArtist, createdAt: active.createdAt,
+          startPositionSec: active.startPositionSec, durationSec: 0, sampleRate: active.sampleRate, channels: 1,
+          inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
+          graphLatencyFrames: active.graphLatencyFrames, latencySource: active.latencySource, input: request.input,
+          settings: active.settings, matchPercent: null, monitoring: false, status: 'recovered', name: null,
+          audio: { fileName: `${active.takeId}.wav`, format: 'wav-pcm16', byteSize: 0, checksum: null }
+        })
       }
       this.active = active
       this.finalizedTake = null
@@ -263,6 +279,20 @@ export class VoiceTakeStore {
       try {
         const sidecar = JSON.parse(await readFile(join(dir, name), 'utf8')) as VoiceTakeSidecar
         if (sidecar.version !== VOICE_TAKE_SIDECAR_VERSION) continue
+        if (this.active?.request.songId === songId && this.active.takeId === sidecar.takeId) { result.push(summary(sidecar)); continue }
+        if (sidecar.status === 'recovered') {
+          try {
+            const wavPath = join(dir, sidecar.audio.fileName)
+            const file = await stat(wavPath)
+            const wav = await readWavInfo(wavPath)
+            const durationSec = wav.frames / wav.sampleRate
+            const changed = sidecar.durationSec !== durationSec || sidecar.sampleRate !== wav.sampleRate || sidecar.audio.byteSize !== file.size
+            sidecar.durationSec = durationSec
+            sidecar.sampleRate = wav.sampleRate
+            sidecar.audio.byteSize = file.size
+            if (changed && !(this.active?.request.songId === songId && this.active.takeId === sidecar.takeId)) await this.writeSidecar(dir, sidecar.takeId, sidecar)
+          } catch { /* provisional sidecars remain recoverable */ }
+        }
         result.push(summary(sidecar))
       } catch { /* malformed sidecars remain untouched */ }
     }
@@ -277,7 +307,7 @@ export class VoiceTakeStore {
         const wav = await readWavInfo(wavPath)
         const recovered: VoiceTakeSidecar = {
         version: VOICE_TAKE_SIDECAR_VERSION, takeId, songId, songTitle: '', songArtist: '', createdAt: this.now().toISOString(),
-        startPositionSec: 0, durationSec: wav.dataBytes / 2 / wav.sampleRate, sampleRate: wav.sampleRate, channels: 1,
+        startPositionSec: 0, durationSec: wav.frames / wav.sampleRate, sampleRate: wav.sampleRate, channels: 1,
         inputLatencyFrames: 0, outputLatencyFrames: 0, graphLatencyFrames: 0, latencySource: 'measured-trim',
         input: { deviceName: '', channelIndex: 0 }, settings: [{ atSec: 0, tempo: 1, transposeSemitones: 0 }],
         matchPercent: null, monitoring: false, status: 'recovered', name: null,
@@ -299,11 +329,13 @@ export class VoiceTakeStore {
 
   async play(request: VoicePlayTakeRequest): Promise<{ ok: boolean; error?: string }> {
     if (!validId(request.takeId)) return { ok: false, error: 'Invalid take id.' }
+    if (request.gain !== undefined && !Number.isFinite(request.gain)) return { ok: false, error: 'Invalid take gain.' }
     const matches = await this.findTake(request.takeId)
     if (!matches) return { ok: false, error: 'Take not found.' }
     if (matches.sidecar.version !== VOICE_TAKE_SIDECAR_VERSION) return { ok: false, error: 'This take was made by a newer version.' }
     const generation = BigInt(`0x${request.takeId.replace(/-/g, '').slice(0, 15)}`)
-    const result = await this.options.native.playTake({ takeId: request.takeId, path: matches.wav, startPositionSec: matches.sidecar.startPositionSec, mode: request.mode, generation, tempo: matches.sidecar.settings[0]?.tempo ?? 1 })
+    const gain = Math.min(8, Math.max(0, request.gain ?? 1))
+    const result = await this.options.native.playTake({ takeId: request.takeId, path: matches.wav, startPositionSec: matches.sidecar.startPositionSec, mode: request.mode, generation, gain, tempo: matches.sidecar.settings[0]?.tempo ?? 1 })
     if (result.ok) this.playGeneration = generation
     return result
   }

@@ -1,101 +1,15 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
-import { getAudioDevices } from '../audio/devices'
-import {
-  canPressRecord,
-  createBridgeVoiceApi,
-  meterFraction,
-  primaryState,
-  recordBlock,
-  VoiceController,
-  type RecordBlock,
-  type VoiceModel
-} from '../audio/voice-take'
+import { meterFraction, primaryState, recordBlock, type VoiceController, type VoiceModel } from '../audio/voice-take'
 import { t, type Key } from '../i18n'
+import { blockText, clock, dbText, sgn } from './voice-format'
+import { useVoiceModel } from './voice-host'
+import { useVoiceStrings } from './voice-strings'
 import './voice-strip.css'
 
 const METER_SEGS = 24
 const HOT_FROM = 17
 const RED_FROM = 22
-
-export interface VoiceSongMeta {
-  id: string
-  title: string
-  artist: string
-}
-
-/** One controller per App: the strip, the transport Record button and the R key share it. */
-export function useVoiceController(engine: MultitrackEngine, song: VoiceSongMeta | null): VoiceController {
-  const [controller] = useState(
-    () =>
-      new VoiceController({
-        api: createBridgeVoiceApi(() => window.singz?.voiceTakes),
-        engine,
-        askMicAccess: () => window.singz.askMicAccess(),
-        listInputs: async () => {
-          const d = await getAudioDevices({ requestAccess: false })
-          return { inputs: d.inputs, labelsHidden: d.inputLabelsHidden }
-        },
-        storage: (() => {
-          try {
-            return window.localStorage
-          } catch {
-            return null
-          }
-        })()
-      })
-  )
-  const songId = song?.id ?? null
-  const title = song?.title ?? ''
-  const artist = song?.artist ?? ''
-  useEffect(() => {
-    controller.songMeta = { title, artist }
-  }, [controller, title, artist])
-  useEffect(() => {
-    void controller.setSong(songId)
-  }, [controller, songId])
-  useEffect(() => {
-    if (songId === null) return
-    void controller.refreshInputs()
-    const md = navigator.mediaDevices
-    const onChange = (): void => void controller.refreshInputs()
-    md?.addEventListener?.('devicechange', onChange)
-    return () => md?.removeEventListener?.('devicechange', onChange)
-  }, [controller, songId])
-  useEffect(() => () => controller.dispose(), [controller])
-  return controller
-}
-
-export function useVoiceModel(controller: VoiceController): VoiceModel {
-  return useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
-}
-
-/** True while a take plays alone: App dims the stems (they are not playing). */
-export function useVoiceListeningAlone(controller: VoiceController): boolean {
-  return useSyncExternalStore(
-    controller.subscribe,
-    () => controller.getSnapshot().listen === 'take',
-    () => false
-  )
-}
-
-const sgn = (n: number): string => (n > 0 ? `+${n}` : n < 0 ? `−${-n}` : '0')
-const clock = (s: number): string => {
-  const v = Math.max(0, s)
-  const m = Math.floor(v / 60)
-  return `${m}:${(v % 60).toFixed(1).padStart(4, '0')}`
-}
-const dbText = (db: number): string => (db <= -59 ? '−∞' : db >= 0 ? String(Math.round(db)) : `−${Math.round(-db)}`)
-
-const BLOCK_KEY: Record<Exclude<RecordBlock, null | 'no-song'>, Key> = {
-  starting: 'player.voice.recordWhyStarting',
-  perm: 'player.voice.recordWhyPerm',
-  missing: 'player.voice.recordWhyMissing',
-  error: 'player.voice.recordWhyError',
-  take: 'player.voice.recordWhyTake',
-  listening: 'player.voice.recordWhyBusy'
-}
-const blockText = (b: RecordBlock): string => (b && b !== 'no-song' ? t(BLOCK_KEY[b]) : '')
 
 const SvgIcon = ({ children }: { children: React.ReactNode }): React.JSX.Element => (
   <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -231,6 +145,7 @@ export default function VoiceStrip({
   controller: VoiceController
   engine: MultitrackEngine
 }): React.JSX.Element {
+  useVoiceStrings()
   const m = useVoiceModel(controller)
   const state = primaryState(m)
   const rec = m.recording
@@ -444,36 +359,5 @@ export default function VoiceStrip({
         {announceKey ? t(`player.voice.${announceKey}` as Key) : ''}
       </div>
     </section>
-  )
-}
-
-/** The transport's Record button (next to Play). Also announces nothing itself:
- *  the strip's live region owns that. */
-export function VoiceRecordButton({ controller }: { controller: VoiceController }): React.JSX.Element {
-  const m = useVoiceModel(controller)
-  const rec = m.recording
-  const block = recordBlock(m)
-  const disabled = !canPressRecord(m)
-  const label = rec ? t('player.voice.stop') : disabled ? blockText(block) || t('player.voice.record') : t('player.voice.record')
-  return (
-    <>
-      <button
-        type="button"
-        className={`vs-rec-t${rec ? ' recording' : ''}${m.armed ? ' armed' : ''}`}
-        aria-pressed={rec}
-        aria-label={label}
-        title={label}
-        aria-disabled={disabled}
-        disabled={disabled}
-        onClick={() => void controller.toggleRecord()}
-      >
-        <span className="vs-rec-core" aria-hidden="true" />
-      </button>
-      {rec && (
-        <span className="vs-rec-time" aria-hidden="true">
-          {clock(m.elapsedSec)}
-        </span>
-      )}
-    </>
   )
 }

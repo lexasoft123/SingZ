@@ -6,8 +6,9 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { en } from '../../src/shared/i18n/en'
-import { ru } from '../../src/shared/i18n/ru'
-import { zhCN } from '../../src/shared/i18n/zh-CN'
+import { voice as voiceEn } from '../../src/shared/i18n/en/voice'
+import { setLocale, t } from '../../src/shared/i18n'
+import { loadVoiceStrings } from '../../src/renderer/src/components/voice-strings'
 import {
   canPressRecord,
   createBridgeVoiceApi,
@@ -15,13 +16,15 @@ import {
   primaryState,
   recordBlock,
   stableVoiceSongId,
+  takeGain,
   VOICE_STATES,
   VoiceController,
   type VoiceEnginePort,
   type VoiceModel,
   type VoiceTakeApi
 } from '../../src/renderer/src/audio/voice-take'
-import VoiceStrip, { VoiceRecordButton } from '../../src/renderer/src/components/VoiceStrip'
+import VoiceStrip from '../../src/renderer/src/components/VoiceStrip'
+import { VoiceRecordButton } from '../../src/renderer/src/components/voice-record-button'
 import type { VoiceTakeSummary } from '../../src/shared/voice-take'
 
 const summary = (over: Partial<VoiceTakeSummary> = {}): VoiceTakeSummary => ({
@@ -53,7 +56,10 @@ function fakeEngine(): VoiceEnginePort & { _playing: boolean; _pos: number; _tem
     pause: vi.fn(() => { e._playing = false }),
     seek: vi.fn((t: number) => { e._pos = t }),
     setTempo: vi.fn(async (r: number) => { e._tempo = r }),
-    setTranspose: vi.fn(async (s: number) => { e._tr = s })
+    setTranspose: vi.fn(async (s: number) => { e._tr = s }),
+    stems: new Map<string, boolean>([['vocals', false], ['drums', false], ['bass', true]]),
+    getTrackStates: () => [...e.stems].map(([id, muted]) => ({ id, muted })),
+    setMuted: vi.fn((id: string, muted: boolean) => { e.stems.set(id, muted) })
   }
   return e
 }
@@ -376,6 +382,12 @@ describe('stable song identity', () => {
       stableVoiceSongId({ path: '/x', projectDir: 'C:/lib/Wild World' })
     )
   })
+  it('treats Windows paths as case-insensitive and POSIX paths as case-sensitive', () => {
+    expect(stableVoiceSongId({ path: 'x', projectDir: 'C:\\Lib\\Song' })).toBe(stableVoiceSongId({ path: 'x', projectDir: 'c:\\lib\\song' }))
+    expect(stableVoiceSongId({ path: 'C:\\Music\\A.mp3', projectDir: null })).toBe(stableVoiceSongId({ path: 'c:/music/a.mp3', projectDir: null }))
+    expect(stableVoiceSongId({ path: 'x', projectDir: '\\\\Server\\Share\\Song' })).toBe(stableVoiceSongId({ path: 'x', projectDir: '\\\\server\\share\\song' }))
+    expect(stableVoiceSongId({ path: 'x', projectDir: '/Lib/Song' })).not.toBe(stableVoiceSongId({ path: 'x', projectDir: '/lib/song' }))
+  })
   it('does not mix up projects that share a folder name in different parents', () => {
     expect(stableVoiceSongId({ path: '/a', projectDir: '/lib/one/Untitled' })).not.toBe(
       stableVoiceSongId({ path: '/a', projectDir: '/lib/two/Untitled' })
@@ -398,7 +410,7 @@ describe('listening', () => {
     const { c, api, engine } = await withTake()
     clock = 0
     await c.listen('take')
-    expect(api.play).toHaveBeenCalledWith({ takeId: 'take-1', mode: 'take' })
+    expect(api.play).toHaveBeenCalledWith({ takeId: 'take-1', mode: 'take', gain: takeGain(80, false) })
     expect(engine.play).toHaveBeenCalledTimes(1) // only the recording start
     expect(c.state).toBe('playing-take')
     clock = 11_000
@@ -413,7 +425,7 @@ describe('listening', () => {
     expect(engine.setTempo).toHaveBeenCalledWith(0.8)
     expect(engine.setTranspose).toHaveBeenCalledWith(-2)
     expect(engine.seek).toHaveBeenCalledWith(42)
-    expect(api.play).toHaveBeenCalledWith({ takeId: 'take-1', mode: 'with-song' })
+    expect(api.play).toHaveBeenCalledWith({ takeId: 'take-1', mode: 'with-song', gain: takeGain(80, false) })
     expect(engine._playing).toBe(true)
     await c.stopListening()
     expect(engine._playing).toBe(false)
@@ -427,6 +439,147 @@ describe('listening', () => {
     engine._playing = false
     c.tick()
     await vi.waitFor(() => expect(c.getSnapshot().listen).toBeNull())
+    c.dispose()
+  })
+})
+
+describe('take level, mute and solo (VS-PLAY-004/006)', () => {
+  const withTake = async () => {
+    const r = await setup()
+    await r.c.toggleRecord()
+    await r.c.toggleRecord()
+    return r
+  }
+  it('maps the fader to linear gain: 100 is the native maximum (-1 dB), 0 and mute are silent, no boost', () => {
+    expect(takeGain(100, false)).toBeCloseTo(0.891, 3)
+    expect(takeGain(100, false)).toBeLessThanOrEqual(0.891)
+    expect(takeGain(0, false)).toBe(0)
+    expect(takeGain(100, true)).toBe(0)
+    expect(takeGain(50, false)).toBeCloseTo(0.891 * 10 ** (-30 / 20), 3)
+    // strictly increasing: no part of the scale plays identically (native clamps above 0.891)
+    for (let l = 1; l < 100; l++) expect(takeGain(l + 1, false)).toBeGreaterThan(takeGain(l, false))
+  })
+  it('sends the level and mute as gain on every play request', async () => {
+    const { c, api } = await withTake()
+    c.setLevel(60)
+    await c.listen('take')
+    expect(api.play).toHaveBeenLastCalledWith({ takeId: 'take-1', mode: 'take', gain: takeGain(60, false) })
+    await c.stopListening()
+    c.toggleTakeMute()
+    await c.listen('take')
+    expect(api.play).toHaveBeenLastCalledWith({ takeId: 'take-1', mode: 'take', gain: 0 })
+    c.dispose()
+  })
+  it('solo: Listen with song mutes the stems that were audible and restores them after', async () => {
+    const { c, engine } = await withTake()
+    c.toggleSolo()
+    await c.listen('with-song')
+    expect(engine.stems.get('vocals')).toBe(true)
+    expect(engine.stems.get('drums')).toBe(true)
+    await c.stopListening()
+    expect(engine.stems.get('vocals')).toBe(false)
+    expect(engine.stems.get('drums')).toBe(false)
+    expect(engine.stems.get('bass')).toBe(true) // was muted before: stays muted
+    c.dispose()
+  })
+  it('dispose during a soloed listen restores the stems and pauses the song', async () => {
+    const { c, engine } = await withTake()
+    c.toggleSolo()
+    await c.listen('with-song')
+    expect(engine.stems.get('vocals')).toBe(true)
+    c.dispose()
+    expect(engine.stems.get('vocals')).toBe(false)
+    expect(engine.stems.get('drums')).toBe(false)
+    expect(engine.stems.get('bass')).toBe(true)
+    expect(engine._playing).toBe(false)
+    expect(c.getSnapshot().listen).toBeNull()
+  })
+  it('a song change during a soloed listen restores the stems', async () => {
+    const { c, engine } = await withTake()
+    c.toggleSolo()
+    await c.listen('with-song')
+    await c.setSong('song-2')
+    expect(engine.stems.get('vocals')).toBe(false)
+    expect(engine.stems.get('drums')).toBe(false)
+    expect(c.getSnapshot().listen).toBeNull()
+    c.dispose()
+  })
+  it('a controller created after a teardown restores stems left muted by the previous one', async () => {
+    const { c, engine, api } = await withTake()
+    c.toggleSolo()
+    await c.listen('with-song')
+    // simulate a teardown that never ran (page-level unmount): stems stay muted
+    engine.stems.set('vocals', true)
+    engine.stems.set('drums', true)
+    // a different path: leftovers are recorded per engine, a new controller restores them
+    new VoiceController({
+      api,
+      engine,
+      askMicAccess: async () => true,
+      listInputs: async () => ({ inputs: [], labelsHidden: false }),
+      now: () => clock,
+      storage: null
+    })
+    expect(engine.stems.get('vocals')).toBe(false)
+    expect(engine.stems.get('drums')).toBe(false)
+    expect(engine.stems.get('bass')).toBe(true)
+    c.dispose()
+  })
+  it('without solo the stems are left alone', async () => {
+    const { c, engine } = await withTake()
+    await c.listen('with-song')
+    expect(engine.setMuted).not.toHaveBeenCalled()
+    c.dispose()
+  })
+})
+
+describe('Listen with song follows the song position (D4) and surfaces start errors (D1)', () => {
+  const withTake = async (over: Partial<VoiceTakeSummary> = {}) => {
+    const r = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary(over) })) })
+    await r.c.toggleRecord()
+    await r.c.toggleRecord()
+    return r
+  }
+  it('ends when the song position passes startPositionSec + duration * tempo, however it got there', async () => {
+    const { c, engine } = await withTake({ startPositionSec: 30, durationSec: 10, tempo: 0.8 })
+    await c.listen('with-song')
+    clock += 60_000 // wall-clock length is irrelevant while listening with the song
+    engine._pos = 37.9
+    c.tick()
+    expect(c.getSnapshot().listen).toBe('with-song')
+    engine._pos = 38.1 // 30 + 10 * 0.8 = 38
+    c.tick()
+    await vi.waitFor(() => expect(c.getSnapshot().listen).toBeNull())
+    c.dispose()
+  })
+  it('a seek past the end during Listen with song stops it; a seek back keeps it', async () => {
+    const { c, engine } = await withTake({ startPositionSec: 30, durationSec: 10 })
+    await c.listen('with-song')
+    engine._pos = 31
+    c.tick()
+    expect(c.getSnapshot().listen).toBe('with-song')
+    engine._pos = 120
+    c.tick()
+    await vi.waitFor(() => expect(c.getSnapshot().listen).toBeNull())
+    c.dispose()
+  })
+  it('plays the song before seeking, and shows a failing seek instead of swallowing it', async () => {
+    const { c, engine, api } = await withTake()
+    engine._playing = false
+    engine.seek.mockImplementation(() => { throw new Error('Available only on Windows') })
+    await c.listen('with-song')
+    expect(engine.play.mock.invocationCallOrder.at(-1)).toBeLessThan(engine.seek.mock.invocationCallOrder[0])
+    expect(c.state).toBe('error-recoverable')
+    expect(engine._playing).toBe(false)
+    expect(api.play).not.toHaveBeenCalled()
+    c.dispose()
+  })
+  it('a rejected song start in Listen with song is an error too', async () => {
+    const { c, engine } = await withTake()
+    engine._playing = false
+    engine.play.mockRejectedValue(new Error('no audio'))
+    await c.listen('with-song')
+    expect(c.getSnapshot().error).toBe('error')
     c.dispose()
   })
 })
@@ -449,17 +602,28 @@ describe('song lifecycle', () => {
 })
 
 describe('i18n key set', () => {
-  const keys = (d: Record<string, string>): string[] => Object.keys(d).filter((k) => k.startsWith('player.voice.')).sort()
   const holes = (s: string): string[] => (s.match(/\{\w+\}/g) ?? []).sort()
-  it('English, Russian and Simplified Chinese hold the same player.voice.* keys and placeholders', () => {
-    expect(keys(en).length).toBeGreaterThan(50)
-    expect(keys(ru)).toEqual(keys(en))
-    expect(keys(zhCN)).toEqual(keys(en))
-    for (const k of keys(en)) {
-      expect(holes((ru as Record<string, string>)[k]!), `ru ${k}`).toEqual(holes((en as Record<string, string>)[k]!))
-      expect(holes((zhCN as Record<string, string>)[k]!), `zh ${k}`).toEqual(holes((en as Record<string, string>)[k]!))
-      expect((ru as Record<string, string>)[k]!.trim(), `ru ${k}`).not.toBe('')
+  const locales = ['es-419', 'pt-BR', 'tr', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW'] as const
+  it('every language holds the same player.voice.* keys and placeholders as English', async () => {
+    const english = en as Record<string, string>
+    expect(Object.keys(voiceEn).length).toBeGreaterThan(50)
+    for (const loc of locales) {
+      const dict = (await import(`../../src/shared/i18n/${loc}/voice.ts`)).voice as Record<string, string>
+      expect(Object.keys(dict).sort(), loc).toEqual(Object.keys(voiceEn).sort())
+      for (const [k, v] of Object.entries(voiceEn)) {
+        expect(dict[k]!.trim(), `${loc} ${k}`).not.toBe('')
+        expect(holes(dict[k]!), `${loc} ${k}`).toEqual(holes(v))
+      }
     }
+    // Voice strings are registered by the lazy chunk, not the eager dictionary.
+    expect(Object.keys(english).some((k) => k.startsWith('player.voice.'))).toBe(false)
+  })
+  it('loads the current language on demand', async () => {
+    expect(await loadVoiceStrings('ru')).toBe(true)
+    setLocale('ru')
+    expect(t('player.voice.name')).toBe('Голос')
+    setLocale('en')
+    expect(t('player.voice.name')).toBe('Voice')
   })
 })
 

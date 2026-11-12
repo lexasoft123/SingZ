@@ -85,8 +85,6 @@ interface Props {
   engine: MultitrackEngine
   playing: boolean
   onTogglePlay: () => void
-  /** Record button (Voice strip), rendered right after Play. */
-  recordSlot?: React.ReactNode
   split: boolean
   sep: SplitProgress | null
   karaokeOn: boolean
@@ -787,7 +785,6 @@ export default function Transport({
   engine,
   playing,
   onTogglePlay,
-  recordSlot,
   split,
   sep,
   karaokeOn,
@@ -875,7 +872,6 @@ export default function Transport({
             </svg>
           )}
         </button>
-        {recordSlot}
         <div className="clock-group">
           <TimeCode engine={engine} />
           <span className="clock-total">/ {fmtTime(engine.duration)}</span>

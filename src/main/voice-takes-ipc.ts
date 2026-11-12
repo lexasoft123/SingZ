@@ -59,7 +59,7 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   }
   const playValid = (value: unknown): value is VoicePlayTakeRequest => {
     const play = value as VoicePlayTakeRequest
-    return Boolean(play && typeof play === 'object' && typeof play.takeId === 'string' && (play.mode === 'take' || play.mode === 'with-song'))
+    return Boolean(play && typeof play === 'object' && typeof play.takeId === 'string' && (play.mode === 'take' || play.mode === 'with-song') && (play.gain === undefined || Number.isFinite(play.gain)))
   }
   ipcMain.handle(VOICE_IPC.recordStart, async (_event, request: unknown) => { try { return startValid(request) ? await store.start(request) : { ok: false, reason: 'error' as const, message: 'Invalid recording request.' } } catch { return { ok: false, reason: 'error' as const, message: 'Recording could not start.' } } })
   ipcMain.handle(VOICE_IPC.recordStop, async (_event, reason?: 'device-lost' | 'error') => { try { return await store.stop(reason) } catch { return { ok: false, reason: 'error' as const, message: 'The take could not be finalized.' } } })

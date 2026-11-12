@@ -6,10 +6,10 @@ import { VoiceTakeStore, type VoiceTakeNative } from '../../src/main/voice-takes
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
-const wav = (sampleRate = 22050, frames = sampleRate): Buffer => { const b = Buffer.alloc(44 + frames * 2); b.write('RIFF', 0); b.write('WAVE', 8); b.write('fmt ', 12); b.writeUInt32LE(sampleRate, 24); b.write('data', 36); b.writeUInt32LE(frames * 2, 40); return b }
+const wav = (sampleRate = 22050, frames = sampleRate, declaredBytes = frames * 2): Buffer => { const b = Buffer.alloc(44 + frames * 2); b.write('RIFF', 0); b.write('WAVE', 8); b.write('fmt ', 12); b.writeUInt32LE(sampleRate, 24); b.write('data', 36); b.writeUInt32LE(declaredBytes, 40); return b }
 
 const fakeNative = (finish: Partial<Awaited<ReturnType<VoiceTakeNative['finishTake']>>> = {}, placement: Partial<Awaited<ReturnType<VoiceTakeNative['presentationQuery']>>> = {}): VoiceTakeNative => ({
-  recordTake: async ({ dir, takeId }) => { const path = join(dir, `${takeId}.wav`); mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, wav()); return { ok: true } },
+  recordTake: async ({ dir, takeId }) => { const path = join(dir, `${takeId}.wav`); mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, wav(44100, 44100)); return { ok: true } },
   finishTake: async () => ({ ok: true, frames: 44100, sampleRate: 44100, firstSampleQuality: 'hardware' as const, firstSampleHostNs: '123', ...finish }),
   cancelTake: async () => ({ ok: true }),
   presentationQuery: async () => ({ ok: true, startPositionSec: 12, inputLatencyFrames: 1, outputLatencyFrames: 2, graphLatencyFrames: 3, latencySource: 'measured-trim' as const, ...placement }),
@@ -46,6 +46,17 @@ describe('voice take storage', () => {
     mkdirSync(join(root, 'song-1')); writeFileSync(join(root, 'song-1', 'take-1.wav'), wav(22050, 22050))
     const list = await store(root).list('song-1'); expect(list[0]).toMatchObject({ takeId: 'take-1', status: 'recovered' }); expect(list[0]?.durationSec).toBeCloseTo(1, 3)
     expect(existsSync(join(root, 'song-1', 'take-1.json'))).toBe(true)
+  })
+
+  it('recovers zero, oversized, and patched WAV data lengths safely', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root); mkdirSync(join(root, 'song-1'))
+    writeFileSync(join(root, 'song-1', 'zero.wav'), wav(22050, 22050, 0))
+    writeFileSync(join(root, 'song-1', 'oversized.wav'), wav(22050, 22050, 999999999))
+    writeFileSync(join(root, 'song-1', 'patched.wav'), wav(22050, 22050, 22050))
+    const list = await store(root).list('song-1')
+    expect(list.find(t => t.takeId === 'zero')?.durationSec).toBeCloseTo(1, 3)
+    expect(list.find(t => t.takeId === 'oversized')?.durationSec).toBeCloseTo(1, 3)
+    expect(list.find(t => t.takeId === 'patched')?.durationSec).toBeCloseTo(0.5, 3)
   })
 
   it('keeps unknown sidecar versions and does not overwrite them', async () => {
@@ -98,11 +109,30 @@ describe('voice take storage', () => {
     native.playTake = async args => { playArgs = args as unknown as Record<string, unknown>; return { ok: true } }
     const s = new VoiceTakeStore({ rootDir: root, native })
     const started = await s.start({ ...request, tempo: 0.87 }); await s.stop()
-    expect(await s.play({ takeId: started.ok ? started.takeId : '', mode: 'with-song' })).toMatchObject({ ok: true })
-    expect(playArgs).toMatchObject({ mode: 'with-song', startPositionSec: 12, tempo: 0.87 })
+    expect(await s.play({ takeId: started.ok ? started.takeId : '', mode: 'with-song', gain: 99 })).toMatchObject({ ok: true })
+    expect(playArgs).toMatchObject({ mode: 'with-song', startPositionSec: 12, tempo: 0.87, gain: 8 })
     native.playTake = async () => ({ ok: false, error: 'playback unavailable' })
     expect(await s.play({ takeId: started.ok ? started.takeId : '', mode: 'take' })).toMatchObject({ ok: false, error: 'playback unavailable' })
     expect(await s.stopPlay()).toMatchObject({ ok: true })
+  })
+
+  it('writes a provisional sidecar after placement and recovers its placement after a crash', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
+    const first = new VoiceTakeStore({ rootDir: root, native: fakeNative() }); const started = await first.start({ ...request, tempo: 0.82 }); expect(started.ok).toBe(true)
+    const takeId = started.ok ? started.takeId : ''
+    const provisional = JSON.parse(readFileSync(join(root, 'song-1', `${takeId}.json`), 'utf8'))
+    expect(provisional).toMatchObject({ status: 'recovered', startPositionSec: 12, durationSec: 0, songTitle: 'Song', songArtist: 'Artist' })
+    const recovered = await new VoiceTakeStore({ rootDir: root, native: fakeNative() }).list('song-1')
+    expect(recovered[0]).toMatchObject({ takeId, startPositionSec: 12, durationSec: 1, tempo: 0.82, status: 'recovered' })
+  })
+
+  it('does not refresh the active provisional sidecar while listing', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
+    const s = new VoiceTakeStore({ rootDir: root, native: fakeNative() }); const started = await s.start(request); expect(started.ok).toBe(true)
+    const takeId = started.ok ? started.takeId : ''
+    await s.list('song-1')
+    const sidecar = JSON.parse(readFileSync(join(root, 'song-1', `${takeId}.json`), 'utf8'))
+    expect(sidecar.status).toBe('recovered'); expect(sidecar.durationSec).toBe(0)
   })
 
   it('does raw then latency-trimmed placement from real-shaped capture stats and makes stop idempotent', async () => {
@@ -140,6 +170,14 @@ describe('voice take storage', () => {
   it('clears a prior finalized take when the next take is cancelled', async () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root); const s = store(root)
     expect((await s.start(request)).ok).toBe(true); await s.stop(); expect((await s.start(request)).ok).toBe(true); await s.cancel()
+    expect(await s.stop()).toMatchObject({ ok: false, reason: 'error' })
+  })
+
+  it('clears a prior finalized take when a new start fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root); const native = fakeNative(); const s = new VoiceTakeStore({ rootDir: root, native })
+    expect((await s.start(request)).ok).toBe(true); await s.stop()
+    native.recordTake = async () => ({ ok: false, error: 'input unavailable' })
+    expect((await s.start(request)).ok).toBe(false)
     expect(await s.stop()).toMatchObject({ ok: false, reason: 'error' })
   })
 })
