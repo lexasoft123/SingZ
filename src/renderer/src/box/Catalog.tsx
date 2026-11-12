@@ -68,7 +68,7 @@ export function Catalog({
       <span>{tn('box.catalog.songs', entries.length, { count: entries.length })}</span>
     </div>
     <div className="box-source">
-      <span>{t('box.catalog.source')} <strong>{t('box.catalog.library')}</strong></span>
+      <span><strong>{t('box.catalog.source')}</strong></span>
       {warning ? <span className="box-catalog-warning" role="alert">{warning}</span> : <span>{t('box.catalog.preparationHint')}</span>}
     </div>
     <div className="box-catalog-body">

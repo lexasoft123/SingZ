@@ -145,10 +145,10 @@ let app = null
   await watchdog.run('add both songs to the queue', 60, async () => {
     await page.locator('.box-song-row', { hasText: 'Fixture A' }).click()
     await page.getByRole('button', { name: 'Add to queue' }).click()
-    await page.getByRole('button', { name: '← Catalog' }).click()
+    await page.getByRole('button', { name: '← Songs' }).click()
     await page.locator('.box-song-row', { hasText: 'Fixture B' }).click()
     await page.getByRole('button', { name: 'Add to queue' }).click()
-    await page.getByRole('button', { name: '← Catalog' }).click()
+    await page.getByRole('button', { name: '← Songs' }).click()
   })
 
   await watchdog.run('preview Sing starts A without its original', 90, async () => {
@@ -304,7 +304,7 @@ let app = null
     const vocals = page.locator('[data-mix-level="vocals"]')
     await vocals.focus()
     await page.keyboard.press('ArrowLeft')
-    await page.getByRole('button', { name: 'Lead vocal mute' }).click()
+    await page.getByRole('button', { name: 'Vocals mute' }).click()
     await page.waitForFunction(() => {
       const input = document.querySelector('[data-mix-level="vocals"]')
       return input && Number(input.value) < 0
