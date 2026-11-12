@@ -41,6 +41,9 @@ pub enum UpdateChip {
 
 pub struct Header {
     pub guides: singz_uikit::GuideAnchors,
+    /// Labels of the compact right-hand pills from the last render (ui-tests probe).
+    #[cfg(feature = "ui-tests")]
+    pill_labels: std::cell::RefCell<Vec<(&'static str, SharedString, bool)>>,
     output_label: String,
     controls: std::collections::BTreeMap<&'static str, FocusHandle>,
     monitor_label: Option<String>,
@@ -94,6 +97,8 @@ impl Header {
         });
         Self {
             guides: Default::default(),
+            #[cfg(feature = "ui-tests")]
+            pill_labels: Default::default(),
             controls: ["header-language","header-help","header-settings","header-log","header-save","header-import","header-projects","header-catalog","header-songs","header-training","header-version","header-engine","header-rename","header-update"].into_iter().map(|id|(id,cx.focus_handle().tab_stop(true))).collect(),
             output_label: "System default output".into(),
             monitor_label: None,
@@ -340,6 +345,45 @@ impl Header {
         }
     }
 
+    /// Every right-hand pill's label width against the width it was given. A
+    /// pill narrower than its label is ellipsized (a clipped control).
+    #[cfg(feature = "ui-tests")]
+    pub fn pill_fit(&self, window: &Window) -> serde_json::Value {
+        let guide = |id: &str| match id {
+            "header-save" => "save",
+            "header-import" => "import",
+            "header-projects" => "projects",
+            "header-log" => "log",
+            "header-help" => "help",
+            _ => "",
+        };
+        let rows: Vec<_> = self
+            .pill_labels
+            .borrow()
+            .iter()
+            .map(|(id, label, ellipsizes)| {
+                let run = TextRun {
+                    len: label.len(),
+                    font: Font { family: singz_uikit::tokens::DISPLAY_600.into(), ..Default::default() },
+                    color: rgb(TEXT).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                // The pill's label is a tracked label (0.01 em after every character).
+                let text = f32::from(window.text_system().shape_line(label.clone(), px(12.), &[run], None).width)
+                    + 0.12 * label.chars().count() as f32;
+                // Horizontal padding (12 px, 9 px when tight) and a 1 px border on each side.
+                let padding = if window.viewport_size().width <= px(1000.) { 9. } else { 12. };
+                let needed = text + 2. * (padding + 1.);
+                let bounds = self.guides.get(guide(id));
+                let actual = bounds.map(|b| f32::from(b.size.width));
+                serde_json::json!({"id": id, "label": label.as_ref(), "text": text, "needed": needed, "actual": actual, "ellipsis": ellipsizes,
+                    "left": bounds.map(|b| f32::from(b.left())), "right": bounds.map(|b| f32::from(b.right()))})
+            })
+            .collect();
+        serde_json::Value::Array(rows)
+    }
     fn button(
         &self,
         id: &'static str,
@@ -388,18 +432,32 @@ impl Header {
         id: &'static str,
         label: impl Into<SharedString>,
         action: HeaderEvent,
-        compact: bool,
+        tight: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        self.button(id, label, action, cx).when(compact, |button| {
-            button
-                .block()
-                .min_w_0()
-                .flex_shrink_1()
-                .when(id == "header-projects", |button| button.flex_shrink_0())
-                .when(id != "header-projects", |button| button.truncate())
-                .text_center()
-        })
+        let label: SharedString = label.into();
+        // App.tsx's `.header-right > .pill` ellipsizes below 1100 px, but only once the
+        // song title (flex 1 1 0, min-width 0) has given up all its width. The title slot
+        // here does the same, and at 1060 px every locale leaves the title editor its
+        // 96 px floor (the locale driver asserts both), so a pill never has to shrink.
+        // An ellipsizing pill is worse
+        // than none: the tracked label's measured width is quantized down to 1/64 px in
+        // layout, which is smaller than the shaped width it compares against when it
+        // paints, so a pill with room to spare painted "Saved ..." and "Regist...".
+        #[allow(unused_mut)]
+        let mut pill = self.button(id, label.clone(), action, cx).text_center();
+        if tight {
+            // App.tsx tightens the header again at max-width 1000px (engine chip down to
+            // its dot). The 940 px minimum cannot hold Spanish's longest labels and the
+            // title editor's 96 px floor otherwise, so the pills give up 3 px of padding
+            // on each side there.
+            pill = pill.px(px(9.));
+        }
+        #[cfg(feature = "ui-tests")]
+        self.pill_labels
+            .borrow_mut()
+            .push((id, label, pill.style().text.text_overflow.is_some()));
+        pill
     }
 
     /// Exact UK mark from Flags.tsx, keeping its independent fill colors.
@@ -444,6 +502,8 @@ impl Header {
 
 impl Render for Header {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "ui-tests")]
+        self.pill_labels.borrow_mut().clear();
         // Stop may become disabled or the entire monitor control may unmount
         // on any route. Recover only while that exact disappearing handle
         // still owns focus; never replace a later pointer/keyboard focus.
@@ -464,6 +524,7 @@ impl Render for Header {
             } else {
                 1100.
             });
+        let tight = window.viewport_size().width <= px(1000.);
         let catalog = self.catalog;
         // Blink rounds this bundled face's hhea ascent/descent (930/-270,
         // UPEM1000) in device-scaled layout units before normal line spacing.
@@ -669,7 +730,7 @@ impl Render for Header {
                                     t("app.save.save")
                                 },
                                 HeaderEvent::Save,
-                                compact,
+                                tight,
                                 cx,
                             )
                             .when(true, |button| {
@@ -685,7 +746,7 @@ impl Render for Header {
                                     "header-import",
                                     t("app.library.add"),
                                     HeaderEvent::AddToLibrary,
-                                    compact,
+                                    tight,
                                     cx,
                                 )
                                 .when(true, |button| {
@@ -700,7 +761,7 @@ impl Render for Header {
                                 "header-projects",
                                 t("app.library.open"),
                                 HeaderEvent::Projects,
-                                compact,
+                                tight,
                                 cx,
                             )
                             .when(true, |button| {
@@ -710,7 +771,7 @@ impl Render for Header {
                     })
                     .when_some(self.update.clone(), |d, chip| match chip {
                         UpdateChip::Ready => d.child(
-                            self.right_button("header-update", t("app.update.restart"), HeaderEvent::Update, compact, cx)
+                            self.right_button("header-update", t("app.update.restart"), HeaderEvent::Update, tight, cx)
                                 .aria_label(t("app.update.restartTitle")),
                         ),
                         UpdateChip::Available(version) => d.child(
@@ -718,7 +779,7 @@ impl Render for Header {
                                 "header-update",
                                 crate::i18n::tv("app.update.get", &[("version", version)]),
                                 HeaderEvent::Update,
-                                compact,
+                                tight,
                                 cx,
                             )
                             .aria_label(t("app.update.availableTitle")),
@@ -737,7 +798,7 @@ impl Render for Header {
                         "header-log",
                         t("app.titlebar.log"),
                         HeaderEvent::Log,
-                        compact,
+                        tight,
                         cx,
                     ).when(true,|d|self.guides.track_box(d,"log",[1.;4])))
                     .child(
@@ -792,7 +853,7 @@ impl Render for Header {
                         "header-help",
                         "?",
                         HeaderEvent::Help,
-                        compact,
+                        tight,
                         cx,
                     ).aria_label(crate::i18n::t("quickStart.title")).when(true,|d|self.guides.track_box(d,"help",[1.;4])))
                     .child(

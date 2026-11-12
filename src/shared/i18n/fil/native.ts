@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Sinusuri ang Google Drive…",
   "library.drive.finishingSync": "Tinatapos ang Drive sync…",
   "library.picker.noPlayable": "Walang mapapatugtog na proyekto sa folder na ito",
+  "library.folders.savedInPlace": "Mga folder ng proyekto · Sine-save sa mismong lugar",
   "library.recovery.renamedFolderWarning": "Naibalik ang aktuwal na pinalitan ng pangalan na folder, ngunit pinanatili ang mas bagong naka-save na metadata na may ibang pamagat.",
   "drive.auth.callbackInvalid": "Di-wasto ang sign-in callback. Bumalik sa SingZ at subukang muli.",
   "lyrics.editor.skippedRows": "Mga nilaktawang linya: {n}. Ang mga linyang ipinapakita lang ang mananatili kapag nag-save.",

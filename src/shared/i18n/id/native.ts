@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Memeriksa Google Drive…",
   "library.drive.finishingSync": "Menyelesaikan sinkronisasi Drive…",
   "library.picker.noPlayable": "Tidak ada proyek yang dapat diputar di folder ini",
+  "library.folders.savedInPlace": "Folder proyek · Disimpan di tempat",
   "library.recovery.renamedFolderWarning": "Folder yang benar-benar diganti namanya telah dipulihkan, tetapi metadata tersimpan yang lebih baru dengan judul berbeda tetap dipertahankan.",
   "drive.auth.callbackInvalid": "Callback masuk tidak valid. Kembali ke SingZ lalu coba lagi.",
   "lyrics.editor.skippedRows": "Baris dilewati: {n}. Saat disimpan, hanya baris yang ditampilkan yang dipertahankan.",

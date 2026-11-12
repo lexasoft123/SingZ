@@ -202,17 +202,50 @@ with tempfile.TemporaryDirectory(prefix='singz-locale-ui-') as temporary:
         assert saved['language'] == 'ja' and saved['foreign'] == {'preserve': 23}, saved
         (out/stage/'persisted-preference.json').write_text(json.dumps(saved, indent=2))
         if stage == 'exercise':
+            # Strings on the minimum-width routes come from the dictionaries, translated in
+            # every locale: no English literal left in the layout code, and no locale that
+            # copies the English value.
+            import re
+            gpui = repository/'experiments/gpui-player'
+            for source, literal in (('settings.rs', 'Quick start'), ('library.rs', 'Project folders · Saved in place')):
+                assert f'"{literal}"' not in (gpui/'src'/source).read_text(), f'{source} hard-codes {literal!r}'
+            def dictionary(locale):
+                text = (repository/'src/shared/i18n'/locale/'native.ts').read_text()
+                return {key: value for key, value in re.findall(r'^\s*"([^"]+)":\s*"((?:[^"\\]|\\.)*)"', text, re.M)}
+            english = dictionary('en')
+            for key in ('quickStart.title', 'library.folders.savedInPlace'):
+                assert english.get(key), key
+                for language, _ in LANGUAGES[1:]:
+                    value = dictionary(language).get(key)
+                    assert value and (language == 'en' or value != english[key]), f'{key} untranslated in {language}'
             # This additional matrix records the actual window scale. The existing
             # 2x qualification assertions below remain unchanged.
             from PIL import Image
-            for language, _ in LANGUAGES:
+            for prefix, narrow in (('minimum', [940, 600]), ('narrow', [1060, 640])):
+              for language, _ in LANGUAGES:
                 for route in ('title', 'settings', 'library'):
-                    name = f'narrow-{route}-{language}'
+                    name = f'{prefix}-{route}-{language}'
                     data = json.loads((out/stage/(name+'.json')).read_text())
-                    assert data['viewport'] == [1060, 640] and data['hidden']
+                    assert data['viewport'] == narrow and data['hidden']
                     assert data['locale']['language'] == language
                     scale = data['scale']
-                    assert Image.open(out/stage/(name+'.png')).size == (1060*scale, 640*scale)
+                    assert Image.open(out/stage/(name+'.png')).size == (narrow[0]*scale, narrow[1]*scale)
+                    # No clipped control at the minimum width: every header pill is at least
+                    # as wide as its whole translated label (no ellipsis), in every locale.
+                    pills = data['header']
+                    assert {row['id'] for row in pills} >= {'header-log', 'header-help'}, (name, pills)
+                    for row in pills:
+                        assert row['actual'] is not None, (name, row)
+                        assert not row['ellipsis'], f'Header pill ellipsizes at {narrow[0]}: {name} {row}'
+                        # Layout quantizes box widths to 1/64 px, so allow a hair; a real clip is more.
+                        assert row['actual'] >= row['needed'] - 0.5, f'Header pill narrower than its label at {narrow[0]}: {name} {row}'
+                    if route == 'title':
+                        assert data['titleEditor'] is not None and data['titleEditor'] >= 96, f'Title editor too small at {narrow[0]}: {name} {data["titleEditor"]}'
+                    # Nothing is pushed out of the window or onto its neighbour.
+                    placed = sorted(pills, key=lambda row: row['left'])
+                    assert placed[-1]['right'] <= narrow[0] + 0.5, f'Header pill leaves the window at {narrow[0]}: {name} {placed[-1]}'
+                    for before, after in zip(placed, placed[1:]):
+                        assert after['left'] >= before['right'] - 0.5, f'Header pills overlap at {narrow[0]}: {name} {before} {after}'
         for width, height in ((1280,800),(1060,640)):
             if stage == 'restart':
                 data = capture(out/stage, f'restored-ja-{width}', (width,height))
@@ -252,7 +285,10 @@ with tempfile.TemporaryDirectory(prefix='singz-locale-ui-') as temporary:
                     base = independent
                 assert independent == base, language
             search = capture(out/stage, f'search-preserved-ru-{width}', (width,height))
-            assert search['search'] == 'locale' and search['locale']['locale'] == 'ru' and search['playing']
+            # Opening the catalog pauses playback by design (App.tsx toggleCatalog), so the
+            # transport must be paused in the app and in the native helper alike.
+            assert search['search'] == 'locale' and search['locale']['locale'] == 'ru'
+            assert not search['playing'] and not search['native']['playing'], search['native']
             alternate = (1060,640) if width == 1280 else (1280,800)
             capture(out/stage, f'resized-open-from-{width}', alternate)
             guide = json.loads((repository/'experiments/gpui-player/src/quick_start_copy.json').read_text())

@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Google Drive जाँचा जा रहा है…",
   "library.drive.finishingSync": "Drive सिंक पूरा हो रहा है…",
   "library.picker.noPlayable": "इस फ़ोल्डर में चलाने योग्य कोई प्रोजेक्ट नहीं है",
+  "library.folders.savedInPlace": "प्रोजेक्ट फ़ोल्डर · उसी जगह सहेजे जाते हैं",
   "library.recovery.renamedFolderWarning": "असल में नाम बदला गया फ़ोल्डर बहाल हो गया, लेकिन अलग शीर्षक वाला नया सहेजा गया मेटाडेटा रखा गया है।",
   "drive.auth.callbackInvalid": "साइन-इन कॉलबैक अमान्य है। SingZ पर लौटकर फिर कोशिश करें।",
   "lyrics.editor.skippedRows": "छोड़ी गई पंक्तियाँ: {n}। सहेजने पर केवल दिखाई गई पंक्तियाँ रहेंगी।",

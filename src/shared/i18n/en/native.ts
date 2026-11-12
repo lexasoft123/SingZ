@@ -17,6 +17,7 @@ export const native = {
   "library.drive.checking": "Checking Google Drive…",
   "library.drive.finishingSync": "Finishing Drive sync…",
   "library.picker.noPlayable": "No playable projects in this folder",
+  "library.folders.savedInPlace": "Project folders · Saved in place",
   "library.recovery.renamedFolderWarning": "Recovered the actual renamed folder, but retained newer saved metadata with a different title.",
   "drive.auth.callbackInvalid": "Invalid sign-in callback. Return to SingZ and retry.",
   "lyrics.editor.skippedRows": "Rows skipped: {n}. Saving keeps only the rows shown.",

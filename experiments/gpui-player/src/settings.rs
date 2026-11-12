@@ -2011,7 +2011,7 @@ impl Render for SettingsScreen {
                             .child(crate::i18n::t("settings.title")),
                     )
                     .child(
-                        self.control("settings-quick-start", ghost_pill("settings-quick-start", "Quick start")
+                        self.control("settings-quick-start", ghost_pill("settings-quick-start", crate::i18n::t("quickStart.title"))
                             .flex_shrink_0().w_full().justify_start(), true, cx),
                     )
                     .child(

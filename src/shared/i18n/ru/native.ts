@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Проверяем Google Drive…",
   "library.drive.finishingSync": "Завершаем синхронизацию с Drive…",
   "library.picker.noPlayable": "В этой папке нет проектов для воспроизведения",
+  "library.folders.savedInPlace": "Папки проектов · Сохраняются на месте",
   "library.recovery.renamedFolderWarning": "Настоящая переименованная папка восстановлена, но сохранены более новые метаданные с другим названием.",
   "drive.auth.callbackInvalid": "Недопустимый ответ при входе. Вернитесь в SingZ и повторите попытку.",
   "lyrics.editor.skippedRows": "Пропущено строк: {n}. При сохранении останутся только показанные строки.",

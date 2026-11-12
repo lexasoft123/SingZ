@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "กำลังตรวจสอบ Google Drive…",
   "library.drive.finishingSync": "กำลังซิงค์ Drive ให้เสร็จ…",
   "library.picker.noPlayable": "ไม่มีโปรเจกต์ที่เล่นได้ในโฟลเดอร์นี้",
+  "library.folders.savedInPlace": "โฟลเดอร์โปรเจกต์ · บันทึกในตำแหน่งเดิม",
   "library.recovery.renamedFolderWarning": "กู้คืนโฟลเดอร์ที่เปลี่ยนชื่อจริงแล้ว แต่คงเมตาดาต้าที่บันทึกใหม่กว่าซึ่งมีชื่อต่างกันไว้",
   "drive.auth.callbackInvalid": "การเรียกกลับของการลงชื่อเข้าใช้ไม่ถูกต้อง กลับไปที่ SingZ แล้วลองอีกครั้ง",
   "lyrics.editor.skippedRows": "ข้ามไป {n} บรรทัด เมื่อบันทึกจะเก็บเฉพาะบรรทัดที่แสดงอยู่",

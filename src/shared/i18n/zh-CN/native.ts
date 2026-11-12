@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "正在检查 Google Drive…",
   "library.drive.finishingSync": "正在完成 Drive 同步…",
   "library.picker.noPlayable": "此文件夹中没有可播放的项目",
+  "library.folders.savedInPlace": "项目文件夹 · 就地保存",
   "library.recovery.renamedFolderWarning": "已找回实际重命名后的文件夹，但保留了标题不同的较新已保存元数据。",
   "drive.auth.callbackInvalid": "登录回调无效。请返回 SingZ 重试。",
   "lyrics.editor.skippedRows": "已跳过 {n} 行。保存时仅保留显示的行。",

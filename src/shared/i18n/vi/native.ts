@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Đang kiểm tra Google Drive…",
   "library.drive.finishingSync": "Đang hoàn tất đồng bộ Drive…",
   "library.picker.noPlayable": "Thư mục này không có dự án nào phát được",
+  "library.folders.savedInPlace": "Thư mục dự án · Lưu tại chỗ",
   "library.recovery.renamedFolderWarning": "Đã khôi phục thư mục thực sự được đổi tên, nhưng vẫn giữ siêu dữ liệu đã lưu mới hơn có tiêu đề khác.",
   "drive.auth.callbackInvalid": "Phản hồi đăng nhập không hợp lệ. Hãy quay lại SingZ và thử lại.",
   "lyrics.editor.skippedRows": "Số dòng bị bỏ qua: {n}. Khi lưu, chỉ giữ lại các dòng đang hiển thị.",

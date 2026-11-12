@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Google Drive denetleniyor…",
   "library.drive.finishingSync": "Drive eşitlemesi tamamlanıyor…",
   "library.picker.noPlayable": "Bu klasörde oynatılabilir proje yok",
+  "library.folders.savedInPlace": "Proje klasörleri · Yerinde kaydedilir",
   "library.recovery.renamedFolderWarning": "Gerçekten yeniden adlandırılan klasör kurtarıldı, ancak farklı bir başlığa sahip daha yeni kayıtlı meta veriler korundu.",
   "drive.auth.callbackInvalid": "Geçersiz oturum açma geri çağrısı. SingZ'e dönüp yeniden deneyin.",
   "lyrics.editor.skippedRows": "Atlanan satırlar: {n}. Kaydederken yalnızca gösterilen satırlar korunur.",

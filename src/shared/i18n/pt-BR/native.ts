@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Verificando o Google Drive…",
   "library.drive.finishingSync": "Concluindo a sincronização com o Drive…",
   "library.picker.noPlayable": "Não há projetos reproduzíveis nesta pasta",
+  "library.folders.savedInPlace": "Pastas de projetos · Salvos no mesmo local",
   "library.recovery.renamedFolderWarning": "A pasta que de fato foi renomeada foi recuperada, mas os metadados salvos mais recentes, com outro título, foram mantidos.",
   "drive.auth.callbackInvalid": "O retorno de chamada do login é inválido. Volte ao SingZ e tente novamente.",
   "lyrics.editor.skippedRows": "Linhas ignoradas: {n}. Ao salvar, apenas as linhas exibidas serão mantidas.",

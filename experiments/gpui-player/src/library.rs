@@ -1109,7 +1109,7 @@ impl Render for LibraryScreen {
                                             .line_height(px(13.))
                                             .text_color(rgb(DIM))
                                             .child(if native {
-                                                "Project folders · Saved in place".to_owned()
+                                                t("library.folders.savedInPlace")
                                             } else {
                                                 tv("library.dropScreen.libraryLivesHere", &[("cloud",t("library.dropScreen.cloudLocal"))])
                                             }),

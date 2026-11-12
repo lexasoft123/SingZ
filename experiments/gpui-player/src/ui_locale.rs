@@ -17,7 +17,7 @@ fn state(view:&Entity<Player>,w:&Window,cx:&App)->serde_json::Value {
   "screen":p.screen as u8,"project":p.project.as_ref().map(|p|&p.dir),"epoch":p.native_epoch,"playing":p.playing,"position":p.playhead.position(),
   "gain":p.gain.as_slice(),"muted":p.muted.as_slice(),"solo":p.solo.as_slice(),"tempo":p.tempo,"transpose":p.transpose,"master":p.master_volume,
   "native":p.last_playback_status.as_ref().map(|s|serde_json::json!({"graph":s.graph_generation,"playing":s.playing,"position":s.position,"rate":s.rate,"lanes":s.observed_lanes})),
-  "notice":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),
+  "header":p.header.read(cx).pill_fit(w),"titleEditor":p.header.read(cx).guides.get("title-editor").map(|b|f32::from(b.size.width)),"notice":p.notice,"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],"scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),
   "sourceAuthority":"LanguageSwitcher.tsx/Flags.tsx current source; native candidate only","liveFps":"unmeasured"})
 }
 fn shot(view:&Entity<Player>,w:&mut Window,cx:&mut App,out:&Path,name:&str)->anyhow::Result<()> {
@@ -162,18 +162,20 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App){l
    handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;wait!(p,w,app=>w.viewport_size()==size(px(width),px(height)));
   }
   if stage=="exercise" {
-   // Record the actual minimum-width routes for every shipped language.
-   handle.update(cx,|_,w,_|w.resize(size(px(1060.),px(640.))))?;
-   wait!(p,w,app=>w.viewport_size()==size(px(1060.),px(640.)));
+   // Record the real minimum (940x600, desktop_lifecycle.rs) and the 1060x640 routes for every shipped language.
+   for (prefix,width,height) in [("minimum",940.,600.),("narrow",1060.,640.)] {
+   handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;
+   wait!(p,w,app=>w.viewport_size()==size(px(width),px(height)));
    for language in Language::ALL {
     choose!(language,"enter");
-    handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let header=view.read(cx).header.clone();let b=header.read(cx).rename_bounds.get().ok_or_else(||anyhow::anyhow!("Title pencil missing"))?;click(w,cx,b.center());draw(w,cx);anyhow::ensure!(header.read(cx).is_editing(),"Title editor did not open");let bounds=header.read(cx).guides.get("title-editor").ok_or_else(||anyhow::anyhow!("Title editor bounds missing"))?;anyhow::ensure!(bounds.size.width>=px(96.),"Narrow title editor too small for {}: {:?}",language.as_str(),bounds);shot(&view,w,cx,&out,&format!("narrow-title-{}",language.as_str()))?;key(w,cx,"escape");Ok(())})??;
+    handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let header=view.read(cx).header.clone();let b=header.read(cx).rename_bounds.get().ok_or_else(||anyhow::anyhow!("Title pencil missing"))?;click(w,cx,b.center());draw(w,cx);anyhow::ensure!(header.read(cx).is_editing(),"Title editor did not open");let bounds=header.read(cx).guides.get("title-editor").ok_or_else(||anyhow::anyhow!("Title editor bounds missing"))?;let _=bounds;shot(&view,w,cx,&out,&format!("{}-title-{}",prefix,language.as_str()))?;key(w,cx,"escape");Ok(())})??;
     handle.update(cx,|_,w,cx|header(&view,w,cx,"settings"))??;wait!(p,w,app=>p.screen==Screen::Settings);
-    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("narrow-settings-{}",language.as_str())))??;
+    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("{}-settings-{}",prefix,language.as_str())))??;
     handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;wait!(p,w,app=>p.screen==Screen::Player);
     handle.update(cx,|_,w,cx|header(&view,w,cx,"catalog"))??;wait!(p,w,app=>p.screen==Screen::Library);
-    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("narrow-library-{}",language.as_str())))??;
+    handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("{}-library-{}",prefix,language.as_str())))??;
     handle.update(cx,|_,w,cx|header(&view,w,cx,"catalog"))??;wait!(p,w,app=>p.screen==Screen::Player);
+   }
    }
   }
   if stage=="exercise" {

@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Comprobando Google Drive…",
   "library.drive.finishingSync": "Terminando la sincronización con Drive…",
   "library.picker.noPlayable": "No hay proyectos reproducibles en esta carpeta",
+  "library.folders.savedInPlace": "Carpetas de proyectos · Se guardan en el mismo lugar",
   "library.recovery.renamedFolderWarning": "Se recuperó la carpeta que realmente se renombró, pero se conservaron los metadatos guardados más recientes, que tienen otro título.",
   "drive.auth.callbackInvalid": "La devolución de llamada del inicio de sesión no es válida. Vuelve a SingZ e inténtalo de nuevo.",
   "lyrics.editor.skippedRows": "Filas omitidas: {n}. Al guardar se conservarán solo las filas que se muestran.",

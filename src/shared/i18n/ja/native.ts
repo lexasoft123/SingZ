@@ -19,6 +19,7 @@ export const native: Translation<typeof en> = {
   "library.drive.checking": "Google Drive を確認中…",
   "library.drive.finishingSync": "Drive の同期を完了中…",
   "library.picker.noPlayable": "このフォルダーに再生できるプロジェクトはありません",
+  "library.folders.savedInPlace": "プロジェクトフォルダー · その場で保存",
   "library.recovery.renamedFolderWarning": "名前が変更された実際のフォルダーを復元しましたが、タイトルの異なる新しい保存済みメタデータは保持しました。",
   "drive.auth.callbackInvalid": "サインインのコールバックが無効です。SingZ に戻ってもう一度お試しください。",
   "lyrics.editor.skippedRows": "スキップした行数：{n}。保存すると、表示されている行だけが残ります。",
