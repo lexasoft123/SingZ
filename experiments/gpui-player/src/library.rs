@@ -1,5 +1,6 @@
 //! Production DropScreen composition over an isolated, read-only sample collection.
 use crate::i18n::{t,tv,tn};
+use crate::a11y::ButtonSurface;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -287,7 +288,14 @@ impl LibraryScreen {
     }
     pub fn set_drive(&mut self, drive: crate::drive_state::Snapshot, cx: &mut Context<Self>) {
         if !crate::integration::fixture_mode() && self.drive != drive {
+            let (was_signed_in, was_syncing) = (self.drive.signed_in, self.drive_syncing());
             self.drive = drive;
+            // D-06 rule 7: Drive sign-in and sync state changes are announced, politely.
+            if was_signed_in != self.drive.signed_in {
+                crate::a11y::announce(t(if self.drive.signed_in { "a11y.announce.driveSignedIn" } else { "a11y.announce.driveSignedOut" }));
+            } else if was_syncing && !self.drive_syncing() {
+                crate::a11y::announce(t(if self.drive.error.is_some() { "a11y.announce.driveSyncFailed" } else { "a11y.announce.driveSyncDone" }));
+            }
             self.backdrop_revision = self.backdrop_revision.wrapping_add(1);
             cx.notify();
         }
@@ -654,6 +662,7 @@ impl LibraryScreen {
         let meta = format!("{}{} · {day} {month}",
             tn("library.dropScreen.stemsCount", song.stems as f64, &[]),
             if song.lyrics {format!(" · {}",t("library.dropScreen.lyricsBadge"))}else{String::new()});
+        let song_label=format!("{} · {}",song.title,meta);
         let card=div()
             .relative()
             .flex_1()
@@ -662,6 +671,7 @@ impl LibraryScreen {
             .flex_shrink_0()
             .child(
                 catalog_project_card(format!("library-song:{key:?}"))
+                    .a11y_button(song_label)
                     .track_focus(&open_focus).tab_index(0)
                     .on_mouse_down(MouseButton::Left,cx.listener(move|_,_,window,cx|mouse_open.focus(window,cx)))
                     .on_key_down(cx.listener(move|_,event:&KeyDownEvent,_,cx|{
@@ -1022,7 +1032,7 @@ impl Render for LibraryScreen {
                             )
                             // The production title is width:100%; flex-shrink
                             // resolves its nominal 200px input to this DOM width.
-                            .child(catalog_search(&self.search).w(px(164.671875)).h(px(29.))),
+                            .child(catalog_search(&self.search).accessibility_id("library-search").aria_label(crate::i18n::t("library.dropScreen.searchPlaceholder")).w(px(164.671875)).h(px(29.))),
                     )
                     .child(
                         div()

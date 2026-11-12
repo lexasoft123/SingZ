@@ -255,6 +255,7 @@ impl Render for PitchStrip {
             }
         };
         let microphone = small_ghost_pill("pitch-microphone-unavailable", "")
+            .aria_label(mic_label.clone())
             .flex_shrink_1()
             .min_w_0()
             .h(px(24.))

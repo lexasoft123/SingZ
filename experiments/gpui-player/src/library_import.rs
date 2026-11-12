@@ -1,5 +1,6 @@
 //! Native LibraryImport composition. The host owns the copy/move lifecycle.
 use crate::i18n::t;
+use crate::a11y::{ButtonSurface, DialogSurface};
 use gpui_kit::{prelude::FluentBuilder, *};
 use singz_uikit as ui;
 use std::{
@@ -196,6 +197,7 @@ impl ImportDialog {
         self.probe(
             id,
             ui::library_import_action(id.to_owned(), label.to_owned(), !self.busy)
+                .a11y_button(label.to_owned())
                 .when(!self.busy, |d| {
                     d.track_focus(&focus).child(ui::guide_focus_ring(
                         focus.clone(),
@@ -291,6 +293,7 @@ impl Render for ImportDialog {
         }
         ui::modal_scrim()
             .id("library-import-scrim")
+            .a11y_dialog(crate::i18n::t("library.libraryImport.heading"))
             .on_click(cx.listener(|s, _, _, cx| {
                 if !s.busy {
                     cx.emit(Event::Close);

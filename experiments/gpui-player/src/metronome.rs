@@ -58,7 +58,7 @@ pub struct MetPopover {
 impl EventEmitter<Event> for MetPopover {}
 impl MetPopover {
     pub fn new(w: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(w, cx));
+        let input = cx.new(|cx| InputState::new(w, cx).placeholder(t("player.metronome.tempo")));
         let subscription = cx.subscribe_in(&input, w, |s, _, event, w, cx| match event {
             InputEvent::Change => {
                 if s.focused(w, cx) {
@@ -359,13 +359,17 @@ impl MetPopover {
             self.button(
                 &id,
                 enabled[i],
-                ui::mode_option(
-                    id.clone(),
+                crate::a11y::radio(
+                    ui::mode_option(
+                        id.clone(),
+                        (*label).to_owned(),
+                        selected == i,
+                        enabled[i],
+                        i == 0,
+                        i + 1 == labels.len(),
+                    ),
                     (*label).to_owned(),
                     selected == i,
-                    enabled[i],
-                    i == 0,
-                    i + 1 == labels.len(),
                 ),
                 move |s, w, cx| {
                     s.finish_draft(w, cx);

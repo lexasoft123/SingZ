@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "Baixando a versão {version}… {percent}%",
   "update.state.ready": "A versão {version} está pronta. Reinicie para instalá-la.",
   "update.state.error": "Falha na atualização: {message}",
-  "update.state.rolledBack": "A versão {version} não iniciou e a anterior foi restaurada."
+  "update.state.rolledBack": "A versão {version} não iniciou e a anterior foi restaurada.",
+  "a11y.monitor.stop": "Parar o monitoramento por fones de ouvido",
+  "a11y.announce.splitDone": "Separação concluída",
+  "a11y.announce.analysisDone": "Análise concluída",
+  "a11y.announce.driveSignedIn": "Login feito no Google Drive",
+  "a11y.announce.driveSignedOut": "Logout feito do Google Drive",
+  "a11y.announce.driveSyncDone": "Sincronização com o Google Drive concluída",
+  "a11y.announce.driveSyncFailed": "Falha na sincronização com o Google Drive",
+  "a11y.announce.recordingStarted": "Gravação iniciada",
+  "a11y.announce.recordingStopped": "Gravação interrompida",
+  "a11y.announce.recordingFailed": "Falha na gravação",
+  "a11y.announce.modelInstalling": "Instalando {name}",
+  "a11y.announce.modelInstalled": "{name} instalado",
+  "a11y.announce.modelFailed": "Falha na instalação do modelo"
 }

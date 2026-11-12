@@ -67,6 +67,8 @@ fn native_ax() -> Vec<serde_json::Value> {
             let value = object(node, "accessibilityValue");
             rows.push(serde_json::json!({"id": id,
                 "role": string_property(node, "accessibilityRole"),
+                "subrole": string_property(node, "accessibilitySubrole"),
+                "modal": flag(node, "isAccessibilityModal"),
                 "title": string_property(node, "accessibilityTitle"),
                 "help": string_property(node, "accessibilityHelp"),
                 "enabled": flag(node, "isAccessibilityEnabled"),
@@ -96,6 +98,11 @@ fn tree(w: &Window) -> anyhow::Result<serde_json::Value> {
 struct State {
     name: &'static str,
     needs_backend: bool,
+    /// Header control that opens this state from the keyboard: Tab to it, press
+    /// Enter. Escape must then close the state and focus must return to it.
+    opener: Option<&'static str>,
+    /// A surface that must close on Escape (every dialog, popover and overlay route).
+    closes_on_escape: bool,
     open: fn(&Entity<Player>, &mut Window, &mut App),
     reached: fn(&Player, &App) -> bool,
 }
@@ -109,43 +116,128 @@ fn any_dialog(p: &Player, cx: &App) -> bool {
         || p.stem_export_open || p.engine_setup.read(cx).is_open() || p.whats_new.read(cx).is_open()
         || p.quick_start.read(cx).is_open() || p.carry_open || p.metronome_open
 }
-const PROBE_STATE: State = State { name: "probe", needs_backend: false, open: |_, _, _| {}, reached: |_, _| true };
+const PROBE_STATE: State = State { name: "probe", needs_backend: false, opener: None, closes_on_escape: false, open: |_, _, _| {}, reached: |_, _| true };
 const STATES: &[State] = &[
-    State { name: "library", needs_backend: false,
+    State { name: "library", needs_backend: false, opener: None, closes_on_escape: false,
         open: |v, _, cx| v.update(cx, |p, cx| { p.songs_catalog = false; p.screen = Screen::Library; cx.notify(); }),
         reached: |p, _| p.screen == Screen::Library },
-    State { name: "player", needs_backend: false, open: |v, _, cx| v.update(cx, |p, cx| { p.screen = Screen::Player; cx.notify(); }),
+    State { name: "player", needs_backend: false, opener: None, closes_on_escape: false, open: |v, _, cx| v.update(cx, |p, cx| { p.screen = Screen::Player; cx.notify(); }),
         reached: |p, _| p.screen == Screen::Player },
-    State { name: "player-metronome", needs_backend: false,
+    State { name: "player-metronome", needs_backend: false, opener: None, closes_on_escape: false,
         open: |v, _, cx| v.update(cx, |p, cx| { p.screen = Screen::Player; p.metronome_open = true; cx.notify(); }),
         reached: |p, _| p.metronome_open },
-    State { name: "training", needs_backend: false, open: |v, _, cx| header(v, cx, header::HeaderEvent::Training),
+    State { name: "training", needs_backend: false, opener: None, closes_on_escape: false, open: |v, _, cx| header(v, cx, header::HeaderEvent::Training),
         reached: |p, _| p.screen == Screen::Training },
-    State { name: "settings", needs_backend: false, open: |v, _, cx| header(v, cx, header::HeaderEvent::Settings),
+    State { name: "settings", needs_backend: false, opener: Some("header-settings"), closes_on_escape: true, open: |v, _, cx| header(v, cx, header::HeaderEvent::Settings),
         reached: |p, _| p.screen == Screen::Settings },
-    State { name: "log", needs_backend: false, open: |v, _, cx| header(v, cx, header::HeaderEvent::Log),
+    State { name: "log", needs_backend: false, opener: Some("header-log"), closes_on_escape: true, open: |v, _, cx| header(v, cx, header::HeaderEvent::Log),
         reached: |p, _| p.screen == Screen::Log },
-    State { name: "models", needs_backend: false, open: |v, _, cx| v.update(cx, |p, cx| p.open_models(models::Origin::Manual, cx)),
+    State { name: "models", needs_backend: false, opener: None, closes_on_escape: false, open: |v, _, cx| v.update(cx, |p, cx| p.open_models(models::Origin::Manual, cx)),
         reached: |p, _| p.screen == Screen::Models },
-    State { name: "dialog-language-menu", needs_backend: false, open: |v, w, cx| v.update(cx, |p, cx| p.open_language_menu(w, cx)),
+    State { name: "dialog-language-menu", needs_backend: false, opener: Some("header-language"), closes_on_escape: true, open: |v, w, cx| v.update(cx, |p, cx| p.open_language_menu(w, cx)),
         reached: |p, cx| p.language_menu.read(cx).is_open() },
-    State { name: "dialog-quick-start", needs_backend: false, open: |v, _, cx| v.update(cx, |p, cx| p.open_quick_start(false, cx)),
+    State { name: "dialog-quick-start", needs_backend: false, opener: Some("header-help"), closes_on_escape: true, open: |v, _, cx| v.update(cx, |p, cx| p.open_quick_start(false, cx)),
         reached: |p, cx| p.quick_start.read(cx).is_open() },
-    State { name: "dialog-whats-new", needs_backend: false, open: |v, _, cx| header(v, cx, header::HeaderEvent::WhatsNew),
+    State { name: "dialog-whats-new", needs_backend: false, opener: Some("header-version"), closes_on_escape: true, open: |v, _, cx| header(v, cx, header::HeaderEvent::WhatsNew),
         reached: |p, cx| p.whats_new.read(cx).is_open() },
-    State { name: "dialog-engine-setup", needs_backend: false, open: |v, _, cx| v.update(cx, |p, cx| p.open_engine_setup(cx)),
+    State { name: "dialog-engine-setup", needs_backend: false, opener: None, closes_on_escape: true, open: |v, _, cx| v.update(cx, |p, cx| p.open_engine_setup(cx)),
         reached: |p, cx| p.engine_setup.read(cx).is_open() },
-    State { name: "dialog-notice", needs_backend: false,
+    State { name: "dialog-notice", needs_backend: false, opener: None, closes_on_escape: true,
         open: |v, _, cx| v.update(cx, |p, cx| { p.notice = Some("Accessibility audit notice".into()); cx.notify(); }),
         reached: |p, _| p.notice.is_some() },
-    State { name: "dialog-project-picker", needs_backend: true, open: |v, _, cx| v.update(cx, |p, cx| p.open_project_picker(cx)),
-        reached: |p, _| p.project_picker_open },
-    State { name: "dialog-drive-projects", needs_backend: false, open: |v, w, cx| v.update(cx, |p, cx| p.open_drive_projects(w, cx)),
+    State { name: "dialog-drive-projects", needs_backend: false, opener: None, closes_on_escape: true, open: |v, w, cx| v.update(cx, |p, cx| p.open_drive_projects(w, cx)),
         reached: |p, _| p.drive_projects_open },
-    State { name: "dialog-stem-export", needs_backend: true, open: |v, _, cx| v.update(cx, |p, cx| p.open_stem_export(cx)),
+    State { name: "toast", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| v.update(cx, |p, cx| { p.success_toast.update(cx, |t, cx| t.show("Accessibility audit toast", cx)); cx.notify(); }),
+        reached: |p, cx| p.success_toast.read(cx).state().visible },
+    // The next six need a native audio backend to open through their real host methods. The fixture has
+    // none, so the hook fills each dialog entity and sets the host's open flag directly; Escape, focus and
+    // closing then run through the real dialog and Player code.
+    State { name: "dialog-project-picker", needs_backend: false, opener: None, closes_on_escape: true,
+        open: |v, _, cx| v.update(cx, |p, cx| { p.project_picker_open = true; p.project_picker.update(cx, |s, cx| s.open(None, cx)); cx.notify(); }),
+        reached: |p, _| p.project_picker_open },
+    State { name: "dialog-stem-export", needs_backend: false, opener: None, closes_on_escape: true,
+        open: |v, _, cx| v.update(cx, |p, cx| {
+            let lanes = vec![("vocals", "Vocals", "#f66d5c"), ("drums", "Drums", "#f2a83d")].into_iter().enumerate()
+                .map(|(slot, (id, label, color))| tracks::Lane { slot, id: id.into(), label: label.into(), color: color.into(), file: format!("/{id}.wav").into(), custom: false })
+                .collect::<Vec<_>>();
+            p.stem_export_lanes = lanes.clone();
+            p.stem_export_open = true;
+            p.stem_export_dialog.update(cx, |d, cx| d.open(lanes, cx));
+            cx.notify();
+        }),
         reached: |p, _| p.stem_export_open },
-    State { name: "dialog-lyrics-editor", needs_backend: true, open: |v, w, cx| v.update(cx, |p, cx| p.open_lyrics_editor(w, cx)),
+    State { name: "dialog-lyrics-editor", needs_backend: false, opener: None, closes_on_escape: true,
+        open: |v, _, cx| v.update(cx, |p, cx| {
+            let lines = vec![lyrics_edit::Line { start: 1., end: 3., text: "First fixture line".into(), words: vec![] },
+                             lyrics_edit::Line { start: 3., end: 5., text: "Second fixture line".into(), words: vec![] }];
+            p.lyrics_editor.update(cx, |e, cx| e.open("Fixture song".into(), lines, 60., false, cx));
+            p.lyrics_editor_open = true;
+            cx.notify();
+        }),
         reached: |p, _| p.lyrics_editor_open },
+    State { name: "dialog-library-import", needs_backend: false, opener: None, closes_on_escape: true,
+        open: |v, _, cx| v.update(cx, |p, cx| {
+            p.library_import.update(cx, |s, cx| s.open("/fixture/project".into(), "/fixture/library".into(), cx));
+            p.library_import_open = true;
+            cx.notify();
+        }),
+        reached: |p, _| p.library_import_open },
+    State { name: "dialog-project-delete", needs_backend: false, opener: None, closes_on_escape: true,
+        open: |v, _, cx| v.update(cx, |p, cx| {
+            p.project_delete.update(cx, |d, cx| d.open(project_delete_dialog::Details { name: "Fixture song".into(), stem_count: 4, has_lyrics: true, bytes: 12_345_678, opened: false }, cx));
+            cx.notify();
+        }),
+        reached: |p, cx| p.project_delete.read(cx).is_open() },
+    State { name: "popover-carry-line", needs_backend: false, opener: None, closes_on_escape: true,
+        open: |v, _, cx| v.update(cx, |p, cx| {
+            p.screen = Screen::Player; p.carry_open = true;
+            p.carry_popover.update(cx, |c, cx| c.on_open(cx));
+            cx.notify();
+        }),
+        reached: |p, _| p.carry_open },
+    State { name: "announce-recording-started", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| { crate::a11y::announce_recording(crate::a11y::Recording::Started); v.update(cx, |_, cx| cx.notify()); },
+        reached: |_, _| true },
+    State { name: "announce-recording-stopped", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| { crate::a11y::announce_recording(crate::a11y::Recording::Stopped); v.update(cx, |_, cx| cx.notify()); },
+        reached: |_, _| true },
+    State { name: "announce-recording-failed", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| { crate::a11y::announce_recording(crate::a11y::Recording::Failed); v.update(cx, |_, cx| cx.notify()); },
+        reached: |_, _| true },
+    State { name: "announce-training-result", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| { crate::a11y::announce_training_result(3, 4); v.update(cx, |_, cx| cx.notify()); },
+        reached: |_, _| true },
+    State { name: "announce-model-installing", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| {
+            // The reset before each state restores the wizard: set a baseline, then make the real transition.
+            let snapshot = |revision: u64, running: &[&str], present: bool, error: Option<&str>| std::sync::Arc::new(crate::model_service::Snapshot { revision, loaded: true, running: running.iter().map(|s| s.to_string()).collect(), error: error.map(Into::into), rows: vec![crate::model_service::Row { entry: crate::model_catalog::Entry { id: "fixture-model".into(), label: "Fixture model".into(), description: String::new(), optional: false, parts: vec![], archive: false }, present, download_mb: 0 }], ..Default::default() });
+            let models = v.read(cx).models.clone();
+            models.update(cx, |m, cx| { m.update_status(snapshot(201, &[], false, None), cx); m.update_status(snapshot(202, &["fixture-model"], false, None), cx); });
+            v.update(cx, |_, cx| cx.notify());
+        },
+        reached: |_, _| true },
+    State { name: "announce-model-installed", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| {
+            // The reset before each state restores the wizard: set a baseline, then make the real transition.
+            let snapshot = |revision: u64, running: &[&str], present: bool, error: Option<&str>| std::sync::Arc::new(crate::model_service::Snapshot { revision, loaded: true, running: running.iter().map(|s| s.to_string()).collect(), error: error.map(Into::into), rows: vec![crate::model_service::Row { entry: crate::model_catalog::Entry { id: "fixture-model".into(), label: "Fixture model".into(), description: String::new(), optional: false, parts: vec![], archive: false }, present, download_mb: 0 }], ..Default::default() });
+            let models = v.read(cx).models.clone();
+            models.update(cx, |m, cx| { m.update_status(snapshot(203, &["fixture-model"], false, None), cx); m.update_status(snapshot(204, &[], true, None), cx); });
+            v.update(cx, |_, cx| cx.notify());
+        },
+        reached: |_, _| true },
+    State { name: "announce-model-failed", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| {
+            // The reset before each state restores the wizard: set a baseline, then make the real transition.
+            let snapshot = |revision: u64, running: &[&str], present: bool, error: Option<&str>| std::sync::Arc::new(crate::model_service::Snapshot { revision, loaded: true, running: running.iter().map(|s| s.to_string()).collect(), error: error.map(Into::into), rows: vec![crate::model_service::Row { entry: crate::model_catalog::Entry { id: "fixture-model".into(), label: "Fixture model".into(), description: String::new(), optional: false, parts: vec![], archive: false }, present, download_mb: 0 }], ..Default::default() });
+            let models = v.read(cx).models.clone();
+            models.update(cx, |m, cx| { m.update_status(snapshot(205, &["fixture-model"], false, None), cx); m.update_status(snapshot(206, &[], false, Some("disk full")), cx); });
+            v.update(cx, |_, cx| cx.notify());
+        },
+        reached: |_, _| true },
+    State { name: "status", needs_backend: false, opener: None, closes_on_escape: false,
+        open: |v, _, cx| { crate::a11y::announce("Accessibility audit status"); v.update(cx, |_, cx| cx.notify()); },
+        reached: |_, _| true },
 ];
 
 fn progress(out: &Path, state: &str, width: u32, phase: &str) {
@@ -154,12 +246,34 @@ fn progress(out: &Path, state: &str, width: u32, phase: &str) {
             .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)}).to_string());
 }
 
+/// Element id (plain `Name(..)` spelling) of the node that holds keyboard focus.
+fn focused_element(w: &Window) -> Option<String> {
+    let tree = tree(w).ok()?;
+    let node = tree["gpui_focus"].as_str().and_then(|k| tree["nodes"].get(k))?;
+    let raw = node["element_id"].as_str()?;
+    Some(raw.strip_prefix("Name(\"").and_then(|r| r.strip_suffix("\")")).unwrap_or(raw).to_owned())
+}
+
+/// Tab until `id` holds focus, then press Enter: the keyboard way to open a dialog.
+fn open_from_keyboard(w: &mut Window, cx: &mut App, id: &str) -> bool {
+    for _ in 0..90 {
+        key(w, cx, "tab");
+        draw(w, cx);
+        if focused_element(w).as_deref() == Some(id) {
+            key(w, cx, "enter");
+            draw(w, cx);
+            return true;
+        }
+    }
+    false
+}
+
 /// Tab through the focus chain and record where focus lands, up to `limit` stops.
-fn tab_walk(w: &mut Window, cx: &mut App, limit: usize) -> anyhow::Result<serde_json::Value> {
+fn tab_walk(w: &mut Window, cx: &mut App, limit: usize, step_key: &'static str, name_unnoded: &dyn Fn(&Window, &App) -> Option<String>) -> anyhow::Result<serde_json::Value> {
     let mut stops: Vec<serde_json::Value> = vec![];
     let mut first: Option<FocusHandle> = None;
     for index in 0..limit {
-        key(w, cx, "tab");
+        key(w, cx, step_key);
         draw(w, cx);
         // Identity is GPUI's own focus id, so a stop without a node still wraps.
         let focus = w.focused(cx);
@@ -169,7 +283,9 @@ fn tab_walk(w: &mut Window, cx: &mut App, limit: usize) -> anyhow::Result<serde_
         if index > 0 && focus.is_some() && focus == first { break; }
         if first.is_none() { first = focus.clone(); }
         stops.push(serde_json::json!({"index": index, "focused": focus.is_some(), "hasNode": !node.is_null(),
-            "id": node["element_id"], "role": node["aria"]["role"], "label": node["aria"]["label"]}));
+            "id": node["element_id"], "role": node["aria"]["role"], "label": node["aria"]["label"],
+            // For a stop with no node: which control of the open dialog it is, so the source can be found.
+            "unnoded": if node.is_null() { name_unnoded(w, cx).into() } else { serde_json::Value::Null }}));
     }
     Ok(serde_json::json!({"stops": stops, "limit": limit, "wrapped": stops.len() < limit}))
 }
@@ -215,7 +331,16 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                             handle.update(cx, |_, w, cx| { key(w, cx, "escape"); draw(w, cx); })?;
                         }
                         handle.update(cx, |_, w, cx| {
-                            view.update(cx, |p, cx| { p.metronome_open = false; p.screen = base_screen(p); cx.notify(); });
+                            view.update(cx, |p, cx| {
+                                // Whatever Escape left open is closed here, so one failure cannot leak into the next state.
+                                p.metronome_open = false; p.carry_open = false;
+                                p.project_picker_open = false; p.stem_export_open = false;
+                                p.lyrics_editor_open = false; p.library_import_open = false;
+                                p.project_delete.update(cx, |d, cx| d.close(cx));
+                                // The announcement states move the model wizard's snapshot; put it back.
+                                p.models.update(cx, |m, cx| m.update_status(std::sync::Arc::new(crate::model_service::Snapshot { revision: 100, ..Default::default() }), cx));
+                                p.screen = base_screen(p); cx.notify();
+                            });
                             draw(w, cx);
                         })?;
                     }
@@ -225,7 +350,27 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                             "reason": "needs a native audio backend; the fixture has none"}));
                         continue;
                     }
-                    handle.update(cx, |_, w, cx| { (s.open)(&view, w, cx); draw(w, cx); })?;
+                    let mut by_keyboard = false;
+                    if let Some(opener) = s.opener {
+                        by_keyboard = handle.update(cx, |_, w, cx| {
+                            // Start from the app root, as a user arriving at the window does.
+                            view.read(cx).focus_handle.clone().focus(w, cx);
+                            draw(w, cx);
+                            open_from_keyboard(w, cx, opener)
+                        })?;
+                        if by_keyboard {
+                            // Give the key a moment to open the state before falling back.
+                            let settle = Instant::now() + Duration::from_secs(2);
+                            while Instant::now() < settle {
+                                cx.background_executor().timer(Duration::from_millis(25)).await;
+                                if handle.update(cx, |_, w, cx| { draw(w, cx); (s.reached)(view.read(cx), cx) })? { break; }
+                            }
+                            by_keyboard = handle.update(cx, |_, _, cx| (s.reached)(view.read(cx), cx))?;
+                        }
+                    }
+                    if !by_keyboard {
+                        handle.update(cx, |_, w, cx| { (s.open)(&view, w, cx); draw(w, cx); })?;
+                    }
                     let deadline = Instant::now() + step;
                     let reached = loop {
                         cx.background_executor().timer(Duration::from_millis(25)).await;
@@ -247,11 +392,35 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         let (screen, dialog) = (p.screen as u8, any_dialog(p, cx));
                         std::fs::write(out.join(format!("{tag}.tree.json")), w.debug_a11y_tree_json().unwrap_or_default())?;
                         std::fs::write(out.join(format!("{tag}.native.json")), serde_json::to_vec_pretty(&native_ax())?)?;
-                        let tab = tab_walk(w, cx, 90)?;
+                        // A page walk starts from the app root, so its ring is the same whatever ran before.
+                        // An overlay keeps the focus it opened with: that is what proves its trap.
+                        if !s.name.starts_with("dialog-") && !s.name.starts_with("popover-") && !matches!(s.name, "settings" | "log" | "models") {
+                            view.read(cx).focus_handle.clone().focus(w, cx);
+                            draw(w, cx);
+                        }
+                        let tab = tab_walk(w, cx, 90, "tab", &|w, cx| view.read(cx).lyrics_editor.read(cx).focused_control_name(w))?;
                         std::fs::write(out.join(format!("{tag}.tab.json")), serde_json::to_vec_pretty(&tab)?)?;
+                        // Shift+Tab from where the forward walk wrapped must retrace the same ring.
+                        let back = tab_walk(w, cx, 90, "shift-tab", &|w, cx| view.read(cx).lyrics_editor.read(cx).focused_control_name(w))?;
+                        std::fs::write(out.join(format!("{tag}.shifttab.json")), serde_json::to_vec_pretty(&back)?)?;
                         Ok(serde_json::json!({"state": s.name, "width": width as u32, "reached": true, "screen": screen, "dialogOpen": dialog,
                             "viewport": [f32::from(w.viewport_size().width), f32::from(w.viewport_size().height)]}))
                     })??;
+                    let mut row = row;
+                    if s.closes_on_escape {
+                        progress(&out, s.name, width as u32, "open");
+                        handle.update(cx, |_, w, cx| { key(w, cx, "escape"); draw(w, cx); })?;
+                        let deadline = Instant::now() + step.min(Duration::from_secs(3));
+                        let closed = loop {
+                            cx.background_executor().timer(Duration::from_millis(25)).await;
+                            let still = handle.update(cx, |_, w, cx| { draw(w, cx); (s.reached)(view.read(cx), cx) })?;
+                            if !still { break true; }
+                            if Instant::now() >= deadline { break false; }
+                        };
+                        let after = handle.update(cx, |_, w, _| focused_element(w))?;
+                        row["keyboard"] = serde_json::json!({"opener": s.opener, "openedByKeyboard": by_keyboard,
+                            "escapeCloses": closed, "focusAfterClose": after});
+                    }
                     summary.push(row);
                 }
             }

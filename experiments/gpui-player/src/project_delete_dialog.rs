@@ -1,5 +1,6 @@
 //! Source library delete confirmation. The host inspects and deletes the target.
 use crate::i18n::{t, tn, tv};
+use crate::a11y::{ButtonSurface, DialogSurface};
 use gpui_kit::{prelude::FluentBuilder, *};
 use singz_uikit as ui;
 use std::{
@@ -218,7 +219,8 @@ impl DeleteDialog {
         let click_id = id.to_owned();
         self.probe(
             id,
-            ui::project_delete_action(id.to_owned(), label, danger, !self.busy)
+            ui::project_delete_action(id.to_owned(), label.clone(), danger, !self.busy)
+                .a11y_button(label)
                 .when(!self.busy, |d| {
                     d.track_focus(&focus).child(ui::guide_focus_ring(
                         focus,
@@ -388,6 +390,7 @@ impl Render for DeleteDialog {
         }
         ui::modal_scrim()
             .id("project-delete-scrim")
+            .a11y_dialog(tv("library.dropScreen.deleteHeading", &[("name", details.name.clone())]))
             .on_click(cx.listener(|s, _, _, cx| {
                 s.close(cx);
                 cx.stop_propagation();

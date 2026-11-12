@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "Sürüm {version} indiriliyor… %{percent}",
   "update.state.ready": "Sürüm {version} hazır. Yüklemek için yeniden başlatın.",
   "update.state.error": "Güncelleme başarısız: {message}",
-  "update.state.rolledBack": "Sürüm {version} başlamadı ve önceki sürüme geri dönüldü."
+  "update.state.rolledBack": "Sürüm {version} başlamadı ve önceki sürüme geri dönüldü.",
+  "a11y.monitor.stop": "Kulaklık izlemeyi durdur",
+  "a11y.announce.splitDone": "Ayırma tamamlandı",
+  "a11y.announce.analysisDone": "Analiz tamamlandı",
+  "a11y.announce.driveSignedIn": "Google Drive oturumu açıldı",
+  "a11y.announce.driveSignedOut": "Google Drive oturumu kapatıldı",
+  "a11y.announce.driveSyncDone": "Google Drive eşitlemesi tamamlandı",
+  "a11y.announce.driveSyncFailed": "Google Drive eşitlemesi başarısız oldu",
+  "a11y.announce.recordingStarted": "Kayıt başladı",
+  "a11y.announce.recordingStopped": "Kayıt durdu",
+  "a11y.announce.recordingFailed": "Kayıt başarısız oldu",
+  "a11y.announce.modelInstalling": "{name} yükleniyor",
+  "a11y.announce.modelInstalled": "{name} yüklendi",
+  "a11y.announce.modelFailed": "Model yüklemesi başarısız oldu"
 }

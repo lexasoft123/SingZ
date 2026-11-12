@@ -335,16 +335,20 @@ impl Popover {
             .children(items.iter().enumerate().map(|(i, (id, label, on))| {
                 self.control(
                     id,
-                    ui::mode_option(
-                        (*id).to_owned(),
+                    crate::a11y::radio(
+                        ui::mode_option(
+                            (*id).to_owned(),
+                            (*label).to_owned(),
+                            *on,
+                            !self.pending,
+                            i == 0,
+                            i + 1 == items.len(),
+                        )
+                        .px(px(14.))
+                        .when(wide, |d| d.flex_1().flex().justify_center()),
                         (*label).to_owned(),
                         *on,
-                        !self.pending,
-                        i == 0,
-                        i + 1 == items.len(),
-                    )
-                    .px(px(14.))
-                    .when(wide, |d| d.flex_1().flex().justify_center()),
+                    ),
                     cx,
                 )
             }))
@@ -365,6 +369,9 @@ impl Render for Popover {
         let cfg = self.desired.config.clone();
         let mut card = ui::carry_line_content(&self.scroll)
             .key_context("SingZCarryLine")
+            // A popover dialog: named, not modal (the player stays usable around it).
+            .role(gpui_kit::accesskit::Role::Dialog).accessibility_id("carry-content")
+            .aria_label(crate::i18n::t("player.transport.carryLine"))
             .track_focus(&self.scope)
             .on_action(cx.listener(|s, _: &NextFocus, w, cx| {
                 s.traverse(false, w, cx);
@@ -432,7 +439,10 @@ impl Render for Popover {
                     lane.label.clone(),
                     cfg.stems.contains(&lane.id),
                     !self.pending,
-                ),
+                )
+                .role(gpui_kit::accesskit::Role::CheckBox)
+                .aria_label(lane.label.clone())
+                .aria_toggled(if cfg.stems.contains(&lane.id) { gpui_kit::accesskit::Toggled::True } else { gpui_kit::accesskit::Toggled::False }),
                 cx,
             ));
         }

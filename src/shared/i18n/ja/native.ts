@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "バージョン {version} をダウンロード中… {percent}%",
   "update.state.ready": "バージョン {version} の準備ができました。再起動してインストールします。",
   "update.state.error": "アップデートに失敗しました: {message}",
-  "update.state.rolledBack": "バージョン {version} が起動しなかったため、元に戻しました。"
+  "update.state.rolledBack": "バージョン {version} が起動しなかったため、元に戻しました。",
+  "a11y.monitor.stop": "ヘッドフォンモニタリングを停止",
+  "a11y.announce.splitDone": "分離が完了しました",
+  "a11y.announce.analysisDone": "分析が完了しました",
+  "a11y.announce.driveSignedIn": "Google ドライブにサインインしました",
+  "a11y.announce.driveSignedOut": "Google ドライブからサインアウトしました",
+  "a11y.announce.driveSyncDone": "Google ドライブの同期が完了しました",
+  "a11y.announce.driveSyncFailed": "Google ドライブの同期に失敗しました",
+  "a11y.announce.recordingStarted": "録音を開始しました",
+  "a11y.announce.recordingStopped": "録音を停止しました",
+  "a11y.announce.recordingFailed": "録音に失敗しました",
+  "a11y.announce.modelInstalling": "{name} をインストール中",
+  "a11y.announce.modelInstalled": "{name} をインストールしました",
+  "a11y.announce.modelFailed": "モデルのインストールに失敗しました"
 }

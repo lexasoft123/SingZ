@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "Dina-download ang bersyon {version}… {percent}%",
   "update.state.ready": "Handa na ang bersyon {version}. I-restart para i-install.",
   "update.state.error": "Nabigo ang update: {message}",
-  "update.state.rolledBack": "Hindi nag-start ang bersyon {version} kaya ibinalik ang dating bersyon."
+  "update.state.rolledBack": "Hindi nag-start ang bersyon {version} kaya ibinalik ang dating bersyon.",
+  "a11y.monitor.stop": "Ihinto ang headphone monitoring",
+  "a11y.announce.splitDone": "Tapos na ang paghihiwalay",
+  "a11y.announce.analysisDone": "Tapos na ang pagsusuri",
+  "a11y.announce.driveSignedIn": "Naka-sign in sa Google Drive",
+  "a11y.announce.driveSignedOut": "Naka-sign out sa Google Drive",
+  "a11y.announce.driveSyncDone": "Tapos na ang pag-sync sa Google Drive",
+  "a11y.announce.driveSyncFailed": "Hindi nagtagumpay ang pag-sync sa Google Drive",
+  "a11y.announce.recordingStarted": "Nagsimula ang pagre-record",
+  "a11y.announce.recordingStopped": "Huminto ang pagre-record",
+  "a11y.announce.recordingFailed": "Hindi nagtagumpay ang pagre-record",
+  "a11y.announce.modelInstalling": "Ini-install ang {name}",
+  "a11y.announce.modelInstalled": "Na-install na ang {name}",
+  "a11y.announce.modelFailed": "Hindi nagtagumpay ang pag-install ng model"
 }

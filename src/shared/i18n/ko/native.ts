@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "버전 {version} 다운로드 중… {percent}%",
   "update.state.ready": "버전 {version}이(가) 준비되었습니다. 다시 시작하여 설치하세요.",
   "update.state.error": "업데이트 실패: {message}",
-  "update.state.rolledBack": "버전 {version}이(가) 시작되지 않아 이전 버전으로 되돌렸습니다."
+  "update.state.rolledBack": "버전 {version}이(가) 시작되지 않아 이전 버전으로 되돌렸습니다.",
+  "a11y.monitor.stop": "헤드폰 모니터링 중지",
+  "a11y.announce.splitDone": "분리가 완료되었습니다",
+  "a11y.announce.analysisDone": "분석이 완료되었습니다",
+  "a11y.announce.driveSignedIn": "Google 드라이브에 로그인했습니다",
+  "a11y.announce.driveSignedOut": "Google 드라이브에서 로그아웃했습니다",
+  "a11y.announce.driveSyncDone": "Google 드라이브 동기화가 완료되었습니다",
+  "a11y.announce.driveSyncFailed": "Google 드라이브 동기화에 실패했습니다",
+  "a11y.announce.recordingStarted": "녹음이 시작되었습니다",
+  "a11y.announce.recordingStopped": "녹음이 중지되었습니다",
+  "a11y.announce.recordingFailed": "녹음에 실패했습니다",
+  "a11y.announce.modelInstalling": "{name} 설치 중",
+  "a11y.announce.modelInstalled": "{name} 설치 완료",
+  "a11y.announce.modelFailed": "모델 설치에 실패했습니다"
 }

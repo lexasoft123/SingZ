@@ -150,11 +150,13 @@ impl Render for LanguageMenu {
             let d=ui::language_menu_row(id.clone(),tag,row.label.clone(),row.hint.clone(),row.value==self.language,
                 self.keyboard.get()&&focus.is_focused(window),window)
                 .track_focus(&focus)
+                .role(gpui_kit::accesskit::Role::MenuItemRadio).accessibility_id(id.clone()).aria_label(row.label.clone()).aria_selected(row.value==self.language)
                 .on_mouse_down(MouseButton::Left,cx.listener(move |s,_,w,cx| {s.keyboard.set(false);mouse_focus.focus(w,cx);cx.stop_propagation();}))
                 .on_click(cx.listener(move |s,_,w,cx| {s.pick(index,w,cx);cx.stop_propagation();}));
             list=list.child(self.probe(id,d));
         }
         let mut menu=ui::language_menu_surface(width,height).key_context("SingZLanguageMenu").track_focus(&self.scope)
+            .role(gpui_kit::accesskit::Role::Menu).accessibility_id("language-menu").aria_label(crate::i18n::t("lang.label"))
             .on_action(cx.listener(|s,_:&Next,w,cx|{s.navigate((s.focused(w).unwrap_or(s.selected())+1)%Language::ALL.len(),w,cx);cx.stop_propagation();}))
             .on_action(cx.listener(|s,_:&Previous,w,cx|{s.navigate((s.focused(w).unwrap_or(s.selected())+Language::ALL.len()-1)%Language::ALL.len(),w,cx);cx.stop_propagation();}))
             .on_action(cx.listener(|s,_:&First,w,cx|{s.navigate(0,w,cx);cx.stop_propagation();}))

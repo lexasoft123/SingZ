@@ -1,5 +1,6 @@
 //! Native training routes, composed from current VocalTraining.tsx and UIKit controls.
 use crate::i18n::{t, tn, tv};
+use crate::a11y::ButtonSurface;
 #[path = "training_labels.rs"]
 mod labels;
 use gpui_kit::prelude::*;
@@ -490,6 +491,9 @@ impl TrainingScreen {
     pub fn set_run(&mut self, view: Option<crate::training_run::Snapshot>, cx: &mut Context<Self>) {
         if self.run != view {
             if self.run.as_ref().map(|run|run.phase) != view.as_ref().map(|run|run.phase) {
+                if let Some(run)=view.as_ref().filter(|run|run.phase==crate::training_run::Phase::Summary){
+                    crate::a11y::announce_training_result(run.correct+run.close,run.attempts);
+                }
                 self.summary_scroll.set_offset(point(px(0.),px(0.)));
             }
             self.run = view;
@@ -658,8 +662,33 @@ impl TrainingScreen {
         let id=id.to_owned();let bounds=self.keyboard_bounds.clone();
         element.relative().child(canvas(move|b,_,_|{bounds.borrow_mut().insert(id.clone(),b);b},|_,_,_,_|{}).absolute().inset_0())
     }
+    /// Accessible name of a setup control that is not named at its call site (D-06 rule 1).
+    fn control_name(&self,id:&str)->Option<String>{
+        let index=|prefix:&str|id.strip_prefix(prefix).and_then(|v|v.parse::<usize>().ok());
+        Some(match id {
+            "training-save-retry"=>t("training.route.retry"),
+            "training-back"=>t("training.nav.backToTraining"),
+            "training-program-start"=>t("training.program.start"),
+            "training-program-path"=>t("training.program.path"),
+            "training-progress"=>t("training.progress.heading"),
+            "training-start"=>t("training.setup.startPractice"),
+            "training-test"=>t(if self.testing {"training.setup.testNote.playing"} else {"training.setup.testNote.idle"}),
+            "training-progress-start"=>t("training.progress.empty.cta"),
+            "training-key"=>t("training.setup.label.key"),
+            "training-interval-focus"=>t("training.program.intervalFocus"),
+            "training-length"=>t("training.setup.label.exercises"),
+            "training-sound"=>t("training.setup.soundType"),
+            _ if index("training-path-").is_some()=>self.lessons().get(index("training-path-")?).map(|l|Self::lesson_label(*l))?,
+            _ if index("training-exercise-").is_some()=>{let e=EXERCISES.get(index("training-exercise-")?)?;format!("{} — {}",e.title(),e.description())},
+            _ if index("training-interval-").is_some()&&id!="training-interval-focus"=>capitalize(t(["training.word.second","training.word.third","training.word.fourth","training.word.fifth","training.word.sixth","training.word.seventh","training.word.octave"].get(index("training-interval-")?)?)),
+            _ if index("training-degree-").is_some()=>tv("training.setup.chordDegreeLabel",&[("n",(index("training-degree-")?+1).to_string())]),
+            _=>return None,
+        })
+    }
     fn setup_control(&self,id:impl Into<String>,element:Stateful<Div>,enabled:bool,cx:&mut Context<Self>)->Stateful<Div>{
         let id=id.into();let focus=self.register_keyboard(&id,enabled,cx);let weak=cx.entity().downgrade();let action=id.clone();
+        // Roles first, so a call site's own role (radio, combo box, toggle) still wins below.
+        let element=match self.control_name(&id){Some(name)=>element.a11y_button(name),None=>element};
         self.keyboard_probe(&id,settings_control_with_focus(element,focus,enabled,move|w,cx|{let _=weak.update(cx,|s,cx|s.activate_setup(&action,w,cx));}))
     }
     fn activate_setup(&mut self,id:&str,w:&mut Window,cx:&mut Context<Self>){
@@ -1164,7 +1193,10 @@ impl TrainingScreen {
         let menu_height=px((options.len() as f32*27.5+10.).min(280.));
         let above=self.keyboard_bounds.borrow().get(id).is_some_and(|b|b.bottom()+menu_height>self.scroll.bounds().bottom()&&b.top()-self.scroll.bounds().top()>self.scroll.bounds().bottom()-b.bottom());
         div().relative().min_w_0().flex_1().child(self.probe(id,
-            self.setup_control(id,training_select(id,options.get(selected).cloned().unwrap_or_default()),true,cx)
+            self.setup_control(id,training_select(id,options.get(selected).cloned().unwrap_or_default())
+                .role(gpui_kit::accesskit::Role::ComboBox).aria_expanded(open)
+                .aria_label(self.control_name(id).unwrap_or_else(||options.get(selected).cloned().unwrap_or_default()))
+                .aria_value(options.get(selected).cloned().unwrap_or_default()),true,cx)
                 .key_context("SingZTrainingSelector")
                 .on_action(cx.listener(|s,_:&NextSelectorFocus,w,cx|{s.selector_next(false,w,cx);w.prevent_default();cx.stop_propagation();}))
                 .on_action(cx.listener(|s,_:&PreviousSelectorFocus,w,cx|{s.selector_next(true,w,cx);w.prevent_default();cx.stop_propagation();}))
@@ -1190,6 +1222,7 @@ impl TrainingScreen {
                 training_choice((id, i), label.clone(), i == selected)
                     .when(disabled, |choice| choice.opacity(0.35).cursor_default())
                     .when(i > 0, |d| d.border_l_1().border_color(rgba(LINE)))
+                    .role(gpui_kit::accesskit::Role::RadioButton).aria_label(label.clone()).aria_selected(i == selected)
                     .when(true,|d|self.setup_control(format!("{id}-{i}"),d,!disabled,cx)),
             )
         }))
@@ -1423,6 +1456,7 @@ impl TrainingScreen {
                                             self.intervals[i],
                                         )
                                         .when(true,|d|self.setup_control(format!("training-interval-{i}"),d,true,cx))
+                                        .aria_toggled(if self.intervals[i] { gpui_kit::accesskit::Toggled::True } else { gpui_kit::accesskit::Toggled::False })
                                     },
                                 )))
                             },
@@ -1444,6 +1478,7 @@ impl TrainingScreen {
                                 self.degrees[i],
                             )
                             .when(true,|d|self.setup_control(format!("training-degree-{i}"),d,true,cx))
+                            .aria_toggled(if self.degrees[i] { gpui_kit::accesskit::Toggled::True } else { gpui_kit::accesskit::Toggled::False })
                         }))),
                 )
             })
@@ -1649,6 +1684,7 @@ impl TrainingScreen {
                                 rgba(LINE_STRONG)
                             })
                             .rounded(px(10.))
+                            .role(gpui_kit::accesskit::Role::RadioButton).aria_label(format!("±{n}¢")).aria_selected(self.tolerance == i)
                             .when(true,|d|self.setup_control(format!("training-tolerance-{i}"),d,true,cx))
                         }),
                     ))

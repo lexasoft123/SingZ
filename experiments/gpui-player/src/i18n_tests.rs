@@ -337,6 +337,20 @@ const NATIVE_ONLY_KEYS: &[&str] = &[
     "quickStart.saved.body",
     "quickStart.karaoke.title",
     "quickStart.karaoke.body",
+    // D-06 / C-60: accessible names and announcements added for assistive technology.
+    "a11y.monitor.stop",
+    "a11y.announce.splitDone",
+    "a11y.announce.analysisDone",
+    "a11y.announce.driveSignedIn",
+    "a11y.announce.driveSignedOut",
+    "a11y.announce.driveSyncDone",
+    "a11y.announce.driveSyncFailed",
+    "a11y.announce.recordingStarted",
+    "a11y.announce.recordingStopped",
+    "a11y.announce.recordingFailed",
+    "a11y.announce.modelInstalling",
+    "a11y.announce.modelInstalled",
+    "a11y.announce.modelFailed",
 ];
 /// English is a deliberate answer for these (the word is the same in that language).
 const SAME_AS_ENGLISH: &[(&str, &str)] = &[("fil", "main.menu.window")];

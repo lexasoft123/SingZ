@@ -1,5 +1,7 @@
 //! Native source WhatsNew composition. The host owns acknowledgement and links.
 use crate::i18n::t;
+use crate::a11y::ButtonSurface;
+use crate::a11y::DialogSurface;
 use crate::release_highlights::{Icon, ReleaseNotes};
 use gpui_kit::{prelude::FluentBuilder, *};
 use singz_uikit as ui;
@@ -306,7 +308,7 @@ impl Render for WhatsNew {
                     ))
                     .child(self.control(
                         "whats-new-close",
-                        ui::release_highlights_button("whats-new-close", "×", false),
+                        ui::release_highlights_button("whats-new-close", "×", false).a11y_button(crate::i18n::t("settings.action.close")),
                         cx,
                     )),
             )
@@ -318,7 +320,8 @@ impl Render for WhatsNew {
                     self.copy.subscribe.clone(),
                     self.copy.telegram_description.clone(),
                     w,
-                ),
+                )
+                .a11y_button(self.copy.subscribe.clone()),
                 cx,
             ));
         let mut content =
@@ -376,7 +379,8 @@ impl Render for WhatsNew {
                             "whats-new-full-notes",
                             format!("{} ↗", self.copy.full_notes),
                             false,
-                        ),
+                        )
+                        .a11y_button(self.copy.full_notes.clone()),
                         cx,
                     ))
                     .child(self.control(
@@ -385,7 +389,8 @@ impl Render for WhatsNew {
                             "whats-new-done",
                             self.copy.done.clone(),
                             true,
-                        ),
+                        )
+                        .a11y_button(self.copy.done.clone()),
                         cx,
                     )),
             );
@@ -414,6 +419,7 @@ impl Render for WhatsNew {
         }
         ui::modal_scrim()
             .id("whats-new-scrim")
+            .a11y_dialog(crate::i18n::t("app.whatsNew.title"))
             .on_click(cx.listener(|s, _, _, cx| {
                 s.close(cx);
                 cx.stop_propagation();

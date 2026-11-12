@@ -9,6 +9,8 @@ macro_rules! gated_env {
     }};
 }
 mod gated_env;
+mod a11y;
+use crate::a11y::DialogSurface as _;
 #[cfg(feature = "ui-tests")]
 #[used]
 static SINGZ_GPUI_UI_TESTS_BUILD_MARKER: &[u8] = b"SINGZ_GPUI_UI_TESTS_BUILD_MARKER";
@@ -765,6 +767,8 @@ struct Player {
     transpose: i32,
     header_drag: Rc<Cell<bool>>,
     focus_handle: FocusHandle,
+    /// The notice's Close button: a notice is a modal alert, so focus lives in it.
+    notice_focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
     modal_was_open: bool,
     notice_was_open: bool,
@@ -846,6 +850,7 @@ impl Player {
             }
             cx.notify();
         });
+        a11y::bind_keys(cx);
         let success_toast=cx.new(singz_uikit::Toast::new);
         let engine_setup=cx.new(|cx|engine_setup::EngineSetup::new(window,cx));
         let engine_setup_subscription=cx.subscribe(&engine_setup,|this,_,event,cx|{
@@ -1669,6 +1674,7 @@ impl Player {
             transpose: 0,
             header_drag: Rc::new(Cell::new(false)),
             focus_handle,
+            notice_focus: cx.focus_handle(),
             previous_focus: None,
             modal_was_open: false,
             notice_was_open: false,
@@ -2150,6 +2156,7 @@ impl Player {
             self.source_cancelling = None;
             if snapshot.result.is_none() { self.source_split_combined = false; }
             if let Some(output) = &snapshot.result {
+                if was_splitting { a11y::announce(i18n::t("a11y.announce.splitDone")); }
                 if output.publication_hash.is_some() {
                     self.adopt_source_publication(output, !self.tracks_audio_failed, cx);
                 } else {
@@ -3347,7 +3354,9 @@ impl Player {
                 integration::Event::Analyzed(epoch, job, result) if epoch == self.native_epoch && self.analysis_job==Some(job) && self.tracks_flight.tracks_pending.is_none() => {
                     self.analysis_progress=None;
                     self.analysis_job=None;
+                    let analysis_ok=result.is_ok();
                     self.accept_project_analysis(result,cx);
+                    if analysis_ok { a11y::announce(i18n::t("a11y.announce.analysisDone")); }
                 }
 
                 integration::Event::BeatsDetected(epoch, serial, result) if epoch == self.native_epoch => {
@@ -5210,6 +5219,7 @@ impl Player {
         let custom=lane_spec.is_some_and(|s|s.custom);
         let editing=lane_spec.is_some_and(|s|self.track_rename.as_ref().is_some_and(|(epoch,id)|*epoch==self.native_epoch&&*id==s.id));
         let label=self.lane_label(i);
+        let lane_name=label.to_string();
         let grid = self.paint_beats.clone().filter(|_| self.metronome.grid);
         let beat_cache = self.beat_cache.clone();
         let position = self.display_position();
@@ -5269,7 +5279,7 @@ impl Player {
                                         vec![glow(color, 0.7, 10.)]
                                     }),
                             )
-                            .when(editing,|row|row.child(singz_uikit::track_name_input(&self.track_name_input,color)))
+                            .when(editing,|row|row.child(singz_uikit::track_name_input(&self.track_name_input,color).accessibility_id("track-name").aria_label(i18n::t("player.lane.renameTitle"))))
                             .when(!editing,|row|row.child(
                                 singz_uikit::track_name_label(("lane-name",i),label,if fade>0.5{TEXT}else{FAINT})
                                     .when(custom,|d|d.cursor_text().on_click(cx.listener(move|this,event:&ClickEvent,w,cx|{
@@ -5277,13 +5287,15 @@ impl Player {
                                     }))),
                             ))
                             .when(custom&&!editing,|row|row
-                                .child(self.track_probe(format!("edit-{i}"),singz_uikit::track_action(("lane-edit",i),"✎",false))
+                                .child(self.track_probe(format!("edit-{i}"),singz_uikit::track_action(("lane-edit",i),"✎",false)
+                                        .role(gpui_kit::accesskit::Role::Button).aria_label(i18n::tv("player.lane.rename",&[("track",lane_name.clone())])))
                                     .track_focus(&self.track_action_focus[i][0]).tab_index(0)
                                     .on_key_down(cx.listener(move|this,event:&KeyDownEvent,w,cx|{
                                         if matches!(event.keystroke.key.as_str(),"enter"|"space"){this.begin_track_name(i,w,cx);cx.stop_propagation();}
                                     }))
                                     .on_click(cx.listener(move|this,_,w,cx|this.begin_track_name(i,w,cx))))
-                                .child(self.track_probe(format!("remove-{i}"),singz_uikit::track_action(("lane-remove",i),"✕",true))
+                                .child(self.track_probe(format!("remove-{i}"),singz_uikit::track_action(("lane-remove",i),"✕",true)
+                                        .role(gpui_kit::accesskit::Role::Button).aria_label(i18n::tv("player.lane.remove",&[("track",lane_name.clone())])))
                                     .track_focus(&self.track_action_focus[i][1]).tab_index(1)
                                     .on_key_down(cx.listener(move|this,event:&KeyDownEvent,_,cx|{
                                         if matches!(event.keystroke.key.as_str(),"enter"|"space"){this.remove_custom_track(i,cx);cx.stop_propagation();}
@@ -5383,7 +5395,9 @@ impl Player {
             )
     }
     fn notice_close(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let button=pill("notice-close", "Close", false)
+        let weak=cx.entity().downgrade();
+        let button=singz_uikit::settings_control_with_focus(pill("notice-close", "Close", false), self.notice_focus.clone(), true,
+            move|_,cx|{let _=weak.update(cx,|this,cx|{this.notice=None;cx.notify();});})
             .on_click(cx.listener(|this,_,_,cx|{this.notice=None;cx.notify();}));
         #[cfg(feature="ui-tests")]
         {
@@ -5563,7 +5577,7 @@ impl Render for Player {
         if notice_open!=self.notice_was_open {
             if notice_open {
                 self.notice_previous_focus=notice_focus.map(|focus|(self.native_epoch,focus));
-                self.focus_handle.focus(window,cx);
+                self.notice_focus.focus(window,cx);
             } else if let Some((epoch,previous))=self.notice_previous_focus.take() {
                 // Do not restore a superseded/unmounted control after navigation.
                 // The outer modal owns restoration when the notice was alone.
@@ -5846,9 +5860,9 @@ impl Render for Player {
         let ruler_column_right=window.viewport_size().width-if self.karaoke {px(360.)}else{px(0.)};
         let zoom_controls=ruler_frame.zoom(div().absolute().right(px(22.)).top(px(7.)).pl(px(10.)).bg(rgb(BG)).occlude()
             .child(singz_uikit::zoom_segment(vec![
-                self.track_probe("zoom-out".into(),singz_uikit::zoom_button("zoom-out","−",false)).on_click(cx.listener(|this,_,_,cx|this.zoom_by(1.4,cx))),
-                self.track_probe("zoom-in".into(),singz_uikit::zoom_button("zoom-in","+",false)).on_click(cx.listener(|this,_,_,cx|this.zoom_by(0.65,cx))),
-                self.track_probe("zoom-fit".into(),singz_uikit::zoom_button("zoom-fit",i18n::t("player.stack.full"),self.view_start==0.&&self.view_end==1.)).on_click(cx.listener(|this,_,_,cx|this.timeline_input(timeline_viewport::Input::Fit,cx))),
+                self.track_probe("zoom-out".into(),a11y::button(singz_uikit::zoom_button("zoom-out","−",false),i18n::t("player.stack.zoomOutTitle"))).on_click(cx.listener(|this,_,_,cx|this.zoom_by(1.4,cx))),
+                self.track_probe("zoom-in".into(),a11y::button(singz_uikit::zoom_button("zoom-in","+",false),i18n::t("player.stack.zoomInTitle"))).on_click(cx.listener(|this,_,_,cx|this.zoom_by(0.65,cx))),
+                self.track_probe("zoom-fit".into(),a11y::button(singz_uikit::zoom_button("zoom-fit",i18n::t("player.stack.full"),self.view_start==0.&&self.view_end==1.),i18n::t("player.stack.showWholeSongTitle"))).on_click(cx.listener(|this,_,_,cx|this.timeline_input(timeline_viewport::Input::Fit,cx))),
             ])));
         self.backdrop_clock.painted(self.native_epoch, self.playhead.position());
         let backdrop_key = singz_uikit::ModalBackdropKey::new(
@@ -5864,7 +5878,7 @@ impl Render for Player {
                         .child(div().relative().flex_1().min_h_0().overflow_hidden().pl(px(10.)).pr(px(22.)).pt(px(4.)).pb(px(10.)).flex().flex_col()
                             .child(div().h(px(30.)).flex_shrink_0().flex()
                                 .child(div().w(px(228.)).pl(px(14.)).flex().gap(px(5.)).items_center()
-                                    .child(singz_uikit::song_button_with_focus(self.track_probe("add".into(),singz_uikit::ruler_button("add-track",i18n::t("player.stack.addTrack"),false,false)),self.track_header_focus[0].clone(),true,{
+                                    .child(singz_uikit::song_button_with_focus(self.track_probe("add".into(),a11y::button(singz_uikit::ruler_button("add-track",i18n::t("player.stack.addTrack"),false,false),i18n::t("player.stack.addTrack"))),self.track_header_focus[0].clone(),true,{
                                         let entity=cx.entity().downgrade();
                                         move|w,cx| {let _=entity.update(cx,|this,cx| {
                                             // Source Add blurs before invoking its chooser.
@@ -5873,7 +5887,7 @@ impl Render for Player {
                                     }))
                                     .children(["M","S","↓"].into_iter().enumerate().map(|(i,label)| {
                                         let disabled=match i {0=>!self.muted.iter().any(|value|*value),1=>!self.solo.iter().any(|value|*value),_=>self.backend.is_some()&&!self.audio_available()};
-                                        let button=self.track_probe(if i==2{"export".into()}else{format!("all-track-{i}")},singz_uikit::ruler_button(("all-track",i),label,true,disabled));
+                                        let button=self.track_probe(if i==2{"export".into()}else{format!("all-track-{i}")},a11y::button(singz_uikit::ruler_button(("all-track",i),label,true,disabled),i18n::t(["player.stack.unmuteAll","player.stack.unsoloAll","player.stack.export"][i])));
                                         if i<2 {
                                             let entity=cx.entity().downgrade();
                                             singz_uikit::song_button_with_focus(button,self.track_reset_focus[i].clone(),!disabled,move|_,cx| {
@@ -5932,6 +5946,9 @@ impl Render for Player {
         };
         let root = div()
             .id("app")
+            .role(gpui_kit::accesskit::Role::Group)
+            .accessibility_id("app")
+            .aria_label("SingZ")
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 if this.backend.is_some() && !this.quick_start.read(cx).is_open() && !this.project_delete.read(cx).is_open() {
                     if let Some(path) = paths.paths().first() {
@@ -6114,6 +6131,7 @@ impl Render for Player {
                     .child(self.header.clone()),
             )
             .child(content)
+            .child(self.a11y_semantics(cx))
             .when(self.carry_open,|root|root.child(self.carry_popover.clone()))
             .when(self.metronome_open, |root| {
                 if let Some(anchor) = self.transport.read(cx).guides.get("metronome") {
@@ -6164,7 +6182,7 @@ impl Render for Player {
                 root.child(self.project_delete.clone())
             })
             .when(self.lyrics_editor_open, |root| {
-                root.child(singz_uikit::modal_scrim().absolute().inset_0().on_mouse_down(MouseButton::Left,cx.listener(|s,_,_,cx|{
+                root.child(singz_uikit::modal_scrim().id("lyrics-editor-scrim").a11y_dialog(i18n::t("lyrics.panel.edit.label")).absolute().inset_0().on_mouse_down(MouseButton::Left,cx.listener(|s,_,_,cx|{
                         s.lyrics_editor.update(cx,|editor,cx|editor.request_close(cx));cx.stop_propagation();
                     })).child(self.lyrics_editor.clone()))
             })
@@ -6172,6 +6190,7 @@ impl Render for Player {
                 root.child(
                     singz_uikit::modal_scrim()
                         .id("settings-scrim")
+                        .a11y_dialog(i18n::t("settings.title"))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -6205,7 +6224,7 @@ impl Render for Player {
         });
         let root = root.when(self.loading && !self.source_split_loading(), |root| {
             root.child(
-                singz_uikit::modal_scrim().child(
+                singz_uikit::modal_scrim().id("loading-scrim").a11y_dialog("Opening project…").child(
                     singz_uikit::modal_card()
                         .w(px(360.))
                         .child("Opening project…"),
@@ -6216,7 +6235,7 @@ impl Render for Player {
             self.source_job.is_some() && self.source_split.is_none(),
             |root| {
                 root.child(
-                    singz_uikit::modal_scrim().child(
+                    singz_uikit::modal_scrim().id("source-job-scrim").a11y_dialog(if self.source_status.label.is_empty() { "Preparing…".to_owned() } else { self.source_status.label.clone() }).child(
                         singz_uikit::modal_card()
                             .w(px(440.))
                             .flex()
@@ -6256,7 +6275,8 @@ impl Render for Player {
         });
         let root = root.when_some(self.notice.clone(), |root, text| {
                 root.child(
-                    singz_uikit::modal_scrim().child(
+                    singz_uikit::modal_scrim().id("notice-scrim").a11y_alert_dialog(text.clone())
+                        .key_context("SingZNotice").on_action(cx.listener(|_, _: &a11y::TrapFocus, _, cx| cx.stop_propagation())).child(
                         singz_uikit::modal_card()
                             .w(px(480.))
                             .gap(px(20.))

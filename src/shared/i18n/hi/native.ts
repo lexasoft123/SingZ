@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "संस्करण {version} डाउनलोड हो रहा है… {percent}%",
   "update.state.ready": "संस्करण {version} तैयार है। इंस्टॉल करने के लिए रीस्टार्ट करें।",
   "update.state.error": "अपडेट विफल: {message}",
-  "update.state.rolledBack": "संस्करण {version} शुरू नहीं हुआ और पिछला संस्करण बहाल कर दिया गया।"
+  "update.state.rolledBack": "संस्करण {version} शुरू नहीं हुआ और पिछला संस्करण बहाल कर दिया गया।",
+  "a11y.monitor.stop": "हेडफ़ोन मॉनिटरिंग रोकें",
+  "a11y.announce.splitDone": "विभाजन पूरा हुआ",
+  "a11y.announce.analysisDone": "विश्लेषण पूरा हुआ",
+  "a11y.announce.driveSignedIn": "Google Drive में साइन इन हुआ",
+  "a11y.announce.driveSignedOut": "Google Drive से साइन आउट हुआ",
+  "a11y.announce.driveSyncDone": "Google Drive सिंक पूरा हुआ",
+  "a11y.announce.driveSyncFailed": "Google Drive सिंक विफल रहा",
+  "a11y.announce.recordingStarted": "रिकॉर्डिंग शुरू हुई",
+  "a11y.announce.recordingStopped": "रिकॉर्डिंग बंद हुई",
+  "a11y.announce.recordingFailed": "रिकॉर्डिंग विफल रही",
+  "a11y.announce.modelInstalling": "{name} इंस्टॉल हो रहा है",
+  "a11y.announce.modelInstalled": "{name} इंस्टॉल हो गया",
+  "a11y.announce.modelFailed": "मॉडल इंस्टॉल विफल रहा"
 }

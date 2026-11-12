@@ -1,5 +1,6 @@
 //! Production LogPanel.tsx composition. Data is supplied by the host, never invented engine activity.
 use crate::i18n::{t, tv};
+use crate::a11y::DialogSurface;
 use gpui_kit::base::SelectableText;
 use singz_uikit as ui;
 use std::{
@@ -466,6 +467,7 @@ impl LogPanel {
         let top = (f32::from(viewport.height) - total_height) / 2.;
         singz_uikit::modal_scrim()
             .id("log-scrim")
+            .a11y_dialog(crate::i18n::t("library.logPanel.title"))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |_, e: &MouseDownEvent, _, cx| {
@@ -1094,6 +1096,7 @@ impl LogPanel {
         }
         ui::modal_scrim()
             .id("log-scrim")
+            .a11y_dialog(crate::i18n::t("library.logPanel.title"))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|s, _, _, cx| {

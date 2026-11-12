@@ -108,5 +108,18 @@ export const native = {
   "update.state.downloading": "Downloading version {version}… {percent}%",
   "update.state.ready": "Version {version} is ready. Restart to install it.",
   "update.state.error": "Update failed: {message}",
-  "update.state.rolledBack": "Version {version} did not start and was rolled back."
+  "update.state.rolledBack": "Version {version} did not start and was rolled back.",
+  "a11y.monitor.stop": "Stop headphone monitoring",
+  "a11y.announce.splitDone": "Splitting finished",
+  "a11y.announce.analysisDone": "Analysis finished",
+  "a11y.announce.driveSignedIn": "Signed in to Google Drive",
+  "a11y.announce.driveSignedOut": "Signed out of Google Drive",
+  "a11y.announce.driveSyncDone": "Google Drive sync finished",
+  "a11y.announce.driveSyncFailed": "Google Drive sync failed",
+  "a11y.announce.recordingStarted": "Recording started",
+  "a11y.announce.recordingStopped": "Recording stopped",
+  "a11y.announce.recordingFailed": "Recording failed",
+  "a11y.announce.modelInstalling": "Installing {name}",
+  "a11y.announce.modelInstalled": "{name} installed",
+  "a11y.announce.modelFailed": "Model install failed"
 }

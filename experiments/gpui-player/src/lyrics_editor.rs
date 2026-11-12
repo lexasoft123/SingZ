@@ -267,10 +267,20 @@ impl Editor {
         let focus=self.focus_controls.borrow_mut().entry(id.clone()).or_insert_with(||cx.focus_handle()).clone();
         if enabled&&tab {self.order.borrow_mut().push(id.clone());}
         let click_id=id.clone();
+        // Row buttons are icon-like; the id says which, so a name is derived from it.
+        let name=["stamp-","print-","add-","remove-"].iter().find_map(|p|id.strip_prefix(&format!("lyed-{p}")).map(|_|match *p{
+            "stamp-"=>copy("row.stampTitleTimed"),"print-"=>copy("row.printTitleTimed"),"add-"=>copy("row.addTitle"),_=>copy("row.removeTitle")}));
+        let name=name.or_else(||match id.as_str(){
+            "lyed-play"=>Some(copy(if self.playing{"pause"}else{"play"})),"lyed-help"=>Some(copy("helpTitle")),
+            "lyed-cancel"=>Some(copy("cancel")),"lyed-save"=>Some(copy(if self.saving{"save.saving"}else{"save.label"})),_=>None});
+        let d=match name{Some(name)=>crate::a11y::ButtonSurface::a11y_button(d,name),None=>d};
         self.probe(&id,d.track_focus(&focus).child(ui::guide_focus_ring(focus,self.keyboard.clone(),1.)).on_click(cx.listener(move|s,_,w,cx|{
             s.keyboard.set(false);if enabled{s.activate(&click_id,w,cx);}cx.stop_propagation();
         })))
     }
+    /// Test hook: the id of the footer/row control that holds focus, for naming an unnamed Tab stop.
+    #[cfg(feature="ui-tests")]
+    pub fn focused_control_name(&self,w:&Window)->Option<String>{self.focus_controls.borrow().iter().find(|(_,f)|f.is_focused(w)).map(|(id,_)|id.clone())}
     fn scroll_row(&self,id:u64,strip:bool){
         if let Some(index)=self.rows.iter().position(|r|r.id==id){
             let before=self.strip.as_ref().and_then(|s|self.rows.iter().position(|r|r.id==s.id)).is_some_and(|i|i<index);
@@ -448,7 +458,7 @@ impl Render for Editor {
                 let line=ui::lyrics_editor_row(format!("lyed-row-{id}"),current==Some(i)).group(group.clone())
                     .child(self.button(stamp.clone(),ui::lyrics_editor_stamp(stamp,edit::fmt_stamp(row.start),false,true),true,true,cx))
                     .child(self.button(print_id,print,row.start.is_some(),false,cx))
-                    .child(ui::lyrics_editor_row_input(&input,focused,silent.contains(&id)))
+                    .child(ui::lyrics_editor_row_input(&input,focused,silent.contains(&id)).accessibility_id(format!("lyed-input-{id}")).aria_label(copy("row.placeholder")))
                     .child(self.button(add.clone(),ui::lyrics_editor_row_action(add,false,false,add_focused,true).group_hover(group.clone(),|s|s.opacity(1.)),true,false,cx))
                     .child(self.button(remove.clone(),ui::lyrics_editor_row_action(remove,true,false,remove_focused,true).group_hover(group.clone(),|s|s.opacity(1.)),true,false,cx));
                 self.order.borrow_mut().push(format!("input-{id}"));list=list.child(self.probe(&format!("lyed-row-{id}"),line));

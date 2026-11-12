@@ -1,5 +1,6 @@
 //! Thin state/event adapter for the production shared UIKit export dialog.
 use crate::i18n::t;
+use crate::a11y::DialogSurface;
 use crate::{
     stem_export::{Format, Mode},
     tracks::Lane,
@@ -362,7 +363,7 @@ impl Render for Dialog {
         .map(|(id, label, on, enabled)| {
             self.control(
                 id,
-                ui::stem_export_segment(id, label, on, enabled),
+                crate::a11y::radio(ui::stem_export_segment(id, label.clone(), on, enabled), label, on),
                 enabled,
                 cx,
             )
@@ -402,6 +403,7 @@ impl Render for Dialog {
                     let enabled = !self.busy;
                     let checkbox =
                         ui::checkbox(format!("{id}-check"), self.selected.contains(&t.id))
+                            .aria_label(Self::track_label(t))
                             .a11y_synthetic_children(|builder| builder.parent_node().set_hidden())
                             .on_click(cx.listener(move |s, _, _, cx| {
                                 if enabled {
@@ -445,7 +447,7 @@ impl Render for Dialog {
         .map(|(id, label, on)| {
             self.control(
                 id,
-                ui::stem_export_segment(id, label, on, !self.busy),
+                crate::a11y::radio(ui::stem_export_segment(id, label, on, !self.busy), label, on),
                 !self.busy,
                 cx,
             )
@@ -526,6 +528,7 @@ impl Render for Dialog {
         }
         ui::modal_scrim()
             .id("export-scrim")
+            .a11y_dialog(crate::i18n::t("player.stack.export"))
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.emit(Event::Close);
                 cx.stop_propagation();

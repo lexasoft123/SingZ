@@ -104,6 +104,7 @@ impl Player {
             };
             match event.state {
                 microphone::RecordingState::Started => {
+                    crate::a11y::announce_recording(crate::a11y::Recording::Started);
                     self.training_recorder.started(command, Instant::now())
                 }
                 microphone::RecordingState::Finished {
@@ -112,6 +113,7 @@ impl Player {
                     seconds,
                     sample_rate,
                 } => {
+                    crate::a11y::announce_recording(crate::a11y::Recording::Stopped);
                     self.training_recorder.finished(
                         command,
                         Ok(training_recording::Take {
@@ -125,6 +127,7 @@ impl Player {
                     );
                 }
                 microphone::RecordingState::Error { message } => {
+                    crate::a11y::announce_recording(crate::a11y::Recording::Failed);
                     diagnostics::event(
                         "training-recording",
                         message.clone(),

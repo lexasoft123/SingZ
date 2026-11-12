@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "Đang tải phiên bản {version}… {percent}%",
   "update.state.ready": "Phiên bản {version} đã sẵn sàng. Khởi động lại để cài đặt.",
   "update.state.error": "Cập nhật thất bại: {message}",
-  "update.state.rolledBack": "Phiên bản {version} không khởi động được và đã được khôi phục về bản trước."
+  "update.state.rolledBack": "Phiên bản {version} không khởi động được và đã được khôi phục về bản trước.",
+  "a11y.monitor.stop": "Dừng giám sát qua tai nghe",
+  "a11y.announce.splitDone": "Đã tách xong",
+  "a11y.announce.analysisDone": "Đã phân tích xong",
+  "a11y.announce.driveSignedIn": "Đã đăng nhập Google Drive",
+  "a11y.announce.driveSignedOut": "Đã đăng xuất khỏi Google Drive",
+  "a11y.announce.driveSyncDone": "Đã đồng bộ xong với Google Drive",
+  "a11y.announce.driveSyncFailed": "Đồng bộ với Google Drive không thành công",
+  "a11y.announce.recordingStarted": "Đã bắt đầu ghi âm",
+  "a11y.announce.recordingStopped": "Đã dừng ghi âm",
+  "a11y.announce.recordingFailed": "Ghi âm không thành công",
+  "a11y.announce.modelInstalling": "Đang cài đặt {name}",
+  "a11y.announce.modelInstalled": "Đã cài đặt {name}",
+  "a11y.announce.modelFailed": "Cài đặt mô hình không thành công"
 }

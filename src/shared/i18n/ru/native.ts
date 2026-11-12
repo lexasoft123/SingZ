@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "Загрузка версии {version}… {percent}%",
   "update.state.ready": "Версия {version} готова. Перезапустите, чтобы установить.",
   "update.state.error": "Не удалось обновить: {message}",
-  "update.state.rolledBack": "Версия {version} не запустилась, возвращена прежняя версия."
+  "update.state.rolledBack": "Версия {version} не запустилась, возвращена прежняя версия.",
+  "a11y.monitor.stop": "Остановить мониторинг в наушниках",
+  "a11y.announce.splitDone": "Разделение завершено",
+  "a11y.announce.analysisDone": "Анализ завершён",
+  "a11y.announce.driveSignedIn": "Выполнен вход в Google Drive",
+  "a11y.announce.driveSignedOut": "Выполнен выход из Google Drive",
+  "a11y.announce.driveSyncDone": "Синхронизация с Google Drive завершена",
+  "a11y.announce.driveSyncFailed": "Синхронизация с Google Drive не удалась",
+  "a11y.announce.recordingStarted": "Запись началась",
+  "a11y.announce.recordingStopped": "Запись остановлена",
+  "a11y.announce.recordingFailed": "Не удалось записать",
+  "a11y.announce.modelInstalling": "Устанавливается: {name}",
+  "a11y.announce.modelInstalled": "Установлено: {name}",
+  "a11y.announce.modelFailed": "Не удалось установить модель"
 }

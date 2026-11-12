@@ -1,5 +1,6 @@
 //! App.tsx titlebar content; the host owns the native drag surface and reservation.
 use crate::i18n::t;
+use crate::a11y::ButtonSurface;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -295,8 +296,8 @@ impl Header {
             self.monitor_attention,
             !self.monitor_stopping,
         );
-        let status = self.action_control("header-monitor-status",control.status,HeaderEvent::Settings,cx);
-        let stop = self.action_control("header-monitor-stop",control.stop,HeaderEvent::StopMonitor,cx)
+        let status = self.action_control("header-monitor-status",control.status.a11y_button(label.to_owned()),HeaderEvent::Settings,cx);
+        let stop = self.action_control("header-monitor-stop",control.stop.a11y_button(t("a11y.monitor.stop")),HeaderEvent::StopMonitor,cx)
             .when(true, |d| self.guides.track_box(d,"monitor-stop",[1.,0.,0.,0.]));
         control
             .shell
@@ -522,6 +523,7 @@ impl Render for Header {
                     )
                     .child(
                         self.guides.track(text_link("header-version", ""),"version")
+                            .aria_label(format!("{} {}", crate::i18n::t("app.whatsNew.title"), if self.review_fixture {"dev"} else {crate::release_highlights::CURRENT_VERSION}))
                             .ml(px(7.))
                             .mt(px(version_top))
                             .text_size(px(10.5))
@@ -601,7 +603,7 @@ impl Render for Header {
                                     .child(singz_uikit::title_input(
                                         &self.title_input,
                                         f32::from(window.viewport_size().width),
-                                    ).w_full())
+                                    ).accessibility_id("header-title").aria_label(t("app.titlebar.renameSong")).w_full())
                                     .when(cfg!(feature = "ui-tests"), |editor| {
                                         self.guides.track(editor, "title-editor")
                                     }),
@@ -624,18 +626,20 @@ impl Render for Header {
                     .when(
                         crate::integration::fixture_mode() || self.review_fixture,
                         |right| {
+                            let status_label = if crate::integration::fixture_mode() {
+                                "Audio route needs attention"
+                            } else if self.native_audio_ready {
+                                self.output_label.as_str()
+                            } else {
+                                "Audio not opened"
+                            };
                             right.child(
                                 persistent_monitor_status(
                                     "header-monitor",
-                                    if crate::integration::fixture_mode() {
-                                        "Audio route needs attention"
-                                    } else if self.native_audio_ready {
-                                        self.output_label.as_str()
-                                    } else {
-                                        "Audio not opened"
-                                    },
+                                    status_label,
                                     crate::integration::fixture_mode(),
                                 )
+                                .a11y_button(status_label)
                                 .when(true,|d|self.action_control("header-monitor-status",d,HeaderEvent::Settings,cx)),
                             )
                         },
@@ -779,6 +783,7 @@ impl Render for Header {
                     )
                     .child(
                         self.button("header-language", "", HeaderEvent::Language, cx)
+                            .aria_label(crate::i18n::t("lang.label"))
                             .px(px(8.))
                             .when(true,|d|self.guides.track_box(d,"language",[1.;4]))
                             .child(singz_uikit::language_header_flag(crate::i18n::current().as_str())),
@@ -789,9 +794,10 @@ impl Render for Header {
                         HeaderEvent::Help,
                         compact,
                         cx,
-                    ).when(true,|d|self.guides.track_box(d,"help",[1.;4])))
+                    ).aria_label(crate::i18n::t("quickStart.title")).when(true,|d|self.guides.track_box(d,"help",[1.;4])))
                     .child(
                         self.button("header-settings", "", HeaderEvent::Settings, cx)
+                            .aria_label(crate::i18n::t("app.titlebar.settings"))
                             .when(true, |d| self.guides.track_box(d, "settings", [1.; 4]))
                             .px(px(8.))
                             .child(

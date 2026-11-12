@@ -119,9 +119,11 @@ impl Player {
                     self.stem_export_job = None;
                     if self.stem_export_close_pending { self.detach_stem_export(cx); }
                     else {
+                        let status = error.map(|e|format!("{}: {e}",i18n::t("player.stack.exportError"))).unwrap_or_else(||i18n::t("player.stack.exportDone"));
+                        crate::a11y::announce(status.clone());
                         self.stem_export_dialog.update(cx, |d,cx| {
                             d.set_busy(false,cx);
-                            d.set_status(error.map(|e|format!("{}: {e}",i18n::t("player.stack.exportError"))).unwrap_or_else(||i18n::t("player.stack.exportDone")),cx);
+                            d.set_status(status,cx);
                         });
                     }
                 }

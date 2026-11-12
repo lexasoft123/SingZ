@@ -1,5 +1,6 @@
 //! Contextual desktop tour, using the production copy and shared placement rules.
 use crate::guide_layout::{self, Rect, Side, Viewport};
+use crate::a11y::{ButtonSurface, DialogSurface};
 use crate::quick_start_store::{retain_seen, seen};
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::{cell::Cell, rc::Rc};
@@ -212,7 +213,7 @@ impl QuickStart {
         primary: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let d = singz_uikit::guide_button(id, label, primary).child(singz_uikit::guide_focus_ring(
+        let d = singz_uikit::guide_button(id, label.clone(), primary).a11y_button(label).child(singz_uikit::guide_focus_ring(
             self.buttons[focus].clone(),
             self.keyboard.clone(),
             if primary { 0. } else { 1. },
@@ -341,7 +342,7 @@ impl Render for QuickStart {
                     }),
             )
             .child(
-                div()
+                crate::a11y::heading("quick-start-heading", title.clone(), 2)
                     .track_focus(&self.heading)
                     .text_size(px(21.))
                     .line_height(px(26.25))
@@ -350,7 +351,7 @@ impl Render for QuickStart {
                     .child(title),
             )
             .child(
-                div()
+                crate::a11y::text_region("quick-start-body", body.clone())
                     .text_size(px(14.))
                     .line_height(px(22.4))
                     .mb(px(20.))
@@ -416,6 +417,7 @@ impl Render for QuickStart {
         let keyboard = self.keyboard.clone();
         div()
             .id("quick-start-overlay")
+            .a11y_dialog(text("title"))
             .key_context("SingZQuickStart")
             .track_focus(&self.scope)
             .on_action(cx.listener(|s, _: &NextFocus, w, cx| {

@@ -2,6 +2,8 @@
 //! checkout at 669ba5a0. It is absent from this branch's Electron route inventory;
 //! source-backed composition is not current Electron capture parity.
 use crate::{drive_restore::Row, i18n::t};
+use crate::a11y::ButtonSurface;
+use crate::a11y::DialogSurface;
 use gpui_kit::{
     component::input::{IndentInline, InputEvent, InputState, OutdentInline},
     prelude::*,
@@ -339,7 +341,12 @@ impl Render for Dialog {
                     "library.common.close"
                 }),
                 true,
-            ),
+            )
+            .a11y_button(t(if self.state.busy {
+                "library.dropScreen.cancelSync"
+            } else {
+                "library.common.close"
+            })),
             true,
             cx,
         );
@@ -356,7 +363,7 @@ impl Render for Dialog {
                 .id("drive-projects-search")
                 .w_full()
                 .flex_none()
-                .child(ui::drive_projects_search(&self.search, self.state.busy)),
+                .child(ui::drive_projects_search(&self.search, self.state.busy).accessibility_id("drive-projects-search").aria_label(crate::i18n::t("library.drive.search"))),
         );
         let rows = if self.state.rows.is_none() {
             ui::project_picker_paragraph(t("library.drive.loading")).into_any_element()
@@ -375,7 +382,8 @@ impl Render for Dialog {
                             "library.drive.download"
                         }),
                         window,
-                    );
+                    )
+                    .a11y_button(format!("{} — {}", row.name, t(if row.song_path.is_some() { "library.drive.open" } else { "library.drive.download" })));
                     self.control(id, control, !self.state.busy, cx)
                 })
                 .collect::<Vec<_>>();
@@ -459,6 +467,7 @@ impl Render for Dialog {
         }
         ui::modal_scrim()
             .id("drive-projects-scrim")
+            .a11y_dialog(crate::i18n::t("library.drive.title"))
             .on_click(cx.listener(|s, _, _, cx| {
                 s.close(cx);
                 cx.stop_propagation();

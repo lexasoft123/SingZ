@@ -123,7 +123,7 @@ impl Transport {
             KeyBinding::new("tab",NextSplitFocus,Some("SingZTransportSplit")),
             KeyBinding::new("shift-tab",PreviousSplitFocus,Some("SingZTransportSplit")),
         ]);
-        let bpm_input = cx.new(|cx| InputState::new(w, cx));
+        let bpm_input = cx.new(|cx| InputState::new(w, cx).placeholder(crate::i18n::t("player.metronome.tempo")));
         let subscription = cx.subscribe_in(&bpm_input, w, |s, _, event, w, cx| match event {
             InputEvent::Change => {
                 if s.bpm_input.read(cx).focus_handle(cx).is_focused(w) && s.bpm_enabled() {
@@ -259,12 +259,14 @@ impl Transport {
             "transport-met" => element.aria_label(crate::i18n::t("player.transport.metronomeTitle")),
             "transport-carry" => element.aria_label(crate::i18n::t("player.transport.carryLine")),
             "transport-transpose-down" | "transport-transpose-up" => element.aria_label(format!("{} {}",crate::i18n::t("player.transport.transposeTitle"),if id.ends_with("down") {"−"} else {"+"})),
-            "transport-transpose-reset" => element.aria_label(crate::i18n::t("player.transport.resetTranspose")),
+            "transport-transpose-reset" => crate::a11y::ButtonSurface::a11y_button(element, crate::i18n::t("player.transport.resetTranspose")),
             "transport-tempo-down" | "transport-tempo-up" => element.aria_label(format!("{} {}",crate::i18n::t("player.transport.speedTitle"),if id.ends_with("down") {"−"} else {"+"})),
-            "transport-tempo-reset" => element.aria_label(crate::i18n::t("player.transport.resetSpeed")),
+            "transport-tempo-reset" => crate::a11y::ButtonSurface::a11y_button(element, crate::i18n::t("player.transport.resetSpeed")),
             "transport-bpm-down" | "transport-bpm-up" => element.aria_label(format!("{} {}",crate::i18n::t("player.bpm.setTitle"),if id.ends_with("down") {"−1"} else {"+1"})),
             "transport-output" => element.aria_label(crate::i18n::tv("player.transport.volumeAt",&[("db",song_gain_label(self.volume))])).aria_expanded(self.output_open),
             "split-cancel" => element.aria_label(crate::i18n::t("player.transport.cancelSplit")),
+            "transport-karaoke" => element.aria_label(crate::i18n::t("player.transport.karaoke"))
+                .aria_toggled(if self.karaoke { gpui_kit::accesskit::Toggled::True } else { gpui_kit::accesskit::Toggled::False }),
             _ => element,
         };
         let enabled=self.control_enabled(id);if enabled{if menu{self.split_order.borrow_mut().push(id);}else{self.footer_order.borrow_mut().push(id);}}

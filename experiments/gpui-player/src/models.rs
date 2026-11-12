@@ -1,6 +1,7 @@
 //! Source SetupWizard composition. Persistent modal: Escape/scrim do not
 //! dismiss it. Manual Close cancels; automatic Skip leaves the worker running.
 use crate::i18n::{t, tv};
+use crate::a11y::DialogSurface;
 use gpui_kit::{prelude::*, *};
 use singz_uikit::{tokens::*, *};
 use std::{
@@ -69,6 +70,7 @@ impl ModelsScreen {
         cx: &mut Context<Self>,
     ) {
         if self.snapshot.revision != snapshot.revision {
+            crate::a11y::announce_model_install(&self.snapshot, &snapshot);
             self.snapshot = snapshot;
             self.error = None;
             if self.snapshot.required_done() && !self.snapshot.busy && self.snapshot.error.is_none()
@@ -84,6 +86,7 @@ impl ModelsScreen {
         self.last_targets = targets;
     }
     pub fn failure(&mut self, error: String, cx: &mut Context<Self>) {
+        crate::a11y::announce(crate::i18n::t("a11y.announce.modelFailed"));
         self.error = Some(error);
         cx.notify();
     }
@@ -372,7 +375,7 @@ impl Render for ModelsScreen {
             focus.is_focused(window) && !self.focus_order.borrow().contains(id)
         });
         if lost_control { self.scope.focus(window, cx); }
-        modal_scrim().id("models-keyboard-scope").key_context("SingZModels").track_focus(&self.scope)
+        modal_scrim().id("models-keyboard-scope").a11y_dialog(t(if self.origin == Origin::Auto { "settings.wizard.settingUpTitle" } else { "settings.wizard.aiModelsTitle" })).key_context("SingZModels").track_focus(&self.scope)
             .on_action(cx.listener(|s, _: &NextFocus, w, cx| { s.move_focus(false, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|s, _: &PreviousFocus, w, cx| { s.move_focus(true, w, cx); cx.stop_propagation(); }))
             .capture_key_down(cx.listener(|s, event: &KeyDownEvent, w, cx| {

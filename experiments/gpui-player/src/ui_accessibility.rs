@@ -190,11 +190,22 @@ fn tree_frame(window: &Window) -> anyhow::Result<u64> {
 
 fn actual_node_id(window: &Window, id: &str) -> anyhow::Result<gpui_kit::accesskit::NodeId> {
     let tree:serde_json::Value=serde_json::from_str(&window.debug_a11y_tree_json().ok_or_else(||anyhow::anyhow!("Actual tree missing"))?)?;
+    let nodes=tree["nodes"].as_object().ok_or_else(||anyhow::anyhow!("Actual tree has no nodes"))?;
     // The framework's provenance field uses ElementId's Debug format; retain
     // the actual tree-supplied AccessKit ID rather than deriving a new one.
+    // That field exists only where debug assertions are on. A release or qualify
+    // ui-tests build has no `element_id`, so there the node is the one slider that
+    // carries this control's accessible name: the tree still states role and label.
     let element_id=format!("{:?}",ElementId::from(id.to_owned()));
-    let node=tree["nodes"].as_object().and_then(|nodes|nodes.values().find(|node|node["element_id"]==element_id))
-        .ok_or_else(||anyhow::anyhow!("Actual accessibility node missing: {id}"))?;
+    let by_id:Vec<_>=nodes.values().filter(|node|node["element_id"]==element_id).collect();
+    let node=if let [node]=by_id.as_slice() {*node} else {
+        let label=match id {"a11y-gain"=>"Monitoring gain","a11y-training-gain"=>"Training cue volume","a11y-output-gain"=>"Song output gain",_=>anyhow::bail!("Actual accessibility node missing: {id}")};
+        let by_label:Vec<_>=nodes.values().filter(|node|node["aria"]["role"]=="Slider"&&node["aria"]["label"]==label).collect();
+        match by_label.as_slice() {
+            [node]=>*node,
+            found=>anyhow::bail!("Actual accessibility node missing: {id} ({} by element id, {} sliders named {label:?})",by_id.len(),found.len()),
+        }
+    };
     let raw=node["accesskit_id"].as_str().ok_or_else(||anyhow::anyhow!("Actual node identity missing: {id}"))?;
     Ok(gpui_kit::accesskit::NodeId(raw.parse()?))
 }

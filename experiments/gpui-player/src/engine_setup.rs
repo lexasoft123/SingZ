@@ -1,5 +1,7 @@
 //! Native legacy SetupModal. The host owns engine checks and external URLs.
 use crate::i18n::t;
+use crate::a11y::ButtonSurface;
+use crate::a11y::DialogSurface;
 use gpui_kit::{component::text::TextViewState, prelude::FluentBuilder, *};
 use singz_uikit as ui;
 use std::{
@@ -345,7 +347,12 @@ impl Render for EngineSetup {
                             } else {
                                 "settings.demucs.copyButton"
                             }),
-                        ),
+                        )
+                        .a11y_button(t(if self.copied {
+                            "settings.demucs.copiedBadge"
+                        } else {
+                            "settings.demucs.copyButton"
+                        })),
                         true,
                         cx,
                     )),
@@ -371,7 +378,12 @@ impl Render for EngineSetup {
                         }),
                         true,
                         !self.checking,
-                    ),
+                    )
+                    .a11y_button(t(if self.checking {
+                        "settings.demucs.checkingButton"
+                    } else {
+                        "settings.demucs.recheckButton"
+                    })),
                     !self.checking,
                     cx,
                 ))
@@ -382,7 +394,8 @@ impl Render for EngineSetup {
                         t("settings.demucs.githubLink"),
                         false,
                         true,
-                    ),
+                    )
+                    .a11y_button(t("settings.demucs.githubLink")),
                     true,
                     cx,
                 ))
@@ -393,7 +406,8 @@ impl Render for EngineSetup {
                         t("settings.action.close"),
                         false,
                         true,
-                    ),
+                    )
+                    .a11y_button(t("settings.action.close")),
                     true,
                     cx,
                 )),
@@ -430,6 +444,7 @@ impl Render for EngineSetup {
         }
         ui::modal_scrim()
             .id("engine-setup-scrim")
+            .a11y_dialog(crate::i18n::t("settings.demucs.title"))
             .on_click(cx.listener(|s, _, _, cx| {
                 s.close(cx);
                 cx.stop_propagation();

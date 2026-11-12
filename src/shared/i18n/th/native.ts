@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "กำลังดาวน์โหลดเวอร์ชัน {version}… {percent}%",
   "update.state.ready": "เวอร์ชัน {version} พร้อมแล้ว รีสตาร์ตเพื่อติดตั้ง",
   "update.state.error": "อัปเดตไม่สำเร็จ: {message}",
-  "update.state.rolledBack": "เวอร์ชัน {version} เริ่มต้นไม่สำเร็จ จึงย้อนกลับเป็นเวอร์ชันก่อนหน้า"
+  "update.state.rolledBack": "เวอร์ชัน {version} เริ่มต้นไม่สำเร็จ จึงย้อนกลับเป็นเวอร์ชันก่อนหน้า",
+  "a11y.monitor.stop": "หยุดการมอนิเตอร์ผ่านหูฟัง",
+  "a11y.announce.splitDone": "แยกเสร็จแล้ว",
+  "a11y.announce.analysisDone": "วิเคราะห์เสร็จแล้ว",
+  "a11y.announce.driveSignedIn": "ลงชื่อเข้าใช้ Google Drive แล้ว",
+  "a11y.announce.driveSignedOut": "ออกจากระบบ Google Drive แล้ว",
+  "a11y.announce.driveSyncDone": "ซิงก์ Google Drive เสร็จแล้ว",
+  "a11y.announce.driveSyncFailed": "ซิงก์ Google Drive ไม่สำเร็จ",
+  "a11y.announce.recordingStarted": "เริ่มบันทึกเสียงแล้ว",
+  "a11y.announce.recordingStopped": "หยุดบันทึกเสียงแล้ว",
+  "a11y.announce.recordingFailed": "บันทึกเสียงไม่สำเร็จ",
+  "a11y.announce.modelInstalling": "กำลังติดตั้ง {name}",
+  "a11y.announce.modelInstalled": "ติดตั้ง {name} แล้ว",
+  "a11y.announce.modelFailed": "ติดตั้งโมเดลไม่สำเร็จ"
 }

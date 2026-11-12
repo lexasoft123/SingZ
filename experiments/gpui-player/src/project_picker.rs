@@ -1,5 +1,6 @@
 //! Source-backed ProjectPicker composition; library IO stays in project_library.
 use crate::i18n::{t, tn, tv};
+use crate::a11y::{ButtonSurface, DialogSurface};
 use crate::project_library::Snapshot;
 use gpui_kit::{prelude::FluentBuilder, *};
 use singz_uikit as ui;
@@ -411,7 +412,7 @@ impl Render for Picker {
         let action = |s: &Self, id: &str, label: String, enabled: bool, cx: &mut Context<Self>| {
             s.control(
                 id.into(),
-                ui::project_picker_action(id.to_owned(), label, enabled),
+                ui::project_picker_action(id.to_owned(), label.clone(), enabled).a11y_button(label),
                 enabled,
                 cx,
             )
@@ -482,6 +483,7 @@ impl Render for Picker {
             for (index, p) in snapshot.projects.iter().enumerate() {
                 let id = format!("picker-row-{index}");
                 let row = ui::project_picker_row(id.clone(), w)
+                    .a11y_button(p.name.clone())
                     .child(ui::project_picker_name(p.name.clone()))
                     .child(
                         ui::project_picker_meta()
@@ -531,7 +533,7 @@ impl Render for Picker {
         }
         if self.drive.signed_in {
             actions=actions.child(self.control("picker-drive-browse".into(),
-                ui::drive_library_action("picker-drive-browse",t("library.drive.title"),true,w),true,cx));
+                ui::drive_library_action("picker-drive-browse",t("library.drive.title"),true,w).a11y_button(t("library.drive.title")),true,cx));
         }
         if self.drive.configured {
             let (id, label) = if self.drive.signed_in {
@@ -547,10 +549,11 @@ impl Render for Picker {
                 id.into(),
                 ui::drive_picker_action_tooltip(
                     id,
-                    label,
+                    label.clone(),
                     t("library.projectPicker.gdriveConnectTitle"),
                     enabled,
-                ),
+                )
+                .a11y_button(label.clone()),
                 enabled,
                 cx,
             ));
@@ -656,6 +659,7 @@ impl Render for Picker {
         }
         ui::modal_scrim()
             .id("picker-scrim")
+            .a11y_dialog(crate::i18n::t("library.common.yourProjects"))
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.emit(Event::Close);
                 cx.stop_propagation();

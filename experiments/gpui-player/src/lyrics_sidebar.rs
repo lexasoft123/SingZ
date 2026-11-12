@@ -520,7 +520,9 @@ impl Render for Sidebar {
                                     ui::lyrics_sidebar_search_input(
                                         &self.query,
                                         self.input_focused(w, cx),
-                                    ),
+                                    )
+                                    .accessibility_id("lyrics-search")
+                                    .aria_label(t("lyrics.panel.variants.searchPlaceholder")),
                                 ),
                             ))
                             .child(self.button("lyrics-search",

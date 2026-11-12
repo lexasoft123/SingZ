@@ -1101,11 +1101,11 @@ impl SettingsScreen {
         &self, id: &'static str, label: impl Into<SharedString>, on: bool, cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let label: SharedString = label.into();
-        let row = div().id(format!("{id}-row")).role(Role::CheckBox).accessibility_id(id)
+        let row = div().id(format!("{id}-row")).role(Role::CheckBox).accessibility_id(format!("{id}-row"))
             .aria_label(label.clone()).aria_toggled(if on {Toggled::True} else {Toggled::False})
             .mt(px(10.)).flex().items_center().gap(px(8.))
             .text_color(rgb(DIM)).text_size(px(12.)).line_height(px(15.)).cursor_pointer()
-            .child(checkbox(id, on).a11y_synthetic_children(|builder| builder.parent_node().set_hidden()).on_click(cx.listener(move |s, _, w, cx| {
+            .child(checkbox(id, on).accessibility_id(format!("{id}-box")).aria_label(label.clone()).a11y_synthetic_children(|builder| builder.parent_node().set_hidden()).on_click(cx.listener(move |s, _, w, cx| {
                 s.activate(id, w, cx); cx.stop_propagation();
             }))).child(label);
         let enabled = !(self.native && (id == "settings-native" || self.monitor_busy));

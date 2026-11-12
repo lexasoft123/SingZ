@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "Memuat turun versi {version}… {percent}%",
   "update.state.ready": "Versi {version} sudah sedia. Mulakan semula untuk memasangnya.",
   "update.state.error": "Kemas kini gagal: {message}",
-  "update.state.rolledBack": "Versi {version} gagal dimulakan dan dikembalikan ke versi sebelumnya."
+  "update.state.rolledBack": "Versi {version} gagal dimulakan dan dikembalikan ke versi sebelumnya.",
+  "a11y.monitor.stop": "Hentikan pemantauan fon kepala",
+  "a11y.announce.splitDone": "Pemisahan selesai",
+  "a11y.announce.analysisDone": "Analisis selesai",
+  "a11y.announce.driveSignedIn": "Berjaya log masuk ke Google Drive",
+  "a11y.announce.driveSignedOut": "Berjaya log keluar dari Google Drive",
+  "a11y.announce.driveSyncDone": "Penyegerakan Google Drive selesai",
+  "a11y.announce.driveSyncFailed": "Penyegerakan Google Drive gagal",
+  "a11y.announce.recordingStarted": "Rakaman bermula",
+  "a11y.announce.recordingStopped": "Rakaman dihentikan",
+  "a11y.announce.recordingFailed": "Rakaman gagal",
+  "a11y.announce.modelInstalling": "Memasang {name}",
+  "a11y.announce.modelInstalled": "{name} dipasang",
+  "a11y.announce.modelFailed": "Pemasangan model gagal"
 }

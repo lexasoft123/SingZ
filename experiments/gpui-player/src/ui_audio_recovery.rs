@@ -132,7 +132,8 @@ fn snapshot(view: &Entity<Player>, window: &Window, cx: &App) -> Value {
             "real metadata-read failure with healthy owned audio helper; not hardware hotplug qualification"
         } else { "simulated death of this backend's owned audio child; not hardware hotplug qualification" },
     });
-    state["noticeRootFocused"]=json!(player.notice.is_some() && player.focus_handle.is_focused(window));
+    // The notice is a modal alert: focus lives on its Close button (C-60), inside the app root.
+    state["noticeRootFocused"]=json!(player.notice.is_some() && (player.focus_handle.is_focused(window) || player.notice_focus.is_focused(window)));
     state["headerSaveEnabled"]=json!(player.header.read(cx).save_enabled());
     state["rendererHeldSaveProgress"]=json!(player.source_job==Some(u64::MAX)&&player.source_saving);
     state

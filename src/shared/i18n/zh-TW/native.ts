@@ -110,5 +110,18 @@ export const native: Translation<typeof en> = {
   "update.state.downloading": "正在下載版本 {version}… {percent}%",
   "update.state.ready": "版本 {version} 已就緒，重新啟動即可安裝。",
   "update.state.error": "更新失敗：{message}",
-  "update.state.rolledBack": "版本 {version} 無法啟動，已還原。"
+  "update.state.rolledBack": "版本 {version} 無法啟動，已還原。",
+  "a11y.monitor.stop": "停止耳機監聽",
+  "a11y.announce.splitDone": "分離已完成",
+  "a11y.announce.analysisDone": "分析已完成",
+  "a11y.announce.driveSignedIn": "已登入 Google 雲端硬碟",
+  "a11y.announce.driveSignedOut": "已登出 Google 雲端硬碟",
+  "a11y.announce.driveSyncDone": "Google 雲端硬碟同步已完成",
+  "a11y.announce.driveSyncFailed": "Google 雲端硬碟同步失敗",
+  "a11y.announce.recordingStarted": "錄音已開始",
+  "a11y.announce.recordingStopped": "錄音已停止",
+  "a11y.announce.recordingFailed": "錄音失敗",
+  "a11y.announce.modelInstalling": "正在安裝 {name}",
+  "a11y.announce.modelInstalled": "{name} 已安裝",
+  "a11y.announce.modelFailed": "模型安裝失敗"
 }
