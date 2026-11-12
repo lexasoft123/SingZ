@@ -91,6 +91,33 @@ class SchemaTests(unittest.TestCase):
             perf.main(["--app", "native", "--command", "true", "--out", "/tmp/unused.json"])
 
 
+class BaselineKindTests(unittest.TestCase):
+    def args(self, **over):
+        from argparse import Namespace
+        base = dict(app='native', profile='release+ui-tests', display='hidden', machine='mac', commit='abc', play=180, burst=5, pause=60,
+                    cycles=20, cycle_duration=0.5, deadline=120, command='true', action_command='driver', package=__file__, run_kind='baseline')
+        return Namespace(**{**base, **over})
+
+    def test_cli_accepts_the_baseline_run_kind(self):
+        from unittest.mock import patch
+        with patch.object(perf, "run", side_effect=ValueError("stop here")) as run, self.assertRaises(SystemExit):
+            perf.main(["--app", "native", "--command", "true", "--out", "/tmp/unused.json", "--profile", "p", "--display", "hidden",
+                       "--machine", "m", "--commit", "c", "--run-kind", "baseline"])
+        run.assert_called_once()  # an invalid choice would exit in argparse before run() is reached
+        self.assertEqual(run.call_args.args[0].run_kind, "baseline")
+
+    def test_baseline_needs_the_full_scenario_and_is_not_a_shortened_run(self):
+        from unittest.mock import patch
+        from pathlib import Path
+        full = {"control_dir": Path("/nonexistent/control"), "package_profile": "release"}
+        for patch_args, text in (({"play": 60}, "play"), ({"pause": 10}, "pause"), ({"cycles": 2}, "cycles"),
+                                 ({"control_dir": None}, "control"), ({"package_profile": None}, "package-profile")):
+            with self.subTest(patch_args=patch_args), patch.object(perf.subprocess, "Popen") as launch:
+                with self.assertRaisesRegex(ValueError, text):
+                    perf.run(self.args(**{**full, **patch_args}))
+                launch.assert_not_called()
+
+
 if __name__ == "__main__": unittest.main()
 
 class RunnerSafetyTests(unittest.TestCase):

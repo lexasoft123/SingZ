@@ -52,6 +52,26 @@ staged paths, and point `--command` at the release `ui-tests` executable and
 smoke` marks development smoke results with the coordinator's requested owner
 and non-baseline reservation note.
 
+## Baselines (Q-01 / Q-02)
+
+`--run-kind baseline` marks a G0 baseline run. It refuses a shortened scenario (play >= 180 s,
+pause >= 60 s, cycles >= 20), needs the control driver and `--package-profile`, and `--package` should
+be the shipped installer. Run it three times per app on the same Mac, plus three visible
+`frames_visible.py` runs per scenario (native), then:
+
+```
+python3 tests/perf/baseline_aggregate.py --app electron --tag v0.26.7 --runs e1.json e2.json e3.json \
+    --shipped-package SingZ-0.26.7-mac-arm64.dmg --collect-identity \
+    --out-json experiments/gpui-player/plan/Q-01-electron-baseline.json --out-md experiments/gpui-player/plan/Q-01-electron-baseline.md
+python3 tests/perf/baseline_aggregate.py --app native --runs n1.json n2.json n3.json --frames static-*.json idle-*.json \
+    --shipped-package SingZ.dmg --electron-baseline .../Q-01-electron-baseline.json --collect-identity \
+    --out-json .../Q-02-native-baseline.json --out-md .../Q-02-native-baseline.md
+```
+
+Median and worst per cell; the native file adds the verdict for each budget N1-N14 against the
+Electron file (`pass`, `fail`, `unvalidated`, `deferred`). N11 is judged only after a 60 s burst
+(`--burst 60`); N10 stays unvalidated while neither app can close a project.
+
 ## Presented frames (C-07)
 
 `metrics.frames` is either all null with a `reason`, or all measured:

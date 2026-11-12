@@ -1,0 +1,153 @@
+{
+  "schema": "singz.perf.baseline.v1",
+  "app": "electron",
+  "kind": "baseline",
+  "tag": "v0.26.7",
+  "commit": "2f0dd909",
+  "machine": "Mac16,11 Apple M4 Pro, 14 cores, 48 GB, macOS 27.2",
+  "machineIdentity": {
+    "model": "Mac16,11",
+    "chip": "Apple M4 Pro",
+    "cores": "14",
+    "memoryBytes": "51539607552",
+    "macOS": "27.2 (26B123)"
+  },
+  "buildProfile": "electron-build-out",
+  "packageBuildProfile": "release-dmg",
+  "reference": {
+    "reference": "synthetic 5-minute reference; 12-minute cycle partner",
+    "stemCount": 6,
+    "durationS": 300,
+    "lyricsPresent": true,
+    "storedPitchLine": true
+  },
+  "runs": 3,
+  "cells": {
+    "idleCpuPercent": {
+      "unit": "percent of one core",
+      "runs": [
+        3.283896959585727,
+        3.2071694747532584,
+        3.160862319197242
+      ],
+      "median": 3.2071694747532584,
+      "worst": 3.283896959585727
+    },
+    "playingCpuPercent": {
+      "unit": "percent of one core",
+      "runs": [
+        7.086838187345281,
+        7.08095652652256,
+        7.027706666700641
+      ],
+      "median": 7.08095652652256,
+      "worst": 7.086838187345281
+    },
+    "steadyFootprintBytes": {
+      "unit": "bytes",
+      "runs": [
+        885630192,
+        885761240,
+        885974184
+      ],
+      "median": 885761240,
+      "worst": 885974184
+    },
+    "memoryGrowth": {
+      "unit": "bytes",
+      "runs": [
+        {
+          "growthBytes": 139814402.37569273,
+          "noiseBytes": 989623870.1894118,
+          "growing": false,
+          "samples": 30,
+          "reason": null
+        },
+        {
+          "growthBytes": -150038502.7765755,
+          "noiseBytes": 1042788617.2852271,
+          "growing": false,
+          "samples": 30,
+          "reason": null
+        },
+        {
+          "growthBytes": 74053159.02417974,
+          "noiseBytes": 1128014829.5566823,
+          "growing": false,
+          "samples": 30,
+          "reason": null
+        }
+      ],
+      "closeExposed": false,
+      "closeReceipts": [
+        null,
+        null,
+        null
+      ],
+      "noiseRule": "rise must stay within max(2.0 x residual stdev, 1% of steady footprint)"
+    },
+    "startupMs": {
+      "unit": "ms",
+      "runs": [
+        2220.905,
+        862.636584,
+        859.821041
+      ],
+      "median": 862.636584,
+      "worst": 2220.905
+    },
+    "songOpenMs": {
+      "unit": "ms",
+      "runs": [
+        1681.8904580140952,
+        1682.9487499780953,
+        1156.3857499859296
+      ],
+      "median": 1681.8904580140952,
+      "worst": 1682.9487499780953
+    },
+    "starvedBlocks": [
+      {
+        "lanes": {},
+        "total": null,
+        "reason": "driver or playback helper did not expose lane starvation counters",
+        "burstS": 5.210735708009452
+      },
+      {
+        "lanes": {},
+        "total": null,
+        "reason": "driver or playback helper did not expose lane starvation counters",
+        "burstS": 5.040281708003022
+      },
+      {
+        "lanes": {},
+        "total": null,
+        "reason": "driver or playback helper did not expose lane starvation counters",
+        "burstS": 5.175802624988137
+      }
+    ],
+    "frames": {}
+  },
+  "harnessPackage": {
+    "name": "SingZ-0.26.7-mac-arm64.dmg",
+    "bytes": [
+      133912066,
+      133912066,
+      133912066
+    ]
+  },
+  "shippedPackage": {
+    "name": "SingZ-0.26.7-mac-arm64.dmg",
+    "bytes": 133912066,
+    "sha256": "69e3e6af8e89401921a40307dd1905692a075648f36996473e59c6a7c42060a4"
+  },
+  "caveats": [
+    "Electron runs launch the built out/ of tag v0.26.7 (2f0dd909, npm ci + npm run build) with the repository's Electron binary through Playwright, hidden, not the packaged .app; N14 uses the real published SingZ-0.26.7-mac-arm64.dmg (downloaded from the GitHub release without credentials).",
+    "The Mac was not idle: Chrome and Orca were running (1-minute load 4-7 on 14 cores) during the windows; no builds of ours ran. Runs were interleaved electron/native.",
+    "Presented frames are not measured for Electron (no macOS presented-frame capture). Both apps' cycles are open/open alternations: neither can close a project."
+  ],
+  "deferred": {
+    "120Hz": "deferred until a 120 Hz panel exists; not failed",
+    "windows": "Windows legs are a separate task (see the summary)"
+  }
+}

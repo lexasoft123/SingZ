@@ -52,6 +52,21 @@ def lane_counter(value: Any) -> int | None:
     return None
 
 
+BASELINE_MINIMUM = {"play": 180, "pause": 60, "cycles": 20}
+
+
+def check_baseline_scenario(args: argparse.Namespace) -> None:
+    """A baseline is the full 3.2 scenario through the control driver, never a shortened or hook-driven run."""
+    if not getattr(args, "control_dir", None):
+        raise ValueError("a baseline run needs the control driver (--control-dir)")
+    if not getattr(args, "package_profile", None):
+        raise ValueError("a baseline run needs --package-profile")
+    for name, minimum in BASELINE_MINIMUM.items():
+        value = getattr(args, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum:
+            raise ValueError(f"a baseline run needs {name} >= {minimum}, got {value}")
+
+
 def _required(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"run metadata missing {name}")
@@ -359,6 +374,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _required(value, key)
     if args.display != "hidden":
         raise ValueError("display must be hidden: this driver forces hidden windows")
+    if getattr(args, "run_kind", None) == "baseline":
+        check_baseline_scenario(args)
     if control_dir:
         required_env = ("SINGZ_USERDATA_DIR", "SINGZ_PERF_SONGS") if args.app == "electron" else (
             "SINGZ_GPUI_CONFIG_DIR", "SINGZ_GPUI_PROJECTS_ROOT", "SINGZ_GPUI_TEST_PROJECT", "SINGZ_GPUI_PERF_SECOND_PROJECT", "SINGZ_GPUI_AUDIO_HELPER")
@@ -563,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--command", required=True)
     parser.add_argument("--action-command")
     parser.add_argument("--control-dir", type=Path)
-    parser.add_argument("--run-kind", choices=("smoke", "benchmark"), default="benchmark")
+    parser.add_argument("--run-kind", choices=("smoke", "benchmark", "baseline"), default="benchmark")
     parser.add_argument("--reference-json", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--frames-json", type=Path, help="merge the Windows sampler's frames/GPU/DWM JSON (C-07)")
