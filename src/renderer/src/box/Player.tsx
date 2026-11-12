@@ -1,8 +1,9 @@
-import type { CSSProperties } from 'react'
+import { memo, type CSSProperties } from 'react'
 import { Button } from '@singz/ui'
 import { Icon } from '@singz/ui/icons'
 import { t } from './i18n'
 import { playbackStatus } from './playback-status'
+import { nextSlot, songLine } from './next-song'
 import { timeText } from './metadata'
 import { PlayerLyrics } from './PlayerLyrics'
 import { parseSongName } from './song-identity'
@@ -18,6 +19,8 @@ export function Player({
   onLibrary,
   onMix,
   onQueue,
+  onNext,
+  next,
   onSettings,
   onToggle,
   onSeek,
@@ -31,6 +34,10 @@ export function Player({
   onLibrary: () => void
   onMix: () => void
   onQueue: () => void
+  /** Starts the next queued song (App decides whether to confirm). */
+  onNext: () => void
+  /** Primitive fields only, so the Up next line never re-renders with the playback clock. */
+  next: { title: string; artist: string | null } | null
   onSettings: () => void
   onToggle: () => void
   onSeek: (position: number) => void
@@ -42,6 +49,7 @@ export function Player({
   const lines = active.lyrics.status === 'ready' ? active.lyrics.lines : []
   const status = playbackStatus(snapshot)
   const canPlay = active.lyrics.status === 'ready' && active.lyrics.lines.length > 0 && !snapshot.routingBlocked && !snapshot.applyingOutput && !snapshot.restartRequired
+  const slot = nextSlot(status, next !== null)
   const chromeProps = { inert: !controlsVisible, 'aria-hidden': !controlsVisible }
   return <section
     className="box-player"
@@ -90,16 +98,20 @@ export function Player({
           </div>
           <div className="player-playback" data-remote-up="[data-control='seek']">
             <Button aria-label={t('box.player.back5')} data-control="previous" disabled={!canPlay} onClick={() => onSeekBy(-5)}><Icon name="replay" size={23} /></Button>
-            <Button className="player-play" variant="primary" aria-label={snapshot.playing ? t('box.player.pause') : t('box.player.play')} data-control="play" disabled={!canPlay} onClick={onToggle}>
+            <Button className="player-play" variant="primary" aria-label={snapshot.playing ? t('box.player.pause') : status === 'ended' ? t('box.player.replay') : t('box.player.play')} data-control="play" disabled={!canPlay} onClick={onToggle}>
               <Icon name={snapshot.playing ? 'pause' : 'play'} size={27} />
             </Button>
-            <Button aria-label={t('box.player.forward5')} data-control="next" disabled={!canPlay} onClick={() => onSeekBy(5)}><Icon name="skip" size={23} /></Button>
+            <Button aria-label={t('box.player.forward5')} data-control="forward5" disabled={!canPlay} onClick={() => onSeekBy(5)}><span className="icon-mirror" aria-hidden="true"><Icon name="replay" size={23} /></span></Button>
+            {slot === 'next' && next && <Button className="player-next" aria-label={status === 'ended' ? t('box.player.nextLabel', { title: songLine(next.title, next.artist) }) : t('box.player.nextSong')} data-control="next-song" onClick={onNext}>
+              <Icon name="skip" size={23} />{status === 'ended' && <span className="player-next-label">{t('box.player.nextLabel', { title: next.title })}</span>}
+            </Button>}
+            {slot === 'choose' && <Button className="player-next" data-control="next-song" onClick={onLibrary}><span className="player-next-label">{t('box.player.chooseSong')}</span></Button>}
           </div>
           <div className="player-tools" data-remote-up="[data-control='seek']"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button><Button data-control="queue" onClick={onQueue}>{t('box.navigation.queue')}</Button></div>
           <PlayerMicrophoneMeters microphones={microphones} snapshot={microphoneSnapshot} />
           <span className="player-time player-duration">{timeText(snapshot.duration)}</span>
         </div>
-        <div className="player-hints"><span>← → {t('box.hints.move')} <b>↑</b> {t('box.hints.seek')} <b>OK</b> {t('box.hints.select')} <b>Back</b> {t('box.navigation.catalog')}</span><span>{snapshot.restartRequired ? `${tSettings('box.settings.restartRequired')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.routingBlocked ? `${tSettings('box.settings.routingPaused')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.saveError ?? snapshot.outputError ?? snapshot.playbackError?.message ?? (status === 'ended' ? t('box.player.ended') : status === 'playing' ? t('box.player.hideHint') : t('box.player.paused'))}</span></div>
+        <div className="player-hints"><span>← → {t('box.hints.move')} <b>↑</b> {t('box.hints.seek')} <b>OK</b> {t('box.hints.select')} <b>Back</b> {t('box.navigation.catalog')}</span>{next && <PlayerUpNext title={next.title} artist={next.artist} />}<span>{snapshot.restartRequired ? `${tSettings('box.settings.restartRequired')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.routingBlocked ? `${tSettings('box.settings.routingPaused')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.saveError ?? snapshot.outputError ?? snapshot.playbackError?.message ?? (status === 'ended' ? t(next ? 'box.player.endedNext' : 'box.player.ended') : status === 'playing' ? t('box.player.hideHint') : t('box.player.paused'))}</span></div>
       </div>
       {!controlsVisible && <button className="player-wake" tabIndex={-1} aria-label={t('box.player.wake')} onClick={onWake} />}
     </div>
@@ -123,3 +135,8 @@ export function PlayerMicrophoneMeters({ microphones, snapshot: snapshotProp }: 
     })}
   </div>
 }
+
+/** Memoised on two strings: playback-clock renders of Player skip it entirely. */
+const PlayerUpNext = memo(function PlayerUpNext({ title, artist }: { title: string; artist: string | null }): React.JSX.Element {
+  return <span className="player-upnext" data-upnext>{t('box.player.upNext', { title: songLine(title, artist) })}</span>
+})

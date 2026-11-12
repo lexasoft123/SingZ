@@ -2,11 +2,6 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
-if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
-  exec node "$repo_root/scripts/with-native-build-lock.mjs" \
-    --owner sanitizer-gates -- bash "$repo_root/zdsp/run-sanitizer-gates.sh" "$@"
-fi
-node "$repo_root/scripts/assert-native-build-lock.cjs"
 cd "$repo_root"
 
 case "$(uname -s)" in

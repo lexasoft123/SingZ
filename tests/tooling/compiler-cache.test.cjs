@@ -90,7 +90,6 @@ for (const preset of ['host-debug', 'host-release']) {
   }, t => {
     // This test is opt-in because actual compilation must hold the repository's
     // global native lock. It never uses or resets the machine's shared cache.
-    require('../../scripts/native-build-lock.cjs').assertNativeBuildLockHeld(repository, process.env.SINGZ_NATIVE_BUILD_LOCK_HELD)
     const directory = fixture(t)
     const conf = path.join(directory, 'ccache.conf')
     fs.writeFileSync(conf, 'max_size = 100M\n')

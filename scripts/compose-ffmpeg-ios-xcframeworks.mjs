@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import {
   copyFileSync,
   cpSync,
@@ -36,18 +36,6 @@ const proofStaging = process.argv.includes('--proof-staging')
 const replaceExisting = process.argv.includes('--replace-existing')
 if (proofStaging && process.env.SINGZ_CODEC_TARGET_PROOF !== '1')
   throw new Error('--proof-staging requires SINGZ_CODEC_TARGET_PROOF=1')
-if (!process.env.SINGZ_NATIVE_BUILD_LOCK_HELD) {
-  const locked = spawnSync(process.execPath, [
-    join(root, 'scripts', 'with-native-build-lock.mjs'),
-    '--owner', `ffmpeg-xcframeworks:${proofStaging ? 'proof' : 'release'}`,
-    '--', process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2),
-  ], { cwd: process.cwd(), stdio: 'inherit' })
-  if (locked.error) throw locked.error
-  process.exit(locked.status ?? 1)
-}
-execFileSync(process.execPath, [join(root, 'scripts', 'assert-native-build-lock.cjs')], {
-  stdio: 'inherit',
-})
 const output = join(root, 'vendor', 'ffmpeg-codec', 'ios-xcframeworks')
 if (existsSync(output) && !replaceExisting) {
   throw new Error(

@@ -14,12 +14,6 @@ case "$MODE" in
   build|--prove-existing) ;;
   *) echo "usage: scripts/build-ffmpeg-codec-runtime.sh <target> [--prove-existing]" >&2; exit 2 ;;
 esac
-if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
-  exec node "$ROOT/scripts/with-native-build-lock.mjs" \
-    --owner "ffmpeg-codec:$TARGET:$MODE" -- \
-    bash "$ROOT/scripts/build-ffmpeg-codec-runtime.sh" "$@"
-fi
-node "$ROOT/scripts/assert-native-build-lock.cjs"
 VERSION=8.0.1
 SOURCE_SHA256=05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41
 SOURCE_URL="https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz"

@@ -172,6 +172,25 @@ export function disabledFocusReplacement(group: HTMLElement, last: HTMLElement |
   return best?.element ?? null
 }
 
+/** Back from the catalog: focus the top navigation's current section (NAV-02), else its first target. */
+export function focusPrimaryNavigation(root: HTMLElement): boolean {
+  const target = root.querySelector<HTMLElement>('.box-navigation button.on') ??
+    root.querySelector<HTMLElement>('.box-navigation button, [data-surface="navigation"] button')
+  if (!target) return false
+  target.focus({ preventScroll: true })
+  return true
+}
+
+/** How long after a Left/Right on the seek bar the player may not move focus off it. */
+export const SEEK_KEY_GRACE_MS = 1500
+
+/** Seeking with the arrows can reach the end (or leave it); the end-of-song focus repair (NAV-09)
+ * must not pull focus off the slider the user is holding. Leaving it is Up/Down only. */
+export function seekKeepsFocus(active: { matches(selector: string): boolean } | null, lastSeekKeyAt: number | null, now: number): boolean {
+  return active !== null && active.matches('[data-control="seek"]') &&
+    lastSeekKeyAt !== null && now - lastSeekKeyAt <= SEEK_KEY_GRACE_MS
+}
+
 /** Catalog return after a dialog closes prefers the remembered row, then an
  * enabled recovery action or the active Catalog navigation button. */
 export function catalogFocusTarget(root: HTMLElement, index: number): HTMLElement | null {

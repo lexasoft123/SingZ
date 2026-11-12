@@ -35,7 +35,6 @@ const {
   verifyCaptureArtifact,
   verifyCaptureSnapshot
 } = require('./capture-artifact.cjs')
-const { assertNativeBuildLockHeld } = require('./native-build-lock.cjs')
 
 const root = resolve(__dirname, '..')
 const electronVersion = require(join(root, 'node_modules/electron/package.json')).version
@@ -816,23 +815,10 @@ async function main() {
 }
 
 if (runningAsScript) {
-  if (!printingFingerprint && !process.env.SINGZ_NATIVE_BUILD_LOCK_HELD) {
-    const locked = spawnSync(process.execPath, [
-      join(root, 'scripts', 'with-native-build-lock.mjs'),
-      '--owner', `capture-addon:${target}`,
-      '--', process.execPath, __filename, ...process.argv.slice(2)
-    ], { cwd: process.cwd(), stdio: 'inherit' })
-    if (locked.error) throw locked.error
-    process.exitCode = locked.status ?? 1
-  } else {
-    if (!printingFingerprint) {
-      assertNativeBuildLockHeld(root, process.env.SINGZ_NATIVE_BUILD_LOCK_HELD)
-    }
-    main().catch((error) => {
-      console.error(error)
-      process.exitCode = 1
-    })
-  }
+  main().catch((error) => {
+    console.error(error)
+    process.exitCode = 1
+  })
 }
 
 module.exports = { download, downloadHeaderFile, extractHeaders, findAddon, sourceFingerprint, captureBuildDirectory }

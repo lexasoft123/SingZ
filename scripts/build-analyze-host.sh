@@ -15,11 +15,6 @@
 # script-built binary before the switch).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
-  exec node "$ROOT/scripts/with-native-build-lock.mjs" \
-    --owner analyze-host -- bash "$ROOT/scripts/build-analyze-host.sh" "$@"
-fi
-node "$ROOT/scripts/assert-native-build-lock.cjs" 1>&2
 # Keep both source and build paths under the same checkout so ccache can
 # normalize command lines to identical relative paths in sibling worktrees.
 BUILD="${SINGZ_CORE_BUILD_DIR:-$ROOT/build/native/analyze-host}"

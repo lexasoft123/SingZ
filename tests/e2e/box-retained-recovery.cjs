@@ -99,6 +99,9 @@ async function run() {
     await page.locator('[data-focus="details-back"]').click()
     await page.locator('.box-navigation button').filter({ hasText: 'Queue' }).click()
     await page.locator('[data-queue-index="0"]').click()
+    // Queue selection deliberately asks for confirmation even with no current
+    // song; confirming opens the selected song paused, as the recovery case needs.
+    await page.locator('[data-switch-confirm]').click()
     await page.waitForSelector('.box-player[data-active-song]', { timeout: 60000 })
     await eventually('opened song is prepared with its output closed before any Play', status, value =>
       value.state === 'prepared' && value.hostState === 'closed' && value.transportState === 'stopped' && value.renderedProjectFrame === '0')

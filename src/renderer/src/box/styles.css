@@ -158,6 +158,10 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .player-playback { display: flex; align-items: center; gap: 14px; }
 .player-playback .pill { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; background: transparent; }
 .player-playback .player-play { width: 52px; height: 52px; border-radius: 50%; background: linear-gradient(180deg, var(--sz-accent-lift), var(--sz-accent-deep)); color: var(--sz-accent-ink); }
+.player-upnext { flex: 1 1 auto; min-width: 0; margin: 0 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; color: var(--sz-text); }
+.player-playback .player-next { display: inline-flex; align-items: center; gap: 8px; width: auto; max-width: 420px; padding: 0 14px; }
+.icon-mirror { display: inline-flex; transform: scaleX(-1); }
+.player-next-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
 .player-tools { display: flex; gap: 8px; }
 .player-tools .pill { padding: 7px 12px; font-size: 15px; }
 .player-meters { display: grid; grid-template-columns: auto auto; align-items: center; gap: 2px 7px; margin-left: 4px; white-space: nowrap; }

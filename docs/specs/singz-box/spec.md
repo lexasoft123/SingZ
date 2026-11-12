@@ -82,9 +82,9 @@ research. Screen IDs are defined in section 5.
 | J09 Start singing | Select a song, then deliberately choose Sing/Play on its preview | S08 → S10 → S11 | Open and start the chosen song with that single preview action; large lyrics; controls hide after idle | Catalog browsing is silent; failed, cancelled or superseded opens do not start playback | A12, A13 |
 | J09a Lyrics unavailable | Understand missing, empty or unsynchronized lyrics | S27 → S08/S10 | Explain lyric state; offer return/retry and an explicit instrumental option if approved | Never invent synchronized text or silently present stale lyrics | A23 |
 | J10 Adjust during singing | Wake remote controls; open Mix; adjust stem or mic | S11 → S12 → S13/S14 → S11 | First key only wakes; mixing retains playback; Back restores Play focus | Accidental pause/seek or wrong mic; expose labels and absolute levels | A13, A14 |
-| J11 Run the evening | Queue, reorder, remove, select next song | S15, S08, S10 | Queue stays stable during preparation and navigation; explicit next-song policy | Avoid missing/duplicate entries or unrequested autoplay | A15 |
+| J11 Run the evening | Queue, reorder, remove, select next song | S15, S08, S10 | Queue stays stable during preparation and navigation; explicit Next action (starts the next queued song) or explicit queue pick (opens paused) | Avoid missing/duplicate entries or unrequested autoplay | A15 |
 | J12 Pair a phone/guest | Scan a remote pairing QR and approve access | S16, P03 | Scoped pairing, expiration, revocation; guest can control allowed functions | Pairing must not grant account tokens or owner-only settings | A16 |
-| J13 Finish and return | Finish a song; replay, choose next or browse | S10/S15/S07 | Stop at end; show controls; no blind queue consumption; retain song settings | Song ended—what next? Focus on an enabled action | A17 |
+| J13 Finish and return | Finish a song; replay, choose next or browse | S10/S15/S07 | Stop at end; show controls; no autoplay; focus "`Next: <song>`" with Replay beside it, or "Choose a song" when the queue is empty; Next starts the next queued song and removes the finished one from the queue; retain song settings | Song ended—what next? Focus on an enabled action | A17 |
 | J14 Use offline and recover | Lose network/device, restart UI or power cycle | S07, S21, S22 | Verified songs remain usable; persist approved state; truthful degraded indicators | Do not lose collection or switch to an unexpected audible route | A18, A19 |
 | J15 Maintain and update | Inspect update; automatic check/stage; accept idle install | S23–S25 | Verify signed image; avoid active session; reboot with health check and rollback | Power loss/bad image; retain data and previous bootable system | A20, A21 |
 | J16 Next session | Turn on and resume browsing | S01 → S07 | Restore preferences, collection and valid sign-in; playback stays stopped | No repeated sign-in for a valid session; stale authorization offers reapproval | A18 |
@@ -137,6 +137,7 @@ flowchart TD
 | NAV-07 | Hide after 5 seconds with no input while actively playing and no dialog. Never hide during a held key, pause, end-of-song or mixer interaction. Idle starts again after interaction/dialog closure. |
 | NAV-08 | Map physical CEC/HID buttons to logical directions, OK, Back and MediaPlayPause. Do not intercept OS-reserved combinations. Reconnect must not replay stale presses. |
 | NAV-09 | Returning from hidden playback, app visibility recovery or natural song end restores Play focus. Focused rows scroll into view without changing selection. |
+| NAV-10 | Left/Right on the player seek bar only seek, also at its ends and when the end is reached; focus leaves it with Up/Down only. A queued row's actions are reached with Right (footer hint `→ Actions`) as well as Down. Back from a Settings sub-page returns to the row it was opened from; the "Setup, remote & display" row opens at the language step. Next/Sing from the player keeps the player on screen while the song opens. |
 
 Verify the idle deadline with input between transport updates, not only aligned
 to them. A coarse playback clock must not determine the five-second deadline.
@@ -196,12 +197,12 @@ A screen is not complete until its entry, exit, focus and failure states are cov
 | S07 Catalog | Loading, flat list, empty, offline, stale, unavailable; metadata unknown | Remembered song, otherwise first row or empty-state CTA | Primary navigation |
 | S08 Song details | Artist/song, metadata, ready/needs preparation/unavailable | Sing if ready; otherwise Prepare; Add to queue | Same catalog row and scroll |
 | S09 Preparation | Download, verify, ready, canceled, retry, no space, corrupt or unsupported | Cancel while busy; Retry on recoverable failure | Stop task safely; preserve existing verified files |
-| S10 Player controls | Paused, playing-visible, ended, error | Play/Pause; seek, Mix, Queue, Library | Leave player deliberately; preserve settings |
+| S10 Player controls | Paused, playing-visible, ended, error | Play/Pause; seek, Mix, Queue, Library; Up next line and Next (at end: Next with Replay beside it) | Leave player deliberately; preserve settings |
 | S11 Singing | Three contextual large lyric lines, progress by words; controls hidden | Wake-only first key | First Back wakes; next Back can leave |
 | S12 Wake transition | Controls visible, wake sequence consumed until release | Play/Pause focused | No action from held wake repeats |
 | S13 Mix main | Master, lead vocal, microphones 1 and 2; mute/solo/absolute level | Main tab or remembered active channel | Play focus; playback continues |
 | S14 Mix stems | Six stems with M/S/level, absent stem explained | Remembered channel; labels never ambiguous | Same as main mix |
-| S15 Queue | Empty, populated, reordered, preparation pending, next choice | First enabled queued song or Browse | Return to source context; don't silently consume songs |
+| S15 Queue | Empty, populated, reordered, preparation pending, next choice | First enabled queued song or Browse | Return to source context; queue pick opens paused without consuming; only the explicit player Next action consumes (the song that just played) |
 | S16 Phone pairing | QR/link+code, pending, paired, expired, revoked | Pair/renew or Unpair | Preserve independent Drive account state |
 | S17 Sound settings | Draft output/mic routes, test, applying, applied, failed, disconnected | Back or first setting; Apply and Cancel | Discard draft on cancel; preserve effective route on failure |
 | S18 Network settings | Actual link status, switching, failed, reconnect | Existing connection or setup action | Preserve offline music; confirm disruptive switch |
@@ -231,7 +232,7 @@ A screen is not complete until its entry, exit, focus and failure states are cov
 | PLAY-02 | On-demand mixer changes the intended stem/mic only and does not pause transport. State survives close/reopen and, after qualification, restart. Stepped dB sliders render values aligned to their step grid; saved gain and its readout stay exact until user input. |
 | PLAY-03 | Queue browsing preserves the current transport. Back returns to the current song's lyrics and Play focus. Reordering/removing entries never changes active playback; replacing the active song is deliberate. |
 | PLAY-04 | Lyric highlighting uses the shaped text’s measured geometry with a continuous amber edge and glyph-shaped bright core/glow. Seconds and 3/2/1 dots sit just above the lyric line they lead into and guide vocal entries through intros and instrumental gaps independently of audio metronome settings; they hide while paused. Painting pauses under dialogs and resumes at the current accepted song time. Very long wrapped single tokens retain readable text when single-run masks cannot represent them. |
-| QUEUE-01 | Proposed baseline: manual next-song selection, no autoplay. Opening does not consume a queued item; remove is explicit. If autoplay is added, specify consent, failure and consumption rules first. |
+| QUEUE-01 | Next is an explicit player action: it starts the next queued song (mid-song only after the switch confirmation; directly once the current song has ended) and removes the song that just played from the queue (when it was queued) once the next one opens. Choosing a song from the queue opens it paused and consumes nothing; remove is explicit. Nothing advances by itself: no autoplay at song end. If autoplay is added, specify consent, failure and consumption rules first. |
 | AUDIO-01 | UI restart/reconnection reads authoritative audio state instead of restarting playback or restoring stale levels. Opt-in persistent Linux Box implements this with an independent native audio host/socket, a service-lifetime project descriptor and read-only reattachment to the same host epoch and generation for a commandable transport on a running host (playing, pre-roll, paused, stopped before first Play, or completed); Refresh is safe while retained, and explicit Stop is the controlled fallback that must confirm release of the reviewed identity. Microphone analysis is host-owned and always on while any input is enabled: it starts with the host from a persisted selection, survives UI close/restart without any command, retries unavailable devices, and stops only when all inputs are turned off. The TV shows Off, Starting…, No input or Unavailable (a real fault) instead of waiting for a Start press. |
 | AUDIO-02 | FLOW 8 USB and HDMI are explicit output choices. Mic 1/Mic 2 route independently. No automatic loud-route fallback after unplug. |
 | AUDIO-03 | Proposed initial mix controls change local DSP levels. Hardware FLOW 8 control is a separate adapter capability; relative commands require fresh qualified readback or explicit takeover. Stale requested values must not raise volume after a physical fader move. |
@@ -282,9 +283,9 @@ prove a service or hardware scenario. Audit case IDs and evidence live separatel
 | A12 Play from ready | Stems and lyrics exist without original | Select catalog song; choose Sing/Play on preview; seek; pause | Preview remains silent until its explicit action; that action opens and starts once, lyrics synchronize, controls agree | PLAY-01, S08/10/11 |
 | A13 Idle/wake | Singing, controls visible | Idle ≥5s, then Enter/Back/direction/media held | Hidden controls cannot act; first sequence wakes only; next press acts | BOX-07, NAV-06/07, S11/12 |
 | A14 Mix/focus | Song playing | Open Mix, alter one lane, Back | Playback continues; correct lane changes; Play focus restored | PLAY-02, NAV-04/05, S13/14 |
-| A15 Queue lifecycle | Ready and Drive-only queued songs | Reorder/remove/open/prepare/cancel | Explicit ordering/removal, no surprise autoplay/consumption | QUEUE-01, S15 |
+| A15 Queue lifecycle | Ready and Drive-only queued songs | Reorder/remove/open/prepare/cancel | Explicit ordering/removal; queue pick opens paused, no consumption; Next starts the next song and removes the one that played; no autoplay | QUEUE-01, S15 |
 | A16 Guest separation | Owner Drive signed in | Pair/revoke phone | No credential leakage; revocation prevents later commands; Drive remains signed in | AUTH-01, S16, P03 |
-| A17 Natural end | Controls hidden near song end | Transport ends | Controls show, Play focused, remote replay works; next choice explicit | PLAY-01, NAV-09, S10/15 |
+| A17 Natural end | Controls hidden near song end | Transport ends | Controls show, Play focused, remote replay works; Next choice explicit (`Next: <song>` / Replay, or Choose a song when empty) | PLAY-01, NAV-09, S10/15 |
 | A18 Restart/offline | Prepared song, effective routes/stems/auth saved | Restart with network absent | Verified song and preferences survive; no autoplay; expiry offers reapproval | STORE-01, S01/07/20/21 |
 | A19 Audio/UI recovery | Native service playing | UI restarts or audio device drops | Reattach truthful state or expose safe recovery; no uncontrolled level restoration; microphone meters stay live across a UI restart with no input, and return unattended after an interface replug | AUDIO-01–03, S22 |
 | A20 Update integrity/idle | Update staged, active song | Check/install requested or image invalid | Invalid image rejected; singing defers reboot; idle install reports progress | UPDATE-01, S23/24 |
@@ -309,7 +310,7 @@ prove a service or hardware scenario. Audit case IDs and evidence live separatel
 | Decision | Proposed default / required resolution |
 | --- | --- |
 | Long collections and viewing distance | Fixed 4K frame is confirmed; qualify its density from the couch and choose paging/search for large collections without credential typing |
-| Queue end behavior | Manual selection, no autoplay; approve any future alternative explicitly |
+| Queue end behavior | Explicit Next action or manual selection; no autoplay; approve any future alternative explicitly |
 | Destructive/system authority | Owner approval for reset, sign-out, network disruption and reboot; define guest phone scope |
 | Sound-test policy | Deliberate bounded test, never automatic; choose level, duration and emergency stop on hardware |
 | HDMI versus PA latency | Qualify each supported route; measure lyric/audio alignment and TV processing delay |
@@ -333,5 +334,5 @@ are design evidence, not authority to synthesize live service outcomes.
 
 A15 must compare the
 active song, transport and mix before/after queue navigation, reordering/removal
-and Back. Selecting another song requires an explicit switch; it opens paused.
-Queue consumption and autoplay remain separate proposed policies.
+and Back. Selecting another song from the queue requires an explicit switch; it opens paused and consumes nothing.
+The player Next action is the exception: it starts the next queued song (after the switch confirmation mid-song, directly once the song has ended) and removes the song that just played from the queue once the next one opens. Autoplay remains a separate proposed policy; nothing advances without Next.

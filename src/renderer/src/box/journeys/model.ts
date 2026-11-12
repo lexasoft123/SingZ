@@ -28,6 +28,10 @@ export type JourneyAction =
   | { type: 'confirm-start' | 'confirm-finish' | 'confirm-cancel' }
   | { type: 'platform'; snapshot: BoxPlatformSnapshot }
 export const setupStages: readonly SetupStage[] = ['boot', 'welcome', 'remote', 'network', 'audio', 'account', 'done']
+/** The Settings row "Setup, remote & display" promises language first (J03: S02 → S03), so a
+ * finished owner re-enters at the language step; a first run keeps its own position. */
+export const settingsSetupEntry = (setupComplete: boolean | undefined): SetupStage | undefined =>
+  setupComplete ? 'welcome' : undefined
 export const initialJourney = (page: JourneyPage = 'home'): JourneyState => ({
   page, setupStage: 'boot', setupEntry: null, networkReturn: page === 'setup' ? 'setup' : 'home',
   confirmation: null, committed: null, focusRevision: 0
