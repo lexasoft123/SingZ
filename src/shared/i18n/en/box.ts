@@ -64,7 +64,7 @@ export const box = {
   'box.details.playbackKey': 'Playback key',
   'box.details.appliedOffset': 'Saved transposition: {offset} semitones. Original analysis stays unchanged.',
   'box.details.originalAnalysis': 'Original analysis is shown separately from playback changes.',
-  'box.details.noPreparation': 'Prepare songs, repair them and write lyrics in SingZ on your computer. Box plays the ready result.',
+  'box.details.noPreparation': 'Prepare songs, repair them and write lyrics in SingZ on your computer. Box plays those songs.',
   'box.details.sing': 'Sing',
   'box.details.opening': 'Opening…',
   'box.details.opensPaused': "Sing starts playback right away.",

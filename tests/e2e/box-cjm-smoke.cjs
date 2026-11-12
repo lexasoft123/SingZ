@@ -420,7 +420,7 @@ async function cloudJourney(localProject, cloudProject) {
     await tvEnter(privacy.getByRole('button', { name: 'Sign out of Google Drive', exact: true }))
     check(await page.locator('[data-journey-confirm-cancel]').evaluate(node => node === document.activeElement), 'Drive sign-out defaults to Cancel')
     await tvEnter('[data-focus="journey-confirm-action"]')
-    await privacy.getByRole('button', { name: 'Connect collection', exact: true }).waitFor()
+    await privacy.getByRole('button', { name: 'Connect Google Drive', exact: true }).waitFor()
     check(!(await driveStatus()).signedIn, 'Privacy sign-out completes through the shared account owner')
     check(fs.existsSync(path.join(cloudDir, 'lyrics.json')), 'sign-out preserves the verified offline cache')
     await capture('privacy-signed-out')

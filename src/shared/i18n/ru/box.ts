@@ -68,7 +68,7 @@ export const box: Record<keyof typeof english | 'box.catalog.songs_few' | 'box.c
   'box.details.playbackKey': 'Тональность воспроизведения',
   'box.details.appliedOffset': 'Сохранённая транспозиция: {offset} полутонов. Исходный анализ не изменён.',
   'box.details.originalAnalysis': 'Исходный анализ показан отдельно от изменений воспроизведения.',
-  'box.details.noPreparation': 'Подготавливайте и восстанавливайте песни и редактируйте текст в SingZ на компьютере. Box воспроизводит готовый результат.',
+  'box.details.noPreparation': 'Подготавливайте и восстанавливайте песни, редактируйте тексты в SingZ на компьютере. Box воспроизводит эти песни.',
   'box.details.sing': 'Петь',
   'box.details.opening': 'Открываем…',
   'box.details.opensPaused': "«Петь» сразу запускает воспроизведение.",

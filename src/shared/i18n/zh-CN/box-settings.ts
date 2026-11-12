@@ -67,6 +67,7 @@ export const boxSettings: Translation<typeof english> = {
   'box.settings.routing.help': "浏览时音乐和已启用的路由会继续运行。除非你明确配置软件路由，麦克风监听始终由调音台处理。",
   'box.settings.routing.refresh': "刷新",
   'box.settings.routing.statusUnavailable': "路由状态不可用。请刷新以读取音频服务。",
+  'box.settings.routing.revisions': "已保存版本 {saved} · 当前生效版本 {active}",
   'box.settings.routing.connecting': "正在连接音频服务…",
   'box.settings.routing.musicChange': "音乐 → 扬声器 · 更改输出",
   'box.settings.routing.musicNew': "音乐 → 扬声器 · 新建路由",
