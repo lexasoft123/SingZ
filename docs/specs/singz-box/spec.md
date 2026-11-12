@@ -217,7 +217,7 @@ A screen is not complete until its entry, exit, focus and failure states are cov
 | S07 Catalog | Loading, flat list, empty, offline, stale, unavailable; metadata unknown | Remembered song, otherwise first row or empty-state CTA | Primary navigation |
 | S08 Song details | Artist/song, metadata, ready/needs preparation/unavailable | Sing if ready; otherwise Prepare; Add to queue | Same catalog row and scroll |
 | S09 Preparation | Download, verify, ready, canceled, retry, no space, corrupt or unsupported | Cancel while busy; Retry on recoverable failure | Stop task safely; preserve existing verified files |
-| S10 Player controls | Paused, playing-visible, ended, error | Play/Pause; seek, Mix, Queue, Library; Up next line and Next (at end: Next with Replay beside it) | Leave player deliberately; preserve settings |
+| S10 Player controls | Paused, playing-visible, ended, error | Play/Pause; "From the start" (⏮ left of Back 5 s: seeks to 0:00 keeping the play state, same as Replay at the end, disabled at 0:00 while paused); seek, Mix, Queue, Library; Up next line and Next (always shown right of Forward 5 s; disabled with "No next song in the queue" when none; at end: Next with Replay beside it) | Leave player deliberately; preserve settings |
 | S11 Singing | Three contextual large lyric lines, progress by words; controls hidden | Wake-only first key | First Back wakes; next Back can leave |
 | S12 Wake transition | Controls visible, wake sequence consumed until release | Play/Pause focused | No action from held wake repeats |
 | S13 Mix main | Master, lead vocal, microphones 1 and 2; mute/solo/absolute level | Main tab or remembered active channel | Play focus; playback continues |

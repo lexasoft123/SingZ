@@ -98,6 +98,7 @@ export function Player({
             />
           </div>
           <div className="player-playback" data-remote-up="[data-control='seek']">
+            <Button aria-label={t('box.player.fromStart')} title={t('box.player.fromStart')} data-control="from-start" disabled={!canPlay || !snapshot.playing && status !== 'ended' && snapshot.position <= 0.05} onClick={() => { if (status === 'ended') onToggle(); else onSeek(0) }}><span className="icon-mirror" aria-hidden="true"><Icon name="skip" size={23} /></span></Button>
             <Button aria-label={t('box.player.back5')} data-control="previous" disabled={!canPlay} onClick={() => onSeekBy(-5)}><Icon name="replay" size={23} /></Button>
             <Button className="player-play" variant="primary" aria-label={snapshot.playing ? t('box.player.pause') : status === 'ended' ? t('box.player.replay') : t('box.player.play')} data-control="play" disabled={!canPlay} onClick={onToggle}>
               <Icon name={snapshot.playing ? 'pause' : 'play'} size={27} />
@@ -106,6 +107,7 @@ export function Player({
             {slot === 'next' && next && <Button className="player-next" aria-label={status === 'ended' ? t('box.player.nextLabel', { title: songLine(next.title, next.artist) }) : t('box.player.nextSong')} data-control="next-song" onClick={onNext}>
               <Icon name="skip" size={23} />{status === 'ended' && <span className="player-next-label">{t('box.player.nextLabel', { title: next.title })}</span>}
             </Button>}
+            {slot === 'hidden' && <Button className="player-next" aria-label={t('box.player.noNext')} title={t('box.player.noNext')} data-control="next-song" disabled><Icon name="skip" size={23} /></Button>}
             {slot === 'choose' && <Button className="player-next" data-control="next-song" onClick={onLibrary}><span className="player-next-label">{t('box.player.chooseSong')}</span></Button>}
           </div>
           <div className="player-tools" data-remote-up="[data-control='seek']"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button><Button data-control="queue" onClick={onQueue}>{t('box.navigation.queue')}</Button></div>

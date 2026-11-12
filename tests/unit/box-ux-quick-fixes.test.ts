@@ -117,6 +117,22 @@ describe('item 12: player seek is not in the Left/Right chain', () => {
   })
 })
 
+describe('player bar: From the start sits first in the Left/Right order', () => {
+  it('Left from Back 5 s reaches From the start, and Right walks back through Back 5 s to Play', () => {
+    const { scope, back5, play } = playerRow()
+    const fromStart = el('button', 'from-start', 780, 920)
+    fromStart.dataset.control = 'from-start'
+    scope.append(fromStart)
+    back5.focus()
+    moveSpatialFocus(as(scope), 'ArrowLeft')
+    expect(activeElement).toBe(fromStart)
+    moveSpatialFocus(as(scope), 'ArrowRight')
+    expect(activeElement).toBe(back5)
+    moveSpatialFocus(as(scope), 'ArrowRight')
+    expect(activeElement).toBe(play)
+  })
+})
+
 describe('step 6: Song details key controls stay on the vertical remote path', () => {
   it('moves Sing/Add to queue Up to a key button, Down to Sing, and Up again to the header', () => {
     const scope = el('main', 'details', 0, 0, 1600, 900)
