@@ -29,7 +29,7 @@
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
     "@fontsource-variable/martian-mono": "^5.3.0",
-    "@singz/ui": "https://github.com/lexasoft123/singz-ui/archive/473a9560130781d8a30227c50517b567425d608c.tar.gz",
+    "@singz/ui": "https://github.com/lexasoft123/singz-ui/archive/e068fa586f2746fc88877dd585d27a825b868f65.tar.gz",
     "@types/node": "^26.1.1",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.17",
