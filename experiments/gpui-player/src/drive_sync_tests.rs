@@ -866,3 +866,248 @@ fn review_remote_change_after_listing_waits_one_sync_then_repairs() {
     assert_eq!(result.unwrap().uploaded, 1);
     assert_eq!(f.state()["files"], before["files"]);
 }
+
+/// A second library whose projects share no names with the remote's.
+fn fresh_library(f: &Fixture, name: &str) -> PathBuf {
+    let staging = f.base.join(format!("{name}-staging"));
+    build_library(&staging, 2);
+    let root = f.base.join(name);
+    fs::create_dir_all(&root).unwrap();
+    for index in 0..2 {
+        fs::rename(staging.join(format!("Project-{index:03}")), root.join(format!("Fresh-{index:03}"))).unwrap();
+    }
+    root
+}
+fn sync_with(f: &Fixture, root: &Path, preferences: &str) -> crate::drive_sync::Report {
+    crate::drive_sync::run(&f.remote, root, &f.base.join(preferences).join("gdrive/spool"),
+        &|| false, &|_, _| {}, &|_| {}).unwrap()
+}
+fn assert_kept_and_cataloged(before: &Value, after: &Value, kept: &[&str], fresh: &[&str]) {
+    for name in kept {
+        assert_eq!(review_roster(after, name), review_roster(before, name),
+            "{name} was trashed or changed though this library never published it");
+    }
+    let names = kept.iter().chain(fresh).copied().collect::<Vec<_>>();
+    review_assert_catalog(after, &names);
+}
+#[test]
+fn fresh_profile_small_library_never_trashes_unknown_remote_projects() {
+    let f = Fixture::new(3);
+    f.run_and_requests();
+    let before = f.state();
+    // A new configuration directory: no lineage, binding, cache or journals.
+    let root = fresh_library(&f, "fresh-library");
+    // A same-name local directory that is not a project: it is neither an
+    // orphan nor a published row, and the remote row must survive it.
+    fs::create_dir(root.join("Project-000")).unwrap();
+    let report = sync_with(&f, &root, "fresh-preferences");
+    assert_eq!((report.projects, report.trashed), (2, 0));
+    let kept = ["Project-000", "Project-001", "Project-002"];
+    assert_kept_and_cataloged(&before, &f.state(), &kept, &["Fresh-000", "Fresh-001"]);
+    // This library did publish Fresh-001, so deleting it locally still trashes it.
+    fs::remove_dir_all(root.join("Fresh-001")).unwrap();
+    let fresh_folder = review_folder(&f.state(), "Fresh-001")["id"].clone();
+    let report = sync_with(&f, &root, "fresh-preferences");
+    assert_eq!((report.projects, report.trashed), (1, 1));
+    let after = f.state();
+    assert!(after["files"].as_array().unwrap().iter().any(|r| r["id"] == fresh_folder && r["trashed"] == true));
+    assert_kept_and_cataloged(&before, &after, &kept, &["Fresh-000"]);
+}
+#[test]
+fn switched_library_never_trashes_projects_the_old_library_published() {
+    let f = Fixture::new(3);
+    f.run_and_requests();
+    let before = f.state();
+    // Same profile, same account; the library root now points elsewhere.
+    let root = fresh_library(&f, "switched-library");
+    let report = sync_with(&f, &root, "preferences");
+    assert_eq!((report.projects, report.trashed), (2, 0));
+    assert_kept_and_cataloged(&before, &f.state(),
+        &["Project-000", "Project-001", "Project-002"], &["Fresh-000", "Fresh-001"]);
+}
+
+fn catalog_rows(state: &Value) -> BTreeMap<String, Value> {
+    review_catalog(state)["projects"].as_array().unwrap().iter()
+        .map(|row| (row["dir"].as_str().unwrap().to_owned(), row.clone())).collect()
+}
+/// A synced library deletes Project-002 locally; `alter` then removes the
+/// evidence that this binding published that exact folder. Nothing is trashed
+/// and every folder ID, roster and catalog row stays as it was.
+fn unproven_delete_keeps_everything(alter: impl FnOnce(&Fixture) -> PathBuf) {
+    let f = Fixture::new(3);
+    f.run_and_requests();
+    fs::remove_dir_all(f.root.join("Project-002")).unwrap();
+    let root = alter(&f);
+    let before = f.state();
+    let result = crate::drive_sync::run(&f.remote, &root, &f.base.join("preferences/gdrive/spool"),
+        &|| false, &|_, _| {}, &|_| {});
+    let after = f.state();
+    // Restore access so the fixture can clean up before any assertion fails.
+    let publications = f.base.join("preferences/gdrive/retirements/publications");
+    #[cfg(unix)] if publications.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&publications, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    if let Ok(report) = &result { assert_eq!(report.trashed, 0, "{:?}", report.warnings); }
+    let names = ["Project-000", "Project-001", "Project-002"];
+    for name in names {
+        assert_eq!(review_roster(&after, name), review_roster(&before, name), "{name} roster changed");
+    }
+    // Every carried row must still describe the folder holding its name. A
+    // replaced Project-002 folder invalidates its old row, which is dropped.
+    let replaced = after["files"].as_array().unwrap().iter().any(|r| r["id"] == "replacement-002");
+    let mut expected = catalog_rows(&before);
+    if replaced { expected.remove("Project-002"); }
+    assert_eq!(catalog_rows(&after), expected, "catalog rows changed");
+    let cataloged = expected.keys().map(String::as_str).collect::<Vec<_>>();
+    review_assert_catalog(&after, &cataloged);
+    assert_phone_reads_current_folders(&after);
+}
+/// Mirrors mobile/src/gdrive.ts manifestEntries: the phone trusts catalog.json
+/// only when its rows name exactly the root's project folders, and then reads
+/// each row's project.json by ID. Either it walks, or every row it would
+/// trust names a live document inside the folder that now holds the name.
+fn assert_phone_reads_current_folders(state: &Value) {
+    let singz = review_folder(state, "SingZ")["id"].clone();
+    let folders = state["files"].as_array().unwrap().iter()
+        .filter(|f| f["parents"] == json!([singz]) && f["mimeType"] == crate::drive_remote::FOLDER
+            && f["trashed"] == false)
+        .map(|f| (f["name"].as_str().unwrap().to_owned(), f["id"].clone())).collect::<BTreeMap<_, _>>();
+    let rows = catalog_rows(state);
+    if rows.len() != folders.len() || rows.keys().any(|name| !folders.contains_key(name)) { return; }
+    for (name, row) in rows {
+        let document = row["files"].as_array().unwrap().iter().find(|f| f["name"] == "project.json")
+            .unwrap_or_else(|| panic!("{name}: trusted row has no project.json"));
+        let live = state["files"].as_array().unwrap().iter().find(|f| f["id"] == document["id"]).unwrap();
+        assert_eq!((&live["trashed"], &live["parents"], &live["md5Checksum"]),
+            (&json!(false), &json!([folders[&name]]), &document["md5Checksum"]),
+            "{name}: the phone would read a stale project.json");
+    }
+}
+#[test]
+fn missing_publication_history_keeps_everything() {
+    unproven_delete_keeps_everything(|f| {
+        fs::remove_dir_all(f.base.join("preferences/gdrive/retirements/publications")).unwrap();
+        f.root.clone()
+    });
+}
+#[test]
+fn corrupt_publication_history_keeps_everything() {
+    unproven_delete_keeps_everything(|f| {
+        let directory = f.base.join("preferences/gdrive/retirements/publications");
+        let record = fs::read_dir(&directory).unwrap().next().unwrap().unwrap().path();
+        fs::write(record, b"{not a lineage").unwrap();
+        f.root.clone()
+    });
+}
+#[cfg(unix)]
+#[test]
+fn unreadable_publication_history_keeps_everything() {
+    unproven_delete_keeps_everything(|f| {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(f.base.join("preferences/gdrive/retirements/publications"),
+            fs::Permissions::from_mode(0o000)).unwrap();
+        f.root.clone()
+    });
+}
+#[test]
+fn account_switch_keeps_everything_the_old_account_published() {
+    unproven_delete_keeps_everything(|f| {
+        f.control(json!({"permissionId": "fixture-other-account"}));
+        f.root.clone()
+    });
+}
+#[test]
+fn replaced_library_identity_keeps_everything_the_old_root_published() {
+    unproven_delete_keeps_everything(|f| {
+        // Restored from a backup: same path, new directory identities.
+        let aside = f.base.join("library-aside");
+        fs::rename(&f.root, &aside).unwrap();
+        fs::create_dir(&f.root).unwrap();
+        for entry in fs::read_dir(&aside).unwrap() {
+            let entry = entry.unwrap();
+            copy_tree(&entry.path(), &f.root.join(entry.file_name()));
+        }
+        fs::remove_dir_all(aside).unwrap();
+        f.root.clone()
+    });
+}
+fn copy_tree(from: &Path, to: &Path) {
+    if from.is_dir() {
+        fs::create_dir(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            copy_tree(&entry.path(), &to.join(entry.file_name()));
+        }
+    } else {
+        fs::copy(from, to).unwrap();
+    }
+}
+#[test]
+fn same_name_replacement_folder_is_not_the_published_folder() {
+    unproven_delete_keeps_everything(|f| {
+        // Another writer replaced Project-002 with a new folder of that name.
+        let state = f.state();
+        let mut old = review_folder(&state, "Project-002").clone();
+        let mut replacement = old.clone();
+        old["trashed"] = json!(true);
+        replacement["id"] = json!("replacement-002");
+        f.control(json!({"files":[old, replacement]}));
+        f.root.clone()
+    });
+}
+#[test]
+fn replacement_folder_with_new_document_drops_the_stale_row() {
+    unproven_delete_keeps_everything(|f| {
+        // Another writer replaced Project-002 with a new folder and document.
+        use base64::Engine;
+        let state = f.state();
+        let mut old = review_folder(&state, "Project-002").clone();
+        let mut replacement = old.clone();
+        old["trashed"] = json!(true);
+        replacement["id"] = json!("replacement-002");
+        let body = br#"{"version":2,"name":"Project-002","settings":{"custom":[]},"replaced":true}"#;
+        let document = json!({"id":"replacement-002-doc","name":"project.json","mimeType":"application/json",
+            "parents":["replacement-002"],
+            "contentBase64": base64::engine::general_purpose::STANDARD.encode(body)});
+        f.control(json!({"files":[old, replacement, document]}));
+        f.root.clone()
+    });
+}
+#[test]
+fn replacement_during_project_pass_drops_the_stale_row() {
+    use base64::Engine;
+    let f = Fixture::new(3);
+    f.run_and_requests();
+    fs::remove_dir_all(f.root.join("Project-002")).unwrap();
+    // No proof this binding published Project-002: its folder and row are carried.
+    fs::remove_dir_all(f.base.join("preferences/gdrive/retirements/publications")).unwrap();
+    let before = f.state();
+    let old = review_folder(&before, "Project-002").clone();
+    let injected = std::cell::Cell::new(false);
+    // After the root listing and before cleanup, another writer moves the old
+    // folder out of SingZ and publishes a same-name replacement.
+    let (result, _) = review_run(&f, &|message, _| {
+        if message == "Syncing Project-001…" && !injected.replace(true) {
+            let mut moved = old.clone();
+            moved["parents"] = json!(["root"]);
+            let mut replacement = old.clone();
+            replacement["id"] = json!("replacement-002");
+            let body = br#"{"version":2,"name":"Project-002","settings":{"custom":[]},"replaced":true}"#;
+            let document = json!({"id":"replacement-002-doc","name":"project.json","mimeType":"application/json",
+                "parents":["replacement-002"],
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode(body)});
+            f.control(json!({"files":[moved, replacement, document]}));
+        }
+    });
+    assert!(injected.get());
+    assert_eq!(result.unwrap().trashed, 0);
+    let after = f.state();
+    let mut expected = catalog_rows(&before);
+    expected.remove("Project-002");
+    assert_eq!(catalog_rows(&after), expected, "the moved folder's row survived its replacement");
+    review_assert_catalog(&after, &["Project-000", "Project-001"]);
+    assert_phone_reads_current_folders(&after);
+    let moved = after["files"].as_array().unwrap().iter().find(|r| r["id"] == old["id"]).unwrap();
+    assert_eq!((&moved["trashed"], &moved["parents"]), (&json!(false), &json!(["root"])));
+}

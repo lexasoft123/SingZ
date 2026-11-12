@@ -99,8 +99,69 @@ fn append_unknown(ordered: &mut Value, source: &Value) -> Result<()> {
 }
 // Preserve unknown fields on rows we publish, and retirement-protected rows,
 // while retaining the writer's existing pruning of unchanged nonlocal rows.
+/// Listed top-level children of each retained remote folder whose existing
+/// row this run would carry; None when the name is ambiguous on Drive.
+type CarriedListings = BTreeMap<String, Option<Vec<RemoteEntry>>>;
+/// A carried row is kept only while it describes the folder that now holds
+/// its name: every member is a live direct child with the same identity,
+/// size and checksum, it names project.json, and it omits none of the
+/// fingerprint files the phone compares. Otherwise the phone would read an
+/// obsolete document ID or reuse a stale cache entry; without the row it
+/// walks that folder instead.
+fn row_matches_folder(row: &Value, listed: &[RemoteEntry]) -> bool {
+    let mut by_name = BTreeMap::new();
+    for entry in listed.iter().filter(|entry| entry.mime_type.as_deref() != Some(FOLDER)) {
+        if by_name.insert(entry.name.as_str(), entry).is_some() { return false; }
+    }
+    let Some(files) = row["files"].as_array() else { return false };
+    let mut named = BTreeSet::new();
+    for file in files {
+        let (Some(name), Some(id)) = (file["name"].as_str(), file["id"].as_str()) else { return false };
+        let size = file["size"].as_str().map(str::to_owned)
+            .or_else(|| file["size"].as_u64().map(|n| n.to_string()));
+        let Some(entry) = by_name.get(name) else { return false };
+        if !named.insert(name) || entry.id != id || entry.size != size
+            || file.get("md5Checksum").and_then(Value::as_str) != entry.md5_checksum.as_deref() {
+            return false;
+        }
+    }
+    named.contains("project.json") && ["project.json", "lyrics.json", "graph.json"].iter()
+        .all(|name| !by_name.contains_key(name) || named.contains(name))
+}
+/// Observe, at cleanup time, the folders whose existing rows `document` would
+/// have this run carry: retained folders with a row and no row written by this
+/// run. A row is validated only against the folder this run retained under its
+/// name, and only while that exact folder still holds the name in SingZ. Moved
+/// out, renamed, replaced or duplicated folders yield None and drop the row.
+/// Nothing is listed when there is no candidate. Otherwise one fresh SingZ
+/// listing plus `children_of`, which batches 50 parent IDs per query at up to
+/// 1000 files per page: about 1 + ceil(candidates / 50) requests.
+fn observe_carried(remote: &Remote, singz: &str, retained: &BTreeMap<String, Vec<String>>,
+    document: &Value, catalog: &[Value], cancel: &impl Fn() -> bool) -> Result<CarriedListings> {
+    let mut candidates = Vec::new();
+    for (name, ids) in retained {
+        if catalog.iter().any(|row| row["dir"] == name.as_str())
+            || crate::drive_publication::catalog_project_row(document, name)?.is_none() { continue; }
+        candidates.push((name, ids));
+    }
+    if candidates.is_empty() { return Ok(BTreeMap::new()); }
+    let root = remote.children(singz, cancel)?;
+    let mut current = BTreeMap::<&str, Vec<&str>>::new();
+    for entry in root.iter().filter(|entry| entry.mime_type.as_deref() == Some(FOLDER)) {
+        current.entry(entry.name.as_str()).or_default().push(entry.id.as_str());
+    }
+    let stable = |name: &str, ids: &[String]| match (ids, current.get(name).map(Vec::as_slice)) {
+        ([id], Some([now])) if id == now => Some(id.clone()),
+        _ => None,
+    };
+    let ids = candidates.iter().filter_map(|(name, ids)| stable(name, ids)).collect::<Vec<_>>();
+    let listed = remote.children_of(&ids, cancel)?;
+    Ok(candidates.into_iter().map(|(name, ids)| (name.clone(),
+        stable(name, ids).map(|id| listed.get(&id).cloned().unwrap_or_default()))).collect())
+}
 fn cleanup_manifest(document: &Value, mut catalog: Vec<Value>,
-    protected_names: &BTreeSet<String>, owned: &BTreeSet<String>) -> Result<Vec<u8>> {
+    protected_names: &BTreeSet<String>, owned: &BTreeSet<String>,
+    carried: &CarriedListings) -> Result<Vec<u8>> {
     for row in &mut catalog {
         if !row["dir"].as_str().is_some_and(|name| owned.contains(name)) { continue; }
         if let Some(mut current) = crate::drive_publication::catalog_project_row(
@@ -114,6 +175,14 @@ fn cleanup_manifest(document: &Value, mut catalog: Vec<Value>,
     for name in protected_names {
         if !catalog.iter().any(|row| row["dir"].as_str() == Some(name.as_str())) {
             if let Some(row) = crate::drive_publication::catalog_project_row(document, name)? {
+                if let Some(listed) = carried.get(name) {
+                    if !listed.as_deref().is_some_and(|listed| row_matches_folder(&row, listed)) {
+                        crate::diagnostics::event("sync", format!(
+                            "Dropped the catalog row for {name}: it no longer matches that Drive folder"),
+                            crate::diagnostics::Level::Info);
+                        continue;
+                    }
+                }
                 catalog.push(row);
             }
         }
@@ -449,12 +518,39 @@ fn run_inner(
         "Library changed during sync; retry required"
     );
     local_operations.assert_unchanged(&operation_guard)?;
+    // A remote folder missing locally is deletion evidence only when this
+    // account+library binding positively published that exact folder identity.
+    // A fresh profile or a switched library root has no such lineage, so the
+    // other desktop's projects stay on Drive and keep their catalog rows.
+    let published_here = crate::drive_retirement::publications(&retirement_root, &binding)?
+        .into_iter().map(|lineage| lineage.folder.entry.id).collect::<BTreeSet<_>>();
+    let (orphans, unproven): (Vec<_>, Vec<_>) = drive_plan::orphan_folders(&remote_top, &protected, FOLDER)?
+        .into_iter().partition(|orphan| published_here.contains(&orphan.id));
+    if !unproven.is_empty() {
+        crate::diagnostics::event("sync", format!(
+            "Kept {} Drive project folder(s) this library never published: no local deletion record",
+            unproven.len()), crate::diagnostics::Level::Info);
+    }
+    // Catalog pruning follows the same authority as folder deletion. Every
+    // folder this run leaves on Drive keeps its existing row unless this run
+    // wrote a replacement row: unproven orphans, but also same-name local
+    // directories that are not projects and deferred captures. Only rows for
+    // proven orphans (trashed below) or for no remote folder at all are pruned.
+    let trashed_names = orphans.iter().map(|orphan| orphan.name.as_str()).collect::<BTreeSet<_>>();
+    let retained = remote_top.iter()
+        .filter(|entry| entry.mime_type.as_deref() == Some(FOLDER) && !trashed_names.contains(entry.name.as_str()))
+        .collect::<Vec<_>>();
+    retirement.protected_names.extend(retained.iter().map(|entry| entry.name.clone()));
     let owned_catalog = catalog.iter().filter_map(|row| row["dir"].as_str().map(str::to_owned))
         .collect::<BTreeSet<_>>();
     for row in &retirement.protected_rows {
         if !catalog.iter().any(|current| current["dir"] == row["dir"]) {
             catalog.push(row.clone());
         }
+    }
+    let mut retained_ids = BTreeMap::<String, Vec<String>>::new();
+    for entry in &retained {
+        retained_ids.entry(entry.name.clone()).or_default().push(entry.id.clone());
     }
     // Ordinary projects have already committed their own rows. Refresh the
     // catalog before library-wide pruning and preserve unknown document/row
@@ -466,8 +562,9 @@ fn run_inner(
     } else {
         crate::drive_publication::read_catalog(remote, &singz, &spool.0, cancel)?
     };
+    let carried = observe_carried(remote, &singz, &retained_ids, &current_catalog.document, &catalog, cancel)?;
     let mut manifest = cleanup_manifest(&current_catalog.document, catalog.clone(),
-        &retirement.protected_names, &owned_catalog)?;
+        &retirement.protected_names, &owned_catalog, &carried)?;
     let mut checksum = format!("{:x}", Md5::digest(&manifest));
     // Catalog reads can yield to new local operations too. Recheck the full
     // namespace and operation epoch immediately before destructive cleanup.
@@ -475,7 +572,7 @@ fn run_inner(
         && drive_snapshot::directory_names(&root, cancel)? == local_names,
         "Library changed before Drive cleanup; retry required");
     local_operations.assert_unchanged(&operation_guard)?;
-    for orphan in drive_plan::orphan_folders(&remote_top, &protected, FOLDER)? {
+    for orphan in orphans {
         progress(format!("Removing {}…", orphan.name), 0.99);
         remote.trash(&orphan.id, cancel)?;
         report.trashed += 1;
@@ -500,7 +597,9 @@ fn run_inner(
                 catalog.push(row.clone());
             }
         }
-        manifest = cleanup_manifest(&fresh.document, catalog, &retirement.protected_names, &owned_catalog)?;
+        // The refreshed document is validated against refreshed folder facts.
+        let carried = observe_carried(remote, &singz, &retained_ids, &fresh.document, &catalog, cancel)?;
+        manifest = cleanup_manifest(&fresh.document, catalog, &retirement.protected_names, &owned_catalog, &carried)?;
         checksum = format!("{:x}", Md5::digest(&manifest));
         current_catalog = fresh;
         // The fresh read can yield to a local rename/delete as well.
@@ -572,7 +671,7 @@ mod tests {
         let foreign:Value=serde_json::from_str(r#"{"future":1.0,"dir":"Foreign","opaque":123456789012345678901234567890}"#).unwrap();
         let own=json!({"dir":"Song","files":[{"id":"p","name":"project.json","size":"7","md5Checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]});
         let document=json!({"format":2,"capabilities":{"adopt":1},"future":"keep","projects":[foreign.clone(),own.clone()]});
-        let bytes=cleanup_manifest(&document,vec![own.clone()],&BTreeSet::from(["Foreign".into()]),&BTreeSet::from(["Song".into()])).unwrap();
+        let bytes=cleanup_manifest(&document,vec![own.clone()],&BTreeSet::from(["Foreign".into()]),&BTreeSet::from(["Song".into()]),&BTreeMap::new()).unwrap();
         let text=String::from_utf8(bytes.clone()).unwrap();
         assert!(text.contains(&serde_json::to_string(&foreign).unwrap()));
         assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(),document);
