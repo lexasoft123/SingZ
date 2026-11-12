@@ -219,53 +219,9 @@ export const player = {
   'player.pitch.micMatch': 'Match my singing',
 
   // ── DSP graph visualization (native playback diagnostics panel) ──
-  'player.dspGraph.runtimeGraph': 'Runtime graph',
-  'player.dspGraph.songAndReference': 'Native song and reference graph',
-  'player.dspGraph.monitorChain': 'Native monitor chain',
-  'player.dspGraph.structuredUnavailable': 'Structured graph unavailable',
-  'player.dspGraph.bufferPending': 'Buffer pending',
-  'player.dspGraph.chooseInput': 'Choose an input',
-  'player.dspGraph.chooseOutput': 'Choose an output',
-  'player.dspGraph.deviceKind': 'Device',
-  'player.dspGraph.analyzerKind': 'Analyzer',
-  'player.dspGraph.processorKind': 'Processor',
-  'player.dspGraph.routerKind': 'Router',
-  'player.dspGraph.input': 'Input',
-  'player.dspGraph.output': 'Output',
-  'player.dspGraph.preMeter': 'Pre meter',
-  'player.dspGraph.preFace': 'Pre',
-  'player.dspGraph.postMeter': 'Post meter',
-  'player.dspGraph.postFace': 'Post',
-  'player.dspGraph.gain': 'Gain',
-  'player.dspGraph.channelMap': 'Channel map',
-  'player.dspGraph.mapFace': 'Map',
-  'player.dspGraph.limiter': 'Limiter',
-  'player.dspGraph.limitFace': 'Limit',
-  'player.dspGraph.beforeProcessing': 'Before processing',
-  'player.dspGraph.afterLimiter': 'After limiter',
-  'player.dspGraph.preLevelLabel': 'DSP graph pre-processing level',
-  'player.dspGraph.postLevelLabel': 'DSP graph post-limiter level',
-  'player.dspGraph.modulesAriaLabel': 'DSP graph modules',
-  'player.dspGraph.activeModulesAriaLabel': 'Active song DSP graph modules and connections',
-  'player.dspGraph.activeConnectionsAriaLabel': 'Active song DSP graph connections',
-  'player.dspGraph.unavailableExplain':
-    'Graph details are unavailable because native playback did not provide a valid bounded composition snapshot.',
-  'player.dspGraph.floatNativePath': 'Float32 native path',
-  'player.dspGraph.stateRunning': 'Running',
-  'player.dspGraph.stateChangingRoute': 'Changing route',
-  'player.dspGraph.stateFault': 'Stopped with an error',
-  'player.dspGraph.stateReady': 'Ready',
-  'player.dspGraph.stateBlocked': 'Route blocked',
 
   // ── model.ts: fallback label for an added track with no name left after cleanup ──
   'player.track.untitled': 'Track',
 
   // ── DSP graph card: format line and the transport badge (Settings › Audio) ──
-  'player.dspGraph.framesMaximum': '{n} frames maximum',
-  'player.dspGraph.nodesLinks': '{nodes} nodes · {links} links',
-  'player.dspGraph.transport.stopped': 'stopped',
-  'player.dspGraph.transport.pre-roll': 'pre-roll',
-  'player.dspGraph.transport.playing': 'playing',
-  'player.dspGraph.transport.paused': 'paused',
-  'player.dspGraph.transport.completed': 'completed'
 }

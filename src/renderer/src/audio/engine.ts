@@ -109,7 +109,6 @@ export class MultitrackEngine {
   private outputRouteVersion = 0
   private outputRouteApplyPending: Promise<void> | null = null
   private nativeMonitorLease = false
-  private headphoneMonitorLease = false
   private nativePlayback: DesktopNativePlaybackClient | null = null
   /** The prepare-ahead debounce: the loader and the settings that follow a
    * load (grid, metronome, transpose, tempo, training, region, faders) each
@@ -411,7 +410,7 @@ export class MultitrackEngine {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
-        !this.aheadAllowed || this.betweenSongs || this.headphoneMonitorLease) return
+        !this.aheadAllowed || this.betweenSongs) return
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null
       const pending = this.prepareNativeAhead().catch((error) => {
@@ -426,14 +425,14 @@ export class MultitrackEngine {
 
   private async prepareNativeAhead(): Promise<void> {
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
-        this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs || this.headphoneMonitorLease) return
+        this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs) return
     if (!desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback)) return
     const epoch = this._songEpoch
     const ahead = this.aheadEpoch
     const stale = (): boolean =>
       epoch !== this._songEpoch || ahead !== this.aheadEpoch || this._playing ||
       this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.teardownStarted ||
-      this.betweenSongs || this.headphoneMonitorLease
+      this.betweenSongs
     const module = await this.ensureNativePlayback()
     if (stale() || module.client.recoveryPending) return
     if (module.client.retainedPrepared) {
@@ -483,11 +482,7 @@ export class MultitrackEngine {
     this.nativePlayback ??= new module.DesktopNativePlaybackClient(
       {
         releaseLegacyOutput: () => this.releaseOutputForNativeMonitor(),
-        restoreLegacyOutput: async () => {
-          // Monitoring takes over the silent renderer lease while the song
-          // graph retires. Only the monitor coordinator may restore it then.
-          if (!this.headphoneMonitorLease) await this.restoreOutputAfterNativeMonitor()
-        }
+        restoreLegacyOutput: () => this.restoreOutputAfterNativeMonitor()
       },
       (status) => this.onNativeStatus(status)
     )
@@ -830,38 +825,6 @@ export class MultitrackEngine {
     } finally {
       if (this.outputRouteApplyPending === operation) this.outputRouteApplyPending = null
     }
-  }
-
-  /** Pause/suspend and detach Chromium's destination before the native host
-   * opens it. The silent sink is an explicit device release, not a mute. */
-  async releaseOutputForHeadphoneMonitor(): Promise<void> {
-    this.headphoneMonitorLease = true
-    const position = this.position
-    if (this.nativePlayback?.active && !this.nativePlayback.retainedPrepared) {
-      // Unload serializes behind the coordinator's pause and stops the host;
-      // do not enqueue a second pause against an already parked transport.
-      this.generation++
-      this._playing = false
-    } else this.pause()
-    try {
-      await Promise.allSettled([...this.pendingPlayRequests])
-      await this.discardNativeAhead()
-      this.beginNativePlaybackUnload()
-      await this.settleNativePlaybackUnload()
-      this.startOffset = position
-      this._playing = false
-      await this.releaseOutputForNativeMonitor()
-    } catch (error) {
-      // A failed native cleanup retains its own existing recovery owner;
-      // do not claim a second, invisible headphone-monitor owner.
-      this.headphoneMonitorLease = false
-      throw error
-    }
-  }
-
-  async restoreOutputAfterHeadphoneMonitor(): Promise<void> {
-    await this.restoreOutputAfterNativeMonitor()
-    this.headphoneMonitorLease = false
   }
 
   async releaseOutputForNativeMonitor(): Promise<void> {

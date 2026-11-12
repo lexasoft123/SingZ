@@ -182,7 +182,12 @@ int main() {
   CHECK(backend->lastConfig.outputDeviceUid == "selected");
   client->stop();
   // Starting capture can reduce a stereo car route to mono under the same UID.
+  const auto routeBeforePark = service.outputRouteGeneration();
+  const auto stopsBeforePark = backend->stops;
   service.parkOutput();
+  CHECK(service.outputRouteGeneration() == routeBeforePark + 1);
+  CHECK(backend->stops == stopsBeforePark + 1);
+  CHECK(service.status().state == AudioHostState::Stopped);
   backend->selectedChannels = 1;
   service.refreshInventory();
   CHECK(service.ensureOutput().ok);

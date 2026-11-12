@@ -218,53 +218,9 @@ export const player: Translation<typeof en> = {
   'player.pitch.micMatch': '匹配我的演唱',
 
   // ── DSP graph visualization (native playback diagnostics panel) ──
-  'player.dspGraph.runtimeGraph': '运行时图',
-  'player.dspGraph.songAndReference': '原生歌曲与参考图',
-  'player.dspGraph.monitorChain': '原生返听链',
-  'player.dspGraph.structuredUnavailable': '结构化图不可用',
-  'player.dspGraph.bufferPending': '缓冲区待处理',
-  'player.dspGraph.chooseInput': '选择输入设备',
-  'player.dspGraph.chooseOutput': '选择输出设备',
-  'player.dspGraph.deviceKind': '设备',
-  'player.dspGraph.analyzerKind': '分析器',
-  'player.dspGraph.processorKind': '处理器',
-  'player.dspGraph.routerKind': '路由器',
-  'player.dspGraph.input': '输入',
-  'player.dspGraph.output': '输出',
-  'player.dspGraph.preMeter': '前级电平表',
-  'player.dspGraph.preFace': '前级',
-  'player.dspGraph.postMeter': '后级电平表',
-  'player.dspGraph.postFace': '后级',
-  'player.dspGraph.gain': '增益',
-  'player.dspGraph.channelMap': '通道映射',
-  'player.dspGraph.mapFace': '映射',
-  'player.dspGraph.limiter': '限幅器',
-  'player.dspGraph.limitFace': '限幅',
-  'player.dspGraph.beforeProcessing': '处理前',
-  'player.dspGraph.afterLimiter': '限幅后',
-  'player.dspGraph.preLevelLabel': 'DSP 图处理前电平',
-  'player.dspGraph.postLevelLabel': 'DSP 图限幅后电平',
-  'player.dspGraph.modulesAriaLabel': 'DSP 图模块',
-  'player.dspGraph.activeModulesAriaLabel': '当前歌曲 DSP 图的模块与连接',
-  'player.dspGraph.activeConnectionsAriaLabel': '当前歌曲 DSP 图的连接',
-  'player.dspGraph.unavailableExplain':
-    '图的详细信息不可用，因为原生播放未提供有效的边界组合快照。',
-  'player.dspGraph.floatNativePath': 'Float32 原生路径',
-  'player.dspGraph.stateRunning': '运行中',
-  'player.dspGraph.stateChangingRoute': '正在切换路径',
-  'player.dspGraph.stateFault': '因错误而停止',
-  'player.dspGraph.stateReady': '就绪',
-  'player.dspGraph.stateBlocked': '路径受阻',
 
   // ── model.ts: fallback label for an added track with no name left after cleanup ──
   'player.track.untitled': '音轨',
 
   // ── DSP graph card: format line and the transport badge (Settings › Audio) ──
-  'player.dspGraph.framesMaximum': '最多 {n} 帧',
-  'player.dspGraph.nodesLinks': '{nodes} 个节点 · {links} 条连接',
-  'player.dspGraph.transport.stopped': '已停止',
-  'player.dspGraph.transport.pre-roll': '预备拍',
-  'player.dspGraph.transport.playing': '播放中',
-  'player.dspGraph.transport.paused': '已暂停',
-  'player.dspGraph.transport.completed': '已结束'
 }

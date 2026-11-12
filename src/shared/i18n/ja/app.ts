@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "接続されていない保存された再生装置  システムデフォルトを使用して",
   "app.output.switchDenied": "SingZは再生装置を切り替えることは許されなかった",
   "app.output.switchFailed": "前のデバイスに切り替えることができませんでした",
-  "app.monitor.stopped": "ヘッドフォン監視停止: {message}",
   "app.native.beatNotApplied": "ネイティブ・ビートグリッド更新は適用されなかった: {error}",
   "app.native.metronomeNotApplied": "メトロノームのネイティブ更新は適用されなかった: {error}",
   "app.native.transposeNotApplied": "ローカルトランスポス更新は適用されなかった: {error}",

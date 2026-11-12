@@ -5,7 +5,6 @@ import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type {
   CaptureStartConfig,
-  DesktopMonitorConfig,
   DesktopPlaybackLaneMeasureRequest,
   DesktopPlaybackLaneMeasureResult,
   DesktopPlaybackPrepareConfig,
@@ -80,6 +79,8 @@ import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
 import { registerVoiceTakes } from './voice-takes-ipc'
+import { registerVoiceMonitor } from './voice-monitor-ipc'
+import type { VoiceMonitorStore } from './voice-monitor'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -399,6 +400,7 @@ function registerIpc(): void {
   registerAnalyze()
   registerDesktopAudioInput()
   registerVoiceTakes()
+  voiceMonitor = registerVoiceMonitor()
 
   ipcMain.handle(
     'lyrics:get',
@@ -714,12 +716,12 @@ function registerIpc(): void {
       audioLifetimes.set(sender, lifetime)
       const tracked = lifetime
       const rendererId = sender.id
-      const detached = (): void => { ++tracked.epoch; captureOwner.rendererDetached(rendererId) }
+      const detached = (): void => { ++tracked.epoch; void voiceMonitor?.dispose(); captureOwner.rendererDetached(rendererId) }
       sender.on('render-process-gone', detached)
       sender.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
         if (isMainFrame && !inPlace) detached()
       })
-      sender.once('destroyed', () => { ++tracked.epoch; captureOwner.rendererGone(rendererId) })
+      sender.once('destroyed', () => { ++tracked.epoch; void voiceMonitor?.dispose(); captureOwner.rendererGone(rendererId) })
     }
     const epoch = lifetime.epoch
     return () => !sender.isDestroyed() && lifetime.epoch === epoch
@@ -784,22 +786,6 @@ function registerIpc(): void {
         ? provider
         : undefined
     ))
-  ipcMain.handle('audio-host:monitor-begin', async (event, raw: unknown) => {
-    bindNativeAudioCleanup(event.sender)
-    const result = await captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
-    return result
-  })
-  ipcMain.handle(
-    'audio-host:monitor-gain',
-    (event, generation: unknown, gainDb: unknown, enabled: unknown) => {
-      if (
-        typeof generation !== 'string' || typeof gainDb !== 'number' ||
-        typeof enabled !== 'boolean'
-      ) return captureOwner.setMonitorGain(event.sender.id, '', Number.NaN, false)
-      return captureOwner.setMonitorGain(event.sender.id, generation, gainDb, enabled)
-    }
-  )
-
   ipcMain.handle('audio-host:microphone-mix-configure', async (event, config: unknown) => {
     bindNativeAudioCleanup(event.sender)
     const result = await captureOwner.configureMicrophoneMix(event.sender.id, config)
@@ -807,11 +793,6 @@ function registerIpc(): void {
   })
   ipcMain.handle('audio-host:microphone-mix-stop', event => captureOwner.stopMicrophoneMix(event.sender.id))
   ipcMain.handle('audio-host:microphone-mix-status', () => captureOwner.microphoneMixStatus())
-
-  ipcMain.handle('audio-host:monitor-status', () => captureOwner.monitorStatus())
-  ipcMain.handle('audio-host:monitor-end', (event, generation: unknown) =>
-    captureOwner.endMonitor(event.sender.id, typeof generation === 'string' ? generation : '')
-  )
 
   ipcMain.handle('audio-host:playback-providers', () => captureOwner.playbackProviders())
   ipcMain.handle('audio-host:playback-capability', () => captureOwner.playbackCapability())
@@ -880,6 +861,8 @@ function registerIpc(): void {
         : authorized
       if (!callerIsCurrent())
         return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
+      await voiceMonitor?.songChanged(JSON.stringify(authorized.map(lane => lane.path).sort()))
+      if (!callerIsCurrent()) return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
       // Lifecycle is already bound and fenced across capability discovery and seed lookup.
       const persistentBox = process.env.SINGZ_SURFACE === 'box' && Boolean(process.env.SINGZ_BOX_AUDIO_SOCKET)
       const result = persistentBox
@@ -987,7 +970,8 @@ function registerIpc(): void {
       })
     }
   )
-  ipcMain.handle('audio-host:playback-unload', (event, generation: unknown) => {
+  ipcMain.handle('audio-host:playback-unload', async (event, generation: unknown) => {
+    await disposeWithin(voiceMonitor, 2000)
     // Logged by the owner, which also sees the unloads that come back ok
     // WITHOUT a cleanup receipt — the case worth a line.
     return captureOwner.unloadPlayback(event.sender.id, playbackGeneration(generation))
@@ -1109,6 +1093,7 @@ app.whenReady().then(async () => {
   })
 })
 
+let voiceMonitor: VoiceMonitorStore | undefined
 let audioQuitPending = false
 let audioQuitComplete = false
 app.on('before-quit', event => {
@@ -1144,6 +1129,7 @@ app.on('before-quit', event => {
     if (finishing) return
     finishing = true
     try { await disposeWithin(localBoxMicrophones, 3000) } catch (error) { log('mic', `Microphone shutdown failed · ${String(error)}`, 'warn') }
+    await disposeWithin(voiceMonitor, 2000)
     await captureOwner.stop()
     await boxCec?.dispose()
     audioQuitComplete = true

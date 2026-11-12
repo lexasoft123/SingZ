@@ -8,11 +8,11 @@
 #include <span>
 #include <algorithm>
 
-#include "audio_monitor_session.h"
 #include "native_audio_ownership.h"
 #include "playback_addon_bridge.h"
 #include "../playback/shared_audio_service.h"
 #include "training_audio_session.h"
+#include "voice_monitor_bridge.h"
 #include "take_writer.h"
 #include "microphone_mix_bridge.h"
 #include <zcore/audio/capture_recording.h>
@@ -138,7 +138,6 @@ struct CaptureOwner {
 };
 
 CaptureOwner owner;
-singz::AudioMonitorSession monitor;
 singz::NativeAudioOwnership nativeAudioOwnership{true};
 
 uint64_t hostTimeNowNs() noexcept {
@@ -823,20 +822,6 @@ napi_value stats(napi_env env, napi_callback_info) {
   return result;
 }
 
-const char* hostStateName(singz::AudioHostState state) {
-  switch (state) {
-    case singz::AudioHostState::Closed: return "closed";
-    case singz::AudioHostState::Open: return "open";
-    case singz::AudioHostState::Running: return "running";
-    case singz::AudioHostState::Stopped: return "stopped";
-    case singz::AudioHostState::DeviceLost: return "device-lost";
-    case singz::AudioHostState::Error: return "error";
-    case singz::AudioHostState::Unsupported: return "unsupported";
-    case singz::AudioHostState::Suspended: return "suspended";
-  }
-  return "error";
-}
-
 const char* directionName(singz::AudioHostEndpointDirection direction) {
   switch (direction) {
     case singz::AudioHostEndpointDirection::Duplex: return "duplex";
@@ -886,48 +871,6 @@ const char* monitoringSuitabilityName(
       return "unsupported";
   }
   return "unknown";
-}
-
-void setHostFormat(napi_env env, napi_value object,
-                   const singz::AudioHostFormat& format) {
-  napi_value value;
-  napi_create_object(env, &value);
-  set(env, value, "sampleRate", numberValue(env, format.sampleRate));
-  set(env, value, "maximumFrames", uintValue(env, format.maximumFrames));
-  set(env, value, "nominalBufferFrames",
-      uintValue(env, format.nominalBufferFrames));
-  set(env, value, "inputChannels", uintValue(env, format.inputChannels));
-  set(env, value, "outputChannels", uintValue(env, format.outputChannels));
-  set(env, value, "sampleFormat", stringValue(env, "float32-planar"));
-  set(env, value, "outputClockMaster", boolValue(env, format.outputClockMaster));
-  set(env, value, "accessMode", stringValue(env, accessName(format.accessMode)));
-  set(env, object, "format", value);
-}
-
-void setHostLatency(napi_env env, napi_value object,
-                    const singz::AudioHostLatency& latency) {
-  napi_value value;
-  napi_create_object(env, &value);
-  set(env, value, "inputDeviceFrames", uintValue(env, latency.inputDeviceFrames));
-  set(env, value, "outputDeviceFrames", uintValue(env, latency.outputDeviceFrames));
-  set(env, value, "bufferFrames", uintValue(env, latency.bufferFrames));
-  set(env, value, "externalRouteFrames", uintValue(env, latency.externalRouteFrames));
-  set(env, object, "latency", value);
-}
-
-napi_value monitorResultValue(napi_env env,
-                              const singz::AudioMonitorResult& source) {
-  napi_value result;
-  napi_create_object(env, &result);
-  set(env, result, "ok", boolValue(env, source.ok));
-  set(env, result, "errorCode",
-      stringValue(env, singz::audioMonitorErrorName(source.error)));
-  set(env, result, "error", stringValue(env, source.message));
-  setU64(env, result, "ownershipGeneration", source.ownershipGeneration);
-  set(env, result, "state", stringValue(env, hostStateName(source.state)));
-  setHostFormat(env, result, source.format);
-  setHostLatency(env, result, source.latency);
-  return result;
 }
 
 std::unique_ptr<singz::AudioHostBackend> playbackBackend(
@@ -1151,199 +1094,6 @@ napi_value audioHostDevices(napi_env env, napi_callback_info info) {
   return result;
 }
 
-napi_value beginMonitor(napi_env env, napi_callback_info info) {
-#if defined(SINGZ_BOX_LOOPZ_ROUTING)
-  if (singz::boxRoutingOwnsCapture()) {
-    napi_throw_error(env, nullptr, "Direct monitoring is unavailable while Box routing owns audio inputs");
-    return undefined(env);
-  }
-#endif
-  size_t argc = 2;
-  napi_value argv[2];
-  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-  if (argc != 2) {
-    napi_throw_type_error(env, nullptr,
-                          "beginMonitor requires config and generation");
-    return undefined(env);
-  }
-  uint64_t generation = 0;
-  const bool validGeneration = getExactU64(env, argv[1], &generation);
-  singz::AudioMonitorConfig config;
-  config.inputDeviceUid = getString(env, argv[0], "inputDeviceUid");
-  config.outputDeviceUid = getString(env, argv[0], "outputDeviceUid");
-  uint32_t sampleRate = 0;
-  const bool validConfig =
-      getExactU32Array(env, argv[0], "inputChannels", &config.inputChannels) &&
-      getExactU32Array(env, argv[0], "outputChannels",
-                       &config.outputChannels) &&
-      getExactU32(env, argv[0], "sampleRate", 8000, 384000, true, 0,
-                  &sampleRate) &&
-      getExactU32(env, argv[0], "bufferFrames", 1,
-                  singz::kAudioHostMaxFrames, true, 0,
-                  &config.bufferFrames) &&
-      getExactU32(env, argv[0], "maximumFrames", 1,
-                  singz::kAudioHostMaxFrames, true, 0,
-                  &config.maximumFrames) &&
-      getExactBool(env, argv[0], "exclusive", false, false,
-                   &config.exclusive);
-  config.sampleRate = static_cast<double>(sampleRate);
-  if (!validGeneration)
-    return monitorResultValue(env, monitor.begin(config, 0));
-  if (!validConfig) {
-    const singz::AudioMonitorStatus status = monitor.status();
-    return monitorResultValue(
-        env, {false, singz::AudioMonitorError::InvalidConfiguration,
-              generation, status.host.state, status.host.format,
-              status.host.latency,
-              "Monitor configuration values must have exact bounded types"});
-  }
-  if (singz::microphoneMixActive()) {
-    const auto status = monitor.status();
-    return monitorResultValue(env,
-        {false, singz::AudioMonitorError::NativeAudioBusy, generation,
-         status.host.state, status.host.format, status.host.latency,
-         "Stop microphone mixing before starting exclusive headphone monitoring"});
-  }
-  const singz::NativeAudioAcquireResult acquired =
-      nativeAudioOwnership.acquire(singz::NativeAudioOwnerKind::Monitor,
-                                   generation);
-  if (acquired != singz::NativeAudioAcquireResult::Acquired) {
-    const singz::AudioMonitorStatus status = monitor.status();
-    const singz::AudioMonitorError error =
-        acquired == singz::NativeAudioAcquireResult::Busy
-            ? singz::AudioMonitorError::NativeAudioBusy
-            : singz::AudioMonitorError::InvalidGeneration;
-    return monitorResultValue(
-        env, {false, error, generation, status.host.state, status.host.format,
-              status.host.latency,
-              error == singz::AudioMonitorError::NativeAudioBusy
-                  ? "Another native microphone owner is already active"
-                  : "Monitor generation is invalid"});
-  }
-  {
-    std::lock_guard<std::mutex> lock(owner.mutex);
-    // An idle prepared capture holds no ownership lease, but exclusive
-    // monitoring must retire even its stopped platform unit before opening.
-    if (owner.input) { owner.input->stop(); owner.input.reset(); }
-  }
-  singz::sharedAudioService().parkOutput();
-  singz::AudioMonitorResult result = monitor.begin(config, generation);
-  if (!result.ok) {
-    const singz::AudioMonitorStatus status = monitor.status();
-    const uint64_t retainedGeneration =
-        status.active ? status.ownershipGeneration : 0;
-    (void)singz::releaseUnretainedMonitorBeginLease(
-        &nativeAudioOwnership, generation, retainedGeneration);
-  }
-  return monitorResultValue(env, result);
-}
-
-napi_value setMonitorGain(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
-  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-  if (argc != 3) {
-    napi_throw_type_error(env, nullptr,
-                          "setMonitorGain requires generation, gainDb and enabled");
-    return undefined(env);
-  }
-  uint64_t generation = 0;
-  const bool validGeneration = getExactU64(env, argv[0], &generation);
-  double gainDb = std::numeric_limits<double>::quiet_NaN();
-  napi_valuetype gainType = napi_undefined;
-  napi_valuetype enabledType = napi_undefined;
-  bool enabled = false;
-  const bool validGain =
-      napi_typeof(env, argv[1], &gainType) == napi_ok &&
-      gainType == napi_number &&
-      napi_get_value_double(env, argv[1], &gainDb) == napi_ok &&
-      std::isfinite(gainDb) &&
-      gainDb >= static_cast<double>(singz::kMonitorMinimumGainDb) &&
-      gainDb <= static_cast<double>(singz::kMonitorMaximumGainDb);
-  const bool validEnabled =
-      napi_typeof(env, argv[2], &enabledType) == napi_ok &&
-      enabledType == napi_boolean &&
-      napi_get_value_bool(env, argv[2], &enabled) == napi_ok;
-  if (!validGeneration)
-    return monitorResultValue(env, monitor.setGain(0, 0.0F, false));
-  if (!validGain || !validEnabled) {
-    const singz::AudioMonitorStatus status = monitor.status();
-    return monitorResultValue(
-        env, {false, singz::AudioMonitorError::InvalidConfiguration,
-              generation, status.host.state, status.host.format,
-              status.host.latency,
-              "Gain must be between -60 and +12 dB and enabled must be a boolean"});
-  }
-  return monitorResultValue(
-      env, monitor.setGain(generation,
-                           static_cast<float>(gainDb), enabled));
-}
-
-void setMonitorMeter(napi_env env, napi_value object, const char* name,
-                     const singz::AudioMonitorMeter& source) {
-  napi_value meter;
-  napi_create_object(env, &meter);
-  set(env, meter, "peak", numberValue(env, source.peak));
-  set(env, meter, "rms", numberValue(env, source.rms));
-  setU64(env, meter, "frames", source.frames);
-  set(env, object, name, meter);
-}
-
-napi_value monitorStatus(napi_env env, napi_callback_info) {
-  const singz::AudioMonitorStatus source = monitor.status();
-  napi_value result;
-  napi_create_object(env, &result);
-  set(env, result, "active", boolValue(env, source.active));
-  set(env, result, "enabled", boolValue(env, source.enabled));
-  set(env, result, "deviceLost", boolValue(env, source.deviceLost));
-  setU64(env, result, "ownershipGeneration", source.ownershipGeneration);
-  set(env, result, "gainDb", numberValue(env, source.gainDb));
-  set(env, result, "state", stringValue(env, hostStateName(source.host.state)));
-  set(env, result, "error", stringValue(env, source.error));
-  setMonitorMeter(env, result, "pre", source.pre);
-  setMonitorMeter(env, result, "post", source.post);
-  setHostFormat(env, result, source.host.format);
-  setHostLatency(env, result, source.host.latency);
-  setU64(env, result, "routeGeneration", source.host.routeGeneration);
-  setU64(env, result, "streamGeneration", source.host.streamGeneration);
-  setU64(env, result, "callbacks", source.host.callbacks);
-  setU64(env, result, "renderedFrames", source.host.renderedFrames);
-  setU64(env, result, "xruns", source.host.xruns);
-  setU64(env, result, "deadlineMisses", source.host.deadlineMisses);
-  setU64(env, result, "renderFailures", source.host.renderFailures);
-  set(env, result, "adapterRenderFailures",
-      uintValue(env, source.adapterRenderFailures));
-  set(env, result, "terminalRenderFailures",
-      uintValue(env, source.terminalRenderFailures));
-  set(env, result, "adapterLastStatusCode",
-      uintValue(env, source.adapterLastStatusCode));
-  set(env, result, "adapterLastStatusDetail",
-      uintValue(env, source.adapterLastStatusDetail));
-  set(env, result, "parameterOverflows",
-      uintValue(env, source.parameterOverflows));
-  set(env, result, "nonFiniteSamples",
-      uintValue(env, source.nonFiniteSamples));
-  set(env, result, "rejectedBlocks", uintValue(env, source.rejectedBlocks));
-  return result;
-}
-
-napi_value endMonitor(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-  if (argc != 1) {
-    napi_throw_type_error(env, nullptr, "endMonitor requires generation");
-    return undefined(env);
-  }
-  uint64_t generation = 0;
-  if (!getExactU64(env, argv[0], &generation))
-    return monitorResultValue(env, monitor.end(0));
-  singz::AudioMonitorResult result = monitor.end(generation);
-  (void)singz::releaseMonitorLeaseAfterEnd(
-      &nativeAudioOwnership, generation, result.ok);
-  return monitorResultValue(env, result);
-}
-
 napi_value captureRecording(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3]{};
@@ -1474,18 +1224,12 @@ napi_value cancelTake(napi_env env, napi_callback_info info) {
 }
 
 void cleanup(void*) {
+  if (!singz::cleanupVoiceMonitor()) return; // Other N-API environments still own shared hosts.
   singz::cleanupMicrophoneMix();
   singz::cleanupTrainingAudio();
   singz::cleanupPlaybackBridge();
   std::lock_guard<std::mutex> lock(owner.mutex);
   stopLocked(owner.generation, true);
-  const auto status = monitor.status();
-  if (status.active) {
-    const singz::AudioMonitorResult ended =
-        monitor.end(status.ownershipGeneration);
-    (void)singz::releaseMonitorLeaseAfterEnd(
-        &nativeAudioOwnership, status.ownershipGeneration, ended.ok);
-  }
   singz::sharedAudioService().shutdown();
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   singz::shutdownBoxRouting();
@@ -1494,6 +1238,7 @@ void cleanup(void*) {
 
 napi_value init(napi_env env, napi_value exports) {
   singz::defineAudioExport(env, exports);
+  singz::defineVoiceMonitorExports(env, exports, &nativeAudioOwnership);
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   singz::defineBoxRoutingExports(env, exports);
 #endif
@@ -1512,10 +1257,6 @@ napi_value init(napi_env env, napi_value exports) {
       {"captureStats", nullptr, stats, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostProviders", nullptr, audioHostProviders, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostDevices", nullptr, audioHostDevices, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"beginMonitor", nullptr, beginMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"setMonitorGain", nullptr, setMonitorGain, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"monitorStatus", nullptr, monitorStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"endMonitor", nullptr, endMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   singz::definePlaybackExports(env, exports, &nativeAudioOwnership,

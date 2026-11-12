@@ -47,7 +47,7 @@ monitoring off, the default), solo, level, record, and the take clip.
   can both want the mic; sharing one capture is an open question (OQ-6).
 - ADR 0010 gave Settings a monitoring preview with an app-shell coordinator and a
   top-bar Stop. The Voice strip replaces it (M2 deletes the Settings preview;
-  `parkOutput` / `native_audio_ownership.h` exclusivity is removed). The song
+  desktop monitor exclusivity is removed; `parkOutput` remains for mobile). The song
   player no longer releases output to a silent sink to monitor.
 
 ## 2 Personas and jobs-to-be-done
@@ -261,7 +261,7 @@ M1, M2, M3. Every requirement is intended to be testable; the test column in sec
 | VS-MON-008 | Gain changes and mute SHALL be ramped; the monitor path SHALL include a safety limiter that the user cannot disable (from ADR 0010: -1 dBFS ceiling, bounded gain; **[inferred]** retained as is). | MUST | M2 |
 | VS-MON-009 | THE SYSTEM SHALL handle the song's tempo and transpose without altering the monitored voice (rate handling per ADR M2). | MUST | M2 |
 | VS-MON-010 | WHEN monitoring starts and the buffer size must change, THE SYSTEM MAY cause a short dropout of the song; the UI SHALL treat it as a route change and SHALL NOT report an error. | SHOULD | M2 |
-| VS-MON-011 | The Settings monitoring preview, the top-bar monitor Stop and monitor exclusivity (`parkOutput`) SHALL be removed; song play SHALL NOT be refused while monitoring. | MUST | M2 |
+| VS-MON-011 | The Settings monitoring preview, the top-bar monitor Stop and desktop monitor exclusivity SHALL be removed (`parkOutput` remains for mobile); song play SHALL NOT be refused while monitoring. | MUST | M2 |
 | VS-MON-012 | Windows monitoring SHALL use the zCore WASAPI host and SHALL report the latency it can achieve; where 32 frames is not legal, the strip SHALL use the smallest legal size at or below 256. | MUST | M2 (Windows) |
 | VS-MON-013 | WHILE monitoring with built-in microphone and speakers, THE SYSTEM SHOULD warn about feedback. Behavior is undecided (OQ-1). | SHOULD | M2 |
 | VS-MON-014 | The strip SHOULD show measured round-trip latency in the reason or details, not as a constantly visible number. **[inferred]** | SHOULD | M2 |

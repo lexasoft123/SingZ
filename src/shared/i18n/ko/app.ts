@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "저장된 재생 장치 연결되지 않은 시스템 기본을 사용하여",
   "app.output.switchDenied": "SingZ 재생 장치를 변경할 수 없었습니다",
   "app.output.switchFailed": "이 장치로 전환할 수 없었습니다",
-  "app.monitor.stopped": "헤드폰 모니터링 중단: {message}",
   "app.native.beatNotApplied": "네이티브 비트 그리드 업데이트는 적용되지 않았습니다: {error}",
   "app.native.metronomeNotApplied": "네이티브 메트로노마 업데이트는 적용되지 않았습니다: {error}",
   "app.native.transposeNotApplied": "네이티브 트랜스포스 업데이트는 적용되지 않았습니다: {error}",

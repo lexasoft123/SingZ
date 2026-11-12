@@ -1234,46 +1234,6 @@ describe('engine-owned training audio', () => {
   })
 })
 
-describe('song to headphone-monitor handoff', () => {
-  afterEach(() => vi.unstubAllGlobals())
-
-  it.each([false, true])('retires playback before monitor acquisition; cleanup failure=%s', async (failed) => {
-    vi.stubGlobal('AudioContext', FakeAudioContext)
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-    const engine = new MultitrackEngine()
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
-    engine.setNativeAheadAllowed(false)
-    let active = true
-    const unload = vi.fn(async () => {
-      if (failed) throw new Error('native cleanup retained')
-      active = false
-    })
-    const client = {
-      get active() { return active }, preparedAhead: false, transportParked: true,
-      audibleSeconds: () => 1.5, discardAhead: vi.fn(async () => undefined), unload
-    }
-    ;(engine as unknown as { nativePlayback: typeof client }).nativePlayback = client
-    if (failed) {
-      await expect(engine.releaseOutputForHeadphoneMonitor()).rejects.toThrow('native cleanup retained')
-      expect(active).toBe(true)
-      expect((engine as unknown as { headphoneMonitorLease: boolean }).headphoneMonitorLease).toBe(false)
-      expect(FakeAudioContext.last!.sinkCalls).toHaveLength(0)
-    } else {
-      await engine.releaseOutputForHeadphoneMonitor()
-      expect(unload).toHaveBeenCalledOnce()
-      expect(engine.nativeActive).toBe(false)
-      expect(engine.position).toBe(1.5)
-      expect(engine.nativeMonitorOwnsOutput).toBe(true)
-      expect(FakeAudioContext.last!.sinkCalls.at(-1)).toEqual({ type: 'none' })
-      await engine.restoreOutputAfterHeadphoneMonitor()
-      expect(engine.nativeMonitorOwnsOutput).toBe(false)
-      expect(engine.playing).toBe(false)
-    }
-  })
-})
-
-
 describe('native terminal transport errors', () => {
   afterEach(() => vi.unstubAllGlobals())
   it('stops the UI at the last audible frame and reports an underrun with empty provider text', async () => {

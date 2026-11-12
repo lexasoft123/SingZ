@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { boxAudioPersistentLifetime } from '../shared/box-audio'
 import type { BoxAPI } from '../shared/box-contract'
+import { VOICE_IPC, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorGainRequest, type VoiceMonitorState } from '../shared/voice-take'
 import type { VoiceArmRequest, VoiceArmResult, VoiceRecordSettingsChange, VoiceRecordStartRequest, VoicePlayTakeRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
 import type {
   GlassVerdict,
@@ -55,6 +56,10 @@ export type VoiceTakeApi = {
   stopPlay(): Promise<{ ok: boolean; error?: string }>
   remove(songId: string, takeId: string): Promise<{ ok: boolean; error?: string }>
   level(): Promise<VoiceInputLevel>
+  monitorAvailability(request: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState>
+  monitorSet(request: VoiceMonitorSetRequest): Promise<VoiceMonitorState>
+  monitorGain(request: VoiceMonitorGainRequest): Promise<VoiceMonitorState>
+  monitorState(): Promise<VoiceMonitorState>
 }
 
 const voiceTakes: VoiceTakeApi = {
@@ -67,7 +72,11 @@ const voiceTakes: VoiceTakeApi = {
   play: request => ipcRenderer.invoke('voice:play', request),
   stopPlay: () => ipcRenderer.invoke('voice:stop-play'),
   remove: (songId, takeId) => ipcRenderer.invoke('voice:remove', songId, takeId),
-  level: () => ipcRenderer.invoke('voice:level')
+  level: () => ipcRenderer.invoke('voice:level'),
+  monitorAvailability: request => ipcRenderer.invoke(VOICE_IPC.monitorAvailability, request),
+  monitorSet: request => ipcRenderer.invoke(VOICE_IPC.monitorSet, request),
+  monitorGain: request => ipcRenderer.invoke(VOICE_IPC.monitorGain, request),
+  monitorState: () => ipcRenderer.invoke(VOICE_IPC.monitorState)
 }
 
 const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
@@ -227,12 +236,6 @@ const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
   },
 
   audioHostDevices: (provider) => ipcRenderer.invoke('audio-host:devices', provider),
-  beginMonitor: (config) => ipcRenderer.invoke('audio-host:monitor-begin', config),
-  setMonitorGain: (ownershipGeneration, gainDb, enabled) =>
-    ipcRenderer.invoke('audio-host:monitor-gain', ownershipGeneration, gainDb, enabled),
-  monitorStatus: () => ipcRenderer.invoke('audio-host:monitor-status'),
-  endMonitor: (ownershipGeneration) =>
-    ipcRenderer.invoke('audio-host:monitor-end', ownershipGeneration),
 
   desktopPlaybackProviders: () => ipcRenderer.invoke('audio-host:playback-providers'),
   desktopPlaybackCapability: () => ipcRenderer.invoke('audio-host:playback-capability'),

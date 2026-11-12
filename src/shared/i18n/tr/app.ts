@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "Kayıtlı çalma aygıtı bağlı değil; sistemin varsayılanı kullanılıyor",
   "app.output.switchDenied": "SingZ çalma aygıtını değiştirme izni alamadı; önceki aygıt kullanılıyor",
   "app.output.switchFailed": "Bu aygıta geçilemedi; önceki aygıt kullanılıyor",
-  "app.monitor.stopped": "Kulaklıkla izleme durdu: {message}",
   "app.native.beatNotApplied": "Yerel ritm şebekesi güncellemeleri uygulanmadı: {error}",
   "app.native.metronomeNotApplied": "Yerel metronom güncellemesi uygulanmadı: {error}",
   "app.native.transposeNotApplied": "Yerel transpozisyon güncellemesi uygulanmadı: {error}",

@@ -287,6 +287,12 @@ struct SharedAudioService::Impl {
     return true;
   }
   AudioHostResult openLocked(AudioHostConfig config) {
+#if defined(__APPLE__) && TARGET_OS_OSX
+    // Opt in only to an unchanged-buffer song capacity lease. A nonzero song
+    // period request must retain its former Unsupported behavior: only the
+    // independent monitor is authorized to write the shared device period.
+    config.allowSharedDeviceBufferChange = config.requestedBufferFrames == 0;
+#endif
     if (!enumerated) refreshLocked();
     startWatcherLocked();
     if (config.outputDeviceUid.empty()) config.outputDeviceUid = cached.defaultOutputUid;

@@ -78,7 +78,8 @@ ready.then(async () => {
   for (const name of [
     'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats',
     'recordTake', 'finishTake', 'cancelTake',
-    'audioHostDevices', 'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor',
+    'voiceMonitorAvailability', 'beginVoiceMonitor', 'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor',
+    'audioHostDevices',
     'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
     'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',
     'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
@@ -158,75 +159,47 @@ ready.then(async () => {
   if (process.argv.includes('--inventory')) {
     console.log(JSON.stringify({ input: devices, host: hostDevices }))
   }
-  const monitor = addon.monitorStatus()
-  assert.equal(monitor.active, false)
-  assert.equal(monitor.enabled, false)
-  assert.equal(typeof monitor.deviceLost, 'boolean')
-  assert.equal(typeof monitor.ownershipGeneration, 'string')
-  assert.equal(typeof monitor.pre.peak, 'number')
-  assert.equal(typeof monitor.post.rms, 'number')
-  assert.equal(typeof monitor.callbacks, 'string')
-  assert.equal(typeof monitor.adapterRenderFailures, 'number')
-  assert.equal(typeof monitor.terminalRenderFailures, 'number')
-  const invalidBegin = addon.beginMonitor({}, 1n)
-  assert.equal(invalidBegin.ok, false)
-  assert.equal(invalidBegin.errorCode, 'invalid-configuration')
-  assert.equal(typeof invalidBegin.format.sampleRate, 'number')
-  assert.equal(typeof invalidBegin.latency.bufferFrames, 'number')
-  const typedConfig = {
-    inputDeviceUid: 'smoke:never-opened',
-    outputDeviceUid: 'smoke:never-opened',
-    inputChannels: [2],
-    outputChannels: [0, 1],
-    sampleRate: 48000,
-    bufferFrames: 128,
-    maximumFrames: 256,
-    exclusive: false
+  const voiceMonitor = addon.voiceMonitorStatus()
+  assert.equal(voiceMonitor.running, false)
+  assert.equal(voiceMonitor.lost, false)
+  assert.deepEqual(voiceMonitor.warnings, [])
+  const voiceInput = { inputUid: 'smoke:never-opened', inputChannel: 0 }
+  const voiceAvailability = addon.voiceMonitorAvailability(voiceInput)
+  assert.equal(voiceAvailability.available, false)
+  assert.ok(['platform', 'output-not-native', 'no-input', 'permission'].includes(voiceAvailability.reason))
+  assert.equal(addon.voiceMonitorAvailability({ ...voiceInput, inputChannel: 0.5 }).available, false)
+  for (const generation of [0n, -1n, 1, 1.5, Infinity, 2n ** 64n]) {
+    assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: 0, targetFrames: 32, maxFrames: 256 }, generation).ok, false)
+    assert.equal(addon.endVoiceMonitor(generation).ok, false)
   }
-  for (const generation of [Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1, 2n ** 64n]) {
-    const rejected = addon.beginMonitor(typedConfig, generation)
-    assert.equal(rejected.ok, false)
-    assert.equal(rejected.errorCode, 'invalid-generation')
+  assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: NaN, targetFrames: 32, maxFrames: 256 }, 10n).ok, false)
+  assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: 0, targetFrames: 32, maxFrames: 257 }, 10n).ok, false)
+  assert.equal(addon.setVoiceMonitorGain(Infinity).ok, false)
+  assert.equal(addon.setVoiceMonitorGain(0).ok, false)
+  assert.equal(addon.endVoiceMonitor(10n).ok, false)
+  assert.equal(addon.voiceMonitorStatus().running, false)
+  // Loading/unloading a peer N-API environment must retain addon-wide hosts.
+  const { Worker } = require('node:worker_threads')
+  await new Promise((resolveWorker, rejectWorker) => {
+    const worker = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads')
+      const peer = require(workerData)
+      parentPort.postMessage(peer.voiceMonitorStatus())
+    `, { eval: true, workerData: addonPath })
+    worker.once('message', status => {
+      try { assert.equal(status.running, false) } catch (error) { rejectWorker(error) }
+    })
+    worker.once('error', rejectWorker)
+    worker.once('exit', code => code === 0 ? resolveWorker() : rejectWorker(new Error('Peer addon environment failed')))
+  })
+  assert.equal(addon.voiceMonitorStatus().running, false)
+  console.log('PASS voice monitor exports and rejected admission without hardware')
+  for (const name of ['beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor']) {
+    assert.equal(addon[name], undefined)
   }
-  const maximumGeneration = addon.beginMonitor({}, (2n ** 64n) - 1n)
-  assert.equal(maximumGeneration.ok, false)
-  assert.equal(maximumGeneration.errorCode, 'invalid-configuration')
-  assert.equal(maximumGeneration.ownershipGeneration, '18446744073709551615')
-  for (const mutation of [
-    { sampleRate: Infinity },
-    { sampleRate: 48000.5 },
-    { bufferFrames: 128.5 },
-    { bufferFrames: 8193 },
-    { maximumFrames: 2n ** 32n },
-    { inputChannels: [2.5] },
-    { inputChannels: [64] },
-    { exclusive: 1 }
-  ]) {
-    const rejected = addon.beginMonitor({ ...typedConfig, ...mutation }, 2n)
-    assert.equal(rejected.ok, false)
-    assert.equal(rejected.errorCode, 'invalid-configuration')
-  }
-  for (const [gain, enabled] of [
-    [Infinity, false], [12.0000001, false], [-60.000001, false],
-    [0, 0], [0, 'false']
-  ]) {
-    const rejected = addon.setMonitorGain(1n, gain, enabled)
-    assert.equal(rejected.ok, false)
-    assert.equal(rejected.errorCode, 'invalid-configuration')
-  }
-  assert.equal(addon.setMonitorGain(1.5, 0, false).errorCode,
-    'invalid-generation')
-  assert.equal(addon.endMonitor(Number.MAX_SAFE_INTEGER + 1).errorCode,
-    'invalid-generation')
   for (const generation of [1.5, Number.MAX_SAFE_INTEGER + 1, 2n ** 64n]) {
     assert.throws(() => addon.beginCapture({}, generation, () => {}), TypeError)
   }
-  const staleGain = addon.setMonitorGain(1n, 0, false)
-  assert.equal(staleGain.ok, false)
-  assert.equal(staleGain.errorCode, 'invalid-generation')
-  const staleEnd = addon.endMonitor(1n)
-  assert.equal(staleEnd.ok, false)
-  assert.equal(staleEnd.errorCode, 'invalid-generation')
   const playback = addon.playbackStatus()
   assert.equal(playback.capability, PLAYBACK_CAPABILITY)
   assert.equal(playback.state, 'unloaded')

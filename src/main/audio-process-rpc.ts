@@ -11,7 +11,7 @@ export const AUDIO_RPC_TIMEOUT_MS = 120_000
 
 export const AUDIO_OWNER_METHODS: ReadonlySet<string> = new Set([
   'configureMicrophoneMix', 'stopMicrophoneMix', 'microphoneMixStatus', 'devices', 'hostDevices',
-  'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor', 'playbackProviders', 'playbackCapability',
+  'playbackProviders', 'playbackCapability',
   'preparePlayback', 'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback',
   'seekPlayback', 'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
   'setPlaybackMasterGain', 'playbackStatus', 'measurePlaybackLanes', 'unloadPlayback', 'begin', 'cancel',
@@ -21,7 +21,8 @@ export const AUDIO_BINDING_METHODS: ReadonlySet<string> = new Set([
   'initializeSharedAudio', 'refreshSharedAudioInventory', 'inputDevices', 'beginCapture', 'cancelCapture',
   'captureState', 'captureStats', 'scheduleTrainingCue', 'trainingCueStatus', 'cancelTrainingCues',
   'setTrainingCueGain', 'captureRecording', 'cancelAudioExport', 'recordTake', 'finishTake', 'cancelTake',
-  'playTake', 'stopTake', 'presentationQuery'
+  'playTake', 'stopTake', 'presentationQuery', 'voiceMonitorAvailability', 'beginVoiceMonitor',
+  'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor'
 ])
 
 export interface AudioRequest {

@@ -7,7 +7,7 @@ import { PitchStripMicOwner } from '../audio/pitch-strip-mic'
 import { CONTROLS_W, fmtTime, sanitizePitchHeight, type TimeView } from '../model'
 import { modalCoversApp } from '../model'
 import { midiOfHz, segmentMelodyNotes, toNoteSegments } from '../audio/notes'
-import { audioSafetyBlockedCopy } from '../audio/monitoring'
+import { trainingCleanupAudioBlockedCopy } from '../audio/training-cleanup'
 import { t } from '../i18n'
 
 export type MelodyState =
@@ -30,7 +30,7 @@ export function pitchMicrophoneUnavailableCopy(
   audioLeaseCopy?: string
 ): string | null {
   if (settingsOwnsMic) return t('player.pitch.micUnavailableSettings')
-  if (audioLeaseBlocked) return audioLeaseCopy ?? audioSafetyBlockedCopy(t('settings.subject.microphone'))
+  if (audioLeaseBlocked) return audioLeaseCopy ?? trainingCleanupAudioBlockedCopy()
   return null
 }
 
@@ -64,8 +64,8 @@ interface Props {
   onMicDevice?: (d: MicDevice | null) => void
   /** Settings owns the physical input exclusively while its meter is open. */
   settingsOwnsMic?: boolean
-  /** Another app-level audio owner (currently native headphone monitoring)
-   * holds the microphone/output safety lease. */
+  /** Another app-level audio owner (currently training cleanup) holds the
+   * microphone/output safety lease. */
   audioLeaseBlocked?: boolean
   /** Provenance-specific guidance for the app-level lease, when known. */
   audioLeaseCopy?: string

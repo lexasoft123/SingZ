@@ -92,9 +92,6 @@ export const app = {
   "app.output.switchDenied": "SingZ wasn't allowed to switch playback devices — still on the previous one",
   'app.output.switchFailed': 'Could not switch to that device — still on the previous one',
 
-  // {message} is the monitor's own status text
-  'app.monitor.stopped': 'Headphone monitoring stopped: {message}',
-
   // native engine rejected a live control change and the UI rolled back — {error} is the raw error text
   'app.native.beatNotApplied': 'The native beat-grid update was not applied: {error}',
   'app.native.metronomeNotApplied': 'The native metronome update was not applied: {error}',

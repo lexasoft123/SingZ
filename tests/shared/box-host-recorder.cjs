@@ -10,9 +10,9 @@ const forbiddenOwner = new Set([
   'setPlaybackMasterGain', 'setPlaybackLoop', 'clearPlaybackLoop'
 ])
 const allowedOwner = new Set([
-  'devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus', 'playbackProviders',
+  'devices', 'hostDevices', 'microphoneMixStatus', 'playbackProviders',
   'playbackCapability', 'playbackStatus', 'state', 'stats', 'measurePlaybackLanes',
-  'rendererDetached', 'rendererGone', 'endMonitor'
+  'rendererDetached', 'rendererGone'
 ])
 
 async function startBoxHostRecorder({ socketPath, realSocketPath, maxFrameBytes = REQUEST_FRAME_BYTES, maxRecords = 64 }) {

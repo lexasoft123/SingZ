@@ -54,19 +54,12 @@ import {
 } from './audio/beat'
 import { MultitrackEngine } from './audio/engine'
 import {
-  canRetrySettingsAfterPlaybackRouteFailure,
   playbackOutputUnconfirmedCopy,
   PlaybackOutputArbiter,
   PlaybackOutputRouteSafety,
   PlaybackOutputSelectionError
 } from './audio/output-routing'
-import {
-  DesktopMonitorCoordinator,
-  runSongTransportToggle,
-  songTransportAudioLeaseCopy,
-  SettingsRouteApplicationQueue,
-  type MonitorShellSnapshot
-} from './audio/monitoring'
+import { SettingsRouteApplicationQueue } from './audio/settings-route-queue'
 import { DesktopTrainingMicCapture } from './audio/training-mic'
 import {
   awaitTrainingCleanupExit,
@@ -110,7 +103,6 @@ const RetainedAudioControl = lazy(loadRetainedAudio)
 
 const LyricsEditor = lazy(() => import('./components/LyricsEditor'))
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
-import PersistentMonitorControl from './components/PersistentMonitorControl'
 import type ProjectPickerComponent from './components/ProjectPicker'
 import SettingsModal from './components/SettingsRoute'
 import type WhatsNewComponent from './components/WhatsNew'
@@ -788,13 +780,7 @@ export default function App(): React.JSX.Element {
   /** App-level verdict on the saved output ("not connected", "not allowed"). */
   const [outputStatus, setOutputStatus] = useState<string | null>(null)
   const [outputRouteUnconfirmed, setOutputRouteUnconfirmed] = useState(false)
-  const monitorCoordinatorRef = useRef<DesktopMonitorCoordinator | null>(null)
   const [outputRouteSafety] = useState(() => new PlaybackOutputRouteSafety(
-    () => {
-      const coordinator = monitorCoordinatorRef.current
-      if (coordinator === null) throw new Error('Audio route safety owner is not ready')
-      return coordinator.acquireRouteTransitionLease()
-    },
     setOutputRouteUnconfirmed
   ))
   const [outputArbiter] = useState(() => new PlaybackOutputArbiter(
@@ -1301,97 +1287,9 @@ export default function App(): React.JSX.Element {
     setAudioPrefs((p) => ({ ...p, inputChannel }))
   }, [])
 
-  const changeNativeMonitorOutput = useCallback((nativeMonitorOutputUid: string | undefined) => {
-    setAudioPrefs((p) => sanitizeAudioPrefs({
-      ...p,
-      nativeMonitorOutputUid,
-      nativeMonitorOutputChannels: undefined
-    }))
-  }, [])
-
-  const changeNativeMonitorOutputChannels = useCallback((nativeMonitorOutputChannels: number[]) => {
-    setAudioPrefs((p) => sanitizeAudioPrefs({ ...p, nativeMonitorOutputChannels }))
-  }, [])
-
-  const changeMonitorGain = useCallback((monitorGainDb: number) => {
-    setAudioPrefs((p) => sanitizeAudioPrefs({ ...p, monitorGainDb }))
-  }, [])
-
-  const pauseForNativeMonitor = useCallback(() => {
-    engine.pause()
-    trainingCues.cancel()
-    trainingMic.stop()
-    setMicDevice(null)
-  }, [engine, trainingCues, trainingMic])
-
-  const releaseLegacyOutputForMonitor = useCallback(
-    () => engine.releaseOutputForHeadphoneMonitor(),
-    [engine]
-  )
-  const restoreLegacyOutputAfterMonitor = useCallback(
-    () => engine.restoreOutputAfterHeadphoneMonitor(),
-    [engine]
-  )
-
-  // The native monitor lease belongs to the app shell, not to the Settings
-  // route. Settings contributes its temporary preview stopper, then may close
-  // while this exact coordinator generation remains audible and observable.
-  const [monitorCoordinator] = useState(() => new DesktopMonitorCoordinator({
-    // A song prepared ahead of Play holds the playback lease without playing;
-    // monitoring needs the device, so the prepared graph goes first.
-    api: {
-      ...window.singz,
-      beginMonitor: async (config) => {
-        await engine.discardNativeAhead()
-        return window.singz.beginMonitor(config)
-      }
-    },
-    stopPreview: async () => undefined,
-    pauseSong: pauseForNativeMonitor,
-    releaseLegacyOutput: releaseLegacyOutputForMonitor,
-    restoreLegacyOutput: restoreLegacyOutputAfterMonitor,
-    // Nothing scheduled against the silent sink may become audible merely
-    // because the native/preview leases finally released.
-    beforeRestoreLegacyOutput: pauseForNativeMonitor
-  }))
-  monitorCoordinatorRef.current = monitorCoordinator
   const [settingsRouteApplicationQueue] = useState(
     () => new SettingsRouteApplicationQueue()
   )
-  const [monitorShell, setMonitorShell] = useState<MonitorShellSnapshot>(
-    () => monitorCoordinator.shellSnapshot
-  )
-
-  useEffect(() => monitorCoordinator.subscribeShell((snapshot) => {
-    setMonitorShell(snapshot)
-    if (snapshot.phase === 'error' && !snapshot.hasAudioSafetyLease) {
-      setNotice(t('app.monitor.stopped', { message: snapshot.message }))
-    }
-  }), [monitorCoordinator])
-
-  useEffect(() => {
-    if (monitorShell.phase !== 'active') return
-    let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const poll = async (): Promise<void> => {
-      await monitorCoordinator.refreshStatus()
-      if (!cancelled && monitorCoordinator.snapshot.phase === 'active') {
-        timer = setTimeout(() => void poll(), 120)
-      }
-    }
-    timer = setTimeout(() => void poll(), 120)
-    return () => {
-      cancelled = true
-      if (timer !== null) clearTimeout(timer)
-    }
-  }, [monitorCoordinator, monitorShell.phase])
-
-  // Renderer teardown is the final app-shell boundary. Native ownership is
-  // never persisted across app restart.
-  useEffect(() => () => {
-    void monitorCoordinator.stop()
-  }, [monitorCoordinator])
-
   useEffect(() => {
     const mutation = ++beatMutationSeq.current
     const songVersion = loadSeq.current
@@ -3370,24 +3268,23 @@ export default function App(): React.JSX.Element {
   /** Space / play button: starting with a selection armed targets the selection. */
   const togglePlay = useCallback(() => {
     const trainingCleanupBlocked = trainingCleanupCoordinator.blocksAudio
-    void runSongTransportToggle(
-      engine.playing,
-      monitorCoordinator.hasAudioSafetyLease || trainingCleanupBlocked,
-      () => setNotice(trainingCleanupBlocked
+    // An owner lease may prevent opening a new physical output session, but
+    // an already-playing song keeps its pause/stop path.
+    if (!engine.playing && (trainingCleanupBlocked || outputRouteSafety.unconfirmed)) {
+      setNotice(trainingCleanupBlocked
         ? trainingCleanupSongBlockedCopy()
-        : songTransportAudioLeaseCopy()),
-      () => {
-        if (!engine.playing) {
-          const sel = selectionRef.current
-          if (sel) {
-            const pos = engine.position
-            if (pos < sel.s - 0.05 || pos >= sel.e - 0.05) engine.seek(sel.s)
-          }
-        }
-        engine.toggle()
+        : playbackOutputUnconfirmedCopy())
+      return
+    }
+    if (!engine.playing) {
+      const sel = selectionRef.current
+      if (sel) {
+        const pos = engine.position
+        if (pos < sel.s - 0.05 || pos >= sel.e - 0.05) engine.seek(sel.s)
       }
-    )
-  }, [engine, monitorCoordinator, trainingCleanupCoordinator])
+    }
+    engine.toggle()
+  }, [engine, outputRouteSafety, trainingCleanupCoordinator])
   const togglePlayRef = useRef(togglePlay)
   togglePlayRef.current = togglePlay
 
@@ -3990,12 +3887,6 @@ export default function App(): React.JSX.Element {
         )}
         <div className="header-right no-drag">
           <Suspense fallback={null}><RetainedAudioControl songLoaded={song !== null} /></Suspense>
-          <PersistentMonitorControl
-            snapshot={monitorShell}
-            routeUnconfirmed={outputRouteUnconfirmed}
-            onOpenSettings={openAudioSettings}
-            onStop={() => monitorCoordinator.stop()}
-          />
           {appSection === 'songs' && phase === 'ready' && (
             <button
               type="button"
@@ -4105,12 +3996,8 @@ export default function App(): React.JSX.Element {
           inputChannel={audioPrefs.inputChannel}
           onMicDevice={setMicDevice}
           settingsOwnsMic={showSettings}
-          audioLeaseBlocked={
-            monitorShell.hasAudioSafetyLease || trainingCleanupPhase !== 'idle'
-          }
-          audioLeaseCopy={trainingCleanupPhase !== 'idle'
-            ? trainingCleanupAudioBlockedCopy()
-            : undefined}
+          audioLeaseBlocked={trainingCleanupPhase !== 'idle'}
+          audioLeaseCopy={trainingCleanupAudioBlockedCopy()}
           onSetupChange={changeDesktopTrainingSetup}
           trainingSound={audioPrefs.trainingSound ?? 'piano'}
           onTrainingSoundChange={changeTrainingSound}
@@ -4189,12 +4076,8 @@ export default function App(): React.JSX.Element {
                   inputChannel={audioPrefs.inputChannel}
                   onMicDevice={setMicDevice}
                   settingsOwnsMic={showSettings}
-                  audioLeaseBlocked={
-                    monitorShell.hasAudioSafetyLease || trainingCleanupPhase !== 'idle'
-                  }
-                  audioLeaseCopy={trainingCleanupPhase !== 'idle'
-                    ? trainingCleanupAudioBlockedCopy()
-                    : undefined}
+                  audioLeaseBlocked={trainingCleanupPhase !== 'idle'}
+                  audioLeaseCopy={trainingCleanupAudioBlockedCopy()}
                 />
               )}
             </div>
@@ -4358,26 +4241,14 @@ export default function App(): React.JSX.Element {
           onChangeInput={changeInput}
           onMigrateNativeInput={migrateNativeInput}
           onChangeInputChannel={changeInputChannel}
-          onChangeNativeMonitorOutput={changeNativeMonitorOutput}
-          onChangeNativeMonitorOutputChannels={changeNativeMonitorOutputChannels}
-          onChangeMonitorGain={changeMonitorGain}
           onChangeNativePlayback={(enabled) =>
             setAudioPrefs((prefs) => ({ ...prefs, nativePlayback: enabled }))}
           onChangeNativeAudioProvider={(provider) =>
             setAudioPrefs((prefs) => sanitizeAudioPrefs({ ...prefs, nativeAudioProvider: provider }))}
           nativePlaybackLeaseBlocked={nativePlaybackLeaseBlocked}
-          monitorCoordinator={monitorCoordinator}
           externalAudioLeaseBlocked={trainingCleanupPhase !== 'idle'}
           externalAudioLeaseCopy={trainingCleanupSettingsBlockedCopy()}
           routeApplicationQueue={settingsRouteApplicationQueue}
-          emergencyStopMonitoring={() => monitorCoordinator.stop()}
-          hasMonitorSafetyLease={() => monitorCoordinator.hasAudioSafetyLease}
-          canRetrySettingsAfterUnsafeStop={() =>
-            canRetrySettingsAfterPlaybackRouteFailure(
-              outputRouteSafety.unconfirmed,
-              monitorCoordinator.hasRouteOnlySafetyLease
-            )
-          }
           outputRouteUnconfirmed={outputRouteUnconfirmed}
           onRetryOutputRoute={reconcileOutput}
           outputStatus={outputStatus}

@@ -95,9 +95,6 @@ export const app: Translation<typeof en> = {
   'app.output.switchDenied': 'SingZ 未获得切换播放设备的权限——仍在使用之前的设备',
   'app.output.switchFailed': '无法切换到该设备——仍在使用之前的设备',
 
-  // {message} is the monitor's own status text
-  'app.monitor.stopped': '耳机返听已停止：{message}',
-
   // native engine rejected a live control change and the UI rolled back — {error} is the raw error text
   'app.native.beatNotApplied': '原生节拍网格更新未生效：{error}',
   'app.native.metronomeNotApplied': '原生节拍器更新未生效：{error}',

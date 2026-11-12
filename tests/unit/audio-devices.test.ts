@@ -130,22 +130,22 @@ describe('sanitizeAudioPrefs', () => {
     expect(sanitizeAudioPrefs({ referenceVolume: 'loud' }).referenceVolume).toBeUndefined()
   })
 
-  it('persists only native monitor routing and bounded gain, never enabled or headphone state', () => {
+  it('ignores and never re-emits the retired headphone-monitor fields', () => {
+    // Older builds wrote these; they are dropped on read, so a rollback to an
+    // older build simply falls back to that build's own defaults.
     expect(sanitizeAudioPrefs({
       nativeMonitorOutputUid: 'coreaudio:usb',
       nativeMonitorOutputChannels: [1, 3],
       monitorGainDb: -12,
       monitorEnabled: true,
       wiredHeadphonesConfirmed: true
-    })).toEqual({
-      nativeMonitorOutputUid: 'coreaudio:usb',
-      nativeMonitorOutputChannels: [1, 3],
-      monitorGainDb: -12
-    })
+    })).toEqual({})
     expect(sanitizeAudioPrefs({
-      nativeMonitorOutputChannels: [1, 1],
-      monitorGainDb: 8
-    })).toEqual({ monitorGainDb: 0 })
-    expect(sanitizeAudioPrefs({ monitorGainDb: -90 })).toEqual({ monitorGainDb: -60 })
+      outputId: 'speakers',
+      nativeInputUid: 'coreaudio:usb',
+      inputChannel: 1,
+      nativeMonitorOutputUid: 'coreaudio:usb',
+      monitorGainDb: -12
+    })).toEqual({ outputId: 'speakers', nativeInputUid: 'coreaudio:usb', inputChannel: 1 })
   })
 })

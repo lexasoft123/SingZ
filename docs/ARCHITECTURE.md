@@ -40,7 +40,7 @@ without a second device owner. See the
 
 For the Desktop utility path, the Electron main process owns the service lifetime and file authorization.
 Playback and relay survive a renderer reload; renderer-owned microphone
-analysis and headphone monitoring release on detach. Destroying the owning
+analysis releases on detach. Destroying the owning
 webContents releases all of its native ownership; app quit closes the service.
 A replacement screen shows top-bar Stop controls for retained song playback
 and active relay audio, even before a song document has been reopened. This is not a system daemon: restarting Electron main stops audio,

@@ -239,7 +239,7 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
   stop(): Promise<void>
 } {
   const localBox = process.env.SINGZ_SURFACE === 'box' && !process.env.SINGZ_BOX_AUDIO_SOCKET
-  const rendererMethods = new Set(['beginMonitor', 'endMonitor', 'setMonitorGain', 'configureMicrophoneMix', 'stopMicrophoneMix',
+  const rendererMethods = new Set(['configureMicrophoneMix', 'stopMicrophoneMix',
     'preparePlayback', 'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback', 'seekPlayback',
     'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback'])
   const rendererId = (id: number): number => localBox ? id + 1000 : id

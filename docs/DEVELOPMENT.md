@@ -34,7 +34,7 @@ playback, renderer reload, stop/unload, pending-prepare cancellation, and helper
 crash. A successful mocked RPC test does not qualify hardware buffer sizes.
 
 Renderer reload retains song/relay audio but releases private microphone
-analysis and monitoring. The replacement screen exposes top-bar Stop controls
+analysis. The replacement screen exposes top-bar Stop controls
 for audio that remains active without a loaded song. Destroying the owning
 webContents releases its native ownership; app quit tears down the helper. A helper crash or
 control timeout fails closed and needs an app restart; status polls must not

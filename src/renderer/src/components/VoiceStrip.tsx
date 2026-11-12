@@ -1,11 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
-import { meterFraction, primaryState, recordBlock, type VoiceController, type VoiceModel } from '../audio/voice-take'
+import { meterFraction, monitorDbToFader, primaryState, recordBlock, type VoiceController, type VoiceModel } from '../audio/voice-take'
+import type { VoiceMonitorReason } from '../../../shared/voice-take'
 import { t, type Key } from '../i18n'
 import { blockText, clock, dbText, sgn } from './voice-format'
 import { useVoiceModel } from './voice-host'
 import { useVoiceStrings } from './voice-strings'
 import './voice-strip.css'
+
+const REASON_KEY: Record<VoiceMonitorReason, Key> = {
+  'route-separate-devices': 'player.voice.monReasonSeparateDevices',
+  'route-latency': 'player.voice.monReasonLatency',
+  'route-bluetooth': 'player.voice.monReasonBluetooth',
+  'route-wireless': 'player.voice.monReasonWireless',
+  'no-input': 'player.voice.monReasonNoInput',
+  permission: 'player.voice.monReasonPermission',
+  'output-not-native': 'player.voice.monReasonOutputNotNative',
+  platform: 'player.voice.monReasonPlatform',
+  'device-lost': 'player.voice.monReasonDeviceLost',
+  error: 'player.voice.monReasonError'
+}
+const monitorReasonText = (m: VoiceModel): string => (m.monitor.avail === 'ok' || !m.monitor.reason ? '' : t(REASON_KEY[m.monitor.reason]))
 
 const METER_SEGS = 24
 const HOT_FROM = 17
@@ -115,7 +130,9 @@ function statusLine(
           ? t('player.voice.errBusy')
           : m.error === 'no-bridge'
             ? t('player.voice.errNoBridge')
-            : t('player.voice.errGeneric')
+            : m.error === 'monitor'
+              ? t('player.voice.errMonitor')
+              : t('player.voice.errGeneric')
     return { cls: 'err', text, action: { label: t('player.voice.retry'), run: () => c.retry() } }
   }
   if (state === 'permission-needed') {
@@ -135,7 +152,12 @@ function statusLine(
   // A take stopped by a seek or a pause reads as that first, then as a review.
   if (m.stoppedBy === 'seek' && state === 'take-review') return { cls: 'warn', text: t('player.voice.msgSeekStopped') }
   if (state === 'take-review') return { cls: '', text: t('player.voice.msgReview') }
+  if (m.monitor.on && m.monitor.warnings.length > 0) {
+    return { cls: 'warn', text: t('player.voice.monitorWarning', { text: m.monitor.warnings[0]! }) }
+  }
+  if (m.monitor.on) return { cls: '', text: t('player.voice.msgMonitoring') }
   if (state === 'armed') return { cls: '', text: t('player.voice.msgArmed') }
+  if (m.monitor.avail !== 'ok') return { cls: 'warn', text: monitorReasonText(m) }
   return null
 }
 
@@ -187,6 +209,9 @@ export default function VoiceStrip({
         : 'player.voice.emptyIdle'
 
   const armed = m.armed || rec
+  const monitorWhy = monitorReasonText(m)
+  const monitorUnavailable = !m.monitor.on && (m.monitor.avail !== 'ok' || m.inputMissing || m.perm === 'denied')
+  const monitorLabel = m.monitor.on ? t('player.voice.monitorOn') : t('player.voice.monitorOff')
   const takeInfo = !take
     ? ''
     : rec
@@ -201,18 +226,33 @@ export default function VoiceStrip({
       <div className="vs-controls">
         <div className="vs-top">
           <h2 className="vs-name">{t('player.voice.name')}</h2>
-          {/* Monitoring ships later (M2): present so the strip keeps its final shape, but inert. */}
+          {m.monitor.on && m.monitor.latency && (
+            <span
+              className="vs-badge"
+              title={t(m.monitor.latency.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', {
+                frames: m.monitor.latency.bufferFrames
+              })}
+            >
+              {t('player.voice.monitorBadge', { ms: Math.round(m.monitor.latency.roundTripMs) })}
+            </span>
+          )}
           <button
             type="button"
-            className="vs-ib vs-mon"
-            aria-disabled="true"
-            aria-pressed="false"
-            aria-label={t('player.voice.monitorLater')}
-            title={t('player.voice.monitorLater')}
-            onClick={(e) => e.preventDefault()}
+            className={`vs-ib vs-mon${m.monitor.on ? ' active' : ''}`}
+            aria-pressed={m.monitor.on}
+            aria-disabled={monitorUnavailable}
+            aria-label={monitorLabel}
+            aria-describedby={monitorUnavailable ? 'voice-monitor-why' : undefined}
+            title={monitorUnavailable ? monitorWhy : monitorLabel}
+            onClick={() => void controller.toggleMonitor()}
           >
             <SvgIcon>{ICON.phones}</SvgIcon>
           </button>
+          {monitorUnavailable && (
+            <span id="voice-monitor-why" className="vs-sr-only">
+              {monitorWhy}
+            </span>
+          )}
         </div>
         <label className="vs-sr-only" htmlFor="voice-input">
           {t('player.voice.input')}
@@ -273,10 +313,13 @@ export default function VoiceStrip({
               type="range"
               min={0}
               max={100}
-              value={m.level}
-              aria-label={t('player.voice.level')}
-              aria-valuetext={`${m.level}%`}
-              onChange={(e) => controller.setLevel(Number(e.target.value))}
+              value={m.monitor.on ? monitorDbToFader(m.monitorGainDb) : m.level}
+              aria-label={m.monitor.on ? t('player.voice.monitorLevel') : t('player.voice.level')}
+              title={m.monitor.on ? t('player.voice.monitorLevel') : t('player.voice.level')}
+              aria-valuetext={m.monitor.on ? `${m.monitorGainDb} dB` : `${m.level}%`}
+              onChange={(e) =>
+                m.monitor.on ? controller.setMonitorFader(Number(e.target.value)) : controller.setLevel(Number(e.target.value))
+              }
             />
           </div>
         </div>
@@ -291,7 +334,7 @@ export default function VoiceStrip({
           onClick={() => controller.resetClip()}
         />
         <div className="vs-mwrap">
-          <Meter controller={controller} live={m.armed || rec} />
+          <Meter controller={controller} live={m.armed || rec || m.monitor.on} />
         </div>
       </div>
 

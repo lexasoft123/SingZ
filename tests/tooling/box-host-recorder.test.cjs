@@ -184,9 +184,9 @@ test('an existing non-private parent is rejected without changing its mode', uni
 test('all read-only owner queries, routing state and private capture cleanup are allowed', unixOnly, async t => {
   const { recorder, connect } = await fixture(t)
   const client = await connect()
-  const methods = ['devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus', 'playbackProviders',
+  const methods = ['devices', 'hostDevices', 'microphoneMixStatus', 'playbackProviders',
     'playbackCapability', 'playbackStatus', 'state', 'stats', 'measurePlaybackLanes',
-    'rendererDetached', 'rendererGone', 'endMonitor']
+    'rendererDetached', 'rendererGone']
   recorder.start()
   for (const method of methods)
     await client.call('owner', method, [{ private: 'argument-is-not-retained' }])

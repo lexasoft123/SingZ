@@ -118,5 +118,67 @@ export const VOICE_IPC = {
   remove: 'voice:remove',
   level: 'voice:level',
   arm: 'voice:arm',
-  disarm: 'voice:disarm'
+  disarm: 'voice:disarm',
+  monitorAvailability: 'voice:monitor-availability',
+  monitorSet: 'voice:monitor-set',
+  monitorGain: 'voice:monitor-gain',
+  monitorState: 'voice:monitor-state'
 } as const
+
+// ---- Live monitoring (milestone 2, ADR 0014 + decision record) ----
+// The monitor is a second small duplex host on the SAME physical device as the song output (mic in, mono
+// voice out). Routes whose input and output are different devices are unavailable in v1.
+
+/** Buffer target and the largest accepted IO buffer, in frames at the device rate. */
+export const VOICE_MONITOR_TARGET_FRAMES = 32
+export const VOICE_MONITOR_MAX_FRAMES = 256
+
+export type VoiceMonitorReason =
+  | 'route-separate-devices' // input and output are different physical devices
+  | 'route-latency' // the device cannot reach VOICE_MONITOR_MAX_FRAMES
+  | 'route-bluetooth'
+  | 'route-wireless'
+  | 'no-input'
+  | 'permission'
+  | 'output-not-native' // the song does not play through the native output
+  | 'platform' // not supported on this platform yet
+  | 'device-lost'
+  | 'error'
+
+export interface VoiceMonitorLatency {
+  sampleRate: number
+  requestedFrames: number
+  /** Negotiated IO buffer read back from the device. */
+  bufferFrames: number
+  inputDeviceFrames: number
+  outputDeviceFrames: number
+  /** 2 x buffer + input (latency + safety) + output (latency + safety), at the device rate. */
+  roundTripFrames: number
+  roundTripMs: number
+  /** 'estimated' until measured against a loopback for this device (spike). */
+  source: 'estimated' | 'measured'
+}
+
+export interface VoiceMonitorState {
+  available: true | { reason: VoiceMonitorReason; detail?: string }
+  on: boolean
+  gainDb: number
+  latency: VoiceMonitorLatency | null
+  /** Soft notes from the native layer (e.g. buffer could not be restored); never fatal. */
+  warnings: string[]
+}
+
+export interface VoiceMonitorAvailabilityRequest {
+  input: { deviceName: string; channelIndex: number }
+}
+
+export interface VoiceMonitorSetRequest {
+  input: { deviceName: string; channelIndex: number }
+  on: boolean
+  /** Monitor gain in dB, clamped main-side to [-60, +12]. */
+  gainDb?: number
+}
+
+export interface VoiceMonitorGainRequest {
+  gainDb: number
+}

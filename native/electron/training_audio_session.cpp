@@ -93,8 +93,6 @@ napi_value initialize(napi_env env, napi_callback_info info) {
   }
 #endif
   std::lock_guard<std::mutex> lock(control);
-  if (ownership && ownership->snapshot().kind == NativeAudioOwnerKind::Monitor)
-    return failure(env,"Native monitoring currently owns the audio output");
   if (!provider.empty()) {
     std::string reason;
     auto backend = factory ? factory(provider,&reason) : nullptr;
@@ -131,8 +129,6 @@ napi_value schedule(napi_env env, napi_callback_info info) {
     for (size_t frame=0;frame<length;++frame) if (!std::isfinite(samples[frame])) return failure(env,"Non-finite training PCM");
   }
   std::lock_guard<std::mutex> lock(control);
-  if (ownership && ownership->snapshot().kind == NativeAudioOwnerKind::Monitor)
-    return failure(env,"Native monitoring currently owns the audio output");
   if (!mixer.canSchedule(frames,count)) return failure(env,"Training PCM capacity exceeded");
   std::vector<std::vector<float>> planes;
   for(uint32_t channel=0;channel<count;++channel) planes.emplace_back(sources[channel],sources[channel]+frames);
@@ -167,9 +163,7 @@ napi_value playTake(napi_env env, napi_callback_info info) {
   if (present && (!scalar(env,args[0],"tempo",&tempo) || tempo<=0 || tempo>8)) return failure(env,"Invalid recorded voice take tempo");
   std::lock_guard<std::mutex> lock(control);
   // Like training cues, takes join the shared output without claiming the
-  // song/capture lease. The exclusive Settings monitor still blocks them.
-  if (ownership && ownership->snapshot().kind == NativeAudioOwnerKind::Monitor)
-    return failure(env,"Native monitoring currently owns the audio output");
+  // song/capture lease.
   if (mode == "with-song" && !presentationProvider.load(std::memory_order_acquire))
     return failure(env,"Song playback is unavailable");
   auto ready = sharedAudioService().ensureOutput();

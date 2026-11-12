@@ -7,12 +7,18 @@
  * as ports, which is also what the tests swap for fakes. `useVoiceController`
  * (components/VoiceStrip.tsx) binds it to React.
  *
- * M1 scope: record a take over the song, listen back, keep or discard. The
- * `monitoring-*` states exist in the type and in `primaryState`, but nothing
- * sets them yet: monitoring is inert until M2.
+ * Records a take over the song, listens back, keeps or discards it, and (M2)
+ * monitors live: monitoring is a second duplex host in main; this controller toggles it,
+ * routes the fader to its gain, and releases it with everything else.
  */
 import type {
   VoiceArmRequest,
+  VoiceMonitorAvailabilityRequest,
+  VoiceMonitorGainRequest,
+  VoiceMonitorLatency,
+  VoiceMonitorReason,
+  VoiceMonitorSetRequest,
+  VoiceMonitorState,
   VoiceArmResult,
   VoiceInputLevel,
   VoicePlayTakeRequest,
@@ -42,7 +48,7 @@ export const VOICE_STATES = [
 export type VoiceState = (typeof VOICE_STATES)[number]
 
 export type VoiceListenMode = 'take' | 'with-song'
-export type VoiceErrorKind = 'device-lost' | 'busy' | 'error' | 'no-bridge'
+export type VoiceErrorKind = 'device-lost' | 'busy' | 'error' | 'no-bridge' | 'monitor'
 
 /** What the strip needs of the preload bridge (`window.singz.voiceTakes`, WP4). */
 export interface VoiceTakeApi {
@@ -57,6 +63,11 @@ export interface VoiceTakeApi {
   /** Open the chosen input so the meter is live (armed); disarm releases it. */
   arm(req: VoiceArmRequest): Promise<VoiceArmResult>
   disarm(): Promise<unknown>
+  /** Live monitoring (M2). Each answers with the monitor's current state. */
+  monitorAvailability(req: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState>
+  monitorSet(req: VoiceMonitorSetRequest): Promise<VoiceMonitorState>
+  monitorGain(req: VoiceMonitorGainRequest): Promise<VoiceMonitorState>
+  monitorState(): Promise<VoiceMonitorState>
 }
 
 /** The slice of MultitrackEngine the strip drives. */
@@ -117,7 +128,16 @@ export interface VoiceModel {
   perm: 'unknown' | 'granted' | 'denied'
   inputMissing: boolean
   /** Monitoring is inert in M1: always 'ok' and off. */
-  monitor: { avail: 'ok' | 'latency' | 'route'; on: boolean }
+  monitor: {
+    /** 'latency' and 'route' are the two unavailable states; `reason` keeps the precise cause. */
+    avail: 'ok' | 'latency' | 'route'
+    reason: VoiceMonitorReason | null
+    on: boolean
+    latency: VoiceMonitorLatency | null
+    warnings: string[]
+  }
+  /** Monitor level in dB (-60..+12). The take level is `level`; the fader edits one or the other. */
+  monitorGainDb: number
   error: VoiceErrorKind | null
   /** Why the last take ended without the singer pressing stop. */
   stoppedBy: 'seek' | 'auto' | null
@@ -144,6 +164,8 @@ export type AnnounceKey =
   | 'announceGranted'
   | 'announceRetried'
   | 'announceClipReset'
+  | 'announceMonitorOn'
+  | 'announceMonitorOff'
 
 export const INITIAL_VOICE_MODEL: VoiceModel = {
   songId: null,
@@ -153,7 +175,9 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   listen: null,
   perm: 'unknown',
   inputMissing: false,
-  monitor: { avail: 'ok', on: false },
+  // Monitoring is never persisted as on: every controller starts off.
+  monitor: { avail: 'ok', reason: null, on: false, latency: null, warnings: [] },
+  monitorGainDb: 0,
   error: null,
   stoppedBy: null,
   take: null,
@@ -169,7 +193,7 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
 }
 
 /** Spec §4.1 precedence: error > recording > playing > review > permission >
- *  input-missing > monitoring-* > armed > idle. A kept take is resolved, so it
+ *  input-missing > monitoring-on > armed > monitoring-unavailable-* > idle. A kept take is resolved, so it
  *  no longer holds the strip in take-review. */
 export function primaryState(m: VoiceModel): VoiceState {
   if (m.error) return 'error-recoverable'
@@ -178,10 +202,12 @@ export function primaryState(m: VoiceModel): VoiceState {
   if (m.take && !m.take.kept) return 'take-review'
   if (m.perm === 'denied') return 'permission-needed'
   if (m.inputMissing) return 'input-missing'
+  if (m.monitor.on) return 'monitoring-on'
+  // Armed outranks the unavailable flags (a built-in mic is unavailable for monitoring
+  // all the time, and the strip should still read as armed).
+  if (m.armed) return 'armed'
   if (m.monitor.avail === 'latency') return 'monitoring-unavailable-latency'
   if (m.monitor.avail === 'route') return 'monitoring-unavailable-route'
-  if (m.monitor.on) return 'monitoring-on'
-  if (m.armed) return 'armed'
   return 'idle'
 }
 
@@ -206,6 +232,7 @@ export const CLIP_DB = -0.1
 const SEEK_JUMP_SEC = 0.75
 const STORAGE_KEY = 'singz.voice.input'
 const SONG_START_TIMEOUT_MS = 3000
+const MONITOR_STATE_EVERY = 10 // level polls (~50 ms each) per monitor-state check
 const BRIDGE_MISSING = 'voice bridge unavailable'
 
 /**
@@ -245,6 +272,15 @@ export class VoiceController {
   private songEpoch = 0
   private disposed = false
   private startToken = 0
+  private monitorToken = 0
+  private availToken = 0
+  private monitorPending = false
+  /** The input was armed by turning monitoring on (so turning it off releases it), not by the singer. */
+  private armedByMonitor = false
+  private monitorOpen = false
+  private monitorPollCount = 0
+  private monitorGainSending = false
+  private monitorGainDirty = false
   private armToken = 0
   private armOpen = false
   private listenSettings: ListenSettings | null = null
@@ -328,6 +364,7 @@ export class VoiceController {
       recording: false
     })
     if (songId === null) return
+    void this.refreshMonitorAvailability()
     try {
       const takes = await this.deps.api.list(songId)
       if (epoch !== this.songEpoch || this.disposed || this.model.take) return
@@ -345,6 +382,7 @@ export class VoiceController {
     this.startToken++
     this.armToken++
     this.releaseArm()
+    const monitorReleased = this.releaseMonitor() // sync part now; awaited last
     // A listen ends synchronously here, before any await: stems restored, song
     // paused, listen state cleared (stopListening does all three).
     if (this.pendingListen) await this.cancelPendingListen()
@@ -354,6 +392,7 @@ export class VoiceController {
       await this.deps.api.recordStop().catch(() => undefined)
       await this.forceDisarm()
     }
+    await monitorReleased
   }
 
   /** Re-read capture devices; also the "Check again" action. */
@@ -371,6 +410,7 @@ export class VoiceController {
     } catch {
       this.set({ inputs: [], inputMissing: true })
     }
+    void this.refreshMonitorAvailability()
   }
 
   async allowMic(): Promise<void> {
@@ -380,7 +420,12 @@ export class VoiceController {
   }
 
   selectInput(id: string): void {
+    const changed = id !== this.model.input
     this.set({ input: id })
+    // A different input is a different route: monitoring stops, availability is re-asked.
+    if (changed) {
+      void this.releaseMonitor().then(() => this.refreshMonitorAvailability())
+    }
     try {
       this.deps.storage?.setItem(STORAGE_KEY, id)
     } catch {
@@ -407,47 +452,63 @@ export class VoiceController {
   async arm(): Promise<void> {
     const m = this.model
     if (m.armed) {
+      // An explicit disarm also ends monitoring (the input is being released), and
+      // takes over an arm that monitoring had made.
+      this.armedByMonitor = false
       this.armToken++
+      if (m.monitor.on) await this.releaseMonitor()
       this.set({ armed: false, ...this.say('announceDisarmed') })
       this.releaseArm()
       return
     }
-    if (recordBlock(m) !== null) return
+    await this.armInput(true)
+  }
+
+  /**
+   * Open the chosen input (armed = input open, meter live). With `respectBlock`
+   * the take/listen/error blocks of Record apply; monitoring arms without them
+   * (it works with a take waiting). Failures map to the existing recoverable
+   * states and return false.
+   */
+  private async armInput(respectBlock: boolean): Promise<boolean> {
+    const m = this.model
+    if (respectBlock ? recordBlock(m) !== null : m.songId === null) return false
     if (m.perm !== 'granted') {
       const ok = await this.deps.askMicAccess().catch(() => false)
       if (!ok) {
         this.set({ perm: 'denied' })
-        return
+        return false
       }
       this.set({ perm: 'granted' })
       await this.refreshInputs()
-      if (recordBlock(this.model) !== null) return
+      if (respectBlock ? recordBlock(this.model) !== null : this.model.inputMissing) return false
     }
-    // Armed means the input is open and the meter live: ask main to open it,
-    // and only then show the strip armed.
+    // Main opens the input first; only then does the strip show armed.
     const token = ++this.armToken
     const input = this.model.inputs.find((i) => i.id === this.model.input)
     let res: VoiceArmResult
     try {
       res = await this.deps.api.arm({ input: { deviceName: input?.label ?? '', channelIndex: 0 } })
     } catch (err) {
-      if (token !== this.armToken) return
+      if (token !== this.armToken) return false
       this.set(err instanceof Error && err.message === BRIDGE_MISSING ? { error: 'no-bridge' } : { error: 'error' })
-      return
+      return false
     }
     if (token !== this.armToken) {
       // Disarmed or torn down while main was opening the input.
       if (res.ok) void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
-      return
+      return false
     }
     if (!res.ok) {
       if (res.reason === 'permission') this.set({ perm: 'denied' })
       else if (res.reason === 'no-input') this.set({ inputMissing: true })
       else this.set({ error: res.reason === 'busy' ? 'busy' : 'error' })
-      return
+      return false
     }
     this.armOpen = true
     this.set({ armed: true, clipped: false, ...this.say('announceArmed') })
+    void this.refreshMonitorAvailability()
+    return true
   }
 
   /** Release the armed input in main (idempotent; the take path keeps it open). */
@@ -604,7 +665,8 @@ export class VoiceController {
       res = { ok: false, reason: 'error' }
     }
     // The take is over, so the input is no longer held open for it.
-    void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
+    if (!this.model.monitor.on) void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
+    if (res.reason === 'device-lost') void this.releaseMonitor()
     if (this.disposed) return
     if (res.ok && res.take) {
       this.set({
@@ -872,9 +934,157 @@ export class VoiceController {
     }
   }
 
+  // ── live monitoring (M2) ──
+  private monitorRequestInput(): { deviceName: string; channelIndex: number } {
+    const input = this.model.inputs.find((i) => i.id === this.model.input)
+    return { deviceName: input?.label ?? '', channelIndex: 0 }
+  }
+
+  /** Fold main's answer into the model: availability, on, latency, warnings. */
+  private applyMonitorState(st: VoiceMonitorState): void {
+    const wasOn = this.model.monitor.on
+    const available = st.available === true
+    const reason = st.available === true ? null : st.available.reason
+    const avail = available ? 'ok' : reason === 'route-latency' ? 'latency' : 'route'
+    const on = available && st.on
+    this.monitorOpen = on
+    this.set({
+      monitor: { avail, reason, on, latency: on ? st.latency : null, warnings: on ? st.warnings : [] },
+      ...(wasOn !== on ? this.say(on ? 'announceMonitorOn' : 'announceMonitorOff') : {})
+    })
+  }
+
+  /** Ask main whether this input can be monitored; on input change, arm, song load and device change, not on a timer. */
+  async refreshMonitorAvailability(): Promise<void> {
+    // A toggle in flight owns the monitor state; its own reply carries availability.
+    if (this.model.songId === null || this.model.monitor.on || this.monitorPending) return
+    const token = ++this.availToken
+    try {
+      const st = await this.deps.api.monitorAvailability({ input: this.monitorRequestInput() })
+      if (token !== this.availToken || this.disposed || this.model.monitor.on || this.monitorPending) return
+      this.applyMonitorState({ ...st, on: false })
+    } catch {
+      // Availability is advisory; a toggle attempt will report the real failure.
+    }
+  }
+
+  async toggleMonitor(): Promise<void> {
+    const m = this.model
+    if (m.monitor.on) {
+      await this.releaseMonitor()
+      return
+    }
+    if (this.monitorPending || m.songId === null || m.monitor.avail !== 'ok' || m.inputMissing || m.perm === 'denied') return
+    const token = ++this.monitorToken
+    this.monitorPending = true
+    let armedHere = false
+    const stale = (): boolean => token !== this.monitorToken || this.disposed
+    const undoArm = (): void => {
+      if (!armedHere) return
+      armedHere = false
+      this.armedByMonitor = false
+      if (this.model.armed) this.set({ armed: false })
+      void this.forceDisarm()
+    }
+    try {
+      // Monitoring needs the input open (meter live): arm it unless the singer already did.
+      if (!this.model.armed) {
+        const ok = await this.armInput(false)
+        if (stale()) return
+        if (!ok) return
+        armedHere = true
+      }
+      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb })
+      if (stale()) {
+        // Torn down while main was opening it: do not leave it on.
+        if (st.on) void Promise.resolve(this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: false })).catch(() => undefined)
+        return
+      }
+      this.applyMonitorState(st)
+      if (st.available === true && st.on) {
+        this.armedByMonitor = armedHere
+      } else {
+        undoArm()
+        if (st.available === true) this.set({ error: 'monitor' })
+      }
+    } catch (err) {
+      if (stale()) return
+      this.monitorOpen = false
+      undoArm()
+      this.set({ error: err instanceof Error && err.message === BRIDGE_MISSING ? 'no-bridge' : 'monitor' })
+    } finally {
+      if (token === this.monitorToken) this.monitorPending = false
+    }
+  }
+
+  /** Turn monitoring off and release it in main. Safe to call when it is not on. */
+  async releaseMonitor(): Promise<void> {
+    this.monitorToken++
+    this.monitorPending = false
+    const ownArm = this.armedByMonitor
+    this.armedByMonitor = false
+    if (!this.monitorOpen && !this.model.monitor.on) {
+      if (ownArm) void this.forceDisarm()
+      return
+    }
+    this.monitorOpen = false
+    const was = this.model.monitor.on
+    // Release the input too if monitoring was what opened it and no take needs it.
+    const disarm = ownArm && !this.model.recording
+    this.set({
+      monitor: { ...this.model.monitor, on: false, latency: null, warnings: [] },
+      ...(disarm && this.model.armed ? { armed: false } : {}),
+      ...(was ? this.say('announceMonitorOff') : {})
+    })
+    await Promise.resolve(this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: false })).catch(() => undefined)
+    if (disarm) await this.forceDisarm()
+  }
+
+  /** The strip fader while monitoring: live monitor gain (dB), coalesced so only the latest is sent. */
+  setMonitorFader(v: number): void {
+    this.set({ monitorGainDb: monitorFaderToDb(v) })
+    if (!this.model.monitor.on) return
+    if (this.monitorGainSending) {
+      this.monitorGainDirty = true
+      return
+    }
+    void this.sendMonitorGain()
+  }
+
+  private async sendMonitorGain(): Promise<void> {
+    this.monitorGainSending = true
+    do {
+      this.monitorGainDirty = false
+      try {
+        await this.deps.api.monitorGain({ gainDb: this.model.monitorGainDb })
+      } catch {
+        // A lost gain update is not worth an error; the next one resends.
+      }
+    } while (this.monitorGainDirty && this.model.monitor.on)
+    this.monitorGainSending = false
+  }
+
+  /** Main ended the monitor by itself (device lost, route change): reflect it, never leave it shown on. */
+  private async pollMonitorState(): Promise<void> {
+    try {
+      const st = await this.deps.api.monitorState()
+      if (this.disposed || !this.model.monitor.on) return
+      if (st.available !== true || !st.on) {
+        const lost = st.available !== true && st.available.reason === 'device-lost'
+        this.applyMonitorState(st)
+        if (lost) this.set({ error: 'monitor' })
+      } else {
+        this.set({ monitor: { ...this.model.monitor, latency: st.latency, warnings: st.warnings } })
+      }
+    } catch {
+      /* the next poll retries */
+    }
+  }
+
   async pollLevel(): Promise<void> {
     const m = this.model
-    if (!(m.armed || m.recording)) return
+    if (!(m.armed || m.recording || m.monitor.on)) return
+    if (m.monitor.on && ++this.monitorPollCount % MONITOR_STATE_EVERY === 0) void this.pollMonitorState()
     let lv: VoiceInputLevel | null = null
     const issuedMs = this.now()
     try {
@@ -944,7 +1154,7 @@ export class VoiceController {
       clearInterval(this.timer)
       this.timer = null
     }
-    const wantLevel = (m.armed || m.recording) && !this.disposed
+    const wantLevel = (m.armed || m.recording || m.monitor.on) && !this.disposed
     if (wantLevel && !this.levelTimer) {
       this.levelTimer = setInterval(() => void this.pollLevel(), 50)
     } else if (!wantLevel && this.levelTimer) {
@@ -995,6 +1205,13 @@ export function songSpan(take: Pick<VoiceTake, 'durationSec' | 'tempo' | 'timeli
   return span
 }
 
+/** The strip fader (0..100) as monitor gain: -60 dB .. +12 dB in half-dB steps; 0 dB sits at 83. */
+export function monitorFaderToDb(v: number): number {
+  const clamped = Math.max(0, Math.min(100, v))
+  return Math.round((clamped / 100 * 72 - 60) * 2) / 2
+}
+export const monitorDbToFader = (db: number): number => Math.round(((Math.max(-60, Math.min(12, db)) + 60) / 72) * 100)
+
 /** dBFS (-60..0) to a 0..1 meter fraction. */
 export const meterFraction = (db: number): number => Math.max(0, Math.min(1, (db + 60) / 60))
 
@@ -1021,7 +1238,11 @@ export function createBridgeVoiceApi(
     remove: call('remove'),
     level: call('level'),
     arm: call('arm'),
-    disarm: call('disarm')
+    disarm: call('disarm'),
+    monitorAvailability: call('monitorAvailability'),
+    monitorSet: call('monitorSet'),
+    monitorGain: call('monitorGain'),
+    monitorState: call('monitorState')
   }
 }
 

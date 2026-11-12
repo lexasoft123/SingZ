@@ -273,9 +273,9 @@ notarized `SingZ-<version>-mac-x64.dmg` and `-mac-arm64.dmg`.
 Those two proving runs predate `singz-capture.node`, so they do not prove its
 Hardened Runtime load. Release acceptance now also requires launching a real
 Developer ID-signed, notarized SingZ build and opening Settings → Audio until
-the Headphone monitoring section's **Audio interface playback** picker lists
-the native output devices. That picker is populated only by the packaged
-addon's `audioHostDevices` export through the real app process, so success
+the **Microphone** picker lists the native input devices with their channel
+counts. That picker is populated only by the packaged addon's `inputDevices`
+export through the real app process, so success
 proves the same-team nested signature passes library validation; the separate
 Chromium microphone picker and a signature-only check do not. The existing
 capture package checks remain complementary:

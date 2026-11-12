@@ -220,53 +220,9 @@ export const player: Translation<typeof en> = {
   'player.pitch.micMatch': 'Сравнить пение',
 
   // ── DSP graph visualization (native playback diagnostics panel) ──
-  'player.dspGraph.runtimeGraph': 'Граф работы',
-  'player.dspGraph.songAndReference': 'Нативный граф песни и эталона',
-  'player.dspGraph.monitorChain': 'Нативный монитор',
-  'player.dspGraph.structuredUnavailable': 'Граф недоступен',
-  'player.dspGraph.bufferPending': 'Буфер: ждём',
-  'player.dspGraph.chooseInput': 'Выберите вход',
-  'player.dspGraph.chooseOutput': 'Выберите выход',
-  'player.dspGraph.deviceKind': 'Устройство',
-  'player.dspGraph.analyzerKind': 'Анализ',
-  'player.dspGraph.processorKind': 'Процессор',
-  'player.dspGraph.routerKind': 'Роутер',
-  'player.dspGraph.input': 'Вход',
-  'player.dspGraph.output': 'Выход',
-  'player.dspGraph.preMeter': 'Уровень до',
-  'player.dspGraph.preFace': 'До',
-  'player.dspGraph.postMeter': 'Метр после',
-  'player.dspGraph.postFace': 'Пост',
-  'player.dspGraph.gain': 'Гейн',
-  'player.dspGraph.channelMap': 'Маппинг',
-  'player.dspGraph.mapFace': 'Мап',
-  'player.dspGraph.limiter': 'Лимитер',
-  'player.dspGraph.limitFace': 'Лимит',
-  'player.dspGraph.beforeProcessing': 'До обработки',
-  'player.dspGraph.afterLimiter': 'Пост-лимитер',
-  'player.dspGraph.preLevelLabel': 'Уровень DSP-графа до обработки',
-  'player.dspGraph.postLevelLabel': 'Уровень DSP после лимитера',
-  'player.dspGraph.modulesAriaLabel': 'Модули DSP-графа',
-  'player.dspGraph.activeModulesAriaLabel': 'Активные модули и связи DSP-графа песни',
-  'player.dspGraph.activeConnectionsAriaLabel': 'Активные связи DSP-графа песни',
-  'player.dspGraph.unavailableExplain':
-    'Детали недоступны — нативное воспроизведение не дало корректный снимок композиции.',
-  'player.dspGraph.floatNativePath': 'Нативный Float32',
-  'player.dspGraph.stateRunning': 'Активен',
-  'player.dspGraph.stateChangingRoute': 'Смена маршрута',
-  'player.dspGraph.stateFault': 'Остановлен: ошибка',
-  'player.dspGraph.stateReady': 'Готов',
-  'player.dspGraph.stateBlocked': 'Путь закрыт',
 
   // ── model.ts: fallback label for an added track with no name left after cleanup ──
   'player.track.untitled': 'Трек',
 
   // ── DSP graph card: format line and the transport badge (Settings › Audio) ──
-  'player.dspGraph.framesMaximum': 'макс. кадров: {n}',
-  'player.dspGraph.nodesLinks': 'узлов: {nodes} · связей: {links}',
-  'player.dspGraph.transport.stopped': 'остановлен',
-  'player.dspGraph.transport.pre-roll': 'отсчёт',
-  'player.dspGraph.transport.playing': 'играет',
-  'player.dspGraph.transport.paused': 'пауза',
-  'player.dspGraph.transport.completed': 'завершён'
 }

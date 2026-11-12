@@ -53,7 +53,7 @@ first-class client beside song playback. LoopZ stays the Box router. Reasons:
    one lock-free journal append. Works on all desktop routes.
 2. **Monitoring while the song plays, macOS first.** Lift the ALSA gate, add
    rate handling, ramped gain and limiter (from ADR 0010), shorten the delay,
-   remove monitor exclusivity (`parkOutput`, `native_audio_ownership.h`), delete
+   remove desktop monitor exclusivity (retain `parkOutput` for mobile), delete
    the Settings preview. Touches zCore (capture buffer-size request); Box must
    re-pin LoopZ to the same zCore. Then Windows via zCore's host.
 3. Takes list per song with match %, "Add to song as track", phones.

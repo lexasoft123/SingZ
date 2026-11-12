@@ -43,7 +43,7 @@ class SharedAudioService final {
   std::string providerId() const;
   std::string activeOutputUid() const;
   uint64_t outputRouteGeneration() const noexcept;
-  // Monitoring has an exclusive direct host until it joins this service.
+  // Mobile may park the shared output while another route owns the device.
   void parkOutput() noexcept;
   void shutdown() noexcept;
   std::unique_ptr<AudioHostBackend> playbackBackend(

@@ -5,18 +5,6 @@ export type PlaybackOutputId = string | undefined
 /** The status line while the playback route is unconfirmed, in the current language. */
 export const playbackOutputUnconfirmedCopy = (): string => t('settings.output.unconfirmedStatus')
 
-/** Settings may recover an unsafe boundary through the playback-output UI
- * only when the exact app-lifetime output-route owner is still retained and
- * no preview, native session, or pending stop shares its coordinator lease.
- * An ordinary Settings route-application lease is deliberately insufficient:
- * it has no provenance proving that reopening playback settings can repair it. */
-export function canRetrySettingsAfterPlaybackRouteFailure(
-  outputRouteUnconfirmed: boolean,
-  hasRouteOnlySafetyLease: boolean
-): boolean {
-  return outputRouteUnconfirmed && hasRouteOnlySafetyLease
-}
-
 export type PlaybackOutputReconcileResult =
   | { kind: 'applied'; outputId: PlaybackOutputId }
   | { kind: 'missing'; outputId: string }
@@ -27,7 +15,8 @@ export class PlaybackOutputSelectionError extends Error {
     readonly causeValue: unknown,
     readonly current: boolean,
     /** The direct rollback could not prove the committed physical route. The
-     * caller must await a current reconcile before releasing its route lease. */
+     * caller must await a current reconcile before treating the route as
+     * confirmed. */
     readonly repairRequired = false,
     /** Intent generation restored by the failed rollback. Only this exact
      * generation may be repaired; a newer direct pick always wins. */
@@ -44,22 +33,14 @@ interface PlaybackOutputArbiterDependencies {
   commit: (outputId: PlaybackOutputId) => void
 }
 
-interface PlaybackOutputRouteSafetyLease {
-  release: () => void
-}
-
-/** App-lifetime fail-closed ownership for a playback route that could not be
- * confirmed after both rollback and authoritative repair failed. Settings'
- * ordinary operation lease may then settle/unmount, but this exact retained
- * lease continues blocking new audio owners until a current route operation
- * positively confirms a sink. Repeated failures reuse it rather than leaking
- * leases. */
+/** App-lifetime record of a playback route that could not be confirmed after
+ * both rollback and authoritative repair failed. It stays unconfirmed (and the
+ * app refuses to start new song playback) until a current route operation
+ * positively confirms a sink. Repeated failures are idempotent. */
 export class PlaybackOutputRouteSafety {
-  private retainedLease: PlaybackOutputRouteSafetyLease | null = null
   private unconfirmedValue = false
 
   constructor(
-    private readonly acquireLease: () => PlaybackOutputRouteSafetyLease,
     private readonly onUnconfirmedChange: (unconfirmed: boolean) => void
   ) {}
 
@@ -68,7 +49,6 @@ export class PlaybackOutputRouteSafety {
   }
 
   retainUnconfirmed(): void {
-    if (this.retainedLease === null) this.retainedLease = this.acquireLease()
     if (this.unconfirmedValue) return
     this.unconfirmedValue = true
     this.onUnconfirmedChange(true)
@@ -78,14 +58,9 @@ export class PlaybackOutputRouteSafety {
    * selection that returned true. Stale/superseded operations deliberately do
    * not cross this boundary. */
   confirmCurrentRoute(): void {
-    const retainedLease = this.retainedLease
-    if (retainedLease === null && !this.unconfirmedValue) return
-    this.retainedLease = null
-    if (this.unconfirmedValue) {
-      this.unconfirmedValue = false
-      this.onUnconfirmedChange(false)
-    }
-    retainedLease?.release()
+    if (!this.unconfirmedValue) return
+    this.unconfirmedValue = false
+    this.onUnconfirmedChange(false)
   }
 }
 

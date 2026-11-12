@@ -228,3 +228,5 @@ body.modal-open .vs-rec-t.recording .vs-rec-core { animation-play-state: paused;
 .vs-rec-t:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .voice-host { display: contents; }
 .voice-record-slot { display: contents; }
+.vs-ib.vs-mon.active { color: #12100d; background: var(--voice); }
+.vs-badge { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--voice) 45%, transparent); color: var(--voice); background: color-mix(in srgb, var(--voice) 10%, transparent); white-space: nowrap; }

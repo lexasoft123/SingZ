@@ -686,18 +686,7 @@ export type DesktopAudioHostInventoryResult =
       error: string
     }
 
-export interface DesktopMonitorConfig {
-  inputDeviceUid: string
-  outputDeviceUid: string
-  inputChannels: number[]
-  outputChannels: number[]
-  sampleRate: number
-  bufferFrames: number
-  maximumFrames: number
-  exclusive: boolean
-}
-
-export interface DesktopMonitorFormat {
+export interface AudioHostFormat {
   sampleRate: number
   maximumFrames: number
   nominalBufferFrames: number
@@ -709,79 +698,11 @@ export interface DesktopMonitorFormat {
 }
 
 /** Named provider components. This is deliberately not a round-trip total. */
-export interface DesktopMonitorLatency {
+export interface AudioHostLatency {
   inputDeviceFrames: number
   outputDeviceFrames: number
   bufferFrames: number
   externalRouteFrames: number
-}
-
-export type DesktopMonitorErrorCode =
-  | 'none'
-  | 'invalid-generation'
-  | 'already-running'
-  | 'invalid-configuration'
-  | 'platform-not-ready'
-  | 'unsupported-route'
-  | 'native-audio-busy'
-  | 'graph-failure'
-  | 'host-failure'
-  | 'queue-full'
-
-interface DesktopMonitorResultBase {
-  ownershipGeneration: string
-  state: AudioHostStateName
-  format: DesktopMonitorFormat
-  latency: DesktopMonitorLatency
-}
-
-export type DesktopMonitorResult =
-  | (DesktopMonitorResultBase & {
-      ok: true
-      errorCode: 'none'
-      error: ''
-    })
-  | (DesktopMonitorResultBase & {
-      ok: false
-      errorCode: Exclude<DesktopMonitorErrorCode, 'none'>
-      error: string
-    })
-
-export interface DesktopMonitorMeter {
-  peak: number
-  rms: number
-  frames: string
-}
-
-/** Scalar telemetry only. PCM and native graph ownership never cross IPC. */
-export interface DesktopMonitorStatus {
-  active: boolean
-  enabled: boolean
-  deviceLost: boolean
-  ownershipGeneration: string
-  gainDb: number
-  state: AudioHostStateName
-  error: string
-  pre: DesktopMonitorMeter
-  post: DesktopMonitorMeter
-  format: DesktopMonitorFormat
-  latency: DesktopMonitorLatency
-  routeGeneration: string
-  streamGeneration: string
-  callbacks: string
-  renderedFrames: string
-  xruns: string
-  deadlineMisses: string
-  renderFailures: string
-  adapterRenderFailures: number
-  terminalRenderFailures: number
-  adapterLastStatusCode: number
-  /** The `detail` beside that code — which check the graph refused on, where
-   *  the code alone collapses a dozen refusals into one value. */
-  adapterLastStatusDetail: number
-  parameterOverflows: number
-  nonFiniteSamples: number
-  rejectedBlocks: number
 }
 
 export type DesktopPlaybackProvider = 'coreaudio' | 'wasapi' | 'asio' | 'alsa'
@@ -1030,8 +951,8 @@ export interface DesktopPlaybackResult {
   error: string
   generation: string
   state: DesktopPlaybackState
-  format: Omit<DesktopMonitorFormat, 'sampleFormat' | 'outputClockMaster' | 'accessMode'>
-  latency: DesktopMonitorLatency
+  format: Omit<AudioHostFormat, 'sampleFormat' | 'outputClockMaster' | 'accessMode'>
+  latency: AudioHostLatency
   cleanupComplete?: boolean
   retainedBytes?: string
   physicalOwnershipRetained?: boolean
@@ -1234,7 +1155,7 @@ export interface DesktopPlaybackStatus {
   rejectedBlocks: number
   error: string
   format: DesktopPlaybackResult['format']
-  latency: DesktopMonitorLatency
+  latency: AudioHostLatency
   lanes: DesktopPlaybackLaneStatus[]
   /** The addon's own media layer (zcore's decodedAudioCapabilityTag). */
   mediaCodecTag: string
@@ -1564,15 +1485,6 @@ export interface SingzApi {
   onCaptureWindow(cb: (window: CaptureAnalysisWindow) => void): () => void
   /** Full-duplex native host inventory. UIDs remain distinct from Chromium ids. */
   audioHostDevices(provider?: DesktopPlaybackProvider): Promise<DesktopAudioHostInventoryResult>
-  /** Starts muted. The main-process owner mints the monotonic native generation. */
-  beginMonitor(config: DesktopMonitorConfig): Promise<DesktopMonitorResult>
-  setMonitorGain(
-    ownershipGeneration: string,
-    gainDb: number,
-    enabled: boolean
-  ): Promise<DesktopMonitorResult>
-  monitorStatus(): Promise<DesktopMonitorStatus>
-  endMonitor(ownershipGeneration: string): Promise<DesktopMonitorResult>
   desktopPlaybackProviders(): Promise<DesktopPlaybackProviderInfo[]>
   desktopPlaybackCapability(): Promise<DesktopPlaybackRuntimeCapability>
   prepareDesktopPlayback(

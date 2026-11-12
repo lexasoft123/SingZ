@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "Na-save na aparato ng pag-play na hindi nakakonekta  gamit ang default na sistema",
   "app.output.switchDenied": "SingZ ay hindi pinahihintulutan upang i-switch playback device  pa rin sa nakaraang isa",
   "app.output.switchFailed": "Hindi ko na mai-switch sa device na iyon  pa rin sa nakaraang isa",
-  "app.monitor.stopped": "Nagtatigil ang pag-monitor ng mga headphone: {message}",
   "app.native.beatNotApplied": "Hindi na inilapat ang update ng native beat-grid: {error}",
   "app.native.metronomeNotApplied": "Hindi na inilapat ang update ng metronome ng bansa: {error}",
   "app.native.transposeNotApplied": "Hindi na inilapat ang native transpose update: {error}",

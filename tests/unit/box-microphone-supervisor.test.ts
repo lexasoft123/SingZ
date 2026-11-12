@@ -20,7 +20,7 @@ function fixture(document: MicrophoneDocument | null = doc()) {
     cancel: vi.fn(async (id, next) => { expect(id).toBe(2); expect(next).toBe(generation); calls.push('cancel'); generation = ''; return { ok: true, cancelled: true } }),
     state: vi.fn(async () => ({ state, ownershipGeneration: generation, error: '' })),
     stats: vi.fn(async () => ({ microphoneLevels: { ...meters, ownershipGeneration: generation } }) as unknown as CaptureStats),
-    beginMonitor: vi.fn(), configureMicrophoneMix: vi.fn(), routingRequest: vi.fn()
+    configureMicrophoneMix: vi.fn(), routingRequest: vi.fn()
   } satisfies MicrophoneAnalysisOwner & Record<string, unknown>
   const store = { load: vi.fn(async () => structuredClone(document)), save: vi.fn(async (_value: MicrophoneDocument) => { calls.push('save') }) }
   const create = () => new MicrophoneAnalysisSupervisor({ epoch: 'epoch', owner: owner as unknown as MicrophoneAnalysisOwner, store, now: Date.now })
@@ -47,7 +47,7 @@ describe('host microphone supervisor', () => {
     expect((await s.snapshot()).levels).toBeNull()
     f.meters.valid = false
     expect((await s.snapshot()).levels).toBeNull()
-    for (const method of [f.owner.beginMonitor, f.owner.configureMicrophoneMix, f.owner.routingRequest]) expect(method).not.toHaveBeenCalled()
+    for (const method of [f.owner.configureMicrophoneMix, f.owner.routingRequest]) expect(method).not.toHaveBeenCalled()
     await s.dispose()
     expect(f.calls).toEqual(['begin', 'cancel'])
     expect(vi.getTimerCount()).toBe(0)
@@ -86,8 +86,8 @@ describe('host microphone supervisor', () => {
     const absent = fixture()
     expect(() => expect(absent.owner.begin).toHaveBeenCalledOnce()).toThrow()
     const audible = fixture(); await start(audible)
-    audible.owner.beginMonitor()
-    expect(() => expect(audible.owner.beginMonitor).not.toHaveBeenCalled()).toThrow()
+    audible.owner.configureMicrophoneMix()
+    expect(() => expect(audible.owner.configureMicrophoneMix).not.toHaveBeenCalled()).toThrow()
   })
   it('resolves first available default, clips channels, and persists only a successful default', async () => {
     const f = fixture(null); f.devices()[0].channels = 1
