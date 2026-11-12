@@ -140,10 +140,18 @@ const SONGS: [DemoSong; 12] = [
 #[derive(Clone, PartialEq, Eq)]
 struct CatalogSong {
     title: String,
+    /// Lowercase title, built once when the catalog arrives: a search keystroke
+    /// then filters without allocating a lowercase copy of every title.
+    lower: String,
     saved: String,
     lyrics: bool,
     project_dir: Option<std::path::PathBuf>,
     stems: usize,
+}
+impl CatalogSong {
+    fn new(title: String, saved: String, lyrics: bool, project_dir: Option<std::path::PathBuf>, stems: usize) -> Self {
+        Self { lower: title.to_lowercase(), title, saved, lyrics, project_dir, stems }
+    }
 }
 
 pub struct LibraryScreen {
@@ -253,13 +261,7 @@ impl LibraryScreen {
             songs: if crate::integration::fixture_mode() {
                 SONGS
                     .iter()
-                    .map(|s| CatalogSong {
-                        title: s.title.into(),
-                        saved: s.saved.into(),
-                        lyrics: s.lyrics,
-                        project_dir: None,
-                        stems: 6,
-                    })
+                    .map(|s| CatalogSong::new(s.title.into(), s.saved.into(), s.lyrics, None, 6))
                     .collect()
             } else {
                 vec![]
@@ -322,14 +324,15 @@ impl LibraryScreen {
         // reset restores its ordinary twelve-song collection, not an empty grid.
         self.songs = (0..if native { 48 } else { SONGS.len() }).map(|index| {
             let song = &SONGS[index % SONGS.len()];
-            CatalogSong {
-                title: if native {format!("{} · {}",song.title,index / SONGS.len() + 1)} else {song.title.into()},
-                saved: song.saved.into(),
-                lyrics: song.lyrics,
-                project_dir: native.then(||root.join(format!("guide-project-{index:02}"))),
-                stems: 6,
-            }
+            CatalogSong::new(
+                if native {format!("{} · {}",song.title,index / SONGS.len() + 1)} else {song.title.into()},
+                song.saved.into(),
+                song.lyrics,
+                native.then(||root.join(format!("guide-project-{index:02}"))),
+                6,
+            )
         }).collect();
+        self.prune_card_focus();
         self.drive = crate::drive_state::Snapshot { configured, ..Default::default() };
         cx.notify();
     }
@@ -501,16 +504,13 @@ impl LibraryScreen {
     ) {
         let songs = projects
             .into_iter()
-            .map(|p| CatalogSong {
-                title: p.name,
-                saved: catalog_date(&p.saved),
-                lyrics: p.has_lyrics,
-                project_dir: Some(p.dir),
-                stems: p.lanes.len(),
-            })
+            .map(|p| CatalogSong::new(p.name, catalog_date(&p.saved), p.has_lyrics, Some(p.dir), p.lanes.len()))
             .collect::<Vec<_>>();
+        #[cfg(feature = "ui-tests")]
+        CATALOG_DELIVERIES.fetch_add(1, std::sync::atomic::Ordering::Release);
         if self.songs != songs {
             self.songs = songs;
+            self.prune_card_focus();
             self.backdrop_revision = self.backdrop_revision.wrapping_add(1);
             cx.notify();
         }
@@ -522,6 +522,21 @@ impl LibraryScreen {
     #[cfg(feature = "ui-tests")]
     pub fn project_open_bounds(&self, dir: &std::path::Path) -> Option<Bounds<Pixels>> {
         self.project_bounds.borrow().get(dir).copied()
+    }
+    /// Catalog size, filter result and grid scroll for the large-library driver (Q-14).
+    #[cfg(feature = "ui-tests")]
+    pub fn long_state(&self) -> serde_json::Value {
+        let grid = self.scroll.bounds();
+        let filtered = self.filtered_indices();
+        serde_json::json!({
+            "projects": self.songs.len(), "matches": filtered.len(), "query": self.query,
+            "firstMatch": filtered.first().map(|i| self.songs[*i].title.clone()),
+            "firstMatchDir": filtered.first().and_then(|i| self.songs[*i].project_dir.clone()),
+            "grid": {"x":f32::from(grid.left()),"y":f32::from(grid.top()),"width":f32::from(grid.size.width),"height":f32::from(grid.size.height),
+                "scrollTop":-f32::from(self.scroll.offset().y),"maxScroll":f32::from(self.scroll.max_offset().y)},
+            "page": {"height":f32::from(self.page_scroll.bounds().size.height),"scrollTop":-f32::from(self.page_scroll.offset().y),
+                "maxScroll":f32::from(self.page_scroll.max_offset().y)},
+        })
     }
     #[cfg(feature = "ui-tests")]
     pub fn project_snapshot(&self) -> serde_json::Value {
@@ -546,7 +561,14 @@ impl LibraryScreen {
     }
     fn filtered_indices(&self)->Vec<usize> {
         let query=self.query.trim().to_lowercase();
-        self.songs.iter().enumerate().filter(|(_,song)|query.is_empty()||song.title.to_lowercase().contains(&query)).map(|(i,_)|i).collect()
+        self.songs.iter().enumerate().filter(|(_,song)|query.is_empty()||song.lower.contains(&query)).map(|(i,_)|i).collect()
+    }
+    /// Forget focus handles of projects that left the catalog. Done when the catalog
+    /// changes, not on every frame: rebuilding a path set of every project per frame
+    /// was a cost that grew with the library.
+    fn prune_card_focus(&mut self) {
+        let existing=(0..self.songs.len()).map(|index|self.song_key(index)).collect::<std::collections::HashSet<_>>();
+        self.card_focus.borrow_mut().retain(|(key,_),_|existing.contains(key));
     }
     fn card_focus_handle(&self,key:std::path::PathBuf,delete:bool,cx:&mut Context<Self>)->FocusHandle {
         self.card_focus.borrow_mut().entry((key,delete)).or_insert_with(||cx.focus_handle().tab_stop(true)).clone()
@@ -846,11 +868,13 @@ impl Render for LibraryScreen {
         }
         self.drive_bounds.borrow_mut().clear();
         let indices=self.filtered_indices();
-        let visible=indices.iter().map(|index|self.song_key(*index)).collect::<std::collections::HashSet<_>>();
-        let existing=(0..self.songs.len()).map(|index|self.song_key(index)).collect::<std::collections::HashSet<_>>();
-        let lost_focus=self.card_focus.borrow().iter().any(|((key,_),f)|f.is_focused(window)&&!visible.contains(key));
-        if lost_focus {self.focus_search(window,cx);}
-        self.card_focus.borrow_mut().retain(|(key,_),_|existing.contains(key));
+        #[cfg(feature = "ui-tests")]
+        {
+            RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(mut shown) = LAST_RENDERED_QUERY.lock() { shown.clone_from(&self.query); }
+        }
+        let focused_card=self.card_focus.borrow().iter().find(|(_,f)|f.is_focused(window)).map(|((key,_),_)|key.clone());
+        if focused_card.is_some_and(|key|!indices.iter().any(|index|self.song_key(*index)==key)) {self.focus_search(window,cx);}
         let width = (f32::from(window.viewport_size().width) - 80.)
             .min(880.)
             .max(240.);
@@ -1201,3 +1225,18 @@ mod drive_progress_tests {
         assert!(!drive_keeps_progress(&finishing));
     }
 }
+
+/// Catalog events delivered to any library so far (Q-14 times a reload by it).
+#[cfg(feature = "ui-tests")]
+static CATALOG_DELIVERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "ui-tests")]
+pub fn catalog_deliveries() -> u64 { CATALOG_DELIVERIES.load(std::sync::atomic::Ordering::Acquire) }
+/// The query of the most recent library render: lets a driver tell which draw first showed a keystroke.
+#[cfg(feature = "ui-tests")]
+static LAST_RENDERED_QUERY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+#[cfg(feature = "ui-tests")]
+pub fn last_rendered_query() -> String { LAST_RENDERED_QUERY.lock().map(|q| q.clone()).unwrap_or_default() }
+#[cfg(feature = "ui-tests")]
+static RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "ui-tests")]
+pub fn renders() -> u64 { RENDERS.load(std::sync::atomic::Ordering::Relaxed) }

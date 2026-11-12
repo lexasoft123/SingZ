@@ -340,6 +340,8 @@ mod ui_stem_export;
 #[cfg(feature = "ui-tests")]
 mod ui_open_steps;
 #[cfg(feature = "ui-tests")]
+mod ui_long_library;
+#[cfg(feature = "ui-tests")]
 mod ui_bar_edit;
 #[cfg(feature = "ui-tests")]
 mod ui_first_run;
@@ -6455,6 +6457,12 @@ fn main() {
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_LYRICS_ALIGN_TEST"){
             assert!(background&&std::env::var_os("SINGZ_MUTE").is_some());
             ui_lyrics_align::run(window_handle,view.clone(),directory.into(),cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_LONG_LIBRARY_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1")
+                && gated_env!("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref() == Some(std::ffi::OsStr::new("1")));
+            ui_long_library::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_OPEN_STEPS_TEST") {

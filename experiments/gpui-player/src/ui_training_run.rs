@@ -5,7 +5,9 @@ pub(super) fn draw(window: &mut Window, cx: &mut App) {
     for _ in 0..3 {
         window.simulate_next_frame(cx);
         window.refresh();
-        let _ = window.draw(cx);
+        // A real frame loop clears the element arena after every draw (gpui window.rs, request_frame).
+        // Dropping the token leaked every frame's element tree: ~85 MB per song open in a 20-open run.
+        window.draw(cx).clear(cx);
     }
 }
 /// A fresh profile opens What's New once a project loads and its backdrop swallows

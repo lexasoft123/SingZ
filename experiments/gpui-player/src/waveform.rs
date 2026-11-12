@@ -68,6 +68,21 @@ pub fn metrics() -> Metrics {
     }
 }
 
+/// Per-lane shape of the admitted project envelopes (Q-14): length, maximum, and
+/// where the signal first reaches half its maximum as a fraction of the lane, so
+/// a driver can prove a loud tail sits at the end of a very long song.
+#[cfg(feature = "ui-tests")]
+pub fn peaks_report() -> serde_json::Value {
+    PROJECT_PEAKS.with_borrow(|peaks| {
+        serde_json::Value::Array(peaks.iter().flatten().enumerate().filter(|(_, lane)| lane.len() > 1).map(|(slot, lane)| {
+            let max = lane.iter().copied().fold(0f32, f32::max);
+            let first = lane.iter().position(|v| *v >= max * 0.5).unwrap_or(0);
+            let body = lane[..first].iter().copied().fold(0f32, f32::max);
+            serde_json::json!({"slot": slot, "len": lane.len(), "max": max, "bodyMax": body, "halfMaxFraction": first as f64 / lane.len() as f64})
+        }).collect())
+    })
+}
+
 thread_local! {
     static PROJECT_PEAKS: RefCell<Option<[Arc<Vec<f32>>;crate::tracks::LANE_SLOTS]>> = const {RefCell::new(None)};
     static PROJECT_REVISION: Cell<u64> = const { Cell::new(0) };
