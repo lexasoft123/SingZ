@@ -30,6 +30,7 @@ import {
   isPublished,
   parentsQuery,
   plainName,
+  planOrphanFolders,
   planProject,
   PUBLISH_ID_KEY,
   PUBLISH_STATE_KEY,
@@ -39,6 +40,7 @@ import {
   type ProjectPlan
 } from './sync-plan'
 import { readSettings, writeSettings } from './settings'
+import { driveLineage, inertLineage, type DriveLineage } from './drive-lineage'
 import { syncLog } from './sync-log'
 import type { ProjectGraphHash } from '../shared/types'
 import {
@@ -334,7 +336,12 @@ function rowsOf(plan: ProjectPlan, fresh?: Map<string, string>): CatalogFile[] {
   return out
 }
 
-async function ensureFolder(name: string, parentId: string | null): Promise<string> {
+const ensureFolder = async (name: string, parentId: string | null): Promise<string> =>
+  (await findOrCreateFolder(name, parentId)).id
+
+/** `created` is true only when THIS call made the folder — the one positive
+ *  proof of ownership a name-paired folder can never give (drive-lineage.ts). */
+async function findOrCreateFolder(name: string, parentId: string | null): Promise<{ id: string; created: boolean }> {
   const q = parentId
     ? `name='${qStr(name)}' and mimeType='${FOLDER}' and '${parentId}' in parents and trashed=false`
     : `name='${qStr(name)}' and mimeType='${FOLDER}' and trashed=false`
@@ -344,13 +351,62 @@ async function ensureFolder(name: string, parentId: string | null): Promise<stri
   // A phone's song waiting to be taken in is never ours to sync into: the
   // sync would trash its stems as orphans of whatever project we push.
   const usable = found.files.find((f) => !isPublished(f))
-  if (usable) return usable.id
+  if (usable) return { id: usable.id, created: false }
   const created = await api<{ id: string }>('/drive/v3/files?fields=id', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, mimeType: FOLDER, ...(parentId ? { parents: [parentId] } : {}) })
   })
-  return created.id
+  return { id: created.id, created: true }
+}
+
+/** The signed-in Google account, as Drive names it. Remembered per refresh
+ *  token, so a clean sync costs no extra request and a new sign-in asks again. */
+/** Null when Drive will not say: the run then still syncs, but owns nothing,
+ *  records nothing and removes nothing (see gdriveSync). Cancellation still
+ *  ends the run. */
+let accountMemo: { refresh: string; key: string } | null = null
+async function accountKey(): Promise<string | null> {
+  const refresh = readTokens()?.refresh ?? ''
+  if (accountMemo && accountMemo.refresh === refresh) return accountMemo.key
+  try {
+    const about = await api<{ user?: { permissionId?: unknown } }>('/drive/v3/about?fields=user(permissionId)')
+    const key = about.user?.permissionId
+    if (typeof key !== 'string' || !key) throw new Error('no permissionId')
+    accountMemo = { refresh, key }
+    return key
+  } catch (error) {
+    syncController?.signal.throwIfAborted()
+    syncLog('error', `could not tell which Google account this is (${error instanceof Error ? error.message : String(error)}) — nothing will be removed from Drive this run`)
+    return null
+  }
+}
+
+/**
+ * The member ids that prove a folder this install did not create is now its
+ * own — or null. Called right after one publishing run's uploads all
+ * succeeded, with the folder's COMPLETE roster as Drive lists it now (nested
+ * folders included). It holds exactly what this library published, every
+ * managed file at its local checksum, and nothing else: no unmanaged member, no
+ * other folder, nothing inside stems/ but stems — and every member is one THIS
+ * run wrote (or, for stems/, created). Bytes that merely match prove nothing:
+ * another desktop may have written them (drive-lineage.ts).
+ */
+function provenRoster(top: LocalEntry[], stems: LocalEntry[], remoteTop: RemoteFile[],
+  remoteStems: RemoteFile[] | null, written: Set<string>): string[] | null {
+  const same = (mine: LocalEntry[], theirs: RemoteFile[]): boolean =>
+    theirs.length === mine.length && new Set(theirs.map((f) => f.name)).size === theirs.length &&
+    mine.every((m) => theirs.some((f) => f.name === m.name && f.md5Checksum === m.md5 && f.size === String(m.size)))
+  const folders = remoteTop.filter((f) => f.mimeType === FOLDER)
+  if (folders.some((f) => f.name !== 'stems') || folders.length > 1) return null
+  if (!same(top, remoteTop.filter((f) => f.mimeType !== FOLDER))) return null
+  if (remoteStems) {
+    if (remoteStems.some((f) => f.mimeType === FOLDER) || !same(stems, remoteStems)) return null
+  } else if (stems.length > 0 || folders.length > 0) {
+    return null
+  }
+  const members = [...remoteTop, ...(remoteStems ?? [])].map((f) => f.id)
+  return members.every((id) => written.has(id)) ? members : null
 }
 
 
@@ -515,7 +571,8 @@ async function adoptPublished(
   remoteTop: RemoteFile[],
   localDirs: string[],
   onProgress?: (msg: string, frac: number) => void,
-  warnings: string[] = []
+  warnings: string[] = [],
+  lineage?: DriveLineage
 ): Promise<string[]> {
   const adopted: string[] = []
 
@@ -533,6 +590,9 @@ async function adoptPublished(
   for (const [folderId, dir] of marked) {
     const f = remoteTop.find((r) => r.id === folderId && r.mimeType === FOLDER)
     if (f && isPublished(f)) {
+      // Ours from here on: recorded before the tag, so a deletion here can
+      // still reach Drive even if the run stops right after tagging.
+      lineage?.grant(f.id)
       await finishAdoption(f, root, dir)
       syncLog('adopt', `${dir}: finished taking it in from the phone`)
     } else {
@@ -641,6 +701,8 @@ async function adoptPublished(
       syncLog('error', `${dir}: not taken in from the phone yet — ${why}; left on Drive for the next sync`)
       continue
     }
+    // verified file by file above: a positive proof, like creating it
+    lineage?.grant(f.id)
     await finishAdoption(f, root, dir)
     adopted.push(dir)
     syncLog('adopt', `${dir}: taken in from the phone${dir !== from ? ` (it was "${from}" on Drive)` : ''}`)
@@ -782,6 +844,66 @@ async function graphEntry(projectDir: string, ref: unknown): Promise<LocalEntry 
   return { name: 'graph.json', path, mime: 'application/json', md5, size: bytes.length }
 }
 
+/** The catalog on Drive now, by dir. A row with a malformed file is dropped,
+ *  and a dir listed twice drops both; an unreadable catalog has no rows to
+ *  keep. A failed request still fails the run, so a network blip can never
+ *  shrink the catalog. */
+async function catalogRows(id: string): Promise<Map<string, CatalogFile[]>> {
+  const token = await accessToken()
+  const text = await responseWithDeadline(`${API()}/drive/v3/files/${id}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` }
+  }, async (res) => {
+    if (!res.ok) throw new Error(`Drive API ${res.status} reading catalog.json`)
+    return await res.text()
+  })
+  const out = new Map<string, CatalogFile[]>()
+  const twice = new Set<string>()
+  try {
+    const parsed = JSON.parse(text) as { format?: unknown; projects?: unknown }
+    if (parsed.format !== 2 || !Array.isArray(parsed.projects)) return out
+    for (const p of parsed.projects as { dir?: unknown; files?: unknown }[]) {
+      if (typeof p?.dir !== 'string' || !Array.isArray(p.files)) continue
+      if (out.has(p.dir)) twice.add(p.dir)
+      const files: CatalogFile[] = []
+      for (const f of p.files as Record<string, unknown>[]) {
+        const size = typeof f?.size === 'number' ? String(f.size) : f?.size
+        if (typeof f?.id !== 'string' || typeof f.name !== 'string' || typeof size !== 'string' || typeof f.md5Checksum !== 'string') {
+          files.length = 0
+          break
+        }
+        files.push({ id: f.id, name: f.name, size, md5Checksum: f.md5Checksum })
+      }
+      if (files.length) out.set(p.dir, files)
+    }
+  } catch {
+    /* not JSON: nothing to carry */
+  }
+  for (const dir of twice) out.delete(dir)
+  return out
+}
+
+/** A row (another writer's, or this run's own) stands only when it describes
+ *  the folder exactly as Drive lists it now: same file ids, checksums and
+ *  sizes, and no judgeable file left unnamed. A row from another
+ *  generation of the project (its document changed and the catalog has not
+ *  caught up) is not ours to repair — it is left out, and phones walk it. */
+function carriedRow(row: CatalogFile[] | undefined, kids: RemoteFile[]): CatalogFile[] | null {
+  if (!row || !row.some((f) => f.name === 'project.json')) return null
+  if (new Set(row.map((f) => f.name)).size !== row.length) return null
+  // a judgeable file the folder holds but the row omits is another generation too
+  for (const name of ['project.json', 'lyrics.json', 'graph.json']) {
+    if (kids.some((k) => k.name === name && k.mimeType !== FOLDER) && !row.some((f) => f.name === name)) return null
+  }
+  for (const f of row) {
+    const live = kids.filter((k) => k.name === f.name && k.mimeType !== FOLDER)
+    if (live.length !== 1 || live[0].id !== f.id || live[0].md5Checksum !== f.md5Checksum || live[0].size !== f.size) return null
+  }
+  return row
+}
+
+const catalogBytes = (projects: CatalogProject[]): Buffer =>
+  Buffer.from(JSON.stringify({ format: 2, capabilities: CATALOG_CAPABILITIES, projects }))
+
 export interface SyncReport {
   ok: boolean
   uploaded: number
@@ -862,8 +984,13 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
       )
       return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'the library looks empty — nothing was synced' }
     }
+    // Which folders this install put THIS library into (drive-lineage.ts):
+    // the only ones the reconcile below may ever trash.
+    const signedInAs = readTokens()?.refresh
+    const account = await accountKey()
+    const lineage = account ? driveLineage(account, singzId, root) : inertLineage()
     const warnings: string[] = []
-    const adopted = await adoptPublished(root, remoteTop, projectDirs, onProgress, warnings)
+    const adopted = await adoptPublished(root, remoteTop, projectDirs, onProgress, warnings, lineage)
     if (adopted.length > 0) projectDirs = await scanLibrary()
 
     // What Drive actually holds, in two batched listings however big the
@@ -908,6 +1035,8 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     let unchanged = 0
     let trashed = 0
     const catalog: CatalogProject[] = []
+    /** The folder each of this run's catalog rows describes. */
+    const rowFolder = new Map<string, string>()
     for (let i = 0; i < projectDirs.length; i++) {
       const dir = projectDirs[i]
 
@@ -1083,14 +1212,35 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
       }
       unchanged += plan.unchanged
       if (plan.upload.length === 0 && plan.trash.length === 0) {
+        // Clean means nothing was written here this run, so nothing is
+        // proven: a pending folder stays pending (drive-lineage.ts).
         if (doc) catalog.push({ dir, files: rowsOf(plan) })
+        if (folderId) rowFolder.set(dir, folderId)
         continue
       }
 
       onProgress?.(t('main.sync.syncing', { dir }), i / projectDirs.length)
-      const projId = folderId ?? (await ensureFolder(dir, singzId))
-      const stemsParent =
-        stemsId ?? (plan.upload.some((u) => u.where === 'stems') ? await ensureFolder('stems', projId) : undefined)
+      // Durable before the first byte goes in. A folder this call created is
+      // ours outright; one found by name is only an intent until its roster
+      // is proven below — a failed upload, then a local delete, must never
+      // trash another desktop's song of the same name.
+      let projId = folderId
+      if (!projId) {
+        const made = await findOrCreateFolder(dir, singzId)
+        projId = made.id
+        if (made.created) lineage.grant(projId)
+        else lineage.intend(projId)
+      } else if (!lineage.owns(projId)) {
+        lineage.intend(projId)
+      }
+      /** Every member this run writes into the folder, by id. */
+      const written = new Set<string>()
+      let stemsParent = stemsId
+      if (!stemsParent && plan.upload.some((u) => u.where === 'stems')) {
+        const made = await findOrCreateFolder('stems', projId)
+        stemsParent = made.id
+        if (made.created) written.add(made.id)
+      }
 
       const freshIds = new Map<string, string>()
       try {
@@ -1105,9 +1255,11 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         for (const step of ordered) {
           onProgress?.(t('main.sync.uploading', { file: `${dir}/${step.name}` }), (i + 0.5) / projectDirs.length)
           const parent = step.where === 'top' ? projId : (stemsParent as string)
-          freshIds.set(step.name, emptyDocument && step.name === 'project.json'
+          const id = emptyDocument && step.name === 'project.json'
             ? await uploadBytes(emptyDocument, step.name, parent, step.existingId, step.mime)
-            : await uploadFile(step.path, step.name, parent, step.existingId, step.mime))
+            : await uploadFile(step.path, step.name, parent, step.existingId, step.mime)
+          freshIds.set(step.name, id)
+          written.add(id)
           uploaded++
           syncLog('upload', `${dir}/${step.name} → Drive${step.existingId ? ' (replaced)' : ''}`)
         }
@@ -1137,30 +1289,51 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         syncLog('error', `${dir} moved or was deleted while syncing — leaving it for the next run`)
         continue // and out of the catalog: it must never name a file Drive lacks
       }
+      // Every upload of this run succeeded: the one moment a folder found by
+      // name can be proven ours — from its complete roster, now.
+      if (!lineage.owns(projId)) {
+        const kids = await listChildren(projId)
+        const stemsFolder = kids.find((f) => f.name === 'stems' && f.mimeType === FOLDER)
+        const proof = provenRoster(top, stems, kids, stemsFolder ? await listChildren(stemsFolder.id) : null, written)
+        if (proof) lineage.grant(projId, proof)
+      }
       if (doc) catalog.push({ dir, files: rowsOf(plan, freshIds) })
+      rowFolder.set(dir, projId)
     }
+    // Deletion authority is checked against the account and library this run
+    // started with: a sign-in or a swapped library folder mid-run removes nothing.
+    if (readTokens()?.refresh !== signedInAs) throw new Error('The Google account changed during sync — nothing was removed from Drive')
+    lineage.assertBound()
+    // Without a known account the inert lineage owns nothing: every orphan is
+    // kept, and the catalog keeps their rows.
+    const orphans = planOrphanFolders(remoteTop, duplicateDirs, new Set(projectDirs), (id) => lineage.owns(id), FOLDER)
     // Reconcile: a renamed or deleted local project must not haunt Drive
     // (phones would list both the old and the new name). Trash — never
-    // hard-delete — remote project folders with no local counterpart;
-    // drive.file scope means we only ever see folders this app created.
-    // (The empty-library refusal happens up top, before adoption.)
-    const local = new Set(projectDirs)
-    // a second folder of the same name is never the one we sync into, and
-    // phones would list the song twice
-    for (const f of [...remoteTop, ...duplicateDirs]) {
-      if (f.mimeType !== FOLDER || (local.has(f.name) && !duplicateDirs.includes(f))) continue
-      // A phone's song that could not be taken in yet is not an orphan: it is
-      // the only copy, and the phone may already have let go of its own.
-      if (isPublished(f)) continue
+    // hard-delete — a remote project folder with no local counterpart, or a
+    // second folder of a name we sync into, ONLY when this install owns that
+    // exact folder id (drive-lineage.ts: created it, took it in from a phone,
+    // or wrote every member of it in one proven run). Every install shares one
+    // OAuth client, so drive.file does not mean "folders this computer made":
+    // a fresh profile, a library switch or a second desktop sees every
+    // desktop's projects, and those are kept. A phone's song not yet taken in
+    // is never an orphan. (The empty-library refusal happens up top.)
+    const gone: string[] = []
+    for (const f of orphans.trash) {
       onProgress?.(t('main.sync.removingGone', { name: f.name }), 0.99)
       await api(`/drive/v3/files/${f.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ trashed: true })
       })
+      gone.push(f.id)
       trashed++
+      syncLog('trash', `${f.name} is no longer in the library — moved to Drive trash`)
     }
+    lineage.forget(gone)
     if (trashed > 0) log('gdrive', `reconcile: ${trashed} orphaned file(s)/folder(s) moved to Drive trash`)
+    if (orphans.keep.length > 0) {
+      log('gdrive', `reconcile: kept ${orphans.keep.length} folder(s) on Drive that this computer never synced from ${root}`)
+    }
 
     // The manifest is written LAST — after every upload and the reconcile —
     // so it never names files that are not on Drive yet; md5-diffed like
@@ -1168,14 +1341,71 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     // `capabilities` is additive on purpose: phones check `format === 2`
     // exactly, and bumping the number would push every phone already out
     // there into walking the library folder by folder.
-    const manifest = Buffer.from(
-      JSON.stringify({ format: 2, capabilities: CATALOG_CAPABILITIES, projects: catalog })
-    )
-    const manifestMd5 = createHash('md5').update(manifest).digest('hex')
-    const catFile = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
-    if (catFile?.md5Checksum !== manifestMd5) {
-      onProgress?.(t('main.sync.updatingCatalog'), 0.995)
-      await uploadBytes(manifest, 'catalog.json', singzId, catFile?.id, 'application/json')
+    //
+    // The catalog describes Drive, not this library. Rows for folders this
+    // run did not write — another desktop's, another library's, one kept
+    // above — survive, but only as Drive holds them NOW: the root, the
+    // catalog and those folders are observed again here, after every upload,
+    // so a folder another desktop added during this run keeps its row, one it
+    // retired meanwhile gets none back, and a row whose project has moved to
+    // another generation is left out rather than half-repaired.
+    const byDir = (a: CatalogProject, b: CatalogProject): number => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0)
+    catalog.sort(byDir)
+    const earlyCatalog = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
+    const removed = new Set(gone)
+    const othersEarly = remoteTop.some((f) => f.mimeType === FOLDER && !removed.has(f.id) && !projectDirs.includes(f.name))
+    if (othersEarly || earlyCatalog?.md5Checksum !== createHash('md5').update(catalogBytes(catalog)).digest('hex')) {
+      const nowTop = await listChildren(singzId)
+      const catFile = nowTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
+      /** Every live folder under the root now, by name. */
+      const holders = new Map<string, RemoteFile[]>()
+      for (const f of nowTop) {
+        if (f.mimeType === FOLDER && !removed.has(f.id)) holders.set(f.name, [...(holders.get(f.name) ?? []), f])
+      }
+      // A row of this run's describes its folder only while that folder is
+      // still the ONE folder of that name: renamed away, joined or replaced
+      // by another writer, the name is no longer ours to describe this run.
+      const stillNamed = (dir: string): string | undefined => {
+        const found = holders.get(dir) ?? []
+        return found.length === 1 && found[0].id === rowFolder.get(dir) ? found[0].id : undefined
+      }
+      const named = new Map<string, RemoteFile[]>()
+      for (const f of nowTop) {
+        if (f.mimeType !== FOLDER || removed.has(f.id) || projectDirs.includes(f.name)) continue
+        named.set(f.name, [...(named.get(f.name) ?? []), f])
+      }
+      // one folder per name, or a row cannot say which one it describes
+      const others = [...named].filter(([, found]) => found.length === 1).map(([dir, found]) => ({ dir, folder: found[0] }))
+      const rows = catFile ? await catalogRows(catFile.id) : new Map<string, CatalogFile[]>()
+      const candidates = others.filter((o) => rows.has(o.dir))
+      const ownIds = catalog.map((p) => stillNamed(p.dir)).filter((id): id is string => !!id)
+      const kids = await childrenOf([...ownIds, ...candidates.map((o) => o.folder.id)])
+      const merged: CatalogProject[] = []
+      // This run's rows too are checked against Drive now. Another desktop
+      // that published the same song meanwhile wrote a newer generation: its
+      // row stands, and ours waits for the next run rather than overwrite it.
+      for (const project of catalog) {
+        const folder = stillNamed(project.dir)
+        if (folder && carriedRow(project.files, kids.get(folder) ?? [])) {
+          merged.push(project)
+          continue
+        }
+        // two folders of one name: no row can say which, so none is written
+        const current = (holders.get(project.dir)?.length ?? 0) > 1 ? undefined : rows.get(project.dir)
+        if (current) merged.push({ dir: project.dir, files: current })
+        log('gdrive', `${project.dir}: Drive changed under this sync — its catalog row is left for the next run`)
+      }
+      for (const { dir, folder } of candidates) {
+        const row = carriedRow(rows.get(dir), kids.get(folder.id) ?? [])
+        if (row) merged.push({ dir, files: row })
+        else log('gdrive', `${dir}: its catalog row does not match Drive now — left out until its writer syncs`)
+      }
+      merged.sort(byDir)
+      const manifest = catalogBytes(merged)
+      if (catFile?.md5Checksum !== createHash('md5').update(manifest).digest('hex')) {
+        onProgress?.(t('main.sync.updatingCatalog'), 0.995)
+        await uploadBytes(manifest, 'catalog.json', singzId, catFile?.id, 'application/json')
+      }
     }
 
     // gdrive.ts must not import the ledger (its own doc rewrites would re-dirty

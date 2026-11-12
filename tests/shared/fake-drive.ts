@@ -52,6 +52,8 @@ export interface FakeDriveStore {
   pageSizeCap?: number
   /** Where upload sessions point back to (the http adapter sets its own). */
   baseUrl: string
+  /** The signed-in account /about reports; change it to switch accounts. */
+  permissionId?: string
 }
 
 export interface FakeResponse {
@@ -230,6 +232,10 @@ export function serveRequest(
   if (path === '/o/oauth2/v2/auth') {
     const redirect = u.searchParams.get('redirect_uri') ?? ''
     return { status: 302, headers: { Location: `${redirect}?code=fake-code` }, body: '' }
+  }
+
+  if (path === '/drive/v3/about' && method === 'GET') {
+    return json(200, { user: { permissionId: store.permissionId ?? 'fake-account' } })
   }
 
   if (path === '/drive/v3/files' && method === 'GET') {

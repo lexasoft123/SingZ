@@ -1,15 +1,33 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { startMockDrive, type MockDrive } from './mock-drive'
+import { putFile, startMockDrive, type MockDrive } from './mock-drive'
 import graphCases from '../shared/graph-document-cases.json'
 
 /** Every fs read of a stem file — the whole point of stored stem hashes is
  *  that a clean sync performs none (hashing evicted iCloud stems downloads
  *  them, which read as "sync re-uploads my library"). */
-const { stemReads, failures } = vi.hoisted(() => ({ stemReads: { count: 0 }, failures: { stat: '' } }))
+const { stemReads, failures } = vi.hoisted(() => ({ stemReads: { count: 0 }, failures: { stat: '', noInode: '' } }))
+/** A filesystem with no stable directory identity (ino 0) at failures.noInode. */
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...real,
+    statSync: ((...a: Parameters<typeof real.statSync>) => {
+      const info = real.statSync(...a)
+      if (!info || String(a[0]) !== failures.noInode) return info
+      return new Proxy(info, {
+        get: (target, key) => {
+          if (key === 'ino') return typeof target.ino === 'bigint' ? 0n : 0
+          const value = Reflect.get(target, key)
+          return typeof value === 'function' ? value.bind(target) : value
+        }
+      })
+    }) as typeof real.statSync
+  }
+})
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>()
   return {
@@ -285,6 +303,8 @@ describe('the dirty ledger and the sync', () => {
 
 describe('planSync', () => {
   it('trashes remote folders for renamed or deleted local projects', async () => {
+    // Earlier tests' folders belong to other libraries now, and are kept.
+    mock.files.clear()
     const { readSettings, writeSettings } = await import('../../src/main/settings')
     const { rename } = await import('node:fs/promises')
     const root = await mkdtemp(join(tmpdir(), 'singz-gdrive-'))
@@ -314,6 +334,8 @@ describe('planSync', () => {
   })
 
   it('survives a project renamed out from under it mid-run', async () => {
+    // Earlier tests' folders belong to other libraries now, and are kept.
+    mock.files.clear()
     const { readSettings, writeSettings } = await import('../../src/main/settings')
     const { renameSync } = await import('node:fs')
     const root = await mkdtemp(join(tmpdir(), 'singz-gdrive-'))
@@ -640,5 +662,382 @@ describe('stale native empty markers', () => {
       failures.stat = ''
       vi.restoreAllMocks()
     }
+  })
+})
+
+/** Every install shares one OAuth client, so a sync sees every desktop's and
+ *  every library's folders. Only folders this install put THIS library into
+ *  may be trashed; the catalog keeps everyone else's rows. */
+describe('remote folders this install never synced', () => {
+  const library = async (prefix: string, names: string[]): Promise<string> => {
+    const root = await mkdtemp(join(tmpdir(), `singz-lineage-${prefix}-`))
+    for (const name of names) await seedProject(root, name)
+    return root
+  }
+  const signIn = async (): Promise<void> => {
+    const { writeSettings } = await import('../../src/main/settings')
+    writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh', expiresAt: Date.now() + 3600_000 } })
+  }
+  /** No lineage on disk: a fresh profile, or one upgraded from before it existed. */
+  const forgetLineage = async (): Promise<void> => {
+    const { app } = await import('electron')
+    await unlink(join(app.getPath('userData'), 'drive-lineage.json')).catch(() => {})
+  }
+  const trashedFolders = (): string[] =>
+    [...mock.files.values()].filter((f) => f.trashed && f.mimeType === FOLDER_MIME).map((f) => f.name).sort()
+  const catalogDirs = (): string[] => {
+    const cat = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)
+    return JSON.parse(cat!.bytes!.toString()).projects.map((p: { dir: string }) => p.dir)
+  }
+  const FOLDER_MIME = 'application/vnd.google-apps.folder'
+  const OTHERS = ['Other A', 'Other B', 'Other C']
+
+  it('a fresh profile with a small library trashes nothing and keeps every catalog row', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    // Another desktop's library, already on Drive with its catalog.
+    expect(await gdriveSync({ root: await library('other', OTHERS) })).toMatchObject({ ok: true, projects: 3 })
+    await forgetLineage()
+
+    const root = await library('fresh', ['Mine 1', 'Mine 2'])
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 2 })
+    expect(trashedFolders()).toEqual([])
+    expect(catalogDirs()).toEqual(['Mine 1', 'Mine 2', ...OTHERS])
+    // a second run is stable
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 0 })
+    expect(trashedFolders()).toEqual([])
+    expect(catalogDirs()).toEqual(['Mine 1', 'Mine 2', ...OTHERS])
+
+    // A real delete of a project this install synced still reaches Drive.
+    await rm(join(root, 'Mine 2'), { recursive: true })
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1 })
+    expect(trashedFolders()).toEqual(['Mine 2'])
+    expect(catalogDirs()).toEqual(['Mine 1', ...OTHERS])
+  })
+
+  it('a library switch keeps the previous library on Drive and in the catalog', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    expect(await gdriveSync({ root: await library('before', OTHERS) })).toMatchObject({ ok: true, projects: 3 })
+    expect(await gdriveSync({ root: await library('after', ['Mine 1', 'Mine 2']) })).toMatchObject({ ok: true, projects: 2 })
+    expect(trashedFolders()).toEqual([])
+    expect(catalogDirs()).toEqual(['Mine 1', 'Mine 2', ...OTHERS])
+  })
+
+  const lineagePath = async (): Promise<string> => join((await import('electron')).app.getPath('userData'), 'drive-lineage.json')
+  const folderNamed = (name: string) => [...mock.files.values()].find((f) => f.name === name && f.mimeType === FOLDER_MIME && !f.trashed)
+  const singzFolder = () => folderNamed('SingZ')!
+  const editStem = (root: string, name: string) =>
+    writeFile(join(root, name, 'stems', 'vocals.flac'), Buffer.from(`fLaC-edited-${Math.random()}`))
+
+  it.each(['missing', 'corrupt'])('a %s lineage seeds nothing by name, and a partial republish proves nothing', async (damage) => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const root = await library(`damage-${damage}`, ['Kept', 'Deleted before proof', 'Deleted after proof'])
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 3 })
+    if (damage === 'missing') await forgetLineage()
+    else await writeFile(await lineagePath(), '{"format":2,"bindings":')
+    // a clean run against same-named folders proves nothing about who made them
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 0 })
+    await rm(join(root, 'Deleted before proof'), { recursive: true })
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 2 })
+    expect(trashedFolders()).toEqual([])
+    expect(catalogDirs()).toEqual(['Deleted after proof', 'Deleted before proof', 'Kept'])
+    // republishing two of its files leaves members this run did not write:
+    // the folder stays pending, and on Drive, for good
+    await editStem(root, 'Deleted after proof')
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, uploaded: 2 })
+    await rm(join(root, 'Deleted after proof'), { recursive: true })
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1 })
+    expect(trashedFolders()).toEqual([])
+    expect(catalogDirs()).toEqual(['Deleted after proof', 'Deleted before proof', 'Kept'])
+  })
+
+  it('a run that writes every member of a same-named folder, and verifies it, owns it', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const root = await library('proof', ['Zed'])
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true })
+    const theirs = putFile(mock.store, { name: 'Song', mimeType: FOLDER_MIME, parents: [singzFolder().id] })
+    putFile(mock.store, { name: 'project.json', mimeType: 'application/json', parents: [theirs.id], bytes: Buffer.from('{}') })
+    await seedProject(root, 'Song')
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 2 })
+    expect(folderNamed('Song')?.id).toBe(theirs.id)
+    await rm(join(root, 'Song'), { recursive: true })
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1 })
+    expect(trashedFolders()).toEqual(['Song'])
+  })
+
+  it.each(['plain', 'with a foreign stems/Private folder'])(
+    'a failed upload, an undo and a clean sync never prove another desktop\'s folder (%s)', async (variant) => {
+      mock.files.clear()
+      await signIn()
+      const { gdriveSync } = await import('../../src/main/gdrive')
+      const { cp, stat: statFile } = await import('node:fs/promises')
+      const a = await library(`undo-a-${variant.length}`, ['Song', 'Zed'])
+      expect(await gdriveSync({ root: a })).toMatchObject({ ok: true })
+      if (variant !== 'plain') {
+        const stemsDir = [...mock.files.values()].find((f) => f.name === 'stems' && f.parents.includes(folderNamed('Song')!.id))!
+        const priv = putFile(mock.store, { name: 'Private', mimeType: FOLDER_MIME, parents: [stemsDir.id] })
+        putFile(mock.store, { name: 'take.wav', mimeType: 'audio/wav', parents: [priv.id], bytes: Buffer.from('A only') })
+      }
+      // Desktop B holds A's exact bytes (a copied library, timestamps kept).
+      const b = await mkdtemp(join(tmpdir(), 'singz-lineage-undo-b-'))
+      await cp(a, b, { recursive: true, preserveTimestamps: true })
+      const keep = async (rel: string) => ({ rel, bytes: await readFile(join(b, rel)), at: (await statFile(join(b, rel))).mtime })
+      const saved = [await keep('Song/project.json'), await keep('Song/stems/vocals.flac')]
+      // B edits; its upload fails before any byte lands on Drive
+      await editStem(b, 'Song')
+      mock.store.faults.push({ match: /^(POST|PATCH|PUT) \/upload/, status: 500, times: Infinity })
+      try {
+        expect(await gdriveSync({ root: b })).toMatchObject({ ok: false })
+      } finally {
+        mock.store.faults.length = 0
+      }
+      // ...then undoes the edit, back to A's exact bytes
+      for (const f of saved) {
+        await writeFile(join(b, f.rel), f.bytes)
+        await utimes(join(b, f.rel), f.at, f.at)
+      }
+      expect(await gdriveSync({ root: b })).toMatchObject({ ok: true, uploaded: 0 })
+      await rm(join(b, 'Song'), { recursive: true })
+      expect(await gdriveSync({ root: b })).toMatchObject({ ok: true, projects: 1 })
+      expect(trashedFolders()).toEqual([])
+      if (variant !== 'plain') expect([...mock.files.values()].some((f) => f.name === 'take.wav' && !f.trashed)).toBe(true)
+    })
+
+  it('a same-named publication by another desktop during this run keeps its row', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const root = await library('shared', ['Mine', 'Shared'])
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true })
+    await editStem(root, 'Mine')
+    const md5 = (bytes: Buffer): string => createHash('md5').update(bytes).digest('hex')
+    let native: { id: string; name: string; size: string; md5Checksum: string } | null = null
+    // While this run uploads Mine, native publishes a new generation of
+    // Shared — the same song this library holds, unchanged here.
+    const interleave = (): void => {
+      const folder = folderNamed('Shared')!
+      const doc = [...mock.files.values()].find((f) => f.name === 'project.json' && f.parents.includes(folder.id) && !f.trashed)!
+      doc.bytes = Buffer.from('{"name":"Shared","savedAt":"native"}')
+      native = { id: doc.id, name: 'project.json', size: String(doc.bytes.length), md5Checksum: md5(doc.bytes) }
+      const catalog = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)!
+      const cat = JSON.parse(catalog.bytes!.toString())
+      const row = cat.projects.find((p: { dir: string }) => p.dir === 'Shared')
+      row.files = row.files.map((f: { name: string }) => (f.name === 'project.json' ? native : f))
+      catalog.bytes = Buffer.from(JSON.stringify(cat))
+    }
+    expect(await gdriveSync({ root, onProgress: (msg) => { if (!native && msg.startsWith('Uploading Mine/')) interleave() } }))
+      .toMatchObject({ ok: true, uploaded: 2 })
+    expect(native).not.toBeNull()
+    const cat = JSON.parse([...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)!.bytes!.toString())
+    expect(cat.projects.map((p: { dir: string }) => p.dir)).toEqual(['Mine', 'Shared'])
+    expect(cat.projects.find((p: { dir: string }) => p.dir === 'Shared').files.find((f: { name: string }) => f.name === 'project.json'))
+      .toEqual(native)
+  })
+
+  it('an unreadable lineage stops the run before anything is published or removed', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const root = await library('unreadable', ['Song', 'Zed'])
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true })
+    await rm(join(root, 'Song'), { recursive: true })
+    await editStem(root, 'Zed')
+    const path = await lineagePath()
+    await rm(path, { force: true })
+    await mkdir(path) // EISDIR on read
+    try {
+      mock.hits.length = 0
+      expect(await gdriveSync({ root })).toMatchObject({ ok: false })
+      expect(mock.hits.some((h) => h.includes('uploadType') || h.startsWith('PATCH'))).toBe(false)
+      expect(trashedFolders()).toEqual([])
+    } finally {
+      await rm(path, { recursive: true, force: true })
+    }
+  })
+
+  it('a failed first upload into another desktop\'s same-named folder never makes that folder ours', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    // Desktop A owns "Song" on Drive, and keeps a file of its own beside it.
+    expect(await gdriveSync({ root: await library('desktop-a', ['Song', 'Other']) })).toMatchObject({ ok: true })
+    const theirs = folderNamed('Song')!
+    putFile(mock.store, { name: 'notes.txt', mimeType: 'text/plain', parents: [theirs.id], bytes: Buffer.from('A only') })
+
+    // Desktop B has a different "Song". Its first upload into A's folder fails.
+    const b = await library('desktop-b', ['Song', 'Zed'])
+    await editStem(b, 'Song')
+    mock.store.faults.push({ match: /^PUT \/upload/, status: 500, times: Infinity })
+    try {
+      expect(await gdriveSync({ root: b })).toMatchObject({ ok: false })
+    } finally {
+      mock.store.faults.length = 0
+    }
+    await rm(join(b, 'Song'), { recursive: true })
+    expect(await gdriveSync({ root: b })).toMatchObject({ ok: true, projects: 1 })
+    expect(trashedFolders()).toEqual([])
+
+    // Desktop C's "Song" is pushed into A's folder in full — but the folder
+    // still holds A's unmanaged file, so C cannot prove it is its own.
+    const c = await library('desktop-c', ['Song', 'Zed'])
+    expect(await gdriveSync({ root: c })).toMatchObject({ ok: true })
+    await rm(join(c, 'Song'), { recursive: true })
+    expect(await gdriveSync({ root: c })).toMatchObject({ ok: true, projects: 1 })
+    expect(trashedFolders()).toEqual([])
+    expect(folderNamed('Song')?.id).toBe(theirs.id)
+    expect([...mock.files.values()].some((f) => f.name === 'notes.txt' && f.parents.includes(theirs.id) && !f.trashed)).toBe(true)
+  })
+
+  it('a different library folder put at the same path has no deletion authority', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const root = await library('replaced', ['Song', 'Zed'])
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true })
+    // restored from a backup, or another volume mounted there: same path, new directory
+    const { rename } = await import('node:fs/promises')
+    await rename(root, `${root}.old`)
+    await mkdir(root)
+    await seedProject(root, 'Zed')
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1 })
+    expect(trashedFolders()).toEqual([])
+    expect(catalogDirs()).toEqual(['Song', 'Zed'])
+  })
+
+  it('another Google account in the same Drive namespace has no deletion authority', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const root = await library('account', ['Song', 'Zed'])
+    mock.store.permissionId = 'account-one'
+    try {
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true })
+      const { writeSettings } = await import('../../src/main/settings')
+      writeSettings({ gdrive: { access: 'mock-access-2', refresh: 'mock-refresh-2', expiresAt: Date.now() + 3600_000 } })
+      mock.store.permissionId = 'account-two'
+      await rm(join(root, 'Song'), { recursive: true })
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1 })
+      expect(trashedFolders()).toEqual([])
+    } finally {
+      delete mock.store.permissionId
+    }
+  })
+
+  it('when Drive will not name the account, the run syncs but removes and claims nothing', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const root = await library('no-account', ['Song', 'Zed'])
+    const { writeSettings } = await import('../../src/main/settings')
+    writeSettings({ gdrive: { access: 'mock-access', refresh: 'mock-refresh-anon', expiresAt: Date.now() + 3600_000 } })
+    mock.store.faults.push({ match: /^GET \/drive\/v3\/about/, status: 500, times: Infinity })
+    try {
+      // folders created while the account is unknown are never claimed
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 2 })
+      await rm(join(root, 'Song'), { recursive: true })
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1 })
+      expect(trashedFolders()).toEqual([])
+      expect(catalogDirs()).toEqual(['Song', 'Zed'])
+    } finally {
+      mock.store.faults.length = 0
+    }
+    // Drive answers again: those folders still were never proven ours
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true })
+    expect(trashedFolders()).toEqual([])
+  })
+
+  it('merges what another desktop publishes, updates and retires while this run uploads', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    expect(await gdriveSync({ root: await library('native', ['Kept Gone', 'Kept Upd']) })).toMatchObject({ ok: true })
+    const md5 = (b: Buffer): string => createHash('md5').update(b).digest('hex')
+    const row = (doc: { id: string; bytes?: Buffer }) => ({ id: doc.id, name: 'project.json', size: String(doc.bytes!.length), md5Checksum: md5(doc.bytes!) })
+    let interleaved = false
+    const interleave = (): void => {
+      interleaved = true
+      const catalog = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)!
+      const doc = JSON.parse(catalog.bytes!.toString())
+      // addition: a new folder and its row
+      const added = putFile(mock.store, { name: 'Added', mimeType: FOLDER_MIME, parents: [singzFolder().id] })
+      const addedDoc = putFile(mock.store, { name: 'project.json', mimeType: 'application/json', parents: [added.id], bytes: Buffer.from('{"name":"Added"}') })
+      doc.projects.push({ dir: 'Added', files: [row(addedDoc)] })
+      // update: a new document generation, and its row
+      const upd = folderNamed('Kept Upd')!
+      const updDoc = [...mock.files.values()].find((f) => f.name === 'project.json' && f.parents.includes(upd.id) && !f.trashed)!
+      updDoc.bytes = Buffer.from('{"name":"Kept Upd","savedAt":"later"}')
+      const updRow = doc.projects.find((p: { dir: string }) => p.dir === 'Kept Upd')
+      updRow.files = updRow.files.map((f: { name: string }) => (f.name === 'project.json' ? row(updDoc) : f))
+      // retirement: the folder goes; its writer has not rewritten the catalog yet
+      folderNamed('Kept Gone')!.trashed = true
+      catalog.bytes = Buffer.from(JSON.stringify(doc))
+    }
+    const root = await library('mine', ['Mine'])
+    expect(await gdriveSync({ root, onProgress: (msg) => { if (!interleaved && msg.startsWith('Uploading Mine/')) interleave() } }))
+      .toMatchObject({ ok: true })
+    expect(interleaved).toBe(true)
+    expect(catalogDirs()).toEqual(['Added', 'Kept Upd', 'Mine'])
+    const cat = JSON.parse([...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)!.bytes!.toString())
+    const upd = folderNamed('Kept Upd')!
+    const updDoc = [...mock.files.values()].find((f) => f.name === 'project.json' && f.parents.includes(upd.id) && !f.trashed)!
+    expect(cat.projects.find((p: { dir: string }) => p.dir === 'Kept Upd').files.find((f: { name: string }) => f.name === 'project.json'))
+      .toEqual(row(updDoc))
+  })
+
+  it('a library folder with no stable identity still syncs, and claims and removes nothing', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const { realpathSync } = await import('node:fs')
+    const root = await library('no-inode', ['Song', 'Zed'])
+    failures.noInode = realpathSync(root)
+    try {
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 2 })
+      expect(catalogDirs()).toEqual(['Song', 'Zed'])
+      await rm(join(root, 'Song'), { recursive: true })
+      expect(await gdriveSync({ root })).toMatchObject({ ok: true, projects: 1 })
+      expect(trashedFolders()).toEqual([])
+      expect(catalogDirs()).toEqual(['Song', 'Zed'])
+    } finally {
+      failures.noInode = ''
+    }
+  })
+
+  it('a song renamed away and replaced under its name during this run keeps the new folder\'s row', async () => {
+    mock.files.clear()
+    await signIn()
+    const { gdriveSync } = await import('../../src/main/gdrive')
+    const root = await library('replace-name', ['Mine', 'Shared'])
+    expect(await gdriveSync({ root })).toMatchObject({ ok: true })
+    await editStem(root, 'Mine')
+    const md5 = (bytes: Buffer): string => createHash('md5').update(bytes).digest('hex')
+    let replacement: { id: string; name: string; size: string; md5Checksum: string } | null = null
+    // Another writer renames Shared to Moved, then publishes a new Shared.
+    const interleave = (): void => {
+      const old = folderNamed('Shared')!
+      old.name = 'Moved'
+      const fresh = putFile(mock.store, { name: 'Shared', mimeType: FOLDER_MIME, parents: [singzFolder().id] })
+      const doc = putFile(mock.store, { name: 'project.json', mimeType: 'application/json', parents: [fresh.id], bytes: Buffer.from('{"name":"Shared","by":"native"}') })
+      replacement = { id: doc.id, name: 'project.json', size: String(doc.bytes!.length), md5Checksum: md5(doc.bytes!) }
+      const catalog = [...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)!
+      const cat = JSON.parse(catalog.bytes!.toString())
+      const moved = cat.projects.find((p: { dir: string }) => p.dir === 'Shared')
+      moved.dir = 'Moved'
+      cat.projects.push({ dir: 'Shared', files: [replacement] })
+      catalog.bytes = Buffer.from(JSON.stringify(cat))
+    }
+    expect(await gdriveSync({ root, onProgress: (msg) => { if (!replacement && msg.startsWith('Uploading Mine/')) interleave() } }))
+      .toMatchObject({ ok: true, uploaded: 2 })
+    expect(replacement).not.toBeNull()
+    const cat = JSON.parse([...mock.files.values()].find((f) => f.name === 'catalog.json' && !f.trashed)!.bytes!.toString())
+    expect(cat.projects.map((p: { dir: string }) => p.dir)).toEqual(['Mine', 'Moved', 'Shared'])
+    expect(cat.projects.find((p: { dir: string }) => p.dir === 'Shared').files).toEqual([replacement])
   })
 })

@@ -154,6 +154,35 @@ export function orphanFolders(rootChildren: RemoteEntry[], localDirs: Set<string
   return rootChildren.filter((f) => f.mimeType === folderMime && !localDirs.has(f.name))
 }
 
+/**
+ * The reconcile's decision about remote project folders with no local
+ * counterpart (and second folders of a name the library syncs into).
+ *
+ * A folder is trashed only when this install provably put its library there:
+ * its exact id is in the lineage (drive-lineage.ts). Everything else — another
+ * desktop's song, another library's, one this install learned of only after
+ * the user had already deleted it here — is kept. A phone's published song is
+ * never an orphan at all.
+ */
+export function planOrphanFolders(
+  rootChildren: RemoteEntry[],
+  duplicates: RemoteEntry[],
+  localDirs: Set<string>,
+  mine: (folderId: string) => boolean,
+  folderMime: string
+): { trash: RemoteEntry[]; keep: RemoteEntry[] } {
+  const trash: RemoteEntry[] = []
+  const keep: RemoteEntry[] = []
+  const seen = new Set<string>()
+  for (const f of [...rootChildren, ...duplicates]) {
+    if (f.mimeType !== folderMime || seen.has(f.id) || isPublished(f)) continue
+    seen.add(f.id)
+    if (localDirs.has(f.name) && !duplicates.includes(f)) continue
+    ;(mine(f.id) ? trash : keep).push(f)
+  }
+  return { trash, keep }
+}
+
 /** mtime is compared with tolerance, not equality: iCloud rehydration rewrites
  *  it with sub-ms truncation (~300 ns measured on the first evict/materialize
  *  round-trip). A real write moves it by far more, and size stands on its own. */
