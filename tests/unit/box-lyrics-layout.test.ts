@@ -65,6 +65,36 @@ describe('Option C lyric rows', () => {
   })
 })
 
+describe('count-in timer sits above the target line, left-aligned with the lyric text', () => {
+  const countdown = rule('.player-singing-countdown')
+  const html = renderToStaticMarkup(createElement(PlayerLyrics, { lines: lines.map(line => ({ ...line, start: line.start + 10, end: line.end + 10 })), position: 8, playing: true, rate: 1 }))
+  it('is anchored to the row wrapper top-left, not the left margin', () => {
+    expect(countdown).toMatch(/position: absolute/)
+    expect(countdown).toMatch(/(?:^|[ {;])left: 0[;\s]/)
+    expect(countdown).toMatch(/(?:^|[ {;])bottom: 100%/)
+    expect(countdown).not.toMatch(/(?:^|[ {;])(?:right|top):/)
+    // The wrapper's left edge is the text's left edge: nothing between them shifts the text.
+    expect(rule('.player-lyric')).toMatch(/padding: 0; margin: 0/)
+    expect(rule('.player-lyric-scale')).not.toMatch(/padding/)
+    const wrapper = html.slice(html.indexOf('class="player-lyric-scale"'))
+    expect(wrapper.indexOf('player-singing-countdown')).toBeGreaterThan(-1)
+    expect(wrapper.indexOf('player-singing-countdown')).toBeLessThan(wrapper.indexOf('class="player-lyric '))
+  })
+  it('fits the inter-line gap of the six-slot layout for every slot the target can occupy, never touching the line above', () => {
+    const slots = lyricSlotLayout(687)
+    const occupied = px(countdown, 'height') + px(countdown, 'margin-bottom')
+    expect(px(countdown, 'height')).toBe(24) // 22 px mono text and 12 px dots
+    for (const slot of [2, 3, 4, 5]) {
+      const scale = slots.scales[slot]
+      const rowTop = slots.centers[slot] - LYRIC_ROW_HEIGHT * scale / 2
+      const countdownTop = rowTop - occupied * scale
+      const lineAboveBottom = slots.centers[slot - 1] + LYRIC_ROW_HEIGHT * slots.scales[slot - 1] / 2
+      expect(rowTop).toBeGreaterThan(countdownTop) // above the target line (bottom <= its top)
+      expect(countdownTop).toBeGreaterThanOrEqual(lineAboveBottom + 4) // no overlap with the previous slot
+    }
+  })
+})
+
 describe('controls never move the lyrics; meters stay', () => {
   const hiddenRules = css.split('\n').filter(line => line.includes('[data-controls="hidden"]'))
   it('hiding the controls only changes opacity, visibility, pointer events and transitions', () => {

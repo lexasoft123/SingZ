@@ -146,8 +146,8 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .player-shaped-word[data-multiline="true"] > .lyric-ink-amber,
 .player-shaped-word[data-multiline="true"] > .lyric-ink-core { display: none; }
 .lyric-word-space { color: inherit; }
-.player-singing-countdown { position: absolute; top: 50%; right: 100%; margin: -16px 14px 0 0; display: flex; align-items: center; gap: 10px; height: 32px; color: var(--sz-accent); font: 28px var(--sz-font-mono); white-space: nowrap; }
-.player-singing-countdown i { width: 14px; height: 14px; border-radius: 50%; background: var(--sz-accent); opacity: .2; }
+.player-singing-countdown { position: absolute; left: 0; bottom: 100%; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; height: 24px; color: var(--sz-accent); font: 22px/24px var(--sz-font-mono); white-space: nowrap; }
+.player-singing-countdown i { width: 12px; height: 12px; border-radius: 50%; background: var(--sz-accent); opacity: .2; }
 .player-singing-countdown i[data-lit="true"] { opacity: 1; }
 
 .player-bottom { flex: 0 0 104px; height: 104px; }
