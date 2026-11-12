@@ -56,7 +56,7 @@ describe('Box queue hydration and persistence', () => {
     const projected = projectQueue([], store.getRefs())
     expect(projected).toHaveLength(2)
     expect(projected.every(item => item.item.songPath === '' && item.entry.unavailable)).toBe(true)
-    expect(entriesWithQueueRefs([], refs).map(entry => entry.name)).toEqual(['Unavailable Drive project', 'Unavailable project'])
+    expect(entriesWithQueueRefs([], refs).map(entry => entry.name)).toEqual(['Unavailable Drive song', 'Unavailable song'])
   })
 
   it('allows explicit retry after hydration failure but hydrates successfully only once', async () => {

@@ -207,8 +207,9 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
       onRemove={(dir, name, bytes) => requestConfirmation({ kind: 'remove-cache', dir, name, bytes, requireIdle: false })} onBack={back}
     />}
     {page === 'diagnostics' && <DiagnosticsPage
-      diagnostics={diagnostics.diagnostics} loading={diagnostics.loading} error={diagnostics.error}
-      onRefresh={() => { void diagnostics.refresh() }} onAudio={props.onOpenAudio}
+      diagnostics={diagnostics.diagnostics} routing={diagnostics.routing} routingError={diagnostics.routingError}
+      audioInventory={inventory.audio} loading={diagnostics.loading || inventory.audioLoading} error={diagnostics.error ?? inventory.audioError}
+      onRefresh={() => { void diagnostics.refresh(); void inventory.refreshAudio() }} onAudio={props.onOpenAudio}
       onSetup={() => dispatch({ type: 'open-setup' })} onBack={back}
     />}
     {page === 'system' && <SystemPage

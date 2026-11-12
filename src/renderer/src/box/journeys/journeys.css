@@ -96,3 +96,7 @@
   font-size: var(--box-label-size);
   line-height: var(--box-label-line);
 }
+[data-diagnostics-device] > strong { display: block; margin-top: 12px; font-size: var(--box-row-size); line-height: var(--box-row-line); font-weight: 600; overflow-wrap: anywhere; }
+.journey-diagnostic-rates { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 8px 0 0; padding: 12px 4px; border-top: 0; }
+.journey-diagnostic-rates dt { color: var(--sz-dim); font-size: var(--box-meta-size); line-height: var(--box-meta-line); }
+.journey-diagnostic-rates dd { margin: 0; font-size: var(--box-row-size); line-height: var(--box-row-line); font-weight: 550; overflow-wrap: anywhere; }
