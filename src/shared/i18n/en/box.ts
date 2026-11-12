@@ -108,6 +108,7 @@ export const box = {
   'box.player.ended': 'Song ended · The queue is empty. Replay or choose a song',
   'box.player.endedNext': 'Song ended · Press OK to start the next song',
   'box.player.nextSong': 'Next song',
+  'box.player.noNext': 'No next song in the queue',
   'box.player.nextLabel': 'Next: {title}',
   'box.player.upNext': 'Up next: {title}',
   'box.player.replay': 'Replay',

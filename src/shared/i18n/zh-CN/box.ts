@@ -110,6 +110,7 @@ export const box: Record<keyof typeof english, string> = {
   'box.player.ended': '歌曲已结束 · 队列为空。可重新演唱或选择歌曲',
   'box.player.endedNext': '歌曲已结束 · 按确定开始下一首',
   'box.player.nextSong': '下一首',
+  'box.player.noNext': '队列中没有下一首',
   'box.player.nextLabel': '下一首:{title}',
   'box.player.upNext': '接下来:{title}',
   'box.player.replay': '重新演唱',

@@ -47,10 +47,22 @@ describe('Player next song', () => {
     expect(html).not.toContain('data-control="next"')
     expect(html).not.toContain('Next: New Song')
   })
-  it('hides Next and Up next when the queue has no next song', () => {
+  it('mid-song with an empty queue shows a disabled Next with the explanation, and no Up next line', () => {
     const html = render(snapshot({ playing: true }), null)
-    expect(html).not.toContain('next-song')
+    expect(html).toMatch(/<button[^>]*aria-label="No next song in the queue"[^>]*data-control="next-song"[^>]*disabled/)
     expect(html).not.toContain('Up next')
+    expect(html.indexOf('data-control="forward5"')).toBeLessThan(html.indexOf('data-control="next-song"'))
+  })
+  it('the Next control is enabled when a next song is queued', () => {
+    const html = render(snapshot({ playing: true }), { title: 'New Song', artist: null })
+    expect(html).toMatch(/aria-label="Next song"[^>]*data-control="next-song"(?![^>]*disabled)/)
+  })
+  it('explanation is localized', async () => {
+    for (const [locale, label] of [['ru', 'В очереди нет следующей песни'], ['zh-CN', '队列中没有下一首']] as const) {
+      await prepareBoxLocale(locale)
+      expect(render(snapshot({ playing: true }), null)).toContain(`aria-label="${label}"`)
+    }
+    await prepareBoxLocale('en')
   })
   it('at the end offers "Next: title", Replay and the start-next status', () => {
     const html = render(snapshot({ position: 100 }), { title: 'New Song', artist: null })

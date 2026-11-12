@@ -117,6 +117,7 @@ export const box: Translation<typeof english> = {
   'box.player.ended': 'Песня закончилась · Очередь пуста. Повторите или выберите песню',
   'box.player.endedNext': 'Песня закончилась · Нажмите OK, чтобы начать следующую',
   'box.player.nextSong': 'Следующая песня',
+  'box.player.noNext': 'В очереди нет следующей песни',
   'box.player.nextLabel': 'Далее: {title}',
   'box.player.upNext': 'Далее в очереди: {title}',
   'box.player.replay': 'Повтор',
