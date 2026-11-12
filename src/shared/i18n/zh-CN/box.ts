@@ -88,6 +88,7 @@ export const box: Record<keyof typeof english, string> = {
   'box.player.lyricsReadError': '无法读取缓存歌词：{error}',
   'box.player.seek': '歌曲位置',
   'box.player.seekValue': '{position}，共 {duration}',
+  'box.player.fromStart': '从头开始',
   'box.player.back5': '后退 5 秒',
   'box.player.forward5': '前进 5 秒',
   'box.player.play': '播放',

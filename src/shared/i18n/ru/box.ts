@@ -95,6 +95,7 @@ export const box: Translation<typeof english> = {
   'box.player.lyricsReadError': 'Не удалось прочитать сохранённый текст: {error}',
   'box.player.seek': 'Позиция в песне',
   'box.player.seekValue': '{position} из {duration}',
+  'box.player.fromStart': 'С начала',
   'box.player.back5': 'Назад на 5 секунд',
   'box.player.forward5': 'Вперёд на 5 секунд',
   'box.player.play': 'Играть',

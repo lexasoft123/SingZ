@@ -86,6 +86,7 @@ export const box = {
   'box.player.lyricsReadError': 'Cached lyrics could not be read: {error}',
   'box.player.seek': 'Song position',
   'box.player.seekValue': '{position} of {duration}',
+  'box.player.fromStart': 'From the start',
   'box.player.back5': 'Back 5 seconds',
   'box.player.forward5': 'Forward 5 seconds',
   'box.player.play': 'Play',

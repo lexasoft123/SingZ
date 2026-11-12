@@ -98,6 +98,7 @@ export function Player({
             />
           </div>
           <div className="player-playback" data-remote-up="[data-control='seek']">
+            <Button aria-label={t('box.player.fromStart')} title={t('box.player.fromStart')} data-control="from-start" disabled={!canPlay || !snapshot.playing && status !== 'ended' && snapshot.position <= 0.05} onClick={() => { if (status === 'ended') onToggle(); else onSeek(0) }}><span className="icon-mirror" aria-hidden="true"><Icon name="skip" size={23} /></span></Button>
             <Button aria-label={t('box.player.back5')} data-control="previous" disabled={!canPlay} onClick={() => onSeekBy(-5)}><Icon name="replay" size={23} /></Button>
             <Button className="player-play" variant="primary" aria-label={snapshot.playing ? t('box.player.pause') : status === 'ended' ? t('box.player.replay') : t('box.player.play')} data-control="play" disabled={!canPlay} onClick={onToggle}>
               <Icon name={snapshot.playing ? 'pause' : 'play'} size={27} />
