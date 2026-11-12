@@ -19,6 +19,12 @@ name: Checks
 # mode this workflow exists to remove. Ignore only what cannot affect a test.
 on:
   workflow_dispatch:
+    inputs:
+      perf_inject_frame_sleep_ms:
+        description: 'Negative control for gpui-perf-smoke: sleep this many ms on every offscreen frame (0 = off). The perf job must go red.'
+        required: false
+        type: string
+        default: '0'
   # Listed twice rather than shared through a YAML anchor: the Actions workflow
   # parser does not resolve anchors, and a workflow that silently fails to parse
   # is worse than a duplicated list.
@@ -375,3 +381,127 @@ jobs:
             playback_cue_plan_tests native_playback_contract_tests
           ctest --test-dir build/native/gpui-session-tests -C Release --output-on-failure \
             -R '^(native_playback_|shared_audio_service_tests|playback_cue_plan_tests)'
+
+      # The perf smoke job below needs the audio helper the app talks to; it is
+      # built above, once, so the perf job does not repeat a C++ build.
+      - name: Keep the macOS helpers for the perf smoke job
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v4
+        timeout-minutes: 5
+        with:
+          name: gpui-ci-helpers
+          path: ${{ env.G }}/target/ci-helpers
+          retention-days: 1
+          if-no-files-found: error
+
+  # C-35: the plan's section 3.3 smoke checks on a release ui-tests build, on
+  # macOS (the only platform with a hidden-window driver and the allocation and
+  # frame-demand counters). A regression fails the job and prints its delta; the
+  # limits and why each one is gated or only reported are in
+  # tests/perf/smoke_thresholds.json and tests/perf/README.md. It reuses the
+  # vendor, registry and target caches of gpui-native (the target cache by prefix:
+  # same toolchain, lockfile and patches, so dependencies are not rebuilt; only
+  # the ui-tests build of our own crate is) and the helpers gpui-native built.
+  # Runs on every push, a superset of "pushes touching the GPUI crate or the helpers".
+  gpui-perf-smoke:
+    name: gpui-perf-smoke (macos)
+    needs: gpui-native
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      G: experiments/gpui-player
+      RUST_TOOLCHAIN: '1.99.1'
+      CARGO_BUILD_JOBS: '4'
+      # Empty or 0 outside a manual dispatch. Only the ui-tests build reads it.
+      SINGZ_PERF_INJECT_FRAME_SLEEP_MS: ${{ inputs.perf_inject_frame_sleep_ms }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+        timeout-minutes: 10
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+        timeout-minutes: 5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+        timeout-minutes: 5
+      # make_reference.cjs synthesizes the Q-02 reference library with ffmpeg
+      # (FLAC and MP3 encoders); the runner image does not carry it.
+      - name: ffmpeg
+        timeout-minutes: 10
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg
+      - name: Rust toolchain
+        timeout-minutes: 10
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          cargo --version
+      - name: Cache vendored GPUI crates
+        uses: actions/cache@v4
+        timeout-minutes: 10
+        with:
+          path: ${{ env.G }}/vendor
+          key: gpui-vendor-${{ runner.os }}-${{ hashFiles('experiments/gpui-player/vendor-patches/**', 'scripts/gpui-vendor.py') }}
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        timeout-minutes: 10
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: gpui-cargo-home-${{ runner.os }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/vendor.lock') }}
+      # Own key (gpui-native saves the gpui-target- key for this sha, and a
+      # second save to the same key is refused); restored from gpui-native's.
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        timeout-minutes: 15
+        with:
+          path: ${{ env.G }}/target
+          key: gpui-perf-target-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-${{ github.sha }}
+          restore-keys: |
+            gpui-target-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-
+            gpui-perf-target-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('experiments/gpui-player/Cargo.lock', 'experiments/gpui-player/vendor-patches/**') }}-
+      - name: Materialize vendored GPUI crates
+        timeout-minutes: 15
+        run: |
+          python scripts/gpui-vendor.py
+          python scripts/gpui-vendor.py --check
+      - name: Build (release, ui-tests)
+        working-directory: ${{ env.G }}
+        timeout-minutes: 40
+        run: node ../../scripts/with-native-build-lock.mjs --owner ci-gpui-perf-build -- cargo build --release --locked --features ui-tests
+      - name: Helpers from gpui-native
+        uses: actions/download-artifact@v4
+        timeout-minutes: 5
+        with:
+          name: gpui-ci-helpers
+          path: ${{ runner.temp }}/helpers
+      - name: Perf gate unit tests
+        timeout-minutes: 5
+        run: python -m unittest tests/perf/test_smoke_gate.py
+      # Exit status is the gate: non-zero prints the REGRESSION lines and fails the job.
+      - name: Perf smoke gate
+        timeout-minutes: 20
+        run: |
+          chmod +x "$RUNNER_TEMP"/helpers/*
+          python tests/perf/smoke_gate.py \
+            --binary "$G/target/release/singz-gpui-player" \
+            --helpers "$RUNNER_TEMP/helpers" \
+            --out-dir "$RUNNER_TEMP/perf-smoke"
+      - name: Keep the perf receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        timeout-minutes: 5
+        with:
+          name: gpui-perf-smoke
+          path: ${{ runner.temp }}/perf-smoke
+          retention-days: 14
+          if-no-files-found: warn

@@ -135,3 +135,68 @@ it on a static animation or playback, or pass `-NoDemand` to skip drop accountin
 The legacy poll mode (`-App -Flag -Out`, used by `run_windows_ui.ps1`) is unchanged.
 Presented time is `CPUStartTime + DisplayLatency` from the PresentMon 2.x CSV;
 frames with no display time count as dropped. Not yet run on a Windows machine. `windows_gpu_sampler_csv_test.ps1` checks the frame statistics on synthetic CSVs (skipped frame counted once); also unrun.
+
+## Perf smoke gate (C-35)
+
+`tests/perf/smoke_gate.py` is the CI entry point (job `gpui-perf-smoke` in
+`.github/workflows/checks.yml`, macOS only) and runs unchanged on a Mac:
+
+```
+cargo build --release --locked --features ui-tests          # in experiments/gpui-player
+python3 tests/perf/smoke_gate.py --binary experiments/gpui-player/target/release/singz-gpui-player \
+    --helpers <dir with singz-gpui-audio, singz-analyze, singz-gpui-input> --out-dir out/perf-smoke
+```
+
+Three hidden, muted launches of the same binary against the Q-02 reference library
+(`make_reference.cjs`: 300 s and 720 s, six stems, lyrics, pitch line; needs `ffmpeg`):
+**probe** (frame-demand and allocation counters), **harness** (`perf_harness.py --run-kind
+smoke`: 10 s play, 3 s burst, 8 s pause, 4 cycles) and **offscreen** (`interface-offscreen-perf.py`:
+GPU render and readback of the player at a 120 Hz budget). It prints one table (measured, limit,
+delta, Q-02 figure, status) and a `REGRESSION` line with the delta for each failure, writes
+`smoke-gate.json` plus each leg's receipt to `--out-dir`, and exits 1 on any failure. A metric
+that could not be measured (a failed leg, an unavailable counter) fails; it never passes by being
+absent. The limits live in `smoke_thresholds.json`; change a limit there with the reason beside it.
+
+GitHub's macOS runners are shared, virtualized and not the reference Mac (M4 Pro), so a
+limit is gated only when it means something there. Timings get a wide margin over Q-02's
+worst run; counts are exact because they do not depend on the machine.
+
+| Metric | Limit | Q-02 | Why this limit |
+|---|---|---|---|
+| Frames demanded in 5 s: idle library, paused player, modal open | 0 | 0 presented in 60 s | A count of app-owned frame requests (N5), not a clock. Exact. |
+| Allocations inside lane/playhead paint, 2 s playback | 0 | - | C-71 invariant, counted by the ui-tests allocator probe. Counted only if playback really demanded frames. |
+| Main-thread waveform rasterizations, waveform cache misses, 2 s playback | 0 | - | C-70 invariants; exact counts. |
+| `starvedBlocks`, all lanes | 0 | 0 | N11. An unavailable lane counter fails. |
+| Hidden scenario completes | yes | yes | A crash, timeout or bad receipt fails. |
+| Song open (300 s, 6 stems) | <= 3000 ms | 194 ms worst | About 15x for a cold shared runner; still catches a synchronous decode of every stem or a lost cache. |
+| Cold launch to interactive | <= 10000 ms | 1728 ms worst (cold) | About 6x the Q-02 cold run. |
+| Offscreen throughput | >= 30 images/s | none (see below) | Mac receipt 102.9 images/s; the existing 50/s gate relaxed for a shared runner (3.4x headroom). |
+| Offscreen prepare+draw p95 | <= 25 ms | none | Mac receipt 1.98 ms; 12x headroom for a shared or software GPU. |
+
+Reported, never gated (printed with the Q-02 figure): idle CPU (4.7 %), playing CPU (6.2 %),
+steady footprint (160 MB), release binary size. A shared runner's CPU and memory are not
+comparable with the reference Mac; N6, N7, N9, N10 and N14 stay beta-gate items judged there
+(CI builds no installer, so the DMG figure from Q-02 has no CI counterpart). Presented frame
+rate and p99 need a visible window and are not measurable on CI: the hidden window presents
+nothing (`frames_visible.py` runs on a real display).
+
+Q-02 has no offscreen figure, because its frame cells come from visible windows. The offscreen
+limits are therefore derived from the Mac receipt in `the table above` and the existing
+offscreen gate, with the margin stated above.
+
+**Negative control.** `--inject-frame-sleep-ms N` (CI: the `perf_inject_frame_sleep_ms` input of
+a manual `workflow_dispatch`) exports `SINGZ_PERF_INJECT_FRAME_SLEEP_MS`. The ui-tests build, and
+only it (the name is in `tests/shared/gpui-gated-env-names.json` and read through `gated_env!`),
+sleeps that long in every offscreen frame, so throughput drops and prepare+draw rises; the gate
+must be red. `test_smoke_gate.py` proves the gate logic turns red with the control and green
+without it. The Mac receipt below shows the real binary doing the same.
+
+Unverified: that GitHub's `macos-15` image has Metal access for `render_to_image` (the offscreen
+leg fails closed if not); the first CI run is the proof. If it has none, move that leg to a
+self-hosted Mac rather than loosening it.
+
+Mac receipt (M4 Pro, release+ui-tests of the C-35 tree): clean run **passed** (offscreen 102.5
+images/s, p95 2.0 ms, song open 176 ms, startup 297 ms, 0 frames demanded, 0 allocations, 0
+starved blocks). With `--inject-frame-sleep-ms 40` it **failed** with
+`offscreenFramesPerSecond: 20.5 images/s, limit >= 30, 9.5 images/s past the limit` and
+`offscreenPrepareDrawP95Ms: 47.1 ms, limit <= 25, 22.1 ms past the limit`.

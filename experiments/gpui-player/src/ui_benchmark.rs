@@ -78,6 +78,10 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, output: PathBuf, cx: &
                         this.playing=false; this.last=Instant::now(); cx.notify();
                     });
                     window.simulate_next_frame(cx); window.refresh(); let _=window.draw(cx);
+                    // C-35 negative control: a per-frame stall that the perf smoke gate must catch.
+                    if let Some(ms)=gated_env!("SINGZ_PERF_INJECT_FRAME_SLEEP_MS").and_then(|value|value.to_str().and_then(|text|text.parse::<u64>().ok())) {
+                        std::thread::sleep(Duration::from_millis(ms));
+                    }
                     let prepare_ms=start.elapsed().as_secs_f64()*1000.;
                     let paint=stats.borrow();
                     // FrameStats emits/reset counters each180 paints. This is

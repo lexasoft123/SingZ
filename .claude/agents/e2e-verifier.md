@@ -328,6 +328,7 @@ Performance and presentation drivers (`tests/perf/`, repo root):
 | `tests/perf/perf_harness.py` | `--app native --command <qualify ui-tests binary> --profile release+ui-tests --display hidden --machine <id> --commit <sha> --reference-json <staged.json> --control-dir <fresh> --package <installer> --out <dir>` | hidden | `--play 180 --burst 5 --pause 60 --cycles 20` by default (about 5 min); `--deadline` 120 s per action; `--run-kind smoke` for non-baseline |
 | `tests/perf/stage_fixture.cjs` | `node tests/perf/stage_fixture.cjs <fresh-dir>` | none | Stages the isolated two-project library the harness reads |
 | `tests/perf/make_reference.cjs` | `node tests/perf/make_reference.cjs <fresh-dir>` | none | Reference library, 300 s and 720 s songs; needs `ffprobe` |
+| `tests/perf/smoke_gate.py` | `python3 tests/perf/smoke_gate.py` (see `tests/perf/README.md`; CI job `gpui-perf-smoke` in `checks.yml`) | hidden, offscreen | Thresholds in `tests/perf/smoke_thresholds.json`; `SINGZ_PERF_INJECT_FRAME_SLEEP_MS` is the negative control |
 | `tests/perf/baseline_aggregate.py` | `python3 tests/perf/baseline_aggregate.py` over three `--run-kind baseline` reports per app (see `tests/perf/README.md`) | none | Offline; writes the Q-01/Q-02 baseline JSON and summary |
 | `tests/perf/electron_driver.cjs` | `--command 'node tests/perf/electron_driver.cjs'` with `--app electron` | hidden | Control run beside the native one; `SINGZ_USERDATA_DIR`, `SINGZ_PERF_SONGS` |
 

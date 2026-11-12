@@ -1,0 +1,68 @@
+{
+  "schema": "singz.perf.smoke-thresholds.v1",
+  "source": "experiments/gpui-player/plan/Q-02-native-baseline.json (commit f9c1a613, tip e40d24d0, Mac16,11 Apple M4 Pro)",
+  "gates": {
+    "idleLibraryDemandedFrames": {
+      "label": "idle library: frames demanded in 5 s", "unit": "frames", "op": "<=", "limit": 0, "q02": 0,
+      "basis": "Q-02 idle gate: 0 presented samples in 60 s (N5). A count of app-owned frame requests, not a timing, so exact."
+    },
+    "pausedPlayerDemandedFrames": {
+      "label": "paused player: frames demanded in 5 s", "unit": "frames", "op": "<=", "limit": 0, "q02": 0,
+      "basis": "Same as above, reference song open and paused."
+    },
+    "modalOpenDemandedFrames": {
+      "label": "modal open: frames demanded in 5 s", "unit": "frames", "op": "<=", "limit": 0, "q02": 0,
+      "basis": "Same as above, with a modal open."
+    },
+    "steadyPlaybackPaintAllocations": {
+      "label": "heap allocations inside lane/playhead paint, 2 s of playback", "unit": "allocations", "op": "<=", "limit": 0, "q02": null,
+      "basis": "Not in Q-02; the C-71 invariant (no per-frame allocation in lane and playhead paint). An exact count from the ui-tests allocator probe."
+    },
+    "steadyPlaybackMainThreadRasterizations": {
+      "label": "main-thread waveform rasterizations, 2 s of playback", "unit": "rasterizations", "op": "<=", "limit": 0, "q02": null,
+      "basis": "Not in Q-02; C-70 invariant. Exact count."
+    },
+    "steadyPlaybackWaveformCacheMisses": {
+      "label": "waveform cache misses, 2 s of playback", "unit": "misses", "op": "<=", "limit": 0, "q02": null,
+      "basis": "Not in Q-02; C-70 invariant. Exact count."
+    },
+    "starvedBlocksTotal": {
+      "label": "starvedBlocks, all lanes, hidden scenario", "unit": "blocks", "op": "<=", "limit": 0, "q02": 0,
+      "basis": "Q-02: 0 on every lane in all three runs (N11). An unavailable counter fails the gate."
+    },
+    "hiddenScenarioComplete": {
+      "label": "hidden scenario completed (all phases, valid report)", "unit": "1 = yes", "op": ">=", "limit": 1, "q02": 1,
+      "basis": "Every Q-02 run completed. A crash, timeout or invalid receipt fails."
+    },
+    "songOpenMs": {
+      "label": "song open (300 s, 6 stems)", "unit": "ms", "op": "<=", "limit": 3000, "q02": 193.9,
+      "basis": "Q-02 worst of 3: 193.9 ms. About 15x: a shared macOS runner has cold disks and no tuning; the bound catches a lost cache or a synchronous decode of every stem, which cost seconds."
+    },
+    "startupMs": {
+      "label": "cold launch to interactive", "unit": "ms", "op": "<=", "limit": 10000, "q02": 1728.0,
+      "basis": "Q-02 worst of 3: 1728 ms (a cold first run; the other two ~260 ms). About 6x the cold run."
+    },
+    "offscreenFramesPerSecond": {
+      "label": "offscreen render+readback throughput", "unit": "images/s", "op": ">=", "limit": 30, "q02": null,
+      "basis": "Q-02 has no offscreen cell (a hidden window presents nothing). Mac receipt (M4 Pro, release+ui-tests, 6 s): 102.9 images/s. The bound is the existing 50 images/s offscreen gate relaxed to 30 for a shared runner (about 3.4x headroom); a 40 ms per-frame stall measured 19.5 images/s."
+    },
+    "offscreenPrepareDrawP95Ms": {
+      "label": "offscreen prepare+draw p95", "unit": "ms", "op": "<=", "limit": 25, "q02": null,
+      "basis": "Q-02 has no offscreen cell. Mac receipt: p95 1.98 ms. 25 ms is about 12x that, for a runner with a software or shared GPU; the injected 40 ms stall measured p95 51.9 ms."
+    },
+    "offscreenStructuralFailures": {
+      "label": "offscreen run checks failed (hidden, glow painted, frames, samples, readback)", "unit": "failures", "op": "<=", "limit": 0, "q02": null,
+      "basis": "interface-offscreen-perf.py's own verdict, excluding its throughput line (gated above). A run whose glow never painted, or that measured too few frames, must not pass on throughput alone."
+    }
+  },
+  "info": {
+    "idleCpuPercent": {"label": "idle CPU (paused, hidden)", "unit": "% of one core", "q02": 4.709,
+      "why": "Runner CPU is shared and its clock differs from the M4 Pro; N6 (< 1%) is owned by C-33/N-packages, judged on the reference Mac."},
+    "playingCpuPercent": {"label": "playing CPU (hidden)", "unit": "% of one core", "q02": 6.150,
+      "why": "Same: relative to a different machine under load."},
+    "steadyFootprintBytes": {"label": "steady footprint", "unit": "bytes", "q02": 159844368,
+      "why": "Allocator and page behavior differ per macOS image; growth over cycles is a Q-02 beta-gate item."},
+    "packageSizeBytes": {"label": "release binary size (CI builds no installer)", "unit": "bytes", "q02": 45373983,
+      "why": "Q-02 records the DMG; CI has no DMG, so the binary is reported without a comparison. N14 is judged on the packaged DMG."}
+  }
+}
