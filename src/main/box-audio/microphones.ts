@@ -1,3 +1,4 @@
+import { boundedMeterSink, coalesceMeterLevels } from '../../shared/box-meter-push'
 import { readAlsaCaptureTiming, type AlsaCaptureTiming } from './meter-trace'
 import { performance } from 'node:perf_hooks'
 import { BOX_HOST_ANALYSIS_OWNER, type BoxMicrophoneLevels, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
@@ -47,6 +48,36 @@ export class MicrophoneAnalysisSupervisor {
   private hardwareGeneration: string | null = null
   private hardware: AlsaCaptureTiming[] | null = null
   private peakSinceFast: { generation: string; peak: number[]; at: number } | null = null
+  private levelListeners = new Set<ReturnType<typeof boundedMeterSink>>()
+  private levelTimer?: ReturnType<typeof setTimeout>
+  private levelReading = false
+  private pendingPush: BoxMicrophoneLevels | undefined
+  private nextPushAt = 0
+  /** Analysis notifications already cross the bounded native bridge. No new
+   * reader, audio callback work, or periodic sampler is needed. */
+  subscribeLevels = (listener: (value: BoxMicrophoneLevels) => void | Promise<void>): (() => void) => {
+    const sink = boundedMeterSink(value => listener(value.trace ? { ...value,
+      trace: { ...value.trace, hostSendNs: process.hrtime.bigint().toString() } } : value))
+    this.levelListeners.add(sink)
+    this.scheduleLevels()
+    return () => {
+      sink.close(); this.levelListeners.delete(sink)
+      if (!this.levelListeners.size) { clearTimeout(this.levelTimer); this.levelTimer = undefined; this.pendingPush = undefined }
+    }
+  }
+  private scheduleLevels(): void {
+    if (this.disposed || !this.levelListeners.size || this.levelTimer || this.levelReading) return
+    this.levelTimer = setTimeout(() => {
+      this.levelTimer = undefined
+      this.levelReading = true
+      void this.levels().then(value => {
+        const next = coalesceMeterLevels(this.pendingPush, value); this.pendingPush = undefined
+        if (!this.disposed) for (const sink of this.levelListeners) sink.push(next)
+      }).catch(() => {}).finally(() => { this.levelReading = false })
+      this.nextPushAt = this.now() + 1000 / 30
+    }, Math.max(0, this.nextPushAt - this.now()))
+    this.levelTimer.unref?.()
+  }
   private value: BoxMicrophoneSnapshot
   private now: () => number
   constructor(private readonly options: Options) {
@@ -139,7 +170,9 @@ export class MicrophoneAnalysisSupervisor {
       points: native.trace.points.map((point, i) => ({ ...point, matched: point.matched && levels.peak[i] === native.peak[i] })),
       hostReceiveNs: receiveNs!, hostReadNs: readNs!, hostSendNs: process.hrtime.bigint().toString(),
       hardware: this.hardware, device: this.value.active!.device, label: this.value.active!.label } : undefined
-    return { epoch: this.options.epoch, generation, levels, ...(trace ? { trace } : {}) }
+    const value = { epoch: this.options.epoch, generation, levels, ...(trace ? { trace } : {}) }
+    if (this.levelListeners.size) this.pendingPush = coalesceMeterLevels(this.pendingPush, value)
+    return value
   }
   private async observe(): Promise<void> {
     if (this.value.generation === '0') return
@@ -208,6 +241,7 @@ export class MicrophoneAnalysisSupervisor {
         { deviceUid: device.uid, inputChannel: enabled[0], enabledChannels: enabled }, generation, window => {
           if (!this.disposed && window.ownershipGeneration === this.value.generation && Number.isFinite(window.frequency) && Number.isFinite(window.clarity))
             this.pitch = { window, at: this.now() }
+          this.scheduleLevels()
         })
       pendingGeneration = ''
       if (!result.ok) { this.retry(result.error || 'Microphone start failed', result.state === 'unsupported'); return }
@@ -260,6 +294,7 @@ export class MicrophoneAnalysisSupervisor {
   }
   dispose(): Promise<void> {
     this.disposed = true; clearInterval(this.timer)
+    clearTimeout(this.levelTimer); for (const sink of this.levelListeners) sink.close(); this.levelListeners.clear()
     return this.enqueue(() => this.cancel())
   }
 }

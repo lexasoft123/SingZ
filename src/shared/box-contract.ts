@@ -167,6 +167,11 @@ export type BoxAPI = {
   meterTraceEnabled?: true
   /** Level-only read for visible meters, frame-aligned and capped at 30 Hz. */
   microphoneLevels(): Promise<BoxResult<BoxMicrophoneLevels>>
+  /** Optional push extension; old preload/host versions retain fast reads. */
+  subscribeMicrophoneLevels?(subscription: string): Promise<BoxResult<null>>
+  unsubscribeMicrophoneLevels?(subscription: string): Promise<BoxResult<null>>
+  ackMicrophoneLevels?(subscription: string, sequence: number): Promise<BoxResult<null>>
+  onMicrophoneLevels?(callback: (value: BoxMicrophoneLevels, subscription: string, sequence: number) => void): () => void
   /** Revision compare-and-set of the persisted input selection; applies immediately. */
   setMicrophoneSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxResult<BoxMicrophoneSelectionResult>>
   phoneStart(): Promise<BoxResult<BoxPhoneState>>

@@ -26,6 +26,14 @@ const box: BoxAPI = {
   restoreRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-restore', expected),
   microphones: () => ipcRenderer.invoke('box:microphones'),
   microphoneLevels: () => ipcRenderer.invoke('box:microphone-levels'),
+  subscribeMicrophoneLevels: subscription => ipcRenderer.invoke('box:microphone-levels-subscribe', subscription),
+  unsubscribeMicrophoneLevels: subscription => ipcRenderer.invoke('box:microphone-levels-unsubscribe', subscription),
+  ackMicrophoneLevels: (subscription, sequence) => ipcRenderer.invoke('box:microphone-levels-ack', subscription, sequence),
+  onMicrophoneLevels: callback => {
+    const listener = (_event: IpcRendererEvent, value: import('../shared/box-audio').BoxMicrophoneLevels, subscription: string, sequence: number): void => callback(value, subscription, sequence)
+    ipcRenderer.on('box:microphone-levels-push', listener)
+    return () => ipcRenderer.removeListener('box:microphone-levels-push', listener)
+  },
   setMicrophoneSelection: edit => ipcRenderer.invoke('box:microphone-selection-set', edit),
   routingSnapshot: () => ipcRenderer.invoke('box:routing-snapshot'),
   routingEdit: edit => ipcRenderer.invoke('box:routing-edit', edit),

@@ -383,6 +383,7 @@ export async function boxPrepareRetainedPlayback(
 
 /** Host-owned analysis service; reads are safe during transport uncertainty. */
 export const boxMicrophones = {
+  subscribeLevels: (listener: (value: BoxMicrophoneLevels) => Promise<void>): Promise<() => void> => { requireBoxAudioSocket(); return boxAudioProcess!.subscribeLevels(listener) },
   snapshot: (): Promise<BoxMicrophoneSnapshot> => { requireBoxAudioSocket(); return boxAudioProcess!.call('service', 'microphones', []) },
   levels: (): Promise<BoxMicrophoneLevels> => { requireBoxAudioSocket(); return boxAudioProcess!.call('service', 'microphoneLevels', []) },
   setSelection: async (edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> => {

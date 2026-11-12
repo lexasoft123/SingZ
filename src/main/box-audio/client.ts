@@ -1,3 +1,4 @@
+import type { BoxMicrophoneLevels } from '../../shared/box-audio'
 import { connect, type Socket } from 'node:net'
 import { lstat } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -13,6 +14,7 @@ const CAPTURE_RESYNC = new Set(['setMicrophoneSelection'])
 export interface BoxAudioClient {
   call<T>(target: BoxAudioTarget, method: string, args: unknown[]): Promise<T>
   callStamped<T>(target: BoxAudioTarget, method: string, args: unknown[]): Promise<{ epoch: string; value: T }>
+  subscribeLevels(listener: (value: BoxMicrophoneLevels) => Promise<void>): Promise<() => void>
   routingRequest(json: string): Promise<string>
   routingCapabilities(): Promise<unknown>
   reconcile(): Promise<unknown>
@@ -33,6 +35,8 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
   let resyncing: Promise<unknown> | undefined
   let closed = false
   let connection = 0
+  const levelSinks = new Map<string, (value: BoxMicrophoneLevels, sequence: number) => void>()
+  let levelId = 0
   const sinks = new Map<string, { renderer: unknown; generation: string; requestId: bigint; acknowledged: boolean; connection: number; emit(value: unknown): void }>()
   const pending = new Map<string, { resolve(value: unknown, epoch: string): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; mutation: boolean; connection: number; epoch: string }>()
   /** Fails one connection's work, or everything when `only` is omitted. A late
@@ -45,7 +49,7 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
       item.reject(item.mutation ? new BoxAudioUncertainError(error.message) : error)
     }
     for (const [key, sink] of sinks) if (only === undefined || sink.connection === only) sinks.delete(key)
-    if (only === undefined || only === connection) epoch = ''
+    if (only === undefined || only === connection) { epoch = ''; levelSinks.clear() }
   }
   const ensure = (): Promise<void> => {
     if (closed) return Promise.reject(new Error('Box audio client disconnected'))
@@ -72,6 +76,11 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
           clearTimeout(timer); resolve(); return
         }
         if (!epoch || value.epoch !== epoch) throw new Error('Stale Box audio reply')
+        if (value.type === 'levels') {
+          const update = raw as { subscription: string; sequence: number; value: BoxMicrophoneLevels }
+          if (typeof update.subscription !== 'string' || !Number.isSafeInteger(update.sequence) || update.sequence < 1 || update.value?.epoch !== epoch) throw new Error('Invalid Box meter update')
+          levelSinks.get(update.subscription)?.(update.value, update.sequence); return
+        }
         if (value.type === 'capture') { if (boxAudioCounter(value.key)) sinks.get(value.key)?.emit(value.value); return }
         if (value.type !== 'reply' || !boxAudioCounter(value.id) || typeof value.ok !== 'boolean') throw new Error('Invalid Box audio reply')
         const item = pending.get(value.id)
@@ -161,5 +170,20 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
   const call = async <T>(target: BoxAudioTarget, method: string, original: unknown[]): Promise<T> =>
     (await callStamped<T>(target, method, original)).value
   const disconnect = (): void => { closed = true; fail(new Error('Box audio client disconnected')); socket?.destroy() }
-  return { call, callStamped, routingRequest: json => call('routing', 'request', [json]), routingCapabilities: () => call('routing', 'capabilities', []), reconcile: () => call('service', 'reconcile', []), shutdown: async () => disconnect(), terminate: error => { fail(error); socket?.destroy() } }
+  const subscribeLevels = async (listener: (value: BoxMicrophoneLevels) => Promise<void>): Promise<() => void> => {
+    const key = String(++levelId)
+    let active = true
+    levelSinks.set(key, (value, sequence) => {
+      void Promise.resolve().then(() => listener(value)).catch(() => {}).then(() => {
+        if (active && value.epoch === epoch) return call('service', 'ackMicrophoneLevels', [key, sequence])
+      }).catch(() => {})
+    })
+    try { await call('service', 'subscribeMicrophoneLevels', [key]) }
+    catch (error) { levelSinks.delete(key); throw error }
+    return () => {
+      active = false; levelSinks.delete(key)
+      void call('service', 'unsubscribeMicrophoneLevels', [key]).catch(() => {})
+    }
+  }
+  return { call, callStamped, subscribeLevels, routingRequest: json => call('routing', 'request', [json]), routingCapabilities: () => call('routing', 'capabilities', []), reconcile: () => call('service', 'reconcile', []), shutdown: async () => disconnect(), terminate: error => { fail(error); socket?.destroy() } }
 }

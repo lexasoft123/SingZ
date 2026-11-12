@@ -268,3 +268,27 @@ describe('host microphone IPC', () => {
     expect(await invoke(owner, 'box:microphone-selection-set', owner.mainFrame, edit)).toMatchObject({ ok: false, code: 'audio-state' })
   })
 })
+
+
+it('bounds renderer IPC to its acknowledgement and cleans subscription on navigation', async () => {
+  const url = 'file:///tmp/SingZ/out/renderer/box/box.html'
+  let emit!: (value: import('../../src/shared/box-audio').BoxMicrophoneLevels) => Promise<void>
+  const stop = vi.fn()
+  const backend = await register(url, 'box', { microphones: {
+    subscribeLevels: async listener => { emit = listener; return stop },
+    levels: async () => ({} as never), snapshot: async () => ({} as never), setSelection: async () => ({} as never)
+  } })
+  const sender = new Sender(url); attached(backend!, sender)
+  expect(await invoke(sender, 'box:microphone-levels-subscribe', sender.mainFrame, 'meter-1')).toEqual({ ok: true, value: null })
+  let acknowledged = false
+  const pending = emit({ epoch: 'e1', generation: '5', levels: null }).then(() => { acknowledged = true })
+  await Promise.resolve(); expect(acknowledged).toBe(false)
+  const sequence = sender.send.mock.calls[0][3]
+  await invoke(sender, 'box:microphone-levels-ack', sender.mainFrame, 'old', sequence)
+  expect(acknowledged).toBe(false)
+  await invoke(sender, 'box:microphone-levels-ack', sender.mainFrame, 'meter-1', sequence)
+  await pending; expect(acknowledged).toBe(true)
+  const next = emit({ epoch: 'e1', generation: '5', levels: null })
+  sender.emit('did-start-navigation', {}, url, false, true)
+  await next; expect(stop).toHaveBeenCalledOnce()
+})

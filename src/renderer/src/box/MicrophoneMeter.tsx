@@ -35,7 +35,7 @@ export function MicrophoneMeter({ source, snapshot, slot, meterId, mini = false,
   return <span className="mic-meter" data-mic-state={state} data-mic-status={live ? 'level' : state}
     data-mic-db={snapshot && live ? (Number.isFinite(staticDb) ? staticDb.toFixed(1) : '-inf') : undefined}>
     <span className="mic-meter-bar" data-mix-meter={live ? meterId : undefined} aria-hidden="true">
-      <PeakMeter ref={meter} db={staticDb} renderMode="canvas" maxFps={30} attackMs={0} onPaint={source?.meterPaint} enabled={live && showing} mini={mini} clipped={state === 'loud'} size={mini ? PLAYER_METER_SIZE : MIXER_METER_SIZE} />
+      <PeakMeter ref={meter} db={staticDb} renderMode="canvas" maxFps={30} paintOnReceive attackMs={0} onPaint={source?.meterPaint} enabled={live && showing} mini={mini} clipped={state === 'loud'} size={mini ? PLAYER_METER_SIZE : MIXER_METER_SIZE} />
     </span>
     <b className="mic-meter-state">{t(microphoneMeterStateKey(state))}</b>
   </span>

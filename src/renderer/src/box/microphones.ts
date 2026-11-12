@@ -27,7 +27,7 @@ export type MicrophoneSnapshot = {
   pending: boolean
   error: string | null
 }
-type Api = Pick<BoxAPI, 'microphones' | 'microphoneLevels' | 'setMicrophoneSelection' | 'meterTraceEnabled'>
+type Api = Pick<BoxAPI, 'microphones' | 'microphoneLevels' | 'setMicrophoneSelection' | 'meterTraceEnabled' | 'subscribeMicrophoneLevels' | 'unsubscribeMicrophoneLevels' | 'ackMicrophoneLevels' | 'onMicrophoneLevels'>
 const MAX = (1n << 64n) - 1n
 const COUNTER = /^(0|[1-9][0-9]{0,19})$/
 /** Visible meters read on display frames, capped at 30 Hz (a small level-only
@@ -94,6 +94,7 @@ export class BoxMicrophones {
   private fastListeners = new Set<() => void>()
   private disposed = false
   private timer?: ReturnType<typeof setInterval>
+  private levelLeadTimer?: ReturnType<typeof setTimeout>
   private frame = 0
   private nextLevelFrameAt = 0
   private polling = false
@@ -101,7 +102,43 @@ export class BoxMicrophones {
   private nextLevelAttempt = 0
   private levelFailures = 0
   private legacyLevelEpoch: string | null = null
+  private pushKey = ''
+  private pushReady = false
+  private pushProbeEpoch: string | null = null
+  private unwatchPush?: () => void
+  private lastPushAt = Number.NEGATIVE_INFINITY
   private wasWatching = false
+  private stopPush(): void {
+    const key = this.pushKey
+    this.pushKey = ''; this.pushReady = false
+    this.unwatchPush?.(); this.unwatchPush = undefined
+    if (key) void this.api.unsubscribeMicrophoneLevels?.(key).catch(() => {})
+  }
+  private startPush(): void {
+    const epoch = this.value.epoch
+    if (!this.connected || !this.watching() || !epoch || this.pushKey || this.pushProbeEpoch === epoch ||
+        !this.api.subscribeMicrophoneLevels || !this.api.onMicrophoneLevels) return
+    const key = this.pushKey = `meter-${crypto.randomUUID()}`
+    this.pushProbeEpoch = epoch
+    if (this.trace) void this.pollLevels()
+    this.unwatchPush = this.api.onMicrophoneLevels((response, subscription, sequence) => {
+      if (this.disposed || key !== this.pushKey || subscription !== key || !this.watching()) return
+      if (response.epoch === epoch && this.value.epoch === epoch) {
+        this.lastPushAt = this.now()
+        if (this.trace && response.trace && response.levels && response.generation === this.value.active?.generation &&
+            validLevels('running', response.generation, { deviceChannels: this.value.active.channels, enabledChannels: this.value.active.enabledChannels }, response.levels)) {
+          try { this.trace.receivePush(response.trace, response.generation, response.levels.channelIndices, performance.now()) } catch { /* diagnostics only */ }
+        }
+        this.applyLevels(response)
+      } else void this.poll()
+      void this.api.ackMicrophoneLevels?.(key, sequence).catch(() => {})
+    })
+    void this.api.subscribeMicrophoneLevels(key).then(result => {
+      if (key !== this.pushKey || this.disposed || epoch !== this.value.epoch) return
+      if (result.ok) { this.pushReady = true; this.lastPushAt = this.now() }
+      else { this.stopPush(); if (!/Unknown Box audio command$/i.test(result.error.trim())) this.pushProbeEpoch = null }
+    }).catch(() => { if (key === this.pushKey) { this.stopPush(); this.pushProbeEpoch = null } })
+  }
   private pendingEdit = false
   /** Bumped by every edit so a read that started earlier cannot overwrite it. */
   private editSeq = 0
@@ -164,6 +201,7 @@ export class BoxMicrophones {
   private retime(): void {
     if (this.disposed || !this.connected) return
     clearInterval(this.timer)
+    clearTimeout(this.levelLeadTimer); this.levelLeadTimer = undefined
     if (this.frame) this.frames?.cancelAnimationFrame(this.frame)
     this.frame = 0
     this.nextLevelFrameAt = 0
@@ -174,6 +212,8 @@ export class BoxMicrophones {
       this.nextLevelAttempt = 0; this.levelFailures = 0
     }
     this.wasWatching = watching
+    if (!watching) { this.stopPush(); this.pushProbeEpoch = null }
+    else this.startPush()
     this.timer = setInterval(() => this.tick(false), watching ? (this.frames ? MICROPHONE_STATE_POLL_MS : MICROPHONE_LEVEL_POLL_MS) : MICROPHONE_IDLE_POLL_MS)
     if (watching && this.frames) this.frame = this.frames.requestAnimationFrame(this.onFrame)
     if (watching) this.tick(!this.frames)
@@ -183,7 +223,15 @@ export class BoxMicrophones {
     if (this.disposed || !this.watching() || !this.frames) return
     const due = frameTime + .5 >= this.nextLevelFrameAt
     if (due) this.nextLevelFrameAt = Math.max(this.nextLevelFrameAt + MICROPHONE_LEVEL_FRAME_MS, frameTime)
-    this.tick(due)
+    this.tick(false)
+    // Ask after the previous frame has been submitted, with an 8 ms lead
+    // before the next 30 Hz presentation. A fast reply is ready for that rAF.
+    if (due && !this.pushReady && this.legacyLevelEpoch !== this.value.epoch && !this.levelLeadTimer) {
+      this.levelLeadTimer = setTimeout(() => {
+        this.levelLeadTimer = undefined
+        if (!this.disposed && this.watching() && !this.pushReady && this.legacyLevelEpoch !== this.value.epoch) void this.pollLevels()
+      }, MICROPHONE_LEVEL_FRAME_MS - 8)
+    }
     if (this.disposed || !this.watching()) return
     this.frame = this.frames.requestAnimationFrame(this.onFrame)
   }
@@ -191,10 +239,15 @@ export class BoxMicrophones {
     this.expire()
     const time = this.now()
     if (this.watching()) {
+      // Reconnecting to the same persistent host keeps its epoch, but loses
+      // the socket subscription. Resume fast reads and renegotiate on silence.
+      if (this.pushReady && this.value.phase === 'running' && time - this.lastPushAt > 250) {
+        this.stopPush(); this.pushProbeEpoch = null; this.startPush()
+      }
       if (this.legacyLevelEpoch !== null && this.legacyLevelEpoch === this.value.epoch) {
         if (time - this.lastPollStartedAt >= MICROPHONE_LEGACY_POLL_MS) void this.poll()
       } else {
-        if (this.frames ? fromFrame : time - this.lastLevelPollStartedAt >= MICROPHONE_LEVEL_POLL_MS - 5) void this.pollLevels()
+        if (!this.pushReady && (this.frames ? fromFrame : time - this.lastLevelPollStartedAt >= MICROPHONE_LEVEL_POLL_MS - 5)) void this.pollLevels()
         if (time - this.lastPollStartedAt >= MICROPHONE_STATE_POLL_MS) void this.poll()
       }
     } else if (time - this.lastPollStartedAt >= MICROPHONE_IDLE_POLL_MS - 5) void this.poll()
@@ -204,6 +257,8 @@ export class BoxMicrophones {
   /** Stops reading. Never touches analysis: the host owns it. */
   dispose(): void {
     this.disposed = true
+    this.stopPush()
+    clearTimeout(this.levelLeadTimer); this.levelLeadTimer = undefined
     this.trace?.dispose()
     if (this.frame) this.frames?.cancelAnimationFrame(this.frame)
     this.frame = 0
@@ -226,7 +281,9 @@ export class BoxMicrophones {
   private apply(host: BoxMicrophoneSnapshot, startedAt = Number.POSITIVE_INFINITY): void {
     const time = this.now()
     this.lastReadAt = time
-    if (host.epoch !== this.value.epoch) this.legacyLevelEpoch = null
+    if (host.epoch !== this.value.epoch) {
+      this.legacyLevelEpoch = null; this.stopPush(); this.pushProbeEpoch = null
+    }
     const channels: Record<string, number[]> = Object.create(null)
     for (const [uid, list] of Object.entries(host.selection.channels)) channels[uid] = [...list]
     const raw = validLevels(host.phase, host.generation, host.active, host.levels)
@@ -243,6 +300,7 @@ export class BoxMicrophones {
       active: host.active && host.phase === 'running' ? { uid: host.active.device, label: host.active.label, channels: host.active.deviceChannels,
         enabledChannels: [...host.active.enabledChannels], analysisChannel: host.active.analysisChannel, generation: host.generation } : null,
       levels, pitch })
+    this.startPush()
   }
   private newer(host: BoxMicrophoneSnapshot): boolean {
     // Never go back in revision within one host lifetime (a slow read racing an edit).
@@ -320,6 +378,7 @@ export class BoxMicrophones {
     this.publish({ levels: raw ? { generation: host.generation, receivedAt: this.lastReadAt, ...raw } : null })
   }
   private unreachable(detail: string): void {
+    this.stopPush(); this.pushProbeEpoch = null
     this.publish({ phase: 'unreachable', levels: null, pitch: null, active: null, detail, error: null })
   }
   /** One-time import of the old renderer-only preference, only while the host
