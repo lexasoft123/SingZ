@@ -253,11 +253,11 @@ describe('status stripe states', () => {
     ['host unreachable', withHost({ phase: 'unreachable' }), 0, 'unavailable'],
     ['running without a valid level', { ...live, levels: null }, 0, 'unavailable']
   ] as const)('%s', (_name, snapshot, slot, kind) => { expect(microphoneSlotStatus(snapshot, slot, 1000).kind).toBe(kind) })
-  it('Player stripe says Off, Starting…, No input or Unavailable instead of Unavailable for everything', () => {
+  it('Player stripe says Off, Starting…, Not connected or Unavailable instead of Unavailable for everything', () => {
     const text = (snapshot: MicrophoneSnapshot): string => renderToStaticMarkup(createElement(PlayerMicrophoneMeters, { snapshot }))
     expect(text(withHost({ phase: 'off', device: null }))).toContain('>Off<')
     expect(text(withHost({ phase: 'starting' }))).toContain('>Starting…<')
-    expect(text(withHost({ phase: 'waiting', reason: 'no-device' }))).toContain('>No input<')
+    expect(text(withHost({ phase: 'waiting', reason: 'no-device' }))).toContain('>Not connected<')
     expect(text(withHost({ phase: 'error', reason: 'internal' }))).toContain('>Unavailable<')
     expect(text(withHost({ phase: 'off', device: null }))).not.toContain('Unavailable')
     const html = text(liveAt())

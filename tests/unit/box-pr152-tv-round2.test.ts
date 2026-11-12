@@ -33,31 +33,53 @@ describe('PR #152 round 2, fix 2: an open that starts playback lands on Play/Pau
   })
 })
 
-describe('PR #152 round 2, fix 3: Right from a row enters the first enabled action', () => {
+describe('PR #152 round 2, fix 3: Right from a row enters the primary action', () => {
   class El {
     dataset: Record<string, string> = {}
     constructor(private readonly selectors: string[] = []) {}
     matches(selector: string): boolean { return this.selectors.includes(selector) }
   }
-  it('with the current song selected (Select disabled) Right skips the header and reaches Move/Remove', () => {
+  const renderQueue = (): string => renderToStaticMarkup(createElement(Queue, {
+    items: [{ dir: '/a', name: 'B - A', songPath: '', hasStems: false }, { dir: '/b', name: 'B - B', songPath: '', hasStems: false }] as never,
+    rows: {}, selectedDir: '/a', active: null, position: 0, playing: false, status: 'paused',
+    onRemember: () => {}, onChoose: () => {}, onMove: () => {}, onRemove: () => {}, onBrowse: () => {}, onClose: () => {}, onToggle: () => {}
+  }))
+  it('uses the rendered hand-over selector and never lands on Remove, even when Move is disabled', () => {
+    const selector = /data-remote-right="([^"]+)"/.exec(renderQueue())?.[1]
+    expect(selector).toBeDefined()
     const group = new El()
     const row = new El()
+    const select = new El(['[data-queue-action]', "[data-queue-action=select]"])
     const remove = new El(['[data-queue-action]'])
     ;(group as never as { contains(e: unknown): boolean }).contains = element => element === row
-    ;(row as never as { closest(s: string): unknown }).closest = selector => selector === '[data-remote-right]' ? group : null
-    ;(group as never as { getAttribute(a: string): string }).getAttribute = () => '[data-queue-action]'
+    ;(row as never as { closest(s: string): unknown }).closest = candidate => candidate === '[data-remote-right]' ? group : null
+    ;(group as never as { getAttribute(a: string): string }).getAttribute = () => selector!
     const back = new El(['[data-queue-return]'])
     const scope = { contains: () => true }
-    // Disabled buttons are not targets, so Select is absent; the old selector matched only Select and fell through to geometry.
-    expect(sideExit(scope as never, row as never, [back, row, remove] as never, 'ArrowRight')).toBe(remove)
+    // Negative control: the old all-action selector sees Remove first here and selects it.
+    expect(sideExit(scope as never, row as never, [back, row, remove, select] as never, 'ArrowRight')).toBe(select)
   })
-  it('every action button carries the marker, so the first enabled one is chosen', () => {
-    const html = renderToStaticMarkup(createElement(Queue, {
-      items: [{ dir: '/a', name: 'B - A', songPath: '', hasStems: false }, { dir: '/b', name: 'B - B', songPath: '', hasStems: false }] as never,
-      rows: {}, selectedDir: '/a', active: null, position: 0, playing: false, status: 'paused',
-      onRemember: () => {}, onChoose: () => {}, onMove: () => {}, onRemove: () => {}, onBrowse: () => {}, onClose: () => {}, onToggle: () => {}
-    }))
+  it('every action button carries the marker, but row entry names only Select song / Back to lyrics', () => {
+    const html = renderQueue()
     for (const action of ['select', 'up', 'down', 'remove']) expect(html).toContain(`data-queue-action="${action}"`)
-    expect(html).toContain('data-remote-right="[data-queue-action]"')
+    expect(html).toContain('data-remote-right="[data-queue-action=select]"')
+  })
+  it('Down from the list lands on Select song and Left from it returns to the selected row (negative control: on 2e8acc53 neither attribute exists, so geometry picks Remove / stays put)', () => {
+    const html = renderQueue()
+    expect(html).toContain('class="queue-list" aria-label="')
+    expect(/class="queue-list"[^>]*data-remote-down="\[data-queue-action=select\]"/.test(html)).toBe(true)
+    expect(/<button[^>]*data-remote-left="\[data-queue-index\]"[^>]*data-queue-action="select"|<button[^>]*data-queue-action="select"[^>]*data-remote-left="\[data-queue-index\]"/.test(html)).toBe(true)
+    expect(/data-queue-index="0" data-current="true"/.test(html)).toBe(true)
+    expect(/data-queue-index="1" data-current/.test(html)).toBe(false)
+    const row = new El(['[data-queue-index]'])
+    const other = new El(['[data-queue-index]'])
+    other.dataset.current = 'true'
+    const select = new El(['[data-queue-action=select]'])
+    const group = select as never as { closest(s: string): unknown; contains(e: unknown): boolean; getAttribute(a: string): string }
+    group.closest = candidate => candidate === '[data-remote-left]' ? select : null
+    group.contains = element => element === select
+    group.getAttribute = () => '[data-queue-index]'
+    const scope = { contains: () => true }
+    expect(sideExit(scope as never, select as never, [row, other, select] as never, 'ArrowLeft')).toBe(other)
   })
 })

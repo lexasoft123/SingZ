@@ -157,15 +157,15 @@ describe('PR #152 TV fix 5: the pre-lyrics countdown is one tight token', () => 
 
 describe('PR #152 TV fix 6: queue row actions are reachable and announced', () => {
   const group = new El(['[data-remote-right]'])
-  const select = new El(['[data-queue-action]'])
+  const select = new El(['[data-queue-action]', "[data-queue-action=select]"])
   select.dataset.queueAction = 'select'
   const row = new El()
   ;(group as unknown as { contains(e: unknown): boolean }).contains = element => element === row
   ;(row as unknown as { closest(s: string): El | null }).closest = selector => selector === '[data-remote-right]' ? group : null
-  ;(group as unknown as { getAttribute(a: string): string | null }).getAttribute = () => '[data-queue-action]'
+  ;(group as unknown as { getAttribute(a: string): string | null }).getAttribute = () => "[data-queue-action=select]"
   const scope = { contains: (element: unknown) => element === group || element === row || element === select }
 
-  it('Right from a queued row hands over to the first action; no side exit is declared elsewhere', () => {
+  it('Right from a queued row hands over to the primary action; no side exit is declared elsewhere', () => {
     expect(sideExit(scope as never, row as never, [row, select] as never, 'ArrowRight')).toBe(select)
     expect(sideExit(scope as never, row as never, [row, select] as never, 'ArrowLeft')).toBeNull()
   })
@@ -177,7 +177,7 @@ describe('PR #152 TV fix 6: queue row actions are reachable and announced', () =
   it.each([['en', 'Actions'], ['ru', 'Действия'], ['zh-CN', '操作']] as const)('the list declares the hand-over and the footer says "→ %s"', async (locale, word) => {
     await prepareBoxLocale(locale)
     const html = render(2)
-    expect(html).toContain('data-remote-right="[data-queue-action]"')
+    expect(html).toContain('data-remote-right="[data-queue-action=select]"')
     expect(html).toContain(`<b>→</b>${word}`)
     expect(render(0)).not.toContain('<b>→</b>') // empty queue: nothing to act on
   })

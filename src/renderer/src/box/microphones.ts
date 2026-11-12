@@ -268,6 +268,31 @@ export function microphoneStatusKey(status: MicrophoneSlotStatus): 'box.player.m
   }
 }
 
+/** Peak at or above this (about −30 dBFS) reads as someone singing; below it the room is quiet. */
+export const MICROPHONE_SINGING_PEAK = 0.03
+export type MicrophoneMeterState = 'singing' | 'quiet' | 'loud' | 'off' | 'starting' | 'no-input' | 'unavailable'
+export function microphoneMeterState(status: MicrophoneSlotStatus): MicrophoneMeterState {
+  if (status.kind !== 'level') return status.kind
+  return status.level > 1 ? 'loud' : status.level >= MICROPHONE_SINGING_PEAK ? 'singing' : 'quiet'
+}
+/** Meter fill on a −50…0 dBFS scale, so ordinary singing moves the bar visibly. */
+export function microphoneMeterFill(level: number): number {
+  if (!(level > 0)) return 0
+  return Math.max(0, Math.min(1, (20 * Math.log10(level) + 50) / 50))
+}
+export type MicrophoneStateKey = 'box.player.micSinging' | 'box.player.micQuiet' | 'box.player.micLoud' | 'box.player.micOff' | 'box.player.micStarting' | 'box.player.micNotConnected' | 'box.player.unavailable'
+export function microphoneMeterStateKey(state: MicrophoneMeterState): MicrophoneStateKey {
+  switch (state) {
+    case 'singing': return 'box.player.micSinging'
+    case 'quiet': return 'box.player.micQuiet'
+    case 'loud': return 'box.player.micLoud'
+    case 'off': return 'box.player.micOff'
+    case 'starting': return 'box.player.micStarting'
+    case 'no-input': return 'box.player.micNotConnected'
+    default: return 'box.player.unavailable'
+  }
+}
+
 const noSubscription = (): (() => void) => () => undefined
 const noSnapshot = (): undefined => undefined
 /** Subscribe a leaf surface to live microphone telemetry. An explicit snapshot

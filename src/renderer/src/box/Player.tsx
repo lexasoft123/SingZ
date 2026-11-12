@@ -9,7 +9,8 @@ import { PlayerLyrics } from './PlayerLyrics'
 import { parseSongName } from './song-identity'
 import type { BoxTransportSnapshot } from './transport'
 import { tSettings, tMicrophone } from './settings-i18n'
-import { microphoneSlotStatus, microphoneStatusKey, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
+import { MicrophoneMeter } from './MicrophoneMeter'
+import { microphoneSlotStatus, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 
 export function Player({
   snapshot,
@@ -123,14 +124,9 @@ export function PlayerMicrophoneMeters({ microphones, snapshot: snapshotProp }: 
   const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
   return <div className="player-meters" aria-label={tMicrophone('box.microphones.levels')}>
     {[0, 1].map(channel => {
-      const status = microphoneSlotStatus(snapshot, channel)
-      const level = status.kind === 'level' ? status.level : null
       return <span className="player-microphone-row" key={channel}>
-        <span>{t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')}</span>
-        {level === null ? <small data-mic-status={status.kind}>{t(microphoneStatusKey(status))}</small> : <span className="player-microphone-level" role="meter"
-          aria-label={tMicrophone('box.microphones.channelLevel', { channel: channel + 1 })} aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.min(1, level)}>
-          <span style={{ transform: `scaleX(${Math.min(1, level)})` }} />
-        </span>}
+        <span className="player-microphone-name">{t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')}</span>
+        <MicrophoneMeter status={microphoneSlotStatus(snapshot, channel)} channel={channel} />
       </span>
     })}
   </div>
