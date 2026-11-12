@@ -1,0 +1,33 @@
+{
+  "formatVersion": 1,
+  "product": "desktop",
+  "audio": {
+    "nativeInputUid": "mic",
+    "inputChannel": 1,
+    "nativeMonitorOutputUid": "speaker",
+    "nativeMonitorOutputChannels": [
+      1,
+      0
+    ],
+    "monitorGainDb": -12
+  },
+  "metronome": {
+    "click": true,
+    "countInBars": 1,
+    "volume": 0.4,
+    "accent": false,
+    "grid": true
+  },
+  "karaoke": true,
+  "trainingControls": {
+    "formatVersion": 1,
+    "sound": 2,
+    "volume": 0.8,
+    "tolerance": 2,
+    "focus": 0,
+    "program": {
+      "level": 1,
+      "startedAt": 1700000000000
+    }
+  }
+}

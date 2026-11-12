@@ -44,6 +44,15 @@ export const app: Translation<typeof en> = {
   "app.update.get": "v{version} sürümünü indir",
   "app.update.downloadingTitle": "Güncelleme arka planda indiriliyor",
   "app.update.downloading": "güncelleme %{percent}",
+
+  // ── native-app offer (C-44; off unless the build enables it) ──
+  "app.nativeOffer.betaTitle": "Yeni SingZ'i dene (beta)",
+  "app.nativeOffer.stableTitle": "Yeni SingZ burada",
+  "app.nativeOffer.body": "SingZ'in yeni sürümü ({version}) hazır. Şarkılarınız olduğu yerde kalır; ses ve metronom tercihleriniz ilk açılışta taşınır. Bu sürümü kullanmaya devam edebilirsiniz.",
+  "app.nativeOffer.open": "İndirmeyi aç",
+  "app.nativeOffer.dismiss": "Şimdi değil",
+  "app.nativeOffer.chip": "Yeni SingZ'i edin",
+  "app.nativeOffer.chipTitle": "Yeni SingZ kullanılabilir — indirmeyi açar",
   "app.save.tooltipProject": "Ses kanallarını, sözleri ve ayarları bu proje klasörüne kaydet",
   "app.save.tooltipLibrary": "Şarkıyı, ses kanallarını, sözleri ve ayarları proje arşivinize kaydet",
   "app.save.saved": "Kaydedildi ✓",

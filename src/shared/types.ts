@@ -1381,6 +1381,12 @@ export interface SingzApi {
   updateStateNow: () => Promise<UpdateState>
   installUpdate: () => void
   onUpdateState: (cb: (s: UpdateState) => void) => () => void
+  /** C-44 offer to try the native app: always `{ available: false }` unless the
+   * build enables it. Opening writes native-handover.json, then the download. */
+  nativeOfferNow: () => Promise<import('./native-handover').NativeOffer>
+  onNativeOffer: (cb: (offer: import('./native-handover').NativeOffer) => void) => () => void
+  openNativeOffer: (report: import('./native-handover').NativeHandoverReport) => Promise<{ ok: true } | { ok: false; error: string }>
+  dismissNativeOffer: () => Promise<{ ok: boolean }>
   winMinimize: () => void
   winMaximizeToggle: () => void
   winClose: () => void

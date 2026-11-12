@@ -100,6 +100,7 @@ import LyricsPanel from './components/LyricsPanel'
 import { lyricsJobProgressed, lyricsJobSettled, lyricsJobStarted, type LyricsState } from './lyrics-state'
 import { createLazyDialogRoute } from './components/LazyDialogRoute'
 import { getLocale, t, tn, useLocale } from './i18n'
+import { openNativeOffer, useNativeOffer } from './native-offer'
 import { Language } from './components/Language'
 
 // The lyrics editor rides outside the boot bundle like VocalTraining does —
@@ -834,6 +835,7 @@ export default function App(): React.JSX.Element {
   const [ver, setVer] = useState('')
   const [whatsNew, setWhatsNew] = useState<ReleaseNotes | null>(null)
   const [update, setUpdate] = useState<import('../../shared/types').UpdateState>({ state: 'none' })
+  const nativeOffer = useNativeOffer()
   const [isProject, setIsProject] = useState(false)
   /** A project folder opened from outside the library can be brought into it. */
   const [inLibrary, setInLibrary] = useState(true)
@@ -3949,6 +3951,16 @@ export default function App(): React.JSX.Element {
             onClick={() => void window.singz.openExternal(update.url)}
           >
             {t('app.update.get', { version: update.version })}
+          </button>
+        )}
+        {nativeOffer.available && nativeOffer.channel === 'stable' && update.state !== 'ready' && (
+          <button
+            type="button"
+            className="pill ghost small no-drag update-chip"
+            title={t('app.nativeOffer.chipTitle')}
+            onClick={openNativeOffer}
+          >
+            {t('app.nativeOffer.chip')}
           </button>
         )}
         {update.state === 'downloading' && (

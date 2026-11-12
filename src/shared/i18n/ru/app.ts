@@ -56,6 +56,15 @@ export const app: Translation<typeof en> = {
   // {percent} is a 0-100 whole number
   'app.update.downloading': 'грузим {percent}%',
 
+  // ── native-app offer (C-44; off unless the build enables it) ──
+  "app.nativeOffer.betaTitle": "Попробуйте новый SingZ (бета)",
+  "app.nativeOffer.stableTitle": "Вышел новый SingZ",
+  "app.nativeOffer.body": "Готова новая версия SingZ ({version}). Ваши песни остаются на месте, а настройки звука и метронома переносятся при первом запуске. Эту версию можно продолжать использовать.",
+  "app.nativeOffer.open": "Открыть загрузку",
+  "app.nativeOffer.dismiss": "Не сейчас",
+  "app.nativeOffer.chip": "Скачать новый SingZ",
+  "app.nativeOffer.chipTitle": "Доступен новый SingZ — откроется страница загрузки",
+
   // ── save / library ──
   'app.save.tooltipProject': 'Сохранить дорожки, текст и настройки в папку проекта',
   'app.save.tooltipLibrary': 'Сохранить песню, дорожки, текст и настройки в библиотеку',

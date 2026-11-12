@@ -44,6 +44,15 @@ export const app: Translation<typeof en> = {
   "app.update.get": "Dapatkan v{version}",
   "app.update.downloadingTitle": "Mengunduh kemas kini di latar belakang",
   "app.update.downloading": "update {percent}%",
+
+  // ── native-app offer (C-44; off unless the build enables it) ──
+  "app.nativeOffer.betaTitle": "Cuba SingZ baharu (beta)",
+  "app.nativeOffer.stableTitle": "SingZ baharu telah tiba",
+  "app.nativeOffer.body": "Versi baharu SingZ ({version}) sudah sedia. Lagu anda kekal di tempatnya, dan pilihan audio serta metronom anda dibawa bersama semasa dibuka kali pertama. Anda boleh terus menggunakan versi ini.",
+  "app.nativeOffer.open": "Buka muat turun",
+  "app.nativeOffer.dismiss": "Bukan sekarang",
+  "app.nativeOffer.chip": "Dapatkan SingZ baharu",
+  "app.nativeOffer.chipTitle": "SingZ baharu tersedia — membuka muat turun",
   "app.save.tooltipProject": "Simpan trek audio, lirik dan tetapan ke dalam folder projek ini",
   "app.save.tooltipLibrary": "Simpan lagu, trek audio, lirik dan tetapan ke dalam pustaka projek anda",
   "app.save.saved": "Disimpan ✓",

@@ -772,3 +772,36 @@ fn review_summary_counts_only_new_imports_in_this_run() {
     let (_, again) = run_fresh(&f.config, &f.profiles, &inventory).unwrap();
     assert_eq!(again, 0);
 }
+// C-44 round trip: the committed fixture is exactly what the Electron writer
+// (src/main/native-handover-file.ts) produced, checked by tests/unit/native-handover.test.ts.
+#[test]
+fn electron_writer_export_is_imported_with_its_exact_values() {
+    let f = Fixture::new(source::Platform::Mac, "SingZ");
+    fs::write(
+        f.profile.join("native-handover.json"),
+        include_bytes!("../tests/fixtures/electron-native-handover.json"),
+    )
+    .unwrap();
+    let r = f.import();
+    for item in ["audio", "metronome", "karaoke", "training-controls"] {
+        assert_eq!(r.items[item].outcome, Outcome::Import, "{item}");
+    }
+    let audio = f.raw("audio.json");
+    assert_eq!(audio["inputUid"], "mic");
+    assert_eq!(audio["inputChannel"], 1);
+    assert_eq!(audio["monitorOutputUid"], "speaker");
+    assert_eq!(audio["monitorOutputChannels"], json!([1, 0]));
+    assert_eq!(audio["monitorGainDb"], -12.0);
+    assert_eq!(audio["karaoke"], true);
+    let met = f.raw("metronome.json");
+    assert_eq!(
+        (met["click"].clone(), met["countInBars"].clone(), met["volume"].clone(), met["accent"].clone(), met["grid"].clone()),
+        (json!(true), json!(1), json!(0.4), json!(false), json!(true))
+    );
+    let controls = f.raw("training-controls.json");
+    assert_eq!(controls["sound"], 2);
+    assert_eq!(controls["volume"].as_f64().map(|v| (v * 100.).round()), Some(80.));
+    assert_eq!(controls["tolerance"], 2);
+    assert_eq!(controls["focus"], 0);
+    assert_eq!(controls["program"], json!({"level":1,"startedAt":1700000000000u64}));
+}

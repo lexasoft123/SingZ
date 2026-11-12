@@ -61,6 +61,17 @@ const api: SingzApi = {
     }
   },
 
+  nativeOfferNow: () => ipcRenderer.invoke('native-offer:state'),
+  onNativeOffer: (cb) => {
+    const listener = (_e: IpcRendererEvent, offer: import('../shared/native-handover').NativeOffer): void => cb(offer)
+    ipcRenderer.on('native-offer:state', listener)
+    return () => {
+      ipcRenderer.removeListener('native-offer:state', listener)
+    }
+  },
+  openNativeOffer: (report) => ipcRenderer.invoke('native-offer:open', report),
+  dismissNativeOffer: () => ipcRenderer.invoke('native-offer:dismiss'),
+
   winMinimize: () => ipcRenderer.send('win:minimize'),
   winMaximizeToggle: () => ipcRenderer.send('win:maximize-toggle'),
   winClose: () => ipcRenderer.send('win:close'),

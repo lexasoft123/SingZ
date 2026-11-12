@@ -44,6 +44,15 @@ export const app: Translation<typeof en> = {
   "app.update.get": "V{version}를 얻으세요",
   "app.update.downloadingTitle": "백그라운드에서 업데이트를 다운로드",
   "app.update.downloading": "업데이트 {percent}%",
+
+  // ── native-app offer (C-44; off unless the build enables it) ──
+  "app.nativeOffer.betaTitle": "새로운 SingZ 사용해 보기(베타)",
+  "app.nativeOffer.stableTitle": "새로운 SingZ가 나왔어요",
+  "app.nativeOffer.body": "SingZ 새 버전({version})을 사용할 수 있습니다. 곡은 그대로 유지되고, 오디오와 메트로놈 설정은 처음 실행할 때 함께 옮겨집니다. 지금 버전을 계속 사용해도 됩니다.",
+  "app.nativeOffer.open": "다운로드 열기",
+  "app.nativeOffer.dismiss": "나중에",
+  "app.nativeOffer.chip": "새로운 SingZ 받기",
+  "app.nativeOffer.chipTitle": "새로운 SingZ를 사용할 수 있습니다 — 다운로드를 엽니다",
   "app.save.tooltipProject": "이 프로젝트 폴더에 오디오 트랙, 가사 및 설정을 저장하십시오",
   "app.save.tooltipLibrary": "프로젝트 라이브러리에 노래, 오디오 트랙, 가사와 설정을 저장하십시오",
   "app.save.saved": "저장 ✓",

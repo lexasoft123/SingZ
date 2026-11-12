@@ -41,6 +41,7 @@ import type {
 import { Modal } from '@singz/ui'
 import DspGraphVisualization from './DspGraphVisualization'
 import { t } from '../i18n'
+import NativeOfferCard from './NativeOfferCard'
 
 export interface SettingsModalProps {
   onQuickStart?: () => void
@@ -1725,6 +1726,7 @@ export default function SettingsModal({
           {!devices && <p className="settings-hint">{t('settings.devicesLoading')}</p>}
           {devices?.inputLabelsHidden && <p className="settings-hint">{t('settings.inputLabelsHiddenHint')}</p>}
           {audio.outputId && <p className="settings-hint">{t('settings.nonDefaultSpeakerTip')}</p>}
+          <NativeOfferCard />
         </div>
       </div>
       <div className="modal-actions">

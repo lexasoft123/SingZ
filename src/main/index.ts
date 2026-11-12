@@ -50,6 +50,8 @@ import { SyncScheduler } from './sync-scheduler'
 import { logHardwareInfo, readGpuOnce } from './hwinfo'
 import { glassVerdict } from './glass'
 import { installUpdate, startUpdater, updateState } from './updater'
+import { registerNativeHandover } from './native-handover'
+import { nativeOfferEnabled } from '../shared/native-handover'
 import {
   cleanupObsoleteModels,
   dmlFlagPath,
@@ -1031,12 +1033,18 @@ app.whenReady().then(async () => {
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
   logHardwareInfo()
+  const nativeOfferOn = nativeOfferEnabled(requestedRendererSurface(process.argv), process.env)
+  registerNativeHandover(nativeOfferOn, (offer) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('native-offer:state', offer)
+    }
+  })
   if (desktopUpdaterEnabled(requestedRendererSurface(process.argv))) {
     startUpdater((st) => {
       for (const w of BrowserWindow.getAllWindows()) {
         if (!w.isDestroyed()) w.webContents.send('update:state', st)
       }
-    })
+    }, { nativeOffer: nativeOfferOn })
   }
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)

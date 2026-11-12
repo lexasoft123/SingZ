@@ -44,6 +44,15 @@ export const app: Translation<typeof en> = {
   "app.update.get": "Nhận v{version}",
   "app.update.downloadingTitle": "Tải xuống cập nhật trong nền",
   "app.update.downloading": "cập nhật {percent}%",
+
+  // ── native-app offer (C-44; off unless the build enables it) ──
+  "app.nativeOffer.betaTitle": "Dùng thử SingZ mới (beta)",
+  "app.nativeOffer.stableTitle": "SingZ mới đã có",
+  "app.nativeOffer.body": "Đã có phiên bản SingZ mới ({version}). Bài hát của bạn vẫn ở nguyên chỗ cũ, còn cài đặt âm thanh và máy đếm nhịp sẽ được chuyển sang ở lần mở đầu tiên. Bạn vẫn có thể tiếp tục dùng phiên bản này.",
+  "app.nativeOffer.open": "Mở trang tải về",
+  "app.nativeOffer.dismiss": "Để sau",
+  "app.nativeOffer.chip": "Tải SingZ mới",
+  "app.nativeOffer.chipTitle": "SingZ mới đã sẵn sàng — mở trang tải về",
   "app.save.tooltipProject": "Cung trữ các gốc, lời bài hát và cài đặt trong thư mục dự án này",
   "app.save.tooltipLibrary": "Chữ bài hát, gốc, lời bài hát và cài đặt vào thư viện dự án của bạn",
   "app.save.saved": "Được lưu ✓",

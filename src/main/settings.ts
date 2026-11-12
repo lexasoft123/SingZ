@@ -18,6 +18,8 @@ export interface AppSettings {
   gdriveDirty?: DirtyState
   /** The once-only launch offer of the Qwen3-ASR speech model was seen. */
   qwenOfferDismissed?: boolean
+  /** C-44: the native-app offer the user dismissed, as `<channel>:<version>`. */
+  nativeOfferDismissed?: string
   /** The UI language: a locale, or `system` (the default) — see locale.ts. */
   language?: import('../shared/i18n').Language
 }

@@ -53,6 +53,16 @@ export const app = {
   // {percent} is a 0-100 whole number
   'app.update.downloading': 'update {percent}%',
 
+  // ── native-app offer (C-44; off unless the build enables it) ──
+  // {version} is the native app's version number, e.g. "0.27.0-beta.1"
+  "app.nativeOffer.betaTitle": "Try the new SingZ (beta)",
+  "app.nativeOffer.stableTitle": "The new SingZ is here",
+  "app.nativeOffer.body": "A new version of SingZ ({version}) is ready. Your songs stay where they are, and your audio and metronome choices come along the first time it starts. You can keep using this version.",
+  "app.nativeOffer.open": "Open the download",
+  "app.nativeOffer.dismiss": "Not now",
+  "app.nativeOffer.chip": "Get the new SingZ",
+  "app.nativeOffer.chipTitle": "The new SingZ is available — opens the download",
+
   // ── save / library ──
   'app.save.tooltipProject': 'Save stems, lyrics and settings into this project folder',
   'app.save.tooltipLibrary': 'Save song, stems, lyrics and settings into your project library',

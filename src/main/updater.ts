@@ -1,6 +1,7 @@
 import { app, net } from 'electron'
 import electronUpdater from 'electron-updater'
 import type { UpdateState } from '../shared/types'
+import { nativeTarget, pickNativeOffer, type NativeOffer } from '../shared/native-handover'
 import { log } from './log'
 
 const RELEASES_LATEST = 'https://api.github.com/repos/lexasoft123/SingZ/releases/latest'
@@ -16,6 +17,38 @@ function set(s: UpdateState): void {
 
 export function updateState(): UpdateState {
   return current
+}
+
+// C-44: the offer to try the native app. It rides the same schedule as the update
+// check but is its own state, so the Electron update chip and the Windows
+// electron-updater flow are untouched. Off unless startUpdater is told to run it.
+const RELEASES_LIST = 'https://api.github.com/repos/lexasoft123/SingZ/releases?per_page=10'
+let nativeOffer: NativeOffer = { available: false }
+let nativeOfferOn = false
+let nativeOfferListener: () => void = () => {}
+
+export function nativeOfferNow(): NativeOffer {
+  return nativeOffer
+}
+export function nativeOfferActive(): boolean {
+  return nativeOfferOn
+}
+export function onNativeOfferChange(cb: () => void): void {
+  nativeOfferListener = cb
+}
+
+async function checkNativeOffer(): Promise<void> {
+  try {
+    const res = await net.fetch(RELEASES_LIST, { headers: { Accept: 'application/vnd.github+json' } })
+    if (!res.ok) throw new Error(`GitHub answered ${res.status}`)
+    const releases = (await res.json()) as unknown
+    nativeOffer = pickNativeOffer(Array.isArray(releases) ? releases : [], nativeTarget(process.platform, process.arch))
+    if (nativeOffer.available) log('updater', `native ${nativeOffer.channel} on offer: ${nativeOffer.version}`)
+  } catch (err) {
+    // A failed check keeps the last answer: a flaky network must not retract an offer.
+    log('updater', `native offer check failed: ${String(err)}`, 'warn')
+  }
+  nativeOfferListener()
 }
 
 function appVersion(): string {
@@ -110,13 +143,15 @@ export function installUpdate(): void {
   }
 }
 
-export function startUpdater(onState: (s: UpdateState) => void): void {
+export function startUpdater(onState: (s: UpdateState) => void, options: { nativeOffer?: boolean } = {}): void {
   notify = onState
+  nativeOfferOn = options.nativeOffer === true
   const testMode = Boolean(process.env.SINGZ_TEST_UPDATER)
   if (!app.isPackaged && !testMode) return
   const check = (): void => {
     if (process.platform === 'win32' && !testMode) checkViaElectronUpdater()
     else void checkViaGithub()
+    if (nativeOfferOn) void checkNativeOffer()
   }
   setTimeout(check, 3000)
   setInterval(check, CHECK_EVERY_MS)
