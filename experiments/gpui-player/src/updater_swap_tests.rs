@@ -8,9 +8,14 @@ struct Fixture {
 }
 fn fixture(layout: Layout) -> Fixture {
     let root = std::env::temp_dir().join(format!(
-        "singz-swap-{}-{}",
+        "singz-swap-{}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        {
+            // Parallel tests can read the same clock value (macOS reports microseconds).
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
     ));
     let install = root.join("app");
     fs::create_dir_all(&install).unwrap();

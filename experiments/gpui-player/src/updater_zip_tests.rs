@@ -118,10 +118,14 @@ fn zip(entries: &[E]) -> (Vec<u8>, Vec<usize>) {
     (out, offsets)
 }
 fn scratch(name: &str) -> PathBuf {
+    // Parallel tests can read the same clock value (macOS reports
+    // microseconds), so a per-process counter keeps every directory unique.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let p = std::env::temp_dir().join(format!(
-        "singz-zip-{name}-{}-{}",
+        "singz-zip-{name}-{}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     fs::create_dir_all(&p).unwrap();
     p

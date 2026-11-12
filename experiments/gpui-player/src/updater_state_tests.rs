@@ -2,9 +2,14 @@ use super::*;
 
 fn scratch(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "updater-state-{name}-{}-{}",
+        "updater-state-{name}-{}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        {
+            // Parallel tests can read the same clock value (macOS reports microseconds).
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
     ));
     fs::create_dir_all(&p).unwrap();
     p

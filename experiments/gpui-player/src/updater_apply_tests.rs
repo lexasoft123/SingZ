@@ -19,9 +19,14 @@ const ARCHIVE_BYTES: &[u8] = b"pretend this is the signed update archive";
 
 fn temp(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "singz-apply-{name}-{}-{}",
+        "singz-apply-{name}-{}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        {
+            // Parallel tests can read the same clock value (macOS reports microseconds).
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
     ));
     fs::create_dir_all(&p).unwrap();
     p
@@ -208,6 +213,15 @@ impl World {
         self.apps.lock().unwrap().push(handle);
         Ok(Box::new(Sim { exit, kill }))
     }
+    /// The instance lease once every simulated app has been joined. Joining proves
+    /// no simulated app is left, but the flock is tied to the open file
+    /// description: a `Command` spawned by a concurrent test thread duplicates
+    /// the descriptor until its exec closes it, which under load can outlive the
+    /// holder's drop. Wait a bounded time for that release, as production does
+    /// (`acquire_wait`); a lease still held after the bound is a real owner.
+    fn idle_lease(&self) -> lock::Lock {
+        lock::acquire_wait(&instance_lock(&self.dir), Duration::from_secs(10)).expect("no app is running")
+    }
     fn join_apps(&self) {
         let handles: Vec<_> = self.apps.lock().unwrap().drain(..).collect();
         for handle in handles {
@@ -255,7 +269,7 @@ impl World {
                 continue;
             }
             let version = self.version();
-            let lease = lock::try_acquire(&instance_lock(&self.dir)).unwrap().expect("no app is running");
+            let lease = self.idle_lease();
             self.launched.lock().unwrap().push(version.clone());
             match start(&self.dir, &self.install, &version, &self.recovery) {
                 Boot::Normal => return,
@@ -305,7 +319,7 @@ impl World {
         }
         assert!(!*self.recovery.lock().unwrap(), "{context}: the recovery entry was left registered");
         // Another start changes nothing.
-        let lease = lock::try_acquire(&instance_lock(&self.dir)).unwrap().unwrap();
+        let lease = self.idle_lease();
         assert_eq!(start(&self.dir, &self.install, &version, &self.recovery), Boot::Normal, "{context}");
         drop(lease);
         assert_eq!(fs::read_to_string(self.root.join("library/song.json")).unwrap(), "mine");
@@ -433,6 +447,48 @@ fn killing_the_applier_at_any_point_ends_with_one_whole_app_and_a_settled_journa
             }
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_instance_lease_still_open_in_a_forked_child_is_waited_for_not_mistaken_for_an_app() {
+    use std::os::unix::process::CommandExt;
+    let w = world("fork-lease", Opts::new(Layout::TwoRename, NewApp::Healthy));
+    let held = lock::try_acquire(&instance_lock(&w.dir)).unwrap().unwrap();
+    // A concurrent spawn: the child holds a duplicate of the descriptor until it execs.
+    // A handshake instead of timing: the forked child creates `marker`, then
+    // keeps the inherited descriptor (does not exec) until the test removes it.
+    let marker = w.dir.join("forked-child-holds-lease");
+    let c_marker = std::ffi::CString::new(marker.as_os_str().to_str().unwrap()).unwrap();
+    let mut cmd = std::process::Command::new("/usr/bin/true");
+    // SAFETY: only open, close, access and usleep, all async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            let fd = libc::open(c_marker.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o600);
+            if fd >= 0 {
+                libc::close(fd);
+            }
+            let mut waited = 0;
+            while libc::access(c_marker.as_ptr(), libc::F_OK) == 0 && waited < 3000 {
+                libc::usleep(10_000);
+                waited += 1;
+            }
+            Ok(())
+        })
+    };
+    // `spawn` returns only once the child has exec'd, so run it on its own thread.
+    let spawner = std::thread::spawn(move || cmd.spawn().unwrap().wait().unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < deadline, "the child never forked");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(held);
+    assert!(lock::try_acquire(&instance_lock(&w.dir)).unwrap().is_none(), "the forked child should still hold the lease");
+    fs::remove_file(&marker).unwrap();
+    drop(w.idle_lease());
+    spawner.join().unwrap();
+    w.done();
 }
 
 // ---- review regressions -----------------------------------------------------------------
