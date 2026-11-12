@@ -123,6 +123,7 @@ void scheduleRecoversJitterWithoutReset() {
 void nativeQueuePreservesSamplesAndBounds() {
   BoxInputQueue queue;
   queue.start();
+  CHECK(queue.depth() == 0);
   std::array<float, kFrames> pcm{};
   for (uint32_t f = 0; f < kFrames; ++f) pcm[f] = float(f) / 8192;
   const float* planes[]{pcm.data()};
@@ -134,6 +135,7 @@ void nativeQueuePreservesSamplesAndBounds() {
   const auto before = sparseHeapEvents;
   trackSparseHeap = true;
   for (uint32_t i = 0; i < BoxInputQueue::capacity; ++i) queue.push(bus, 44100);
+  CHECK(queue.depth() == BoxInputQueue::capacity);
   const auto* first = queue.peek();
   CHECK(first && first->rate == 44100 && first->bus.firstNs == bus.firstNs);
   CHECK(std::equal(pcm.begin(), pcm.end(), first->pcm.get()));
@@ -146,7 +148,7 @@ void nativeQueuePreservesSamplesAndBounds() {
   CHECK(queue.peek()->serial == BoxInputQueue::capacity + 2);
   CHECK(queue.peek()->pcm[17] == -1);
   queue.consume();
-  CHECK(!queue.peek());
+  CHECK(!queue.peek() && queue.depth() == 0);
   queue.stop(); queue.start(); queue.push(bus, 48000);
   CHECK(queue.peek()->epoch == 2 && queue.peek()->rate == 48000);
   trackSparseHeap = false;
@@ -513,7 +515,9 @@ int main() {
             .empty()); // producer is not physical inventory
   CHECK(hardware->opens == 0 && hardware->outputOpens == 0);
   // Keep behavior assertions independent of a heavily loaded runner's 250 ms scheduling window.
+  CHECK(setenv("SINGZ_BOX_METER_TRACE", "1", 1) == 0);
   BoxInputCapture capture{std::chrono::seconds(2)};
+  CHECK(unsetenv("SINGZ_BOX_METER_TRACE") == 0);
   AudioInputConfig config;
   config.deviceUid = "fixture:microphone";
   config.channel = 1;
@@ -531,6 +535,7 @@ int main() {
            capture.meter().valid;
   });
   const auto levels = capture.meter();
+  CHECK(!levels.trace); // Diagnostics never allocate or consume provenance.
   CHECK(levels.valid && levels.channels == 2 &&
         levels.channelIndices[0] == 0 && levels.channelIndices[1] == 1);
   for (uint32_t channel = 0; channel < levels.channels; ++channel)
@@ -551,9 +556,18 @@ int main() {
   // Snapshot/tick/diagnostic observations must never drain the fast reader's peak.
   for (unsigned reader = 0; reader < 8; ++reader)
     CHECK(capture.meter().peak[0] < .02f);
+  const auto beforeTransientRead = nowNs();
   const auto transient = capture.meter(true);
   CHECK(transient.valid && transient.peak[0] > .9f && transient.peak[0] < .96f);
+  CHECK(transient.trace && transient.trace->points[0].peak == transient.peak[0]);
+  const auto& point = transient.trace->points[0];
+  CHECK(point.sampleHostTimeNs > 0 && point.deliveryNs >= point.sampleHostTimeNs &&
+        point.analysisNs >= point.deliveryNs && point.rate == kRate && point.frames == kFrames &&
+        point.queueDepth <= BoxInputQueue::capacity && transient.trace->queueDepth <= BoxInputQueue::capacity &&
+        beforeTransientRead - point.analysisNs > 300000000 && transient.trace->readNs >= beforeTransientRead);
+  // It is the transient's old block, not the most recent quiet block's timestamp.
   const auto quiet = capture.meter(true);
+  CHECK(quiet.trace && quiet.trace->points[0].sampleHostTimeNs > point.sampleHostTimeNs);
   CHECK(quiet.valid && quiet.peak[0] < .02f && quiet.peak[1] > .08f);
   // A stopped fast reader must not replay an ancient transient on return.
   hardware->amplitude.store(.95f);

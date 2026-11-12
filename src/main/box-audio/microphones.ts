@@ -1,3 +1,4 @@
+import { readAlsaCaptureTiming, type AlsaCaptureTiming } from './meter-trace'
 import { performance } from 'node:perf_hooks'
 import { BOX_HOST_ANALYSIS_OWNER, type BoxMicrophoneLevels, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
 import type { CaptureAnalysisWindow, CaptureInputDevice, CaptureStartConfig, CaptureStartResult, CaptureStateName, CaptureStats } from '../../shared/types'
@@ -42,6 +43,9 @@ export class MicrophoneAnalysisSupervisor {
   private offlineAt: number | null = null
   private generationCounter = BigInt(Date.now()) * 1000n
   private pitch: { window: CaptureAnalysisWindow; at: number } | null = null
+  private readonly tracing = process.env.SINGZ_BOX_METER_TRACE === '1'
+  private hardwareGeneration: string | null = null
+  private hardware: AlsaCaptureTiming[] | null = null
   private peakSinceFast: { generation: string; peak: number[]; at: number } | null = null
   private value: BoxMicrophoneSnapshot
   private now: () => number
@@ -101,7 +105,7 @@ export class MicrophoneAnalysisSupervisor {
   /** Validated copy of a native level read for `generation`, else null. The fast native
    * read drains interval peaks; diagnostics/snapshots observe only the latest block. Every read also
    * folds into `peakSinceFast`, so a snapshot or tick read can never swallow a
-   * transient that the 20 Hz level path has not delivered yet. */
+   * transient that the fast level path has not delivered yet. */
   private readLevels(levels: CaptureStats['microphoneLevels'], generation: string): MicrophoneLevelValues | null {
     if (!(levels?.valid && levels.ownershipGeneration === generation && levels.channelIndices &&
       levels.channelIndices.length === levels.peak.length && levels.peak.length === levels.rms.length &&
@@ -111,20 +115,31 @@ export class MicrophoneAnalysisSupervisor {
     this.peakSinceFast = { generation, peak: peak.slice(), at: this.now() }
     return { channelIndices: [...levels.channelIndices], peak, rms: [...levels.rms] }
   }
-  /** Fresh level read for the renderer's 20 Hz meters: one native meter read, no
+  /** Fresh level read for the renderer's display-aligned meters: one native meter read, no
    * state/selection/pitch work and no whole-snapshot clone. It is read-only, so it
    * does not join the control queue; a generation change during the await is
    * caught by the ownership-generation check. Peak is the loudest block since the
    * previous fast read. */
   async levels(): Promise<BoxMicrophoneLevels> {
+    const receiveNs = this.tracing ? process.hrtime.bigint().toString() : undefined
     const generation = this.value.generation
     const empty = { epoch: this.options.epoch, generation, levels: null }
     if (this.disposed || generation === '0' || this.value.phase !== 'running' || !this.value.active) return empty
     const width = this.value.active.enabledChannels.length
-    const levels = this.readLevels(await this.options.owner.takeMicrophoneLevels(), generation)
+    if (this.tracing && this.hardwareGeneration !== generation) {
+      this.hardwareGeneration = generation; this.hardware = null
+      void readAlsaCaptureTiming().then(value => { if (this.hardwareGeneration === generation) this.hardware = value })
+    }
+    const native = await this.options.owner.takeMicrophoneLevels()
+    const readNs = this.tracing ? process.hrtime.bigint().toString() : undefined
+    const levels = this.readLevels(native, generation)
     if (this.value.generation !== generation || !levels || levels.peak.length !== width) return empty
     this.peakSinceFast = null
-    return { epoch: this.options.epoch, generation, levels }
+    const trace = this.tracing && native?.trace ? { ...native.trace,
+      points: native.trace.points.map((point, i) => ({ ...point, matched: point.matched && levels.peak[i] === native.peak[i] })),
+      hostReceiveNs: receiveNs!, hostReadNs: readNs!, hostSendNs: process.hrtime.bigint().toString(),
+      hardware: this.hardware, device: this.value.active!.device, label: this.value.active!.label } : undefined
+    return { epoch: this.options.epoch, generation, levels, ...(trace ? { trace } : {}) }
   }
   private async observe(): Promise<void> {
     if (this.value.generation === '0') return

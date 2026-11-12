@@ -6,6 +6,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <condition_variable>
 #include <loopz/audio_history.hpp>
 #include <mutex>
@@ -29,9 +31,37 @@ uint64_t nowNs() {
                       .count());
 }
 } // namespace
+namespace {
+struct AtomicMeterPoint {
+  std::atomic<uint64_t> sample{0}, delivery{0}, analysis{0}, serial{0}, epoch{0};
+  std::atomic<uint32_t> frames{0}, depth{0}, quality{0};
+  std::atomic<double> rate{0};
+  std::atomic<float> peak{0};
+  void store(const BoxMeterTracePoint& p) noexcept {
+    sample.store(p.sampleHostTimeNs, std::memory_order_relaxed); delivery.store(p.deliveryNs, std::memory_order_relaxed);
+    analysis.store(p.analysisNs, std::memory_order_relaxed); serial.store(p.serial, std::memory_order_relaxed);
+    epoch.store(p.epoch, std::memory_order_relaxed); frames.store(p.frames, std::memory_order_relaxed);
+    depth.store(p.queueDepth, std::memory_order_relaxed); quality.store(p.quality, std::memory_order_relaxed);
+    rate.store(p.rate, std::memory_order_relaxed); peak.store(p.peak, std::memory_order_relaxed);
+  }
+  BoxMeterTracePoint load() const noexcept {
+    return {sample.load(std::memory_order_relaxed), delivery.load(std::memory_order_relaxed),
+      analysis.load(std::memory_order_relaxed), serial.load(std::memory_order_relaxed), epoch.load(std::memory_order_relaxed),
+      frames.load(std::memory_order_relaxed), depth.load(std::memory_order_relaxed), quality.load(std::memory_order_relaxed),
+      rate.load(std::memory_order_relaxed), peak.load(std::memory_order_relaxed)};
+  }
+};
+struct MeterTraceState { std::array<AtomicMeterPoint, 64> latest, held; };
+bool meterTraceEnabled() {
+  const auto* value = std::getenv("SINGZ_BOX_METER_TRACE");
+  return value && std::strcmp(value, "1") == 0;
+}
+}
 struct BoxInputCapture::Impl {
   explicit Impl(std::chrono::milliseconds hold) : peakHoldNs(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::max(hold, std::chrono::milliseconds{1})).count())) {}
   const uint64_t peakHoldNs;
+  // Flag is sampled once on construction. No tracing clocks/allocation in the producer.
+  std::unique_ptr<MeterTraceState> trace = meterTraceEnabled() ? std::make_unique<MeterTraceState>() : nullptr;
   BoxInputTap tap;
   std::array<uint32_t, 64> enabledChannels{};
   uint32_t enabledCount = 0, analysisIndex = 0;
@@ -44,7 +74,7 @@ struct BoxInputCapture::Impl {
   std::string error;
   std::atomic<uint64_t> meterSequence{0}, meterAt{0}, meterReadAt{0};
   std::array<std::atomic<float>, 64> peak{}, rms{};
-  // Loudest block peak since the previous consuming meter read, so a 20 Hz reader does not
+  // Loudest block peak since the previous consuming meter read, so a frame-aligned reader does not
   // miss transients that fall between two blocks it happens to sample.
   std::array<std::atomic<float>, 64> peakSince{};
   void message(std::string text) {
@@ -105,6 +135,12 @@ struct BoxInputCapture::Impl {
             if (!holding) peakSince[c].store(high, std::memory_order_relaxed);
             float seen = peakSince[c].load(std::memory_order_relaxed);
             while (high > seen && !peakSince[c].compare_exchange_weak(seen, high, std::memory_order_relaxed)) {}
+            if (trace) {
+              const BoxMeterTracePoint point{bus.firstNs, bus.deliveryNs, current, slot->serial, slot->epoch,
+                bus.frames, tap.native->depth(), uint32_t(bus.quality), slot->rate, high};
+              trace->latest[c].store(point);
+              if (!holding || high > seen) trace->held[c].store(point);
+            }
             rms[c].store(float(std::sqrt(sum / bus.frames)), std::memory_order_relaxed);
           }
           meterAt.store(current, std::memory_order_relaxed);
@@ -260,6 +296,10 @@ BoxInputMeter BoxInputCapture::meter(bool consumePeak) const {
   if (!impl_->tap.id ||
       impl_->state.load(std::memory_order_acquire) != AudioInputState::Running)
     return result;
+  if (consumePeak && impl_->trace) result.trace = std::make_unique<BoxInputMeterTrace>();
+  // Scratch exists only with the opt-in trace. All publication remains atomic/seqlocked.
+  auto held = result.trace ? std::make_unique<std::array<BoxMeterTracePoint, 64>>() : nullptr;
+  auto observed = result.trace ? std::make_unique<std::array<float, 64>>() : nullptr;
   for (unsigned retry = 0; retry < 3; ++retry) {
     const auto sequence = impl_->meterSequence.load(std::memory_order_acquire);
     if (sequence & 1)
@@ -270,6 +310,11 @@ BoxInputMeter BoxInputCapture::meter(bool consumePeak) const {
       result.channelIndices[c] = impl_->enabledChannels[c];
       result.peak[c] = impl_->peak[c].load(std::memory_order_relaxed);
       result.rms[c] = impl_->rms[c].load(std::memory_order_relaxed);
+      if (result.trace) {
+        result.trace->points[c] = impl_->trace->latest[c].load();
+        (*held)[c] = impl_->trace->held[c].load();
+        (*observed)[c] = impl_->peakSince[c].load(std::memory_order_relaxed);
+      }
     }
     const auto now = nowNs();
     result.valid = updated && now >= updated && now - updated < 500000000;
@@ -278,8 +323,17 @@ BoxInputMeter BoxInputCapture::meter(bool consumePeak) const {
       // Report the loudest block since the last consuming read (never below the latest block).
       if (consumePeak && result.valid) {
         impl_->meterReadAt.store(now, std::memory_order_relaxed);
-        for (uint32_t c = 0; c < result.channels; ++c)
-          result.peak[c] = std::max(result.peak[c], impl_->peakSince[c].exchange(0.0f, std::memory_order_relaxed));
+        for (uint32_t c = 0; c < result.channels; ++c) {
+          const auto intervalPeak = impl_->peakSince[c].exchange(0.0f, std::memory_order_relaxed);
+          if (result.trace && intervalPeak > result.peak[c]) result.trace->points[c] = (*held)[c];
+          result.peak[c] = std::max(result.peak[c], intervalPeak);
+          if (result.trace) result.trace->matched[c] = (*observed)[c] == intervalPeak && result.trace->points[c].peak == result.peak[c];
+        }
+        if (result.trace) {
+          result.trace->readNs = now; result.trace->queueDepth = impl_->tap.native->depth();
+          // A producer crossing the exchange makes provenance ambiguous, never invent a timestamp.
+          if (sequence != impl_->meterSequence.load(std::memory_order_acquire)) result.trace->matched.fill(false);
+        }
       }
       return result;
     }

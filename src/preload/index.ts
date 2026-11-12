@@ -12,6 +12,7 @@ import type {
 } from '../shared/types'
 
 const box: BoxAPI = {
+  ...(process.env.SINGZ_BOX_METER_TRACE === '1' ? { meterTraceEnabled: true as const } : {}),
   getState: () => ipcRenderer.invoke('box:state-get'),
   setPreferences: (preferences) => ipcRenderer.invoke('box:preferences-set', preferences),
   saveQueue: (queue) => ipcRenderer.invoke('box:queue-save', queue),

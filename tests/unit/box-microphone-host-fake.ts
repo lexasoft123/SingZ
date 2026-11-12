@@ -60,5 +60,5 @@ export function fakeHost(initial: { origin?: 'default' | 'user'; device?: string
   }
 }
 export function newStore(host: ReturnType<typeof fakeHost>, storage?: MicrophoneChannelStorage) {
-  return new BoxMicrophones(host.api, () => Date.now(), storage ?? memoryStorage())
+  return new BoxMicrophones(host.api, () => Date.now(), storage ?? memoryStorage(), null)
 }

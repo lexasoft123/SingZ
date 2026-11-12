@@ -57,6 +57,11 @@ public:
     const auto r = read_.load(std::memory_order_relaxed);
     return r == write_.load(std::memory_order_acquire) ? nullptr : &slots_[r % capacity];
   }
+  uint32_t depth() const noexcept {
+    const auto r = read_.load(std::memory_order_acquire);
+    const auto w = write_.load(std::memory_order_acquire);
+    return uint32_t(std::min<uint64_t>(w - r, capacity));
+  }
   void consume() noexcept { read_.fetch_add(1, std::memory_order_release); }
   std::atomic<bool> online{false};
   std::atomic<double> rate{0};

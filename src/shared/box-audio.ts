@@ -1,3 +1,4 @@
+import type { CaptureMeterTrace } from './types'
 /** Local control protocol only. PCM and mutable native clock metadata never enter it. */
 export const BOX_AUDIO_VERSION = 1
 export const BOX_AUDIO_REQUEST_BYTES = 1024 * 1024
@@ -90,8 +91,16 @@ export interface BoxMicrophoneSnapshot {
   /** Age on the host monotonic clock. */
   pitch: { frequency: number; clarity: number; ageMs: number } | null
 }
+export interface BoxMeterTrace extends CaptureMeterTrace {
+  hostReceiveNs: string; hostReadNs: string; hostSendNs: string
+  hardware: Array<{ card: string; id: string; pcm: string; subdevice: string; rate: number; channels: number;
+    periodFrames: number; bufferFrames: number; periodMs: number; bufferMs: number }> | null
+  device: string; label: string
+}
 /** Level-only read for the on-screen meters; much smaller than a snapshot. */
 export interface BoxMicrophoneLevels {
+  /** Present only with SINGZ_BOX_METER_TRACE=1 in the host. */
+  trace?: BoxMeterTrace
   epoch: string
   /** Capture generation the levels belong to; '0' when none. */
   generation: string

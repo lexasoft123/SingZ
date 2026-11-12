@@ -755,6 +755,22 @@ napi_value microphoneLevelsValue(napi_env env, const singz::BoxInputMeter& level
     set(env, meter, "channelIndices", indices);
   }
   set(env, meter, "peak", peak); set(env, meter, "rms", rms);
+  if (levels.trace) {
+    napi_value trace, points;
+    napi_create_object(env, &trace); napi_create_array_with_length(env, levels.channels, &points);
+    setU64(env, trace, "readNs", levels.trace->readNs);
+    set(env, trace, "queueDepth", uintValue(env, levels.trace->queueDepth));
+    for (uint32_t c = 0; c < levels.channels; ++c) {
+      const auto& p = levels.trace->points[c]; napi_value point; napi_create_object(env, &point);
+      setU64(env, point, "sampleHostTimeNs", p.sampleHostTimeNs); setU64(env, point, "deliveryNs", p.deliveryNs);
+      setU64(env, point, "analysisNs", p.analysisNs); setU64(env, point, "serial", p.serial); setU64(env, point, "epoch", p.epoch);
+      set(env, point, "frames", uintValue(env, p.frames)); set(env, point, "queueDepth", uintValue(env, p.queueDepth));
+      set(env, point, "quality", uintValue(env, p.quality)); set(env, point, "rate", numberValue(env, p.rate));
+      set(env, point, "peak", numberValue(env, p.peak)); set(env, point, "matched", boolValue(env, levels.trace->matched[c]));
+      napi_set_element(env, points, c, point);
+    }
+    set(env, trace, "points", points); set(env, meter, "trace", trace);
+  }
   return meter;
 }
 // Host supervisor only: the public stats path never drains interval peaks.

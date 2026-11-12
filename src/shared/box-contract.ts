@@ -163,7 +163,9 @@ export type BoxAPI = {
   routingEdit(edit: { expected: { epoch: string; generation: string }; commands: unknown[] }): Promise<BoxResult<BoxRoutingState>>
   /** Host-owned microphone analysis: read-only snapshot (levels, pitch, phase, selection). */
   microphones(): Promise<BoxResult<BoxMicrophoneSnapshot>>
-  /** Level-only read for visible meters (about 20 Hz). */
+  /** Enables bounded developer tracing; absent in normal operation. */
+  meterTraceEnabled?: true
+  /** Level-only read for visible meters, frame-aligned and capped at 30 Hz. */
   microphoneLevels(): Promise<BoxResult<BoxMicrophoneLevels>>
   /** Revision compare-and-set of the persisted input selection; applies immediately. */
   setMicrophoneSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxResult<BoxMicrophoneSelectionResult>>

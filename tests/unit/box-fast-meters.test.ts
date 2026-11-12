@@ -8,14 +8,15 @@ import SongOutput from '../../src/renderer/src/components/SongOutput'
 import { PlayerMicrophoneMeters } from '../../src/renderer/src/box/Player'
 import type { MultitrackEngine } from '../../src/renderer/src/audio/engine'
 import { MicrophoneMeter } from '../../src/renderer/src/box/MicrophoneMeter'
-import { MICROPHONE_LEVEL_POLL_MS, MICROPHONE_SINGING_HOLD_MS, microphoneLevelDb, microphoneSlotLevel, microphoneSlotStatus, useMicrophoneSnapshot } from '../../src/renderer/src/box/microphones'
+import { BoxMicrophones, MICROPHONE_LEVEL_POLL_MS, MICROPHONE_SINGING_HOLD_MS, microphoneLevelDb, microphoneSlotLevel, microphoneSlotStatus, useMicrophoneSnapshot } from '../../src/renderer/src/box/microphones'
 import { MicrophoneAnalysisSupervisor, type MicrophoneAnalysisOwner } from '../../src/main/box-audio/microphones'
+import * as meterTrace from '../../src/main/box-audio/meter-trace'
 import type { MicrophoneDocument } from '../../src/main/box-audio/microphone-store'
 import type { CaptureInputDevice, CaptureStartResult, CaptureStats } from '../../src/shared/types'
 import { device, fakeHost, newStore } from './box-microphone-host-fake'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-type MeterContext = { liveWidth: number; paints: number; globalAlpha: number; fillStyle: string; clearRect(): void; save(): void; restore(): void; beginPath(): void; roundRect(): void; fill(): void; clip(): void; fillRect(x: number, y: number, w: number): void }
+type MeterContext = { liveWidth: number; liveExtent: number; paints: number; globalAlpha: number; fillStyle: string; clearRect(): void; save(): void; restore(): void; beginPath(): void; roundRect(): void; fill(): void; clip(): void; fillRect(x: number, y: number, w: number): void }
 let canvases = new Map<HTMLCanvasElement, MeterContext>()
 let frames = new Map<number, FrameRequestCallback>(), frameId = 0, clock = 0
 beforeEach(async () => {
@@ -27,9 +28,9 @@ beforeEach(async () => {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function(this: HTMLCanvasElement) {
     let context = canvases.get(this)
     if (!context) {
-      context = { liveWidth: 0, paints: 0, globalAlpha: 1, fillStyle: '',
-        clearRect() { this.liveWidth = 0; this.paints++ }, save() {}, restore() { this.globalAlpha = 1 }, beginPath() {}, roundRect() {}, fill() {}, clip() {},
-        fillRect(_x, _y, width) { if (this.globalAlpha === 1) this.liveWidth = Math.max(this.liveWidth, width) } }
+      context = { liveWidth: 0, liveExtent: 0, paints: 0, globalAlpha: 1, fillStyle: '',
+        clearRect() { this.liveWidth = this.liveExtent = 0; this.paints++ }, save() {}, restore() { this.globalAlpha = 1 }, beginPath() {}, roundRect() {}, fill() {}, clip() {},
+        fillRect(x, _y, width) { if (this.globalAlpha === 1) { this.liveWidth = Math.max(this.liveWidth, width); this.liveExtent = Math.max(this.liveExtent, x + width) } } }
       canvases.set(this, context)
     }
     return context as unknown as CanvasRenderingContext2D
@@ -301,6 +302,40 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
     const supervisor = new MicrophoneAnalysisSupervisor({ epoch: 'epoch', owner, store: { load: async () => structuredClone(doc), save: async () => {} }, now: Date.now })
     return { owner, meters, supervisor, generation: () => generation }
   }
+  it('brackets native provenance only with the host flag, and marks host-cache overrides unmatched', async () => {
+    vi.stubEnv('SINGZ_BOX_METER_TRACE', '1')
+    const hardware = vi.spyOn(meterTrace, 'readAlsaCaptureTiming').mockResolvedValue([])
+    const f = fixture()
+    try {
+      await f.supervisor.ready
+      const point = { sampleHostTimeNs: '100', deliveryNs: '200', analysisNs: '300', serial: '4', epoch: '1', frames: 256, queueDepth: 1, quality: 1, rate: 48000, peak: .5, matched: true }
+      const raw = { ...f.meters, ownershipGeneration: f.generation(), trace: { readNs: '400', queueDepth: 0, points: [point, { ...point, peak: .4 }] } }
+      f.owner.takeMicrophoneLevels.mockResolvedValueOnce(raw)
+      const first = await f.supervisor.levels()
+      expect(first.trace?.points[0]).toEqual(point)
+      expect(BigInt(first.trace!.hostReadNs)).toBeGreaterThanOrEqual(BigInt(first.trace!.hostReceiveNs))
+      expect(BigInt(first.trace!.hostSendNs)).toBeGreaterThanOrEqual(BigInt(first.trace!.hostReadNs))
+      expect(first.trace?.device).toBe('mic')
+      f.meters.peak = [.95, .1]; await f.supervisor.snapshot()
+      f.owner.takeMicrophoneLevels.mockResolvedValueOnce(raw)
+      const held = await f.supervisor.levels()
+      expect(held.levels?.peak[0]).toBe(.95)
+      expect(held.trace?.points[0].matched).toBe(false)
+      expect(held.trace?.hardware).toEqual([])
+      expect(hardware).toHaveBeenCalledTimes(1)
+    } finally { await f.supervisor.dispose(); vi.unstubAllEnvs() }
+  })
+  it('never reads hardware metadata or propagates trace without the host flag', async () => {
+    vi.stubEnv('SINGZ_BOX_METER_TRACE', '')
+    const hardware = vi.spyOn(meterTrace, 'readAlsaCaptureTiming').mockResolvedValue([])
+    const f = fixture()
+    try {
+      await f.supervisor.ready
+      f.owner.takeMicrophoneLevels.mockResolvedValueOnce({ ...f.meters, ownershipGeneration: f.generation(), trace: { readNs: '400', queueDepth: 0, points: [] } } as never)
+      expect((await f.supervisor.levels()).trace).toBeUndefined()
+      expect(hardware).not.toHaveBeenCalled()
+    } finally { await f.supervisor.dispose(); vi.unstubAllEnvs() }
+  })
   it('reads native levels fresh on every call, with no 1 s cache and no state read', async () => {
     const f = fixture(); await f.supervisor.ready
     f.owner.state.mockClear(); f.owner.stats.mockClear(); f.owner.takeMicrophoneLevels.mockClear()
@@ -343,3 +378,104 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
   })
 })
 void device
+
+
+describe('host-to-brick latency at a 30 Hz display', () => {
+  it('measures first changed live pixels across request/frame phases', async () => {
+    const delays: number[] = []
+    for (let phase = 0; phase < 100; phase += 5) {
+      const host = fakeHost()
+      host.patch({ levels: { channelIndices: [0, 1], peak: [.0063, .0063], rms: [0, 0] } })
+      host.api.microphoneLevels.mockImplementation(() => {
+        const value = { epoch: host.snapshot.epoch, generation: host.snapshot.generation, levels: structuredClone(host.snapshot.levels) }
+        return new Promise(resolve => setTimeout(() => resolve({ ok: true, value }), 2))
+      })
+      const store = new BoxMicrophones(host.api, Date.now, undefined)
+      store.connect(); await vi.advanceTimersByTimeAsync(0)
+      const node = document.createElement('div'); document.body.append(node)
+      const root = createRoot(node)
+      await act(async () => root.render(createElement(MicrophoneMeter, { source: store, slot: 0, mini: true })))
+      let frameAt = 1000 / 30
+      const advance = async (ms: number): Promise<void> => {
+        for (let t = 0; t < ms; t++) {
+          await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+          clock++
+          if (clock + .001 >= frameAt) {
+            frameAt += 1000 / 30
+            const due = [...frames]; frames.clear()
+            await act(async () => { for (const [, callback] of due) callback(clock) })
+          }
+        }
+      }
+      // Reset the display clock per sample; timer clock remains monotonic.
+      clock = 0
+      await advance(400 + phase)
+      const ctx = canvases.get(node.querySelector('canvas')!)!
+      const before = ctx.liveExtent
+      host.patch({ levels: { channelIndices: [0, 1], peak: [.25, .25], rms: [.1, .1] } })
+      let delay = 0
+      while (ctx.liveExtent <= before && delay < 160) { await advance(1); delay++ }
+      expect(delay).toBeLessThan(160)
+      delays.push(delay)
+      await act(async () => root.unmount()); node.remove(); store.dispose()
+      expect(frames.size).toBe(0)
+    }
+    delays.sort((a, b) => a - b)
+    const p50 = delays[Math.ceil(delays.length * .5) - 1], p90 = delays[Math.ceil(delays.length * .9) - 1]
+    expect(p50).toBeLessThanOrEqual(50)
+    expect(p90).toBeLessThanOrEqual(65)
+    process.stdout.write('Mac fake host (2 ms reply), 30 Hz first changed live pixels: ' + JSON.stringify({ p50, p90, samples: delays.length }) + '\n')
+  })
+})
+
+describe('display-aligned fast demand', () => {
+  it('retains roughly 30 reads per second across integer/jittered 30 Hz frame timestamps', async () => {
+    const host = fakeHost(), store = new BoxMicrophones(host.api, Date.now, undefined)
+    store.connect(); await vi.advanceTimersByTimeAsync(0)
+    const unsubscribe = store.subscribe(() => undefined)
+    for (let i = 0; i < 90; i++) {
+      const elapsed = [33, 34, 32][i % 3]
+      await vi.advanceTimersByTimeAsync(elapsed); clock += elapsed
+      const due = [...frames]; frames.clear()
+      for (const [, callback] of due) callback(clock)
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    expect(host.api.microphoneLevels.mock.calls.length).toBeGreaterThanOrEqual(87)
+    expect(host.api.microphoneLevels.mock.calls.length).toBeLessThanOrEqual(90)
+    unsubscribe(); store.dispose(); expect(frames.size).toBe(0)
+  })
+  it('reads on display frames with a 30 Hz bound, one request in flight, and cancels hidden demand', async () => {
+    const host = fakeHost(), store = new BoxMicrophones(host.api, Date.now, undefined)
+    store.connect(); await vi.advanceTimersByTimeAsync(0)
+    const unsubscribe = store.subscribe(() => undefined)
+    await vi.advanceTimersByTimeAsync(0)
+    host.api.microphoneLevels.mockClear()
+    let resolve!: (value: Awaited<ReturnType<typeof host.api.microphoneLevels>>) => void
+    host.api.microphoneLevels.mockImplementationOnce(() => new Promise(done => { resolve = done }))
+    const advance = async (count: number): Promise<void> => {
+      for (let i = 0; i < count; i++) {
+        await vi.advanceTimersByTimeAsync(1000 / 120)
+        clock += 1000 / 120
+        const due = [...frames]; frames.clear()
+        for (const [, callback] of due) callback(clock)
+        await vi.advanceTimersByTimeAsync(0)
+      }
+    }
+    await advance(120)
+    expect(host.api.microphoneLevels).toHaveBeenCalledTimes(1)
+    resolve({ ok: true, value: { epoch: host.snapshot.epoch, generation: host.snapshot.generation, levels: host.snapshot.levels } })
+    await vi.advanceTimersByTimeAsync(0); host.api.microphoneLevels.mockClear()
+    await advance(120)
+    expect(host.api.microphoneLevels.mock.calls.length).toBeGreaterThanOrEqual(29)
+    expect(host.api.microphoneLevels.mock.calls.length).toBeLessThanOrEqual(31)
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(frames.size).toBe(0)
+    host.api.microphoneLevels.mockClear(); await vi.advanceTimersByTimeAsync(3000)
+    expect(host.api.microphoneLevels).not.toHaveBeenCalled()
+    hidden.mockReturnValue(false); document.dispatchEvent(new Event('visibilitychange'))
+    expect(frames.size).toBe(1)
+    unsubscribe(); expect(frames.size).toBe(0); store.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})

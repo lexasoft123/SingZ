@@ -14,7 +14,21 @@ std::optional<loopz::AudioReadResult> readEnabledChannels(
 }
 // Private native-rate analysis tap of the LoopZ-owned capture bus. Lifecycle calls run on
 // the routing control owner; stop drains its reader before releasing the lease.
+// Opt-in diagnostics allocated on the control reader, never the capture callback.
+struct BoxMeterTracePoint {
+  uint64_t sampleHostTimeNs{}, deliveryNs{}, analysisNs{}, serial{}, epoch{};
+  uint32_t frames{}, queueDepth{}, quality{};
+  double rate{};
+  float peak{};
+};
+struct BoxInputMeterTrace {
+  uint64_t readNs{};
+  uint32_t queueDepth{};
+  std::array<BoxMeterTracePoint, 64> points{};
+  std::array<bool, 64> matched{};
+};
 struct BoxInputMeter {
+  std::unique_ptr<BoxInputMeterTrace> trace;
   bool valid{false};
   uint32_t channels{0};
   std::array<float, 64> peak{}, rms{};
