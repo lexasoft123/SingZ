@@ -320,4 +320,41 @@ describe('FFmpeg release policy', () => {
       rmSync(changed, { recursive: true, force: true })
     }
   })
+
+  it('builds the Windows codec pack from the same script under MSYS2 with at most four cl.exe edges', () => {
+    const script = read('scripts/build-ffmpeg-codec-runtime.sh')
+    // MSYS2 has sha256sum, not shasum; the checksum gate must not need macOS tools.
+    expect(script).toContain('command -v sha256sum')
+    expect(script).toContain('if [ "$TARGET" = win32-x64 ]; then\n  COMPILE_JOBS=$(( JOBS < 4 ? JOBS : 4 ))')
+    // One codec configuration: the Windows branch adds only toolchain flags.
+    expect(script).toContain('--target-os=win64 --arch=x86_64 --toolchain=msvc')
+    expect(script).toContain('DECODERS=aac,alac,flac,mp3,opus,vorbis,pcm_s8')
+  })
+
+  it('links the Windows lyric engines against the static CRT and rejects VC runtime imports', () => {
+    const script = read('scripts/vendor-engines-windows.ps1')
+    expect(script).toContain('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded')
+    expect(script).toContain('-DCMAKE_POLICY_DEFAULT_CMP0091=NEW')
+    expect(script).toContain('-DGGML_OPENMP=OFF')
+    expect(script).toContain('-DCMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON')
+    expect(script).toMatch(/@StaticCrt @\(\$s\.Flags\)/)
+    const allowlist = script.split('\n').find((line) => line.includes('$local = $imports')) ?? ''
+    expect(allowlist).toContain('kernel32')
+    for (const runtime of ['vcruntime140', 'msvcp140', 'vcomp140'])
+      expect(allowlist).not.toContain(runtime)
+  })
+
+  it('builds the Windows helpers against the static CRT', () => {
+    const builder = read('scripts/build-gpui-native.py')
+    expect(builder).toContain("'-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'")
+    expect(builder).toContain("'-DCMAKE_POLICY_DEFAULT_CMP0091=NEW'")
+  })
+
+  it('links the Windows player against the static CRT, scoped to the MSVC target', () => {
+    const config = read('.cargo/config.toml')
+    expect(config).toContain('[target.x86_64-pc-windows-msvc]')
+    expect(config).toContain('rustflags = ["-C", "target-feature=+crt-static"]')
+    // Target-scoped: no unscoped [build] rustflags that would reach macOS or Linux.
+    expect(config).not.toMatch(/^\[build\]/m)
+  })
 })

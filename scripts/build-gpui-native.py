@@ -180,7 +180,10 @@ def build(output_dir: Path, *, codec_pack: Path | None = None, basic_only: bool 
                  '-DSINGZ_CORE_TESTS=OFF', '-DCMAKE_BUILD_TYPE=Release',
                  '-DSINGZ_SOURCE_HASH=<computed-under-build-lease>', *codec_args]
     if target.startswith('win32-'):
-        configure += ['-G', 'Visual Studio 17 2022', '-A', 'x64']
+        # Static CRT: the helpers must not import vcruntime140*/msvcp140.dll, which a
+        # clean machine may lack. The FFmpeg DLLs are C and import only system DLLs.
+        configure += ['-G', 'Visual Studio 17 2022', '-A', 'x64',
+                      '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW', '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded']
     compile_command = [configure[0], '--build', str(directory), '--config', 'Release',
                        '--target', *HELPERS, '--parallel', str(jobs)]
     plan = {'target': target, 'buildDir': str(directory), 'outputDir': str(output),

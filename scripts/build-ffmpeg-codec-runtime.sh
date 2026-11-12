@@ -51,7 +51,12 @@ if [ ! -f "$ARCHIVE" ]; then
   mv "$partial" "$ARCHIVE"
   trap - EXIT
 fi
-actual="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
+# MSYS2 (win32-x64) ships sha256sum but not shasum.
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+else
+  actual="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
+fi
 if [ "$actual" != "$SOURCE_SHA256" ]; then
   echo "FFmpeg source checksum mismatch: $actual" >&2
   exit 2
@@ -112,6 +117,11 @@ fi
 # compiler launcher, driver and frontend. Serialize even without ccache until
 # an independently measured launcher proves a larger edge count remains <= 8.
 COMPILE_JOBS=1
+# The win32-x64 build compiles with cl.exe, never clang, so the clang process
+# ceiling does not apply; the ordinary four-compile-edge limit does.
+if [ "$TARGET" = win32-x64 ]; then
+  COMPILE_JOBS=$(( JOBS < 4 ? JOBS : 4 ))
+fi
 ccache_state=disabled
 [ -z "$CCACHE" ] || ccache_state=enabled
 echo "FFmpeg native compile edges: $COMPILE_JOBS (requested $JOBS; ccache $ccache_state)"

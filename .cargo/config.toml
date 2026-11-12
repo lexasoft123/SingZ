@@ -1,0 +1,6 @@
+# Windows release binaries carry their own C runtime, so a clean machine needs no
+# vcruntime140.dll. Scoped to the MSVC target: macOS and Linux builds ignore it.
+# Cargo finds this file from either the repo root (--manifest-path) or
+# experiments/gpui-player, the only Cargo project in the tree.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

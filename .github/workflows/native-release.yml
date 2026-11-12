@@ -332,33 +332,32 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor/ffmpeg-codec/win32-x64
-          key: gpui-codec-win32-x64-${{ hashFiles('third_party/ffmpeg-codec/profile.json', 'scripts/gpui-codec-runtime.py') }}
-      # FFmpeg's MSVC build (scripts/build-ffmpeg-codec-runtime.sh, win32-x64) needs
-      # an MSYS2 shell that already sees cl.exe/link.exe/lib.exe from an x64 MSVC
-      # developer environment, plus make. MSVC first, then MSYS2 inheriting its PATH.
-      - name: Download pinned FFmpeg source
-        if: steps.codec-cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fL --retry 3 --output "$RUNNER_TEMP/ffmpeg-8.0.1.tar.xz" https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
-          test "$(sha256sum "$RUNNER_TEMP/ffmpeg-8.0.1.tar.xz" | awk '{print $1}')" = 05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41
+          key: gpui-codec-win32-x64-${{ hashFiles('third_party/ffmpeg-codec/profile.json', 'scripts/build-ffmpeg-codec-runtime.sh', 'scripts/finalize-ffmpeg-codec-runtime.mjs', 'scripts/verify-staged-ffmpeg-codec-runtime.mjs', 'scripts/verify-ffmpeg-codec-pack.mjs', 'scripts/ffmpeg-runtime-binary.mjs') }}
+      # The pack is built by the same script as every other target
+      # (scripts/build-ffmpeg-codec-runtime.sh win32-x64): it downloads the source,
+      # verifies its SHA-256 and runs configure/make under MSYS2. That shell must
+      # already see cl.exe/link.exe/lib.exe from an x64 MSVC developer environment,
+      # so MSVC comes first and MSYS2 inherits its PATH. The MSVC environment is set
+      # up unconditionally because the lyric-engine build below needs it as well.
       - name: Set up MSVC x64 developer environment
-        if: steps.codec-cache.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
-      - name: Set up MSYS2 (make, diffutils) on top of MSVC
+      - name: Set up MSYS2 (make, diffutils, pkgconf) on top of MSVC
         if: steps.codec-cache.outputs.cache-hit != 'true'
         uses: msys2/setup-msys2@40677d36a502eb2cf0fb808cc9dec31bf6152638 # v2.28.0
         with:
           msystem: MSYS
           update: false
           path-type: inherit
-          install: make diffutils
+          install: make diffutils pkgconf
       - name: Build pinned FFmpeg codec pack
         if: steps.codec-cache.outputs.cache-hit != 'true'
         shell: msys2 {0}
+        env:
+          MSYS2_PATH_TYPE: inherit
+          CHERE_INVOKING: '1'
+          SINGZ_NATIVE_JOBS: '4'
         run: |
           set -euo pipefail
           # MSYS2 ships /usr/bin/link.exe (coreutils ln); it shadows MSVC's linker
@@ -371,10 +370,7 @@ jobs:
           # capture the output first instead of testing a pipeline under pipefail.
           link_banner="$(link.exe 2>&1 || true)"
           grep -q 'Microsoft' <<<"$link_banner" || { echo "::error::link.exe is not MSVC's linker: $(command -v link.exe)"; exit 1; }
-          py="$(command -v python3 || command -v python)"
-          "$py" scripts/gpui-codec-runtime.py build --target win32-x64 \
-            --pack-dir "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/win32-x64" \
-            --source-archive "$RUNNER_TEMP/ffmpeg-8.0.1.tar.xz" --work-dir "$RUNNER_TEMP/gpui-codec-work" --jobs 2
+          bash scripts/build-ffmpeg-codec-runtime.sh win32-x64
       - name: Verify pinned FFmpeg codec pack
         shell: bash
         run: python3 scripts/gpui-codec-runtime.py inspect --target win32-x64 --pack-dir "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/win32-x64"
@@ -392,12 +388,14 @@ jobs:
           node scripts/with-native-build-lock.mjs --owner native-release-windows-helpers -- \
             python3 scripts/build-gpui-native.py --codec-pack "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/win32-x64" --jobs 2 --output-dir experiments/gpui-player/target/release \
             >"$RUNNER_TEMP/native-build/cargo-helpers.log" 2>&1
+      # Static CRT (/MT) and no OpenMP, so the engines import only system DLLs; the
+      # script fails the build if one imports anything else (vcruntime140, vcomp140).
       - name: Build native engines
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/vendor-llama.sh win32-x64
-          bash scripts/vendor-crispasr.sh win32-x64
+          node scripts/with-native-build-lock.mjs --owner native-release-windows-engines -- \
+            powershell -NoProfile -ExecutionPolicy Bypass -File scripts/vendor-engines-windows.ps1
       - name: Locate makensis
         shell: bash
         run: |
@@ -470,7 +468,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          for log in "$RUNNER_TEMP"/native-build/*.log "$RUNNER_TEMP"/gpui-codec-work/*/config.log; do
+          for log in "$RUNNER_TEMP"/native-build/*.log .engines-src/ffmpeg-codec/win32-x64/build/ffbuild/config.log; do
             [[ -f "$log" ]] || continue
             echo "::group::tail -n 120 $log"; tail -n 120 "$log"; echo "::endgroup::"
           done
