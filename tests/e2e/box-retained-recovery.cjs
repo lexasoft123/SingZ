@@ -155,9 +155,8 @@ async function run() {
     assert.equal(resumed.generation, scrubbed.generation)
   })
   let baseline
-  await watchdog.run('real UI opens the stems-only project and associates its graph', 75, async () => {
+  await watchdog.run('real UI keeps the started stems-only project and associates its graph', 75, async () => {
     const page = ui.page
-    await page.locator('[data-control="play"]').click()
     const running = await eventually('real native generation advances', status, value =>
       value.state === 'running' && value.transportState === 'playing' && BigInt(value.renderedProjectFrame) > 0n && value.masterGain === 0, 20000)
     const bound = await recovered(running.generation, fixture)
