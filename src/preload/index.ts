@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { boxAudioPersistentLifetime } from '../shared/box-audio'
 import type { BoxAPI } from '../shared/box-contract'
+import type { VoiceRecordSettingsChange, VoiceRecordStartRequest, VoicePlayTakeRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
 import type {
   GlassVerdict,
   LogEntry,
@@ -43,9 +44,32 @@ const box: BoxAPI = {
   }
 }
 
-const api: SingzApi = {
+export type VoiceTakeApi = {
+  recordStart(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult>
+  recordStop(reason?: 'device-lost' | 'error'): Promise<VoiceRecordStopResult>
+  recordSettings(change: VoiceRecordSettingsChange): Promise<{ ok: boolean; error?: string }>
+  list(songId: string): Promise<VoiceTakeSummary[]>
+  play(request: VoicePlayTakeRequest): Promise<{ ok: boolean; error?: string }>
+  stopPlay(): Promise<{ ok: boolean; error?: string }>
+  remove(songId: string, takeId: string): Promise<{ ok: boolean; error?: string }>
+  level(): Promise<VoiceInputLevel>
+}
+
+const voiceTakes: VoiceTakeApi = {
+  recordStart: request => ipcRenderer.invoke('voice:record-start', request),
+  recordStop: reason => ipcRenderer.invoke('voice:record-stop', reason),
+  recordSettings: change => ipcRenderer.invoke('voice:record-settings', change),
+  list: songId => ipcRenderer.invoke('voice:list', songId),
+  play: request => ipcRenderer.invoke('voice:play', request),
+  stopPlay: () => ipcRenderer.invoke('voice:stop-play'),
+  remove: (songId, takeId) => ipcRenderer.invoke('voice:remove', songId, takeId),
+  level: () => ipcRenderer.invoke('voice:level')
+}
+
+const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
   boxAudioPersistent: boxAudioPersistentLifetime(process.env),
   box,
+  voiceTakes,
   pathForFile: (file) => webUtils.getPathForFile(file),
 
   getSplitterMode: () => ipcRenderer.invoke('splitter:mode'),

@@ -74,6 +74,12 @@ export interface NativeCaptureBinding {
   stopMicrophoneMix?(): DesktopMicrophoneMixResult
   microphoneMixStatus?(): DesktopMicrophoneMixStatus
   captureRecording(action: 'record' | 'finish', path: string, generation: bigint): Record<string, unknown>
+  recordTake(directory: string, takeId: string, generation: bigint): Promise<{ ok: boolean; error?: string }>
+  finishTake(generation: bigint): Promise<Record<string, unknown>>
+  cancelTake(generation: bigint): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
+  playTake(config: unknown, generation: bigint): Promise<{ ok: boolean; error?: string; startHostTimeNs?: string }>
+  stopTake(generation?: bigint): Promise<{ ok: boolean; error?: string }>
+  presentationQuery(hostNs: string | bigint | number): Promise<Record<string, unknown>>
 
   exportAudio?(sourceFd: number | number[], destinationFd: number, format: 'wav' | 'flac' | 'mp3', job: string): Promise<{ ok: boolean; error?: string }>
   cancelAudioExport?(job: string): void
@@ -804,7 +810,7 @@ export function validateCaptureBindingIdentity(
   }
   for (const name of [
     'initializeSharedAudio', 'refreshSharedAudioInventory', 'scheduleTrainingCue', 'cancelTrainingCues', 'setTrainingCueGain', 'trainingCueStatus', 'captureRecording',
-    'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats',
+    'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats', 'recordTake', 'finishTake', 'cancelTake', 'playTake', 'stopTake', 'presentationQuery',
     'audioHostProviders', 'audioHostDevices', 'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor'
     , 'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
     'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',

@@ -214,7 +214,9 @@ set_target_properties(singz_microphone_mix PROPERTIES POSITION_INDEPENDENT_CODE 
 
 add_library(singz_native_playback_callback STATIC EXCLUDE_FROM_ALL
   native/playback/native_playback_callback.cpp
-  native/playback/native_playback_callback.h)
+  native/playback/native_playback_callback.h
+  native/playback/presentation_history.cpp
+  native/playback/presentation_history.h)
 add_library(SingZ::native_playback_callback ALIAS
   singz_native_playback_callback)
 target_compile_features(singz_native_playback_callback PUBLIC cxx_std_20)
@@ -267,9 +269,12 @@ add_dependencies(singz_native_playback_callback
   singz_check_playback_realtime)
 
 add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
+  native/playback/record_placement.cpp
+  native/playback/record_placement.h
   native/playback/shared_audio_service.cpp
   native/playback/shared_audio_service.h
   native/playback/training_pcm_mixer.h
+  native/playback/training_pcm_mixer.cpp
   native/playback/native_playback_graph_document.cpp
   native/playback/native_playback_graph_document.h
   native/playback/playback_cue_plan.cpp
@@ -366,6 +371,8 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
   endif()
   add_library(singz_capture MODULE
     native/electron/capture_addon.cpp
+    native/electron/take_writer.cpp
+    native/electron/take_writer.h
     native/electron/audio_export_bridge.cpp
     native/electron/audio_export_bridge.h
     native/electron/audio_monitor_session.cpp
@@ -809,6 +816,22 @@ if(SINGZ_CORE_TESTS)
       SINGZ_NATIVE_PLAYBACK_QUARANTINED_SWAP=1
       $<TARGET_FILE:native_playback_session_tests>)
 
+  add_executable(playback_presentation_history_tests
+    tests/native/playback_presentation_history_tests.cpp
+    ${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp)
+  target_compile_features(playback_presentation_history_tests PRIVATE cxx_std_20)
+  target_include_directories(playback_presentation_history_tests PRIVATE
+    "${SINGZ_REPO_ROOT}" "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(playback_presentation_history_tests PRIVATE
+    SingZ::native_playback_session Threads::Threads)
+  add_test(NAME playback_presentation_history_tests COMMAND playback_presentation_history_tests)
+
+  add_executable(record_placement_tests tests/native/record_placement_tests.cpp)
+  target_compile_features(record_placement_tests PRIVATE cxx_std_20)
+  target_include_directories(record_placement_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(record_placement_tests PRIVATE SingZ::native_playback_session)
+  add_test(NAME record_placement_tests COMMAND record_placement_tests)
+
   add_executable(playback_cue_plan_tests
     ${SINGZ_REPO_ROOT}/tests/native/playback_cue_plan_tests.cpp)
   target_compile_features(playback_cue_plan_tests PRIVATE cxx_std_20)
@@ -1025,11 +1048,23 @@ if(SINGZ_CORE_TESTS AND SINGZ_BUILD_HOST_TOOLS)
     "${CMAKE_CURRENT_BINARY_DIR}/crepe-recording-test.wav")
 endif()
 
-if(BUILD_TESTING)
-  add_executable(training_pcm_mixer_tests native/playback/training_pcm_mixer_tests.cpp)
+if(SINGZ_CORE_TESTS)
+  add_executable(training_pcm_mixer_tests native/playback/training_pcm_mixer_tests.cpp
+    native/playback/training_pcm_mixer.cpp)
   target_compile_features(training_pcm_mixer_tests PRIVATE cxx_std_20)
-  target_link_libraries(training_pcm_mixer_tests PRIVATE SingZ::zcore_device)
+  target_compile_options(training_pcm_mixer_tests PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>" "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+  target_link_libraries(training_pcm_mixer_tests PRIVATE SingZ::zcore_device Threads::Threads)
   add_test(NAME training_pcm_mixer_tests COMMAND training_pcm_mixer_tests)
+  add_executable(take_playback_tests tests/native/take_playback_tests.cpp
+    native/playback/training_pcm_mixer.cpp native/playback/presentation_history.cpp
+    ${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp)
+  target_compile_features(take_playback_tests PRIVATE cxx_std_20)
+  target_compile_options(take_playback_tests PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>" "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+  target_include_directories(take_playback_tests PRIVATE "${SINGZ_REPO_ROOT}" "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(take_playback_tests PRIVATE SingZ::zcore_device Threads::Threads)
+  add_test(NAME take_playback_tests COMMAND take_playback_tests)
 endif()
 
 if(BUILD_TESTING AND SINGZ_BOX_LOOPZ_ROUTING)
@@ -1064,4 +1099,14 @@ if(BUILD_TESTING AND SINGZ_BOX_LOOPZ_ROUTING)
   target_link_libraries(box_input_capture_tests PRIVATE LoopZ::Control Threads::Threads SingZ::zdsp_analysis)
   add_test(NAME box_input_capture_tests COMMAND box_input_capture_tests)
   set_tests_properties(loopz_source_backend_tests box_routing_owner_tests box_input_capture_tests PROPERTIES TIMEOUT 20)
+endif()
+
+if(SINGZ_CORE_TESTS AND SINGZ_BUILD_HOST_TOOLS)
+  add_executable(take_writer_tests
+    native/electron/take_writer.cpp tests/native/take_writer_tests.cpp
+    "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(take_writer_tests PRIVATE cxx_std_20)
+  target_include_directories(take_writer_tests PRIVATE "${SINGZ_REPO_ROOT}" "${ZCORE_ROOT}/zdsp/tests" "${ZCORE_ROOT}/zcore/include")
+  target_link_libraries(take_writer_tests PRIVATE Threads::Threads)
+  add_test(NAME take_writer_tests COMMAND take_writer_tests)
 endif()

@@ -13,6 +13,7 @@
 #include "playback_addon_bridge.h"
 #include "../playback/shared_audio_service.h"
 #include "training_audio_session.h"
+#include "take_writer.h"
 #include "microphone_mix_bridge.h"
 #include <zcore/audio/capture_recording.h>
 #include <filesystem>
@@ -123,6 +124,10 @@ struct CaptureOwner {
   std::unique_ptr<zdsp::analysis::PitchAnalysisModule> analyzer;
   EventBridge* bridge = nullptr;
   std::shared_ptr<singz::CaptureRecording> recording;
+  singz::TakeWriter takeWriter;
+  bool takePresent = false;
+  uint64_t takeGeneration = 0;
+  uint32_t sampleRate = 0;
   uint64_t generation = 0;
   uint64_t lastDroppedEvents = 0;
   uint64_t lastOverwrittenWindows = 0;
@@ -220,6 +225,14 @@ const char* qualityName(zdsp::CaptureTimestampQuality quality) {
   return "unknown";
 }
 
+const char* qualityName(singz::AudioInputTimestampQuality q) {
+  switch (q) {
+    case singz::AudioInputTimestampQuality::Hardware: return "hardware";
+    case singz::AudioInputTimestampQuality::CallbackEstimate: return "estimated";
+    case singz::AudioInputTimestampQuality::Unknown: return "unknown";
+  }
+  return "unknown";
+}
 const char* reasonName(zdsp::DiscontinuityReason reason) {
   switch (reason) {
     case zdsp::DiscontinuityReason::None: return "none";
@@ -334,12 +347,12 @@ std::string getString(napi_env env, napi_value object, const char* name) {
   return result;
 }
 
-std::string getStringValue(napi_env env, napi_value value) {
+std::string getStringValue(napi_env env, napi_value value, size_t maxSize = 16) {
   napi_valuetype type = napi_undefined;
   size_t size = 0;
   if (napi_typeof(env, value, &type) != napi_ok || type != napi_string ||
       napi_get_value_string_utf8(env, value, nullptr, 0, &size) != napi_ok ||
-      size == 0 || size > 16)
+      size == 0 || size > maxSize)
     return {};
   std::string result(size + 1, '\0');
   if (napi_get_value_string_utf8(env, value, result.data(), result.size(),
@@ -474,6 +487,8 @@ void stopLocked(uint64_t generation, bool force) {
     owner.lastState = owner.input->state();
     owner.lastError = owner.input->lastError();
   }
+  if (owner.takePresent) owner.takeWriter.finish();
+  owner.takeWriter.resetLevel();
   if (owner.bridge) {
     owner.lastDroppedEvents = owner.bridge->dropped.load(std::memory_order_relaxed);
     owner.lastOverwrittenWindows = owner.bridge->overwritten.load(std::memory_order_relaxed);
@@ -617,6 +632,8 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
   owner.generation = generation;
   owner.lastDroppedEvents = 0;
   owner.lastOverwrittenWindows = 0;
+  owner.sampleRate = 0;
+  owner.takeWriter.resetCaptureTelemetry();
   const auto modelPath = getString(env, argv[0], "crepeModelPath");
   try {
     owner.analyzer = std::make_unique<zdsp::analysis::PitchAnalysisModule>(
@@ -643,6 +660,7 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
     }
   }
   const auto result = owner.input->start(config, [](const singz::AudioInputBlockView& block) {
+    owner.takeWriter.append(block);
     auto* analyzer = owner.analyzer.get();
     if (!analyzer || !owner.bridge) return;
     if (auto recording = std::atomic_load(&owner.recording)) recording->append(block);
@@ -650,6 +668,7 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
       if (owner.bridge) publishLatest(owner.bridge, window, *analyzer);
     });
   }, &inventory, enabledChannels);
+  owner.sampleRate = static_cast<uint32_t>(result.sampleRate);
   owner.lastState = result.state;
   owner.lastError = result.error;
   if (!result.ok) stopLocked(generation, true);
@@ -739,6 +758,20 @@ napi_value stats(napi_env env, napi_callback_info) {
   const auto value = owner.input ? owner.input->stats() : owner.lastStats;
   napi_value result;
   napi_create_object(env, &result);
+  const auto level = owner.takeWriter.level();
+  napi_value inputLevel;
+  napi_create_object(env, &inputLevel);
+  set(env, inputLevel, "peakDb", numberValue(env, level.peakDb));
+  set(env, inputLevel, "rmsDb", numberValue(env, level.rmsDb));
+  set(env, result, "inputLevel", inputLevel);
+  set(env, result, "sampleRate", uintValue(env, owner.sampleRate));
+  setU64(env, result, "lastSampleHostNs", owner.takeWriter.lastSampleHostNs());
+  const auto firstSample = owner.takeWriter.firstSample();
+  set(env, result, "firstSampleCaptured", boolValue(env, owner.takePresent && firstSample.captured));
+  setU64(env, result, "firstSampleHostNs", firstSample.hostNs);
+  set(env, result, "firstSampleQuality", stringValue(env, qualityName(firstSample.quality)));
+  set(env, result, "takeActive", boolValue(env, owner.takeWriter.active()));
+  set(env, result, "takeCompleted", boolValue(env, owner.takePresent && owner.takeWriter.completed()));
   setU64(env, result, "deliveredBlocks", value.deliveredBlocks);
   setU64(env, result, "deliveredFrames", value.deliveredFrames);
   setU64(env, result, "overruns", value.overruns);
@@ -1347,6 +1380,86 @@ napi_value captureRecording(napi_env env, napi_callback_info info) {
   return result;
 }
 
+// Voice takes are separate from training's bounded RAM CaptureRecording.
+napi_value takeResult(napi_env env, const singz::TakeWriteResult& r) {
+  napi_value result;
+  napi_create_object(env, &result);
+  set(env, result, "ok", boolValue(env, r.error.empty()));
+  set(env, result, "path", stringValue(env, r.path));
+  // Existing capture timestamps are decimal strings to preserve uint64 precision.
+  setU64(env, result, "firstSampleHostNs", r.firstSampleHostNs);
+  set(env, result, "frames", numberValue(env, static_cast<double>(r.frames)));
+  set(env, result, "sampleRate", uintValue(env, r.sampleRate));
+  set(env, result, "firstSampleQuality", stringValue(env, qualityName(r.firstSampleQuality)));
+  set(env, result, "droppedBlocks", numberValue(env, static_cast<double>(r.droppedBlocks)));
+  set(env, result, "deviceLost", boolValue(env, r.deviceLost));
+  if (r.deviceLost) set(env, result, "reason", stringValue(env, "device-lost"));
+  if (!r.error.empty()) {
+    set(env, result, "reason", stringValue(env, "error"));
+    set(env, result, "error", stringValue(env, r.error));
+    set(env, result, "message", stringValue(env, r.error));
+  }
+  return result;
+}
+napi_value takeError(napi_env env, const char* reason, const std::string& message) {
+  napi_value result;
+  napi_create_object(env, &result);
+  set(env, result, "ok", boolValue(env, false));
+  set(env, result, "reason", stringValue(env, reason));
+  set(env, result, "error", stringValue(env, message));
+  set(env, result, "message", stringValue(env, message));
+  return result;
+}
+napi_value recordTake(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value argv[3]{};
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::lock_guard<std::mutex> lock(owner.mutex);
+  uint64_t generation = 0;
+  if (!owner.input || owner.input->state() != singz::AudioInputState::Running)
+    return takeError(env, "no-input", "No microphone input is open");
+  if (argc != 3 || !getExactU64(env, argv[2], &generation) || generation != owner.generation)
+    return takeError(env, "error", "The microphone session is no longer active");
+  if (owner.takePresent) return takeError(env, "busy", "A voice take is already active or awaiting finish");
+  try {
+    auto* input = owner.input.get();
+    owner.takeWriter.start(getStringValue(env, argv[0], 32768), getStringValue(env, argv[1], 128), owner.sampleRate,
+        [input] { return input->state() != singz::AudioInputState::Running; });
+    owner.takePresent = true; owner.takeGeneration = generation;
+    napi_value result;
+    napi_create_object(env, &result);
+    set(env, result, "ok", boolValue(env, true));
+    return result;
+  } catch (const std::exception& e) { return takeError(env, "error", e.what()); }
+}
+napi_value finishTake(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1]{};
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::lock_guard<std::mutex> lock(owner.mutex);
+  uint64_t generation = 0;
+  if (argc != 1 || !getExactU64(env, argv[0], &generation) ||
+      !owner.takePresent || generation != owner.takeGeneration)
+    return takeError(env, "error", "No voice take exists for this microphone session");
+  const auto result = owner.takeWriter.finish();
+  owner.takePresent = false; owner.takeGeneration = 0;
+  return takeResult(env, result);
+}
+napi_value cancelTake(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1]{};
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::lock_guard<std::mutex> lock(owner.mutex);
+  uint64_t generation = 0;
+  const bool matched = argc == 1 && getExactU64(env, argv[0], &generation) &&
+      owner.takePresent && generation == owner.takeGeneration;
+  try {
+    if (matched) { owner.takeWriter.cancel(); owner.takePresent = false; owner.takeGeneration = 0; }
+    napi_value result;
+    napi_create_object(env, &result);
+    set(env, result, "ok", boolValue(env, true));
+    set(env, result, "cancelled", boolValue(env, matched));
+    return result;
+  } catch (const std::exception& e) { return takeError(env, "error", e.what()); }
+}
+
 void cleanup(void*) {
   singz::cleanupMicrophoneMix();
   singz::cleanupTrainingAudio();
@@ -1379,6 +1492,9 @@ napi_value init(napi_env env, napi_value exports) {
       {"beginCapture", nullptr, begin, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cancelCapture", nullptr, cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureState", nullptr, state, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"recordTake", nullptr, recordTake, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"finishTake", nullptr, finishTake, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"cancelTake", nullptr, cancelTake, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureRecording", nullptr, captureRecording, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureStats", nullptr, stats, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostProviders", nullptr, audioHostProviders, nullptr, nullptr, nullptr, napi_default, nullptr},

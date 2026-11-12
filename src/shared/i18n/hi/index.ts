@@ -6,5 +6,6 @@ import { main } from './main'
 import { player } from './player'
 import { settings } from './settings'
 import { training } from './training'
+import { voice } from './voice'
 
-export const hi: Record<string, string> = { ...app, ...common, ...library, ...lyrics, ...main, ...player, ...settings, ...training }
+export const hi: Record<string, string> = { ...app, ...common, ...library, ...lyrics, ...main, ...player, ...settings, ...training, ...voice }

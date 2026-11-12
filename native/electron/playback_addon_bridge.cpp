@@ -4,6 +4,7 @@
 #endif
 
 #include "native_audio_ownership.h"
+#include "training_audio_session.h"
 #include "../playback/shared_audio_service.h"
 
 #include <lane_measure.h>
@@ -66,6 +67,13 @@ struct DesktopPlaybackOwner {
 };
 
 DesktopPlaybackOwner playback;
+
+// Session lifetime is the addon's static owner, including graph seams. The
+// training renderer stores only this function pointer; it never borrows a
+// prepared graph or copies a reference-counted owner on the render thread.
+PlaybackPresentationQuery takePresentation(uint64_t hostTimeNs) noexcept {
+  return playback.session.presentationQueryRealtime(hostTimeNs);
+}
 
 /**
  * Wait out an in-flight prepare, having first asked it to stop.
@@ -1638,6 +1646,7 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
                     : unavailableReason),
             "platform-not-ready"));
   backend = sharedPlaybackBackend(std::move(backend), provider);
+  setTakePresentationProvider(nullptr);
   if (!playback.session.replaceAudioHostBackend(std::move(backend)))
     return settledPromise(
         env,
@@ -1665,6 +1674,7 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
   playback.handoffLease = 0;
   playback.generation = generation;
   playback.provider = provider;
+  setTakePresentationProvider(takePresentation);
   config.handoffLease = handoff;
   auto job = std::make_unique<PrepareJob>();
   job->config = std::move(config);
@@ -1945,6 +1955,7 @@ napi_value unloadPlaybackWithRetention(napi_env env,
   NativePlaybackUnloadReceipt receipt =
       playback.session.unloadWithCleanup(generation, retention);
   if (receipt.cleanup.globallyComplete()) {
+    setTakePresentationProvider(nullptr);
     playback.handoffLease = receipt.cleanup.handoffLease;
     if (playback.generation != 0)
       playback.ownership->release(NativeAudioOwnerKind::Playback,
@@ -2167,6 +2178,47 @@ napi_value graphSnapshotValue(napi_env env,
     napi_set_element(env, connections, index, connection);
   }
   setValue(env, result, "connections", connections);
+  return result;
+}
+
+napi_value presentationQuery(napi_env env, napi_callback_info info) {
+  napi_value argument{};
+  size_t argc = 1;
+  uint64_t hostNs = 0;
+  if (napi_get_cb_info(env, info, &argc, &argument, nullptr, nullptr) != napi_ok ||
+      argc != 1) {
+    napi_throw_type_error(env, nullptr, "presentationQuery requires host nanoseconds");
+    return nullptr;
+  }
+  // Capture publishes nanosecond counters as decimal strings. Also accept a
+  // bigint or a safe JS integer without losing timestamps to double rounding.
+  bool valid = exactU64(env, argument, &hostNs);
+  if (!valid) {
+    std::string text;
+    if (stringValue(env, argument, 20, &text) && !text.empty()) {
+      const auto parsed = std::from_chars(text.data(), text.data() + text.size(), hostNs);
+      valid = parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && hostNs != 0;
+    }
+  }
+  if (!valid) {
+    napi_throw_type_error(env, nullptr, "presentationQuery requires positive host nanoseconds (decimal string, safe integer or bigint)");
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> lock(playback.mutex);
+  const auto source = playback.session.presentationQuery(hostNs);
+  napi_value result{};
+  napi_create_object(env, &result);
+  setValue(env, result, "found", makeBool(env, source.found));
+  setValue(env, result, "projectFrame", makeNumber(env, source.projectFrame));
+  setValue(env, result, "songSeconds", makeNumber(env, source.songSeconds));
+  setValue(env, result, "rate", makeNumber(env, source.rate));
+  setValue(env, result, "sampleRate", makeNumber(env, source.sampleRate));
+  setValue(env, result, "outputLatencyFrames", makeNumber(env, source.outputLatencyFrames));
+  setValue(env, result, "graphLatencyFrames", makeNumber(env, source.graphLatencyFrames));
+  setCounter(env, result, "discontinuitySerial", source.discontinuitySerial);
+  setCounter(env, result, "generation", source.generation);
+  setValue(env, result, "paused", makeBool(env, source.paused));
+  setValue(env, result, "seekDuringCallback", makeBool(env, source.nonAffine));
   return result;
 }
 
@@ -2569,6 +2621,7 @@ void definePlaybackExports(napi_env env, napi_value exports,
                            DesktopPlaybackBackendFactory backendFactory) {
   playback.ownership = ownership;
   playback.backendFactory = backendFactory;
+  setTakePresentationProvider(takePresentation);
   napi_property_descriptor properties[] = {
       {"preparePlayback", nullptr, preparePlayback, nullptr, nullptr, nullptr,
        napi_default, nullptr},
@@ -2596,6 +2649,8 @@ void definePlaybackExports(napi_env env, napi_value exports,
        nullptr, nullptr, napi_default, nullptr},
       {"playbackStatus", nullptr, playbackStatus, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"presentationQuery", nullptr, presentationQuery, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"unloadPlayback", nullptr, unloadPlayback, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"unloadPlaybackRetainingLanes", nullptr, unloadPlaybackRetainingLanes,
@@ -2611,6 +2666,7 @@ void definePlaybackExports(napi_env env, napi_value exports,
 }
 
 void cleanupPlaybackBridge() noexcept {
+  setTakePresentationProvider(nullptr);
   // The env is going away: a worker still decoding would outlive it, and its
   // completion callback would touch an env that is closing. The lane measure
   // is a worker of the same kind and drains the same way.
@@ -2623,6 +2679,7 @@ void cleanupPlaybackBridge() noexcept {
   NativePlaybackUnloadReceipt receipt =
       playback.session.unloadWithCleanup(generation);
   if (receipt.cleanup.globallyComplete()) {
+    setTakePresentationProvider(nullptr);
     playback.handoffLease = receipt.cleanup.handoffLease;
     playback.ownership->release(NativeAudioOwnerKind::Playback, generation);
     playback.generation = 0;

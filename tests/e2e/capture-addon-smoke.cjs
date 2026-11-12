@@ -77,6 +77,7 @@ ready.then(async () => {
   assert.equal(addon.buildInfo.sourceStamp, manifest.sourceStamp, 'compiled source identity')
   for (const name of [
     'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats',
+    'recordTake', 'finishTake', 'cancelTake',
     'audioHostDevices', 'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor',
     'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
     'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',
@@ -96,6 +97,21 @@ ready.then(async () => {
   assert.equal(typeof stats.deliveredBlocks, 'string')
   assert.equal(typeof stats.droppedEvents, 'string')
   assert.equal(typeof stats.overwrittenWindows, 'string')
+  assert.deepEqual(stats.inputLevel, { peakDb: -120, rmsDb: -120 })
+  assert.equal(typeof stats.sampleRate, 'number')
+  assert.equal(stats.sampleRate, 0)
+  assert.equal(stats.lastSampleHostNs, '0')
+  assert.equal(stats.firstSampleCaptured, false)
+  assert.equal(stats.firstSampleHostNs, '0')
+  assert.equal(stats.firstSampleQuality, 'unknown')
+  assert.equal(stats.takeActive, false)
+  assert.equal(stats.takeCompleted, false)
+  const noTakeInput = addon.recordTake(tmpdir(), 'smoke-take-no-input', 999n)
+  assert.equal(noTakeInput.ok, false)
+  assert.equal(noTakeInput.reason, 'no-input')
+  assert.equal(addon.finishTake(999n).ok, false)
+  assert.deepEqual(addon.cancelTake(999n), { ok: true, cancelled: false })
+  console.log('PASS voice take addon admission without input and silent input level')
   const expectedProvider = process.platform === 'darwin' ? 'coreaudio' : process.platform === 'linux' ? 'alsa' : 'wasapi'
   // Playback requires provider-scoped device identities (notably wasapi: on Windows).
   // A UID absent from inventory tests admission without opening hardware.

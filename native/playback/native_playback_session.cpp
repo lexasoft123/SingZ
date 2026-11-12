@@ -354,6 +354,7 @@ struct PlaybackTransportCommand {
 // steady-clock instant, so the reader can say how stale the frame is without
 // a wall clock the two sides might not share.
 struct PlaybackPositionPublication {
+  PlaybackPresentationHistory presentationHistory;
   std::atomic<uint32_t> sequence{0};
   std::atomic<uint64_t> generation{0};
   std::atomic<uint32_t> state{
@@ -450,6 +451,7 @@ struct PreparedPlaybackTransport {
   // before any callback of this generation can run; never changed after, so
   // the callback reads a plain pointer. Shared, not borrowed: see the struct.
   std::shared_ptr<PlaybackPositionPublication> positionSink;
+  PlaybackPresentationEntry presentationCallback{};
   uint64_t generation{0};
   int64_t initialProjectFrame{0};
   bool initialPaused{false};
@@ -1860,6 +1862,35 @@ struct PreparedPlaybackTransport {
     slice->discontinuity = emitPendingDiscontinuity();
     if (slice->discontinuity.reason != zdsp::DiscontinuityReason::None)
       callbackTimePitchBoundaryPrepared = false;
+
+    // Stage ordinary scalars across transport slices; publish exactly ONCE
+    // per hardware callback, even for a one-frame loop. The journal is owned
+    // by the session's shared publication, so tempo graph swaps keep history.
+    if (offset == 0) {
+      presentationCallback = {};
+      presentationCallback.hostTimeNs = block.callbackHostTimeNs;
+      presentationCallback.frames = block.frames;
+      presentationCallback.sampleRate = block.sampleRate;
+      presentationCallback.projectFrame = static_cast<double>(callbackProjectFrame) +
+          static_cast<double>(callbackProjectFractionQ32) / 4294967296.0;
+      presentationCallback.rate = advancesProject ? playbackRate : 0.0;
+      presentationCallback.generation = generation;
+      presentationCallback.continuousFrame = callbackContinuousFrame;
+      presentationCallback.seekCount = callbackSeekCount;
+      presentationCallback.loopCount = callbackLoopCount;
+      presentationCallback.paused = !advancesProject;
+    } else if (slice->discontinuity.reason != zdsp::DiscontinuityReason::None ||
+               advancesProject == presentationCallback.paused) {
+      presentationCallback.nonAffine = true;
+    }
+    if (frames == remaining && positionSink != nullptr) {
+      presentationCallback.nonAffine = presentationCallback.nonAffine ||
+          callbackSeekCount != presentationCallback.seekCount ||
+          callbackLoopCount != presentationCallback.loopCount;
+      presentationCallback.seekCount = callbackSeekCount;
+      presentationCallback.loopCount = callbackLoopCount;
+      positionSink->presentationHistory.append(presentationCallback);
+    }
 
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     recordBoxSongSlice(block.callbackHostTimeNs +
@@ -8728,6 +8759,58 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
   }
   result.ok = true;
   result.error = NativePlaybackError::None;
+  return result;
+}
+
+PlaybackPresentationQuery
+NativePlaybackSession::presentationQueryRealtime(uint64_t hostTimeNs) const noexcept {
+  const uint64_t active = impl_->activeGeneration.load(std::memory_order_acquire);
+  if (!active) return {};
+  const uint64_t outgoing = impl_->swapFromGeneration.load(std::memory_order_acquire);
+  const auto publication = impl_->position->sequence.load(std::memory_order_acquire);
+  if (publication & 1u) return {};
+  NativePlaybackPositionNow position;
+  int64_t publishedAt = 0;
+  if (!impl_->position->snapshot(&position, &publishedAt) ||
+      (position.generation != active && (!outgoing || position.generation != outgoing)))
+    return {};
+  if (position.transportState != NativePlaybackTransportState::Playing &&
+      position.transportState != NativePlaybackTransportState::PreRoll &&
+      position.transportState != NativePlaybackTransportState::Paused)
+    return {};
+  const auto result = impl_->position->presentationHistory.query(hostTimeNs);
+  // The journal and position are published together at the end of the song
+  // block. A concurrent reset/swap must miss rather than mix incarnations.
+  if (result.latestGeneration != position.generation ||
+      active != impl_->activeGeneration.load(std::memory_order_acquire) ||
+      publication != impl_->position->sequence.load(std::memory_order_acquire))
+    return {};
+  return result;
+}
+
+PlaybackPresentationQuery
+NativePlaybackSession::presentationQuery(uint64_t hostTimeNs) const {
+  // Ordinary audio-process control thread only. The RT writer never takes
+  // this lock. It protects graph lifetime while latency is read below.
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->prepared == nullptr) return {};
+  auto result = impl_->position->presentationHistory.query(hostTimeNs);
+  const auto *graph = impl_->renderingGraph();
+  if (graph == nullptr ||
+      (result.latestGeneration != graph->transportGeneration &&
+       result.latestGeneration != impl_->prepared->transportGeneration)) return {};
+  // A landed graph can precede the control thread's retirement poll. Prefer
+  // the queried generation while it is retained, then the latest journal
+  // generation, rather than reporting the outgoing graph's latency forever.
+  if (result.generation == impl_->prepared->transportGeneration ||
+      result.latestGeneration == impl_->prepared->transportGeneration)
+    graph = impl_->prepared.get();
+  if (impl_->retiringSwap != nullptr &&
+      result.generation == impl_->retiringSwap->transportGeneration)
+    graph = impl_->retiringSwap.get();
+  const auto host = impl_->hostMutationActive() ? impl_->host.status() : impl_->lastHost;
+  result.outputLatencyFrames = presentationLatencyFrames(host.latency);
+  result.graphLatencyFrames = graph->graphLatencyFrames;
   return result;
 }
 

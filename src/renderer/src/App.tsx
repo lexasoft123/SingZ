@@ -120,6 +120,8 @@ import SetupWizard from './components/SetupWizard'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
+import { stableVoiceSongId } from './audio/voice-take'
+import VoiceStrip, { useVoiceController, useVoiceListeningAlone, VoiceRecordButton } from './components/VoiceStrip'
 import VocalTraining from './components/VocalTrainingRoute'
 import { TrainingProgressMutations } from './training-progress-persistence'
 import { activatableAncestor, blocksSongTransportShortcut } from './keyboard'
@@ -838,6 +840,9 @@ export default function App(): React.JSX.Element {
   /** A project folder opened from outside the library can be brought into it. */
   const [inLibrary, setInLibrary] = useState(true)
   const [projectDir, setProjectDir] = useState<string | null>(null)
+  // Fixed at load: later project creation re-anchors `song.path`, which must not
+  // swap the Voice strip's song (and its takes) mid-session.
+  const [voiceSongId, setVoiceSongId] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [importing, setImporting] = useState(false)
   const [editName, setEditName] = useState<string | null>(null)
@@ -1552,6 +1557,16 @@ export default function App(): React.JSX.Element {
     return () => clearTimeout(t)
   }, [notice])
 
+  // Voice strip (ADR 0014): one controller shared by the strip, the transport
+  // Record button and the R shortcut. It only has a song while one is on screen.
+  const voice = useVoiceController(
+    engine,
+    song && voiceSongId && phase === 'ready' && !showCatalog
+      ? { id: voiceSongId, title: cleanSongName(song.name), artist: '' }
+      : null
+  )
+  const voiceListeningAlone = useVoiceListeningAlone(voice)
+
   const openAudioSettings = useCallback((): boolean => {
     if (trainingCleanupCoordinator.blocksAudio) {
       setNotice(trainingCleanupSettingsBlockedCopy())
@@ -1593,6 +1608,11 @@ export default function App(): React.JSX.Element {
         e.preventDefault()
         activatableAncestor(e.target)?.blur()
         togglePlayRef.current()
+      } else if (e.code === 'KeyR' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        // Record (Voice strip). Text fields and dialogs were ruled out above by
+        // blocksSongTransportShortcut (TEXT_ENTRY_SELECTOR, DIALOG_SELECTOR).
+        e.preventDefault()
+        if (!e.repeat && voice.getSnapshot().songId !== null) void voice.toggleRecord()
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault()
         engine.seekBy(-5)
@@ -1603,7 +1623,7 @@ export default function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [engine])
+  }, [engine, voice])
 
   const loadPath: (path: string) => Promise<void> = useCallback(
     async (path: string) => {
@@ -1714,6 +1734,7 @@ export default function App(): React.JSX.Element {
       }
       mark(t('app.load.opening'), 0)
       setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
+      setVoiceSongId(stableVoiceSongId({ path: reg.path, projectDir: reg.project?.dir ?? null }))
       setSourceMissing(Boolean(reg.project?.sourceMissing))
       setIsProject(Boolean(reg.project))
       setLeadVocalSeparated(reg.project?.settings.leadVocalSeparated === true)
@@ -4136,7 +4157,7 @@ export default function App(): React.JSX.Element {
       ) : phase === 'ready' && !showCatalog ? (
         <>
           <div className="main-row">
-            <div className="main-col">
+            <div className={`main-col${voiceListeningAlone ? ' voice-listening-alone' : ''}`}>
               <TrackStack
                 tracks={tracks}
                 engine={engine}
@@ -4165,6 +4186,7 @@ export default function App(): React.JSX.Element {
                 onRemoveTrack={removeTrack}
                 onRenameTrack={renameTrack}
               />
+              <VoiceStrip controller={voice} engine={engine} />
               {karaoke && (
                 <PitchStrip
                   engine={engine}
@@ -4222,6 +4244,7 @@ export default function App(): React.JSX.Element {
             engine={engine}
             playing={playing}
             onTogglePlay={togglePlay}
+            recordSlot={<VoiceRecordButton controller={voice} />}
             split={split}
             sep={sep}
             karaokeOn={karaoke}
