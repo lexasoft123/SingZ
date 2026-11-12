@@ -359,11 +359,13 @@ async function cloudJourney(localProject, cloudProject) {
     check(state.queue.length === 1 && state.queue[0].kind === 'drive' && state.queue[0].id === cached[0].driveId, 'real queue API persists the Drive entry')
     cloudQueueRef = state.queue[0]
     await tvEnter(details.getByRole('button', { name: 'Sing', exact: true }))
-    await page.waitForSelector('.box-player[data-active-song][data-playing="false"]', { timeout: 60000 })
+    await page.waitForSelector('.box-player[data-active-song][data-playing="true"]', { timeout: 60000 })
     const player = page.locator('.box-player')
     check(path.resolve(await player.getAttribute('data-active-song')) === path.resolve(cloudDir), 'explicit Sing opens the verified downloaded project')
-    check(Number(await player.getAttribute('data-position')) === 0, 'explicit Sing opens paused at zero')
     check((await page.locator('.player-lyrics').textContent()).includes('Linux fixture line 1'), 'player renders the verified synchronized lyrics')
+    await tvEnter('[data-control="play"]')
+    await page.waitForSelector('.box-player[data-active-song][data-playing="false"]')
+    check(await player.getAttribute('data-playing') === 'false', 'Pause control pauses the explicitly started song')
     await capture('cloud-paused')
     await tvEnter('[data-control="mix"]')
     await page.waitForFunction(() => {
