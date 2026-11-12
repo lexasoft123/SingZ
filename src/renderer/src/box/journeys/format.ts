@@ -1,5 +1,6 @@
 import type { BoxPlatformSnapshot } from '../../../../shared/box-contract'
 import type { DesktopAudioHostInventoryResult } from '../../../../shared/types'
+import { lookupPlural } from '../../../../shared/i18n/core'
 import { tJourney, type JourneyKey } from './i18n'
 
 export type JourneyAudioInventory = DesktopAudioHostInventoryResult & { physicalInputCount?: number | null; physicalInputError?: string }
@@ -62,4 +63,12 @@ export function summarizeAudio(audio: unknown): AudioSummary {
     ready: typeof record.ready === 'boolean' ? record.ready : null,
     playing: typeof record.playing === 'boolean' ? record.playing : null
   }
+}
+
+/** "1 output and 2 inputs found": each count takes its own plural form (Russian has three). */
+export function audioReadyText(counts: { outputs: number; inputs: number }): string {
+  return tJourney('journey.setup.audioReady', {
+    outputs: lookupPlural('journey.audio.outputs', counts.outputs),
+    inputs: lookupPlural('journey.audio.inputs', counts.inputs)
+  })
 }

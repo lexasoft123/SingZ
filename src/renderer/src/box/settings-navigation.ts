@@ -12,6 +12,17 @@ export function overlayReturnRoute(current: BoxRoute, previous: BoxRoute, openin
   return current === 'home' || current === 'settings' || current === opening ? previous : current
 }
 
+/** Next/Sing from the player keeps the player on screen while the song opens (details would flash
+ * "← Catalog" focus); every other origin shows the details screen it opens from. */
+export function routeWhileOpening(current: BoxRoute): BoxRoute {
+  return current === 'player' ? 'player' : 'details'
+}
+
+/** A failed open from the player lands on details, where the error is shown. */
+export function routeAfterFailedOpen(current: BoxRoute): BoxRoute {
+  return current === 'player' ? 'details' : current
+}
+
 /** Account opened from the Settings hub returns to the hub, unless the hub itself was
  * opened from Account: then Account keeps its own origin, so Back cannot cycle. */
 export function accountReturnFromHub(hubReturn: BoxRoute, accountReturn: BoxRoute): BoxRoute {

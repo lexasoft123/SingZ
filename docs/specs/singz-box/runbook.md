@@ -41,7 +41,7 @@ Production outputs are `out/renderer/index.html` for Desktop and
   native quarantine requires an app restart.
 - On-demand mixer, persistent queue and accepted per-project mix snapshots.
   Reorder/remove never changes the active song. Switching asks for confirmation
-  and opens paused; there is no automatic queue consumption.
+  and opens paused without consuming; only the explicit player Next action starts the next song and removes the one that played; nothing advances automatically.
 - Remote spatial navigation, amber focus, five-second singing chrome timeout,
   and complete wake-chord consumption, including repeats and releases.
 - Setup, account, approved/revocable phone controls, storage, diagnostics,

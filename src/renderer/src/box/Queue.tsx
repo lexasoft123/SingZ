@@ -55,7 +55,7 @@ export function Queue({
       <Button data-queue-return onClick={onClose}>{active ? t('box.mix.back') : t('box.navigation.catalog')}</Button>
     </div>
     <div className="queue-columns">{['#', t('box.metadata.artist'), t('box.metadata.song'), t('box.metadata.key'), t('box.metadata.bpm'), t('box.metadata.range'), t('box.metadata.time'), ''].map((name, index) => <span key={index}>{name}</span>)}</div>
-    <div className="queue-list" aria-label={t('box.queue.list')}>{items.length ? items.map((item, index) => {
+    <div className="queue-list" aria-label={t('box.queue.list')} data-remote-right="[data-queue-action]">{items.length ? items.map((item, index) => {
       const metadata = rows[item.dir]?.metadata
       const readiness = rows[item.dir]?.inspection?.readiness
       const isCurrent = active?.item.dir === item.dir
@@ -81,12 +81,12 @@ export function Queue({
     <div className="queue-action-band">
       <div className="queue-actions">
         <Button variant="primary" data-queue-action="select" disabled={!selected} onClick={() => selected && onChoose(selected)}>{selectedIsCurrent ? t('box.mix.back') : t('box.queue.select')}</Button>
-        <Button disabled={!selected || selectedIndex <= 0} onClick={() => selected && onMove(selected.dir, -1)}>{t('box.queue.up')}</Button>
-        <Button disabled={!selected || selectedIndex >= items.length - 1} onClick={() => selected && onMove(selected.dir, 1)}>{t('box.queue.down')}</Button>
-        <Button disabled={!selected} onClick={() => selected && onRemove(selected.dir)}>{t('box.queue.remove')}</Button>
+        <Button data-queue-action="up" disabled={!selected || selectedIndex <= 0} onClick={() => selected && onMove(selected.dir, -1)}>{t('box.queue.up')}</Button>
+        <Button data-queue-action="down" disabled={!selected || selectedIndex >= items.length - 1} onClick={() => selected && onMove(selected.dir, 1)}>{t('box.queue.down')}</Button>
+        <Button data-queue-action="remove" disabled={!selected} onClick={() => selected && onRemove(selected.dir)}>{t('box.queue.remove')}</Button>
       </div>
       <span className="queue-selection-note">{t('box.queue.continuity')}</span>
     </div>
-    <footer className="queue-footer"><span><b>↑ ↓</b>{t('box.hints.browse')}<b>OK</b>{t('box.hints.select')}<b>Back</b>{active ? t('box.mix.back') : t('box.navigation.catalog')}</span><span>{selected ? `${selectedIndex + 1} / ${items.length}` : ''}</span></footer>
+    <footer className="queue-footer"><span><b>↑ ↓</b>{t('box.hints.browse')}{items.length > 0 && <><b>→</b>{t('box.hints.actions')}</>}<b>OK</b>{t('box.hints.select')}<b>Back</b>{active ? t('box.mix.back') : t('box.navigation.catalog')}</span><span>{selected ? `${selectedIndex + 1} / ${items.length}` : ''}</span></footer>
   </main>
 }

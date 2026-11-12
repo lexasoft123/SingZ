@@ -8,7 +8,7 @@ import { acquireJourneyFocus } from './focus'
 import { runJourneyConfirmation } from './confirm'
 import { tJourney } from './i18n'
 import {
-  initialJourney, journeyBack, journeyInteractionLocked, journeyReducer, wifiStartNeedsConfirmation, type Confirmation, type JourneyAction
+  initialJourney, journeyBack, settingsSetupEntry, journeyInteractionLocked, journeyReducer, wifiStartNeedsConfirmation, type Confirmation, type JourneyAction
 } from './model'
 import { NetworkPage } from './NetworkPage'
 import { PhonesPage } from './PhonesPage'
@@ -42,6 +42,9 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
   const latest = useRef(props)
   latest.current = props
   const root = useRef<HTMLElement>(null)
+  /** The Settings row last focused on the home page: Back from a sub-page (or from the audio
+   * and Drive screens that live outside the hub) returns focus there. A fresh entry clears it. */
+  const homeRow = useRef<string | null>(null)
   const [model, setModel] = useState(() => initialJourney(props.initialPage))
   const state = useRef(model)
   state.current = model
@@ -86,7 +89,11 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
     if (!isInteractionLocked()) dispatch({ type: 'open', page })
   }, [dispatch, isInteractionLocked])
 
-  useImperativeHandle(ref, () => ({ back, open, isInteractionLocked }), [back, open, isInteractionLocked])
+  const openFromOutside = useCallback((destination: JourneyPage) => {
+    if (destination === 'home') homeRow.current = null
+    open(destination)
+  }, [open])
+  useImperativeHandle(ref, () => ({ back, open: openFromOutside, isInteractionLocked }), [back, openFromOutside, isInteractionLocked])
 
   const acquiredFocus = useRef<number | null>(null)
   // The control that opened a confirmation regains focus when it closes (long Remove/Revoke lists).
@@ -100,7 +107,8 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
     if (document.hidden) return
     const opener = state.current.confirmation ? null : confirmationOpener.current
     acquiredFocus.current = acquireJourneyFocus(
-      scope, document.activeElement, document.body, state.current.focusRevision, acquiredFocus.current, opener
+      scope, document.activeElement, document.body, state.current.focusRevision, acquiredFocus.current, opener,
+      state.current.page === 'home' ? homeRow.current : null
     )
     if (opener && acquiredFocus.current === state.current.focusRevision) confirmationOpener.current = null
   }, [visible])
@@ -159,6 +167,10 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
     className="journey-hub"
     data-surface="settings"
     data-journey-page={page}
+    onFocus={event => {
+      const row = event.target instanceof HTMLElement && event.target.matches('.journey-row') ? event.target.dataset.focus : undefined
+      if (row && state.current.page === 'home') homeRow.current = row
+    }}
     data-committed-operation={model.committed ?? undefined}
     aria-label={tJourney('journey.settings')}
   >
@@ -167,7 +179,7 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
       audio={inventory.audio} platform={platform.snapshot} drive={inventory.drive} phones={phones.state} storage={storage.snapshot}
       loading={platform.loading || inventory.audioLoading} error={pageError} onBack={back}
       onOpen={destination => destination === 'setup'
-        ? dispatch({ type: 'open-setup', stage: preferences.state?.preferences.setupComplete ? 'remote' : undefined })
+        ? dispatch({ type: 'open-setup', stage: settingsSetupEntry(preferences.state?.preferences.setupComplete) })
         : open(destination)}
       onOpenAudio={props.onOpenAudio} onOpenCollection={props.onOpenCollection}
     />}

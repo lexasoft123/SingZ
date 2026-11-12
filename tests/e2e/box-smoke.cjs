@@ -169,7 +169,7 @@ let app = null
     await page.waitForTimeout(350)
     const parkedAt = Number(await page.locator('.box-player').getAttribute('data-position'))
     check(Math.abs(parkedAt - pausedAt) < 0.15, 'pause parks the transport clock')
-    await page.locator('[data-control="next"]').click()
+    await page.locator('[data-control="forward5"]').click()
     check(Number(await page.locator('.box-player').getAttribute('data-position')) >= 4.5, 'seek moves the real project position')
     await page.locator('[data-control="play"]').click()
     await page.waitForFunction(() => document.querySelector('.box-player').dataset.playing === 'true')
