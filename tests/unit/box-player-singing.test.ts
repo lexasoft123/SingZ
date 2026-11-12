@@ -9,6 +9,7 @@ import { box as zh } from '../../src/shared/i18n/zh-CN/box'
 import { clampTranspose, createKeyChanger, stepTranspose, TRANSPOSE_MAX, TRANSPOSE_MIN } from '../../src/renderer/src/box/key-change'
 import { MICROPHONE_SINGING_PEAK, microphoneLevelDb, microphoneMeterState, microphoneSlotStatus } from '../../src/renderer/src/box/microphones'
 import { PLAYER_METER_SIZE } from '../../src/renderer/src/box/MicrophoneMeter'
+import { LYRIC_ROW_HEIGHT, lyricSlotLayout } from '../../src/renderer/src/box/player-lyrics-model'
 import { SongDetails } from '../../src/renderer/src/box/SongDetails'
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void
@@ -35,28 +36,36 @@ const px = (line: string, property: string): number => Number(new RegExp(`(?:^|[
 
 beforeAll(async () => { await prepareBoxLocale('en') })
 
-describe('player microphone meter readability', () => {
-  it('keeps two couch-readable meter rows inside the transport bar without later shrink overrides', () => {
+describe('player microphone meters: small, bottom-right, outside the strip', () => {
+  it('keeps two small meter rows in their own bottom row, not in the transport strip', () => {
     expect(settingsCss).not.toMatch(/\.player-meters > \.player-microphone-row|\.player-microphone-row > span:first-child|\.player-microphone-level/)
-    expect(px(rule('.player-microphone-name'), 'font-size')).toBeGreaterThanOrEqual(18)
-    expect(px(rule('.player-meters .mic-meter-state'), 'font-size')).toBeGreaterThanOrEqual(18)
-    // The kit mini meter is 9 px at size 1; the player scales it to the old 16 px bar.
-    expect(9 * PLAYER_METER_SIZE).toBeGreaterThanOrEqual(16); expect(9 * PLAYER_METER_SIZE).toBeLessThanOrEqual(17)
-    expect(px(rule('.player-meters .mic-meter-bar'), 'width')).toBeGreaterThanOrEqual(120)
-    const rowsHeight = 2 * px(rule('.player-microphone-name'), 'line-height') + px(rule('.player-meters'), 'gap')
-    expect(rowsHeight).toBeLessThanOrEqual(px(rule('.player-transport'), 'height'))
+    expect(rule('.player-meter-row')).toMatch(/justify-content: flex-end/)
+    expect(px(rule('.player-meter-row'), 'height')).toBe(32)
+    expect(rule('.player-meters')).toMatch(/flex-direction: row/)
+    // Design 160x6 px at 1280x720 = 200x7.5 at 1600x900; the kit mini meter is 9 px at size 1.
+    expect(px(rule('.player-meters .mic-meter-bar'), 'width')).toBe(200)
+    expect(9 * PLAYER_METER_SIZE).toBeCloseTo(7.5)
+    expect(px(rule('.player-microphone-name'), 'font-size')).toBeLessThanOrEqual(16)
+    expect(px(rule('.player-meters .mic-meter-state'), 'font-size')).toBeLessThanOrEqual(16)
+    const player = readFileSync('src/renderer/src/box/Player.tsx', 'utf8')
+    const transport = player.slice(player.indexOf('className="player-transport"'), player.indexOf('className="player-hints"'))
+    expect(transport).not.toContain('PlayerMicrophoneMeters')
+    expect(player).toMatch(/<div className="player-meter-row"><PlayerMicrophoneMeters microphones=\{microphones\} snapshot=\{microphoneSnapshot\} \/><\/div>/)
+    expect(player).not.toMatch(/<PlayerMicrophoneMeters[^>]*visible=/)
   })
 })
 
 describe('mixer leaves the lyric rows visible', () => {
-  it('stays a strip below the lyric viewport at the 1600x900 TV coordinate system', () => {
-    const lyrics = rule('.player-lyrics')
-    const lyricBottom = px(lyrics, 'top') + px(lyrics, 'height')
+  it('opens below all six lyric rows at the 1600x900 TV coordinate system', () => {
     const scrim = rule('.box-safe-surface > .modal-scrim:has(.box-mixer-card)')
     const card = rule('.box-mixer-card')
     const top = 900 - Number(/padding: 0 \d+px (\d+)px/.exec(scrim)?.[1]) - px(card, 'height')
-    // Old layout: 488px card at the bottom => top 388, covering the active (centre ~405) and next row.
-    expect(top).toBeGreaterThanOrEqual(lyricBottom - 12)
+    // Lyric area = frame - paddings - title row - strip band - meter row.
+    const area = 900 - 22 - 12 - px(rule('.player-header'), 'height') - px(rule('.player-bottom'), 'height') - px(rule('.player-meter-row'), 'height')
+    const slots = lyricSlotLayout(area)
+    expect(slots.centers[5] + LYRIC_ROW_HEIGHT * slots.scales[5] / 2).toBeLessThanOrEqual(top)
+  })
+  it('keeps the transparent scrim', () => {
     expect(rule('.box-safe-surface > .modal-scrim:has(.box-mixer-card)')).toContain('background: transparent')
   })
   it('does not dim the lyrics behind it', () => {

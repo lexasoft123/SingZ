@@ -335,13 +335,28 @@ let app = null
   })
 
   await watchdog.run('mouse click reveals controls; brand and song stay visible', 60, async () => {
+    if (process.env.BOX_SHOT_DIR) await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(3840, 2160))
     await page.locator('[data-control="play"]').click()
     await page.waitForSelector('.box-player[data-playing="true"]')
     await page.waitForSelector('.box-player[data-controls="hidden"]', { timeout: 15000 })
     check(await page.locator('.player-header .box-logo').isVisible() && await page.locator('.player-song strong').isVisible(), 'logo and song name stay visible while controls are hidden')
     check(!await page.locator('.player-header-actions').isVisible(), 'header buttons hide with the controls')
+    const geometry = () => page.evaluate(() => ({
+      rows: [...document.querySelectorAll('.player-lyric-scale')].map(el => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height, getComputedStyle(el).opacity].join(',') }),
+      area: (r => [r.left, r.top, r.width, r.height].join(','))(document.querySelector('.player-lyrics').getBoundingClientRect()),
+      meters: [...document.querySelectorAll('.player-meter-row .mic-meter')].map(el => { const r = el.getBoundingClientRect(); return { w: r.width, h: r.height, visible: getComputedStyle(el).visibility === 'visible' && r.width > 0 } }),
+      meterBox: (r => [r.left, r.top, r.width, r.height].join(','))(document.querySelector('.player-meter-row').getBoundingClientRect())
+    }))
+    const hiddenGeometry = await geometry()
+    check(hiddenGeometry.meters.length === 2 && hiddenGeometry.meters.every(m => m.visible), 'both mic meters stay visible while the controls are hidden')
+    check(process.env.BOX_SHOT_DIR ? !!await page.screenshot({ path: path.join(process.env.BOX_SHOT_DIR, 'controls-hidden.png') }).then(() => true) : true, 'hidden-state screenshot')
     await page.locator('.player-wake').click()
     await page.waitForSelector('.box-player[data-controls="visible"]')
+    await page.waitForTimeout(300)
+    const shownGeometry = await geometry()
+    check(JSON.stringify(shownGeometry.rows.map(r => r.split(',').slice(0, 4))) === JSON.stringify(hiddenGeometry.rows.map(r => r.split(',').slice(0, 4))) && shownGeometry.area === hiddenGeometry.area, 'lyric area and rows keep identical geometry with controls shown or hidden')
+    check(shownGeometry.meterBox === hiddenGeometry.meterBox && shownGeometry.meters.every(m => m.visible), 'meters row does not move when the controls show')
+    if (process.env.BOX_SHOT_DIR) await page.screenshot({ path: path.join(process.env.BOX_SHOT_DIR, 'controls-shown.png') })
     check(await page.locator('.box-player').getAttribute('data-playing') === 'true', 'the waking click does not pause or seek')
     await page.locator('[data-control="play"]').click()
     await page.waitForSelector('.box-player[data-playing="false"]')

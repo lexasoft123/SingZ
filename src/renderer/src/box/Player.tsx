@@ -111,11 +111,12 @@ export function Player({
             {slot === 'choose' && <Button className="player-next" data-control="next-song" onClick={onLibrary}><span className="player-next-label">{t('box.player.chooseSong')}</span></Button>}
           </div>
           <div className="player-tools" data-remote-up="[data-control='seek']"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button><Button data-control="queue" onClick={onQueue}>{t('box.navigation.queue')}</Button></div>
-          <PlayerMicrophoneMeters microphones={microphones} snapshot={microphoneSnapshot} visible={controlsVisible} />
           <span className="player-time player-duration">{timeText(snapshot.duration)}</span>
         </div>
         <div className="player-hints"><span>← → {t('box.hints.move')} <b>↑</b> {t('box.hints.seek')} <b>OK</b> {t('box.hints.select')} <b>Back</b> {t('box.navigation.catalog')}</span>{next && <PlayerUpNext title={next.title} artist={next.artist} />}<span>{snapshot.restartRequired ? `${tSettings('box.settings.restartRequired')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.routingBlocked ? `${tSettings('box.settings.routingPaused')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.saveError ?? snapshot.outputError ?? snapshot.playbackError?.message ?? (status === 'ended' ? t(next ? 'box.player.endedNext' : 'box.player.ended') : status === 'playing' ? t('box.player.hideHint') : t('box.player.paused'))}</span></div>
       </div>
+      {/* Own row at the bottom: meters stay on screen (and live) while the controls hide. */}
+      <div className="player-meter-row"><PlayerMicrophoneMeters microphones={microphones} snapshot={microphoneSnapshot} /></div>
       {!controlsVisible && <button className="player-wake" tabIndex={-1} aria-label={t('box.player.wake')} onClick={onWake} />}
     </div>
   </section>

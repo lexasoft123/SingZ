@@ -27,9 +27,10 @@ export function lyricPaintPosition(position: number, sampledAt: number, now: num
 }
 
 // GPUI gpui-lyrics-approved-120hz-v1 shapes at 17.5px (main.rs shape_line);
-// 25.375px is its LINE HEIGHT, not its font size. Box lays out at 68px;
-// row transforms scale glyphs and these local mask coordinates together.
-export const LYRIC_FONT_SIZE = 68
+// 25.375px is its LINE HEIGHT, not its font size. Box lays out at the current-line
+// size (75px on the 1600x900 surface); row transforms scale glyphs and these local
+// mask coordinates together.
+export const LYRIC_FONT_SIZE = 75
 export const LYRIC_DESKTOP_SCALE = LYRIC_FONT_SIZE / 17.5
 export const LYRIC_FEATHER = 17.5 * .4 * LYRIC_DESKTOP_SCALE
 export const LYRIC_LIGHT_WIDTH = 18 * LYRIC_DESKTOP_SCALE
@@ -80,10 +81,54 @@ export function lyricScrollShouldSnap(previousLine: number, nextLine: number, se
   return seek || Math.abs(nextLine - previousLine) > 2
 }
 
-/** Overlap preserves the same line/word nodes as the active row advances. */
+/** Overlap preserves the same line/word nodes as the active row advances. Two rows
+ * above and three below the current line are visible; one more each side waits hidden,
+ * so a row glides in from outside the area and out again. */
 export function lyricWindow(current: number, count: number): number[] {
-  return Array.from({ length: Math.max(0, Math.min(count, current + 4) - Math.max(0, current - 3)) },
+  return Array.from({ length: Math.max(0, Math.min(count, current + 5) - Math.max(0, current - 3)) },
     (_, offset) => Math.max(0, current - 3) + offset)
+}
+
+/** Option C: six fixed lyric slots (2 sung, the current line, 3 upcoming). Sizes are the owner-approved
+ * design pixels at 1280x720; the Box surface is 1600x900, so every length is multiplied by LYRIC_UNIT. */
+export const LYRIC_UNIT = 1600 / 1280
+export const LYRIC_SLOT_SIZES = [38, 42, 60, 46, 42, 38] as const
+export const LYRIC_SLOT_OPACITY = [.38, .55, 1, .82, .68, .5] as const
+export const LYRIC_CURRENT_SLOT = 2
+/** Rows lay out once at the current size; slots shrink them with a transform. */
+export const LYRIC_BASE_SIZE = 60 * LYRIC_UNIT
+export const LYRIC_LINE_HEIGHT = 1.1
+export const LYRIC_ROW_HEIGHT = LYRIC_BASE_SIZE * LYRIC_LINE_HEIGHT
+/** Space between the lyric area's edges and the first/last slot (design px 6). */
+export const LYRIC_AREA_PAD = 6 * LYRIC_UNIT
+/** Left inset of the lyric text (design px 64); the countdown sits in it. Right inset keeps glyphs off the edge. */
+export const LYRIC_TEXT_LEFT = 64 * LYRIC_UNIT
+export const LYRIC_TEXT_RIGHT = 8
+/** A line wider than the area shrinks to fit down to this share of its slot size; beyond that it is clipped. */
+export const LYRIC_FIT_FLOOR = .7
+
+export type LyricSlots = { centers: number[]; scales: number[] }
+/** space-evenly: the gaps (7 of them) split what the six nominal row heights leave over. Content never moves it. */
+export function lyricSlotLayout(height: number): LyricSlots {
+  const scales = LYRIC_SLOT_SIZES.map(size => size / 60)
+  const heights = scales.map(scale => LYRIC_ROW_HEIGHT * scale)
+  const usable = Math.max(0, height - 2 * LYRIC_AREA_PAD)
+  const gap = Math.max(0, (usable - heights.reduce((sum, value) => sum + value, 0)) / (heights.length + 1))
+  const centers: number[] = []
+  let top = LYRIC_AREA_PAD
+  for (const value of heights) { top += gap; centers.push(top + value / 2); top += value }
+  return { centers, scales }
+}
+
+/** Where a row at `offset` from the current line rests. Rows beyond the six slots wait one step outside, invisible. */
+export function lyricRowTarget(offset: number, slots: LyricSlots, natural: number, available: number): { y: number; scale: number; opacity: number } {
+  const k = Math.max(-1, Math.min(6, offset + LYRIC_CURRENT_SLOT))
+  const last = slots.centers.length - 1
+  const center = k < 0 ? slots.centers[0] - (slots.centers[1] - slots.centers[0])
+    : k > last ? slots.centers[last] + (slots.centers[last] - slots.centers[last - 1]) : slots.centers[k]
+  const base = slots.scales[Math.max(0, Math.min(last, k))]
+  const scale = natural > 0 && available > 0 ? Math.min(base, Math.max(base * LYRIC_FIT_FLOOR, available / natural)) : base
+  return { y: center - LYRIC_ROW_HEIGHT / 2, scale, opacity: k < 0 || k > last ? 0 : LYRIC_SLOT_OPACITY[k] }
 }
 
 /** Range includes ligatures, combining marks and fallback glyph shaping. */
@@ -105,9 +150,6 @@ export function setLyricSinging(element: Pick<HTMLElement, 'dataset'>, singing: 
   const active = String(singing && hasGeometry)
   if (element.dataset.singing !== active) element.dataset.singing = active
 }
-
-/** Context rows render at the earlier 52px against the 68px current row. */
-export const LYRIC_ROW_SCALE = 52 / 68
 
 /** Cached masks: only the current row’s edge/pen properties change during playback. */
 export function lyricHighlightMasks(): { amber: string; core: string; glow: string } {
