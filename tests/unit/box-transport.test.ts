@@ -1227,27 +1227,40 @@ describe('BoxTransport key change review follow-ups', () => {
     expect(saves).toHaveLength(0) // old behaviour retried the failed key here
   })
   it('open settles a key press accepted during its own flush', async () => {
-    const hostSetup = host()
-    const { api, saves } = hostSetup
+    const { api, saves } = host()
     let disk = stale(2)
-    const gate = deferred<unknown>()
-    let first = false
+    const firstWrite = deferred<unknown>()
+    const releaseFirst = deferred<unknown>()
+    const secondWrite = deferred<unknown>()
+    const releaseSecond = deferred<unknown>()
+    let writes = 0
     vi.mocked(api.saveProject).mockImplementation((async (songPath: string, _n: string, settings: ProjectSettings) => {
-      if (first) { first = false; await gate.promise }
+      writes++
+      if (writes === 1) { firstWrite.resolve(undefined); await releaseFirst.promise }
+      if (writes === 2) { secondWrite.resolve(undefined); await releaseSecond.promise }
       saves.push({ songPath, settings }); disk = settings
       return { ok: true, dir: '/a', songPath, inLibrary: true }
     }) as never)
-    vi.mocked(api.registerSource).mockImplementation((async (path: string) => ({ ok: true, path, name: 'Song A', size: 0, project: project('/a', { settings: disk }) })) as never)
+    vi.mocked(api.registerSource).mockImplementation((async (path: string) => {
+      const dir = path.split('/')[1]
+      return { ok: true, path, name: `Song ${dir.toUpperCase()}`, size: 0, project: project(`/${dir}`, dir === 'a' ? { settings: disk } : {}) }
+    }) as never)
     const { transport, engine } = makeTransport(api)
     const a = item('/a', 'Song A')
-    expect((await transport.saveSongTranspose(a, disk, 3).then(() => true))).toBe(true) // seed an entry
-    first = true
-    const mix = transport.saveSongTranspose(a, disk, 4)
+    await transport.open(a)
+    await transport.controllerMix({ type: 'volume', target: 'vocals', value: 0.4 })
+    await transport.open(item('/b', 'Song B'))
+    vi.mocked(api.registerSource).mockClear()
     const opening = transport.open(a)
+    await firstWrite.promise
     const press = transport.saveSongTranspose(a, disk, 5)
-    gate.resolve(undefined)
-    await Promise.all([mix, press])
+    releaseFirst.resolve(undefined)
+    await secondWrite.promise
+    const inspectionsWhileKeyWriteWasHeld = vi.mocked(api.registerSource).mock.calls.length
+    releaseSecond.resolve(undefined)
+    await press
     expect(await opening).toBe(true)
+    expect(inspectionsWhileKeyWriteWasHeld).toBe(0)
     expect(engine.transpose).toBe(5)
   })
   it('open re-settles when a key press lands during the final flush write of a pending mixer save', async () => {
@@ -1280,5 +1293,56 @@ describe('BoxTransport key change review follow-ups', () => {
     await press
     expect(await opening).toBe(true)
     expect(engine.transpose).toBe(5) // single-flush open read the old key
+  })
+
+  const outcomeWithin = async <T,>(promise: Promise<T>): Promise<T | 'pending'> => Promise.race([
+    promise,
+    new Promise<'pending'>(resolve => setTimeout(() => resolve('pending'), 20))
+  ])
+
+  it('cancelOpen releases the waiting open and key promise without inspecting ahead of its save', async () => {
+    const { api } = host()
+    const saveStarted = deferred<unknown>()
+    const finishSave = deferred<unknown>()
+    vi.mocked(api.saveProject).mockImplementation((async () => {
+      saveStarted.resolve(undefined)
+      return await finishSave.promise
+    }) as never)
+    const { transport } = makeTransport(api)
+    const key = transport.saveSongTranspose(item('/a', 'Song A'), stale(2), 3)
+    const opening = transport.open(item('/a', 'Song A'))
+    await saveStarted.promise
+    expect(transport.cancelOpen()).toBe(true)
+    const openOutcome = await outcomeWithin(opening)
+    const keyOutcome = await outcomeWithin(key)
+    finishSave.resolve({ ok: true, dir: '/a', songPath: '/a/original.wav', inLibrary: true })
+    await Promise.all([opening, key])
+    expect(openOutcome).toBe(false)
+    expect(keyOutcome).toMatchObject({ ok: false, error: expect.stringContaining('superseded') })
+    expect(api.registerSource).not.toHaveBeenCalled()
+  })
+
+  it('a newer open releases the superseded open and key promise while the save remains serialized', async () => {
+    const { api } = host()
+    const saveStarted = deferred<unknown>()
+    const finishSave = deferred<unknown>()
+    vi.mocked(api.saveProject).mockImplementation((async () => {
+      saveStarted.resolve(undefined)
+      return await finishSave.promise
+    }) as never)
+    const { transport } = makeTransport(api)
+    const key = transport.saveSongTranspose(item('/a', 'Song A'), stale(2), 3)
+    const first = transport.open(item('/a', 'Song A'))
+    await saveStarted.promise
+    const second = transport.open(item('/b', 'Song B'))
+    const firstOutcome = await outcomeWithin(first)
+    const keyOutcome = await outcomeWithin(key)
+    expect(await second).toBe(true)
+    expect(api.registerSource).not.toHaveBeenCalledWith('/a/original.wav')
+    finishSave.resolve({ ok: true, dir: '/a', songPath: '/a/original.wav', inLibrary: true })
+    await Promise.all([first, key])
+    expect(firstOutcome).toBe(false)
+    expect(keyOutcome).toMatchObject({ ok: false, error: expect.stringContaining('superseded') })
+    expect(transport.getSnapshot().active?.item.dir).toBe('/b')
   })
 })

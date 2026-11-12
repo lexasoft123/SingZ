@@ -109,6 +109,8 @@ interface PendingProjectSave {
   error?: string
 }
 
+const SAVE_WAIT_SUPERSEDED = Symbol('save-wait-superseded')
+
 export class BoxTransport {
   private active: BoxActiveSong | null = null
   private loadingName: string | null = null
@@ -137,6 +139,7 @@ export class BoxTransport {
   private outputApplyPromise: Promise<void> | null = null
   private readonly outputArbiter: PlaybackOutputArbiter
   private readonly pendingSaves = new Map<string, PendingProjectSave>()
+  private readonly saveWaiters = new Set<() => void>()
   private readonly listeners = new Set<() => void>()
   private readonly unsubscribeEngine: () => void
   private readonly pollTimer: ReturnType<typeof setInterval> | null
@@ -271,6 +274,19 @@ export class BoxTransport {
     const run = this.saveTail.then(operation, operation)
     this.saveTail = run.catch(() => undefined)
     return run
+  }
+
+  private waitForSave<T>(operation: Promise<T>): Promise<T | typeof SAVE_WAIT_SUPERSEDED> {
+    let release!: () => void
+    const superseded = new Promise<typeof SAVE_WAIT_SUPERSEDED>(resolve => {
+      release = () => resolve(SAVE_WAIT_SUPERSEDED)
+      this.saveWaiters.add(release)
+    })
+    return Promise.race([operation, superseded]).finally(() => this.saveWaiters.delete(release))
+  }
+
+  private supersedeSaveWaits(): void {
+    for (const release of [...this.saveWaiters]) release()
   }
 
   /** Session policy; callers persist Box preferences only after this receipt.
@@ -564,6 +580,8 @@ export class BoxTransport {
 
   async open(item: ProjectListItem): Promise<boolean> {
     if (this.disposed || this.tearingDown) return false
+    // The first open adopts existing key saves; only a replacement supersedes their waiters.
+    if (this.pendingOpen !== null) this.supersedeSaveWaits()
     const generation = ++this.generation
     this.pendingOpen = generation
     this.loadingName = item.name
@@ -583,8 +601,8 @@ export class BoxTransport {
       // Settle until the song has no timer, in-flight or retryable pending save: a key press
       // accepted during a flush adds work, and open() must read the project after all of it.
       for (;;) {
-        await this.flushProject(item.dir)
-        if (!this.current(generation)) return false
+        const flushed = await this.waitForSave(this.flushProject(item.dir))
+        if (flushed === SAVE_WAIT_SUPERSEDED || !this.current(generation)) return false
         const entry = this.pendingSaves.get(item.dir)
         if (!entry || (!entry.saving && entry.timer === null && (!entry.pendingSettings || entry.error))) break
       }
@@ -710,6 +728,7 @@ export class BoxTransport {
 
   cancelOpen(): boolean {
     if (this.loadingName === null || this.committing) return false
+    this.supersedeSaveWaits()
     this.generation++
     this.pendingOpen = null; this.openSettledDir = null
     this.loadingName = null
@@ -870,7 +889,8 @@ export class BoxTransport {
       }
       return pending.pendingSettings ?? pending.acceptedSettings
     })
-    await pending.controlTail
+    const settled = await this.waitForSave(pending.controlTail)
+    if (settled === SAVE_WAIT_SUPERSEDED) return fail(new Error('The key change was superseded.'))
     return outcome
   }
 
