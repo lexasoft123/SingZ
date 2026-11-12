@@ -29,13 +29,13 @@ describe('canonical Box dictionaries', () => {
   it('falls back to English in memory for unsupported locales without changing saved preferences', async () => {
     expect(await prepareBoxLocale('ja')).toBe('en')
     expect(getLocale()).toBe('en')
-    expect(t('box.navigation.catalog')).toBe('Catalog')
+    expect(t('box.navigation.catalog')).toBe('Songs')
     expect(await prepareBoxLocale('ru')).toBe('ru')
-    expect(t('box.navigation.catalog')).toBe('Каталог')
+    expect(t('box.navigation.catalog')).toBe('Песни')
     expect(tn('box.catalog.songs', 2, { count: 2 })).toBe('2 песни')
     expect(tn('box.catalog.songs', 5, { count: 5 })).toBe('5 песен')
     expect(await prepareBoxLocale('zh-CN')).toBe('zh-CN')
-    expect(t('box.navigation.catalog')).toBe('曲库')
+    expect(t('box.navigation.catalog')).toBe('歌曲')
   })
 
   it('does not add Box strings to Desktop eager English or expose milestone copy', () => {

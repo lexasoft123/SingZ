@@ -72,3 +72,8 @@ export function audioReadyText(counts: { outputs: number; inputs: number }): str
     inputs: lookupPlural('journey.audio.inputs', counts.inputs)
   })
 }
+
+/** Settings row status for paired phones: a word, never a bare "0"; each count takes its own plural form. */
+export function phonesStatus(count: number): string {
+  return count === 0 ? tJourney('journey.phones.none') : lookupPlural('journey.phones.count', count)
+}
