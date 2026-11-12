@@ -6,8 +6,8 @@ import { microphoneLevelDb, microphoneMeterStateKey, microphoneSlotLevel, useMic
 
 /** Mixer rows: full 40-brick meter at the kit's 16 px height. */
 export const MIXER_METER_SIZE = 1
-/** Player bar: the 16-brick mini meter scaled to the same 16 px the old bar had. */
-export const PLAYER_METER_SIZE = 1.8
+/** Player corner row: the kit's 16-brick mini meter (9 px at size 1) at 7.5 px, the design's 6 px at 1600x900. */
+export const PLAYER_METER_SIZE = 7.5 / 9
 
 /** The kit PeakMeter plus a plain word. Readings reach the meter through
  * `PeakMeterHandle.push` from the store subscription, so a reading never renders

@@ -39,7 +39,8 @@ function silentWav(seconds = 30) {
 const md5 = bytes => crypto.createHash('md5').update(bytes).digest('hex')
 const lyricLines = [
   { start: 0.25, end: 2.25, text: 'Silent fixture line one', words: [{ w: 'Silent', s: 0.25, e: 0.75 }, { w: 'fixture', s: 0.8, e: 1.35 }, { w: 'line', s: 1.4, e: 1.8 }, { w: 'one', s: 1.85, e: 2.25 }] },
-  { start: 2.5, end: 4.75, text: 'Silent fixture line two', words: [{ w: 'Silent', s: 2.5, e: 3 }, { w: 'fixture', s: 3.05, e: 3.6 }, { w: 'line', s: 3.65, e: 4.1 }, { w: 'two', s: 4.15, e: 4.75 }] }
+  { start: 2.5, end: 4.75, text: 'Silent fixture line two', words: [{ w: 'Silent', s: 2.5, e: 3 }, { w: 'fixture', s: 3.05, e: 3.6 }, { w: 'line', s: 3.65, e: 4.1 }, { w: 'two', s: 4.15, e: 4.75 }] },
+  { start: 12, end: 14, text: 'Silent fixture line three', words: [{ w: 'Silent', s: 12, e: 12.5 }, { w: 'fixture', s: 12.55, e: 13.1 }, { w: 'line', s: 13.15, e: 13.6 }, { w: 'three', s: 13.65, e: 14 }] }
 ]
 
 async function makeProject(name, savedAt, pc) {
@@ -335,13 +336,41 @@ let app = null
   })
 
   await watchdog.run('mouse click reveals controls; brand and song stay visible', 60, async () => {
+    if (process.env.BOX_SHOT_DIR) await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(3840, 2160))
     await page.locator('[data-control="play"]').click()
     await page.waitForSelector('.box-player[data-playing="true"]')
     await page.waitForSelector('.box-player[data-controls="hidden"]', { timeout: 15000 })
     check(await page.locator('.player-header .box-logo').isVisible() && await page.locator('.player-song strong').isVisible(), 'logo and song name stay visible while controls are hidden')
     check(!await page.locator('.player-header-actions').isVisible(), 'header buttons hide with the controls')
+    const geometry = () => page.evaluate(() => ({
+      rows: [...document.querySelectorAll('.player-lyric-scale')].map(el => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height, getComputedStyle(el).opacity].join(',') }),
+      area: (r => [r.left, r.top, r.width, r.height].join(','))(document.querySelector('.player-lyrics').getBoundingClientRect()),
+      meters: [...document.querySelectorAll('.player-meter-row .mic-meter')].map(el => { const r = el.getBoundingClientRect(); return { w: r.width, h: r.height, visible: getComputedStyle(el).visibility === 'visible' && r.width > 0 } }),
+      meterBox: (r => [r.left, r.top, r.width, r.height].join(','))(document.querySelector('.player-meter-row').getBoundingClientRect())
+    }))
+    const hiddenGeometry = await geometry()
+    check(hiddenGeometry.meters.length === 2 && hiddenGeometry.meters.every(m => m.visible), 'both mic meters stay visible while the controls are hidden')
+    check(process.env.BOX_SHOT_DIR ? !!await page.screenshot({ path: path.join(process.env.BOX_SHOT_DIR, 'controls-hidden.png') }).then(() => true) : true, 'hidden-state screenshot')
     await page.locator('.player-wake').click()
     await page.waitForSelector('.box-player[data-controls="visible"]')
+    await page.waitForTimeout(300)
+    const shownGeometry = await geometry()
+    check(JSON.stringify(shownGeometry.rows.map(r => r.split(',').slice(0, 4))) === JSON.stringify(hiddenGeometry.rows.map(r => r.split(',').slice(0, 4))) && shownGeometry.area === hiddenGeometry.area, 'lyric area and rows keep identical geometry with controls shown or hidden')
+    check(shownGeometry.meterBox === hiddenGeometry.meterBox && shownGeometry.meters.every(m => m.visible), 'meters row does not move when the controls show')
+    if (process.env.BOX_SHOT_DIR) await page.screenshot({ path: path.join(process.env.BOX_SHOT_DIR, 'controls-shown.png') })
+    // Count-in: seek into the 4.75 s -> 12 s gap; the dots/seconds sit above the target line, left-aligned with its text.
+    await page.locator('[data-control="from-start"]').click() // playing continues from 0; the countdown starts at 4.75 s
+    await page.waitForSelector('.player-singing-countdown', { timeout: 20000 })
+    const count = await page.evaluate(() => {
+      const box = document.querySelector('.player-singing-countdown').getBoundingClientRect()
+      const row = document.querySelector('.player-singing-countdown').closest('[data-lyric-line]')
+      const text = row.querySelector('.player-lyric').getBoundingClientRect()
+      const index = Number(row.dataset.lyricLine)
+      const above = document.querySelector(`[data-lyric-line="${index - 1}"] .player-lyric`)?.getBoundingClientRect()
+      return { left: box.left, bottom: box.bottom, textLeft: text.left, textTop: text.top, aboveBottom: above ? above.bottom : -Infinity }
+    })
+    check(Math.abs(count.left - count.textLeft) < 1.5 && count.bottom <= count.textTop + 1 && count.aboveBottom <= count.bottom - 0, 'count-in sits above the target line, left-aligned with its text, clear of the line above')
+    if (process.env.BOX_SHOT_DIR) await page.screenshot({ path: path.join(process.env.BOX_SHOT_DIR, 'countdown.png') })
     check(await page.locator('.box-player').getAttribute('data-playing') === 'true', 'the waking click does not pause or seek')
     await page.locator('[data-control="play"]').click()
     await page.waitForSelector('.box-player[data-playing="false"]')

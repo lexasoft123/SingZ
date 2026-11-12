@@ -105,23 +105,26 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .detail-actions .primary { min-width: 150px; justify-content: center; }
 .detail-actions > span { font-size: 15px; color: var(--sz-dim); margin-left: 8px; }
 .box-player { position: absolute; inset: 0; width: 1600px; height: 900px; color: var(--sz-text); background: radial-gradient(900px 620px at 16% -12%, var(--sz-ambient-warm), transparent), radial-gradient(760px 540px at 96% 112%, var(--sz-ambient-cool), transparent), var(--sz-bg); }
-.player-content { position: absolute; inset: 0; }
-.player-header { height: 94px; display: flex; align-items: center; gap: 28px; padding: 0 var(--box-page-x); }
-.player-header .box-logo { font-size: var(--box-brand-size); line-height: var(--box-brand-line); }
-.player-song { display: flex; flex-direction: column; gap: 6px; padding-left: 30px; border-left: 1px solid var(--sz-line-strong); min-width: 0; }
-.player-song strong { font-size: 20px; font-weight: 650; white-space: nowrap; max-width: 1050px; overflow: hidden; text-overflow: ellipsis; }
+/* Option C. 1600x900 is the 1280x720 design x1.25. Title row, lyric area, strip band and meter row are
+   fixed-height flex children: showing or hiding the controls only fades the strip inside its reserved band. */
+.player-content { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 22px 30px 12px; }
+.player-header { flex: 0 0 43px; height: 43px; display: flex; align-items: center; gap: 15px; padding: 0 0 0 10px; }
+.player-header .box-logo { font-size: 22px; line-height: 28px; }
+.player-song { display: flex; flex-direction: column; gap: 2px; padding-left: 15px; border-left: 1px solid var(--sz-line-strong); min-width: 0; }
+.player-song strong { font-size: 20px; font-weight: 650; white-space: nowrap; max-width: 900px; overflow: hidden; text-overflow: ellipsis; }
 .player-song > span { font-size: 15px; color: var(--sz-dim); }
 .player-header-actions { margin-left: auto; }
 .player-header-actions .pill { min-height: var(--box-compact-height); font-size: var(--box-label-size); padding: 8px 16px; }
-.box-player[data-controls="hidden"] .player-chrome { visibility: hidden; pointer-events: none; }
-.player-lyrics { position: absolute; left: 100px; right: 80px; top: 130px; height: 550px; overflow: hidden; mask-image: linear-gradient(to bottom, transparent, #000 64px, #000 calc(100% - 64px), transparent); }
-.player-lyrics-track { position: absolute; left: 20px; right: 20px; top: 0; will-change: transform; }
-.player-lyric-slot { position: absolute; left: 0; right: 0; padding-top: 40px; min-width: 0; transition: opacity var(--lyric-glide-duration) var(--lyric-glide-curve); }
+.player-chrome { opacity: 1; visibility: visible; transition: opacity .18s ease, visibility 0s; }
+.box-player[data-controls="hidden"] .player-chrome { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .18s ease, visibility 0s linear .18s; }
+.player-lyrics { position: relative; flex: 1 1 0; min-height: 0; overflow: hidden; }
+.player-lyric-slot { position: absolute; top: 0; left: 80px; right: 8px; height: 82.5px; min-width: 0; transition: opacity var(--lyric-glide-duration) var(--lyric-glide-curve); }
+/* Hidden window rows (and any row mounted before its first measure) stay invisible until the glide places them. */
 .player-lyric-slot[data-context="outside"] { opacity: 0; }
-/* Only the seven row wrappers need compositor hints; glyph masks paint normally. */
-.player-lyric-scale { transform-origin: left center; will-change: transform, opacity; }
-.player-lyric { padding: 0; margin: 0; width: calc(100% / 1.03); font-size: 68px; line-height: 1.2; font-weight: 650; font-variation-settings: 'wdth' 92; letter-spacing: -.02em; min-height: 82px; overflow-wrap: anywhere; color: var(--sz-text); transform-origin: left center; transform: scale(1.03); }
-.player-shaped-word { display: inline-block; position: relative; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; --lyric-edge: var(--lyric-feather-start); --lyric-pen: 0px; }
+.player-lyric-scale { position: relative; height: 100%; display: flex; align-items: center; transform-origin: left center; will-change: transform, opacity; }
+/* One line per row: a long line is shrunk to fit by the layout model (floor 70%), beyond that the area clips it. */
+.player-lyric { padding: 0; margin: 0; width: max-content; font-size: 75px; line-height: 1.1; font-weight: 650; font-variation-settings: 'wdth' 92; letter-spacing: -.02em; white-space: nowrap; color: var(--sz-text); transform-origin: left center; }
+.player-shaped-word { display: inline-block; position: relative; white-space: pre; --lyric-edge: var(--lyric-feather-start); --lyric-pen: 0px; }
 .player-shaped-word > .lyric-ink-base { color: inherit; }
 .player-shaped-word > .lyric-ink-halo,
 .player-shaped-word > .lyric-ink-glow,
@@ -143,11 +146,11 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .player-shaped-word[data-multiline="true"] > .lyric-ink-amber,
 .player-shaped-word[data-multiline="true"] > .lyric-ink-core { display: none; }
 .lyric-word-space { color: inherit; }
-.player-singing-countdown { position: absolute; top: 0; left: 0; display: flex; align-items: center; gap: 14px; height: 32px; color: var(--sz-accent); font: 24px var(--sz-font-mono); }
-.player-singing-countdown i { width: 14px; height: 14px; border-radius: 50%; background: var(--sz-accent); opacity: .2; }
+.player-singing-countdown { position: absolute; left: 0; bottom: 100%; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; height: 24px; color: var(--sz-accent); font: 22px/24px var(--sz-font-mono); white-space: nowrap; }
+.player-singing-countdown i { width: 12px; height: 12px; border-radius: 50%; background: var(--sz-accent); opacity: .2; }
 .player-singing-countdown i[data-lit="true"] { opacity: 1; }
 
-.player-bottom { position: absolute; left: 40px; right: 40px; bottom: 24px; }
+.player-bottom { flex: 0 0 104px; height: 104px; }
 .player-transport { height: 76px; display: flex; align-items: center; gap: 20px; border: 1px solid var(--sz-control-line); border-radius: 38px; background: var(--sz-panel); padding: 0 22px; }
 .player-time { font: 16px var(--sz-font-mono); color: var(--sz-dim); white-space: nowrap; }
 .player-seek { position: relative; height: 22px; flex: 1; min-width: 100px; }
@@ -164,12 +167,13 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .player-next-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
 .player-tools { display: flex; gap: 8px; }
 .player-tools .pill { padding: 7px 12px; font-size: 15px; }
-.player-meters { display: flex; flex-direction: column; justify-content: center; gap: 4px; margin-left: 4px; white-space: nowrap; }
+.player-meter-row { flex: 0 0 32px; height: 32px; display: flex; align-items: center; justify-content: flex-end; padding-right: 20px; }
+.player-meters { display: flex; flex-direction: row; align-items: center; gap: 45px; white-space: nowrap; }
 .player-microphone-row { display: flex; align-items: center; gap: 10px; }
-.player-microphone-name { width: 54px; font-size: 18px; line-height: 24px; font-weight: 600; color: var(--sz-text); }
-.player-meters .mic-meter-bar { flex: 0 0 120px; width: 120px; }
-.player-meters .mic-meter-state { width: 92px; font-size: 18px; line-height: 24px; }
-.player-hints { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; font-size: 14px; color: var(--sz-dim); min-height: 18px; }
+.player-microphone-name { font-size: 14px; line-height: 18px; font-weight: 600; color: var(--sz-dim); }
+.player-meters .mic-meter-bar { flex: 0 0 200px; width: 200px; min-width: 0; }
+.player-meters .mic-meter-state { flex: 0 0 56px; width: 56px; font-size: 14px; line-height: 18px; }
+.player-hints { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 14px; color: var(--sz-dim); min-height: 18px; }
 .player-hints b { font: 12px var(--sz-font-mono); color: var(--sz-text); margin-left: 16px; margin-right: 5px; }
 .player-wake { position: absolute; inset: 0; border: 0; background: transparent; outline: none !important; }
 .player-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
