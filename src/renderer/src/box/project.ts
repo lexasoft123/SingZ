@@ -39,7 +39,7 @@ export interface BoxInspectionResult {
 export function inspectRegistration(result: RegisterResult): BoxProjectInspection {
   if (!result.ok) return { readiness: 'error', project: null, message: result.error }
   if (!result.project) {
-    return { readiness: 'unsupported', project: null, message: 'The project metadata could not be read.' }
+    return { readiness: 'unsupported', project: null, message: 'The song metadata could not be read.' }
   }
   if (result.project.damaged?.length) {
     return {

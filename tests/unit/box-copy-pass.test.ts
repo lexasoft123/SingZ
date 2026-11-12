@@ -12,9 +12,11 @@ import { boxSettings as enSettings } from '../../src/shared/i18n/en/box-settings
 import { boxSettings as ruSettings } from '../../src/shared/i18n/ru/box-settings'
 import { boxSettings as zhSettings } from '../../src/shared/i18n/zh-CN/box-settings'
 import { journeyEnglish, journeyRussian, journeyChinese } from '../../src/renderer/src/box/journeys/i18n'
+import { collectionEnglish, collectionRussian, collectionChinese } from '../../src/renderer/src/box/collection/i18n'
 import { DiagnosticsPage } from '../../src/renderer/src/box/journeys/DiagnosticsPage'
 import { phonesStatus, storageStatus, type JourneyAudioInventory } from '../../src/renderer/src/box/journeys/format'
 import { Settings } from '../../src/renderer/src/box/Settings'
+import { SongDetails } from '../../src/renderer/src/box/SongDetails'
 import { prepareBoxLocale } from '../../src/renderer/src/box/i18n'
 import { setLocale } from '../../src/shared/i18n'
 
@@ -25,14 +27,14 @@ const values = (...dictionaries: Array<Record<string, string>>): Array<[string, 
 
 // One name per concept: Songs (library), Google Drive (account), Audio & microphones (sound page), Vocals.
 const RETIRED: Record<string, RegExp> = {
-  en: /catalog|collection|your projects|SingZ library|local projects|sound settings|lead vocal|desktop singz|prepared (local )?stems?|prepared in|FLOW 8|\bPCM\b|nominal/i,
-  ru: /каталог|коллекц|ваши проекты|библиотека singz|локальные проекты|настройки звука|ведущий вокал|desktop singz|FLOW 8|номинальн/i,
-  'zh-CN': /曲库|收藏|你的项目|本地项目|声音设置|主唱|desktop singz|FLOW 8|标称/i
+  en: /catalog|collection|\bprojects?\b|SingZ library|sound settings|lead vocal|desktop singz|prepared (local )?stems?|prepared in|FLOW 8|\bPCM\b|nominal/i,
+  ru: /каталог|коллекц|проект|библиотека singz|настройки звука|ведущий вокал|desktop singz|FLOW 8|номинальн/i,
+  'zh-CN': /曲库|收藏|项目|声音设置|主唱|desktop singz|FLOW 8|标称/i
 }
 const sets = {
-  en: [en, enSettings, journeyEnglish],
-  ru: [ru, ruSettings, journeyRussian],
-  'zh-CN': [zh, zhSettings, journeyChinese]
+  en: [en, enSettings, journeyEnglish, collectionEnglish],
+  ru: [ru, ruSettings, journeyRussian, collectionRussian],
+  'zh-CN': [zh, zhSettings, journeyChinese, collectionChinese]
 } as unknown as Record<string, Array<Record<string, string>>>
 
 afterEach(() => setLocale('en'))
@@ -93,6 +95,19 @@ describe('Box copy: one name per concept, no engineering text', () => {
   })
 })
 
+describe('Song details artist subtitle', () => {
+  it('uses Artist unknown instead of a table-cell dash', async () => {
+    await prepareBoxLocale('en')
+    const html = renderToStaticMarkup(createElement(SongDetails, {
+      entry: { id: 'local:/p', name: 'Donaukinder', local: { dir: '/p', songPath: '/p/s.flac', name: 'Donaukinder' }, remoteId: null, unavailable: false },
+      inspection: { readiness: 'ready', project: { stems: { vocals: 'v.flac' }, hasLyrics: true, settings: {} }, message: null },
+      metadata: null, transpose: 0, queued: false, busy: false, error: null, actionError: null, download: null,
+      onBack: vi.fn(), onSing: vi.fn(), onPrepare: vi.fn(), onVerify: vi.fn(), onCancelDownload: vi.fn(), onToggleQueue: vi.fn()
+    } as never))
+    expect(html).toContain('<div class="detail-identity"><p aria-label="Artist unknown">Artist unknown</p><h1>Donaukinder</h1></div>')
+  })
+})
+
 describe('Diagnostics owns revisions and sample-rate detail', () => {
   it('renders the details on Diagnostics, not in the singer Settings views', () => {
     const device: DesktopAudioHostDevice = {
@@ -123,6 +138,11 @@ describe('Diagnostics owns revisions and sample-rate detail', () => {
     expect(html).toContain('44.1 kHz – 48 kHz')
     expect(html).toContain('96 kHz')
     expect(html).toContain('data-diagnostics-device="alsa:mic"')
+    expect(html).toContain('<dl class="journey-metrics journey-diagnostic-rates">')
+    const css = source('src/renderer/src/box/journeys/journeys.css')
+    expect(css).toMatch(/\.journey-diagnostic-rates\s*\{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/)
+    expect(css).toMatch(/\.journey-diagnostic-rates dt\s*\{[^}]*font-size: var\(--box-meta-size\)/)
+    expect(css).toMatch(/\.journey-diagnostic-rates dd\s*\{[^}]*font-size: var\(--box-row-size\)/)
 
     const settings = renderToStaticMarkup(createElement(Settings, {
       inventory: audioInventory, loading: false, error: null, currentOutputUid: null,

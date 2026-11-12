@@ -47,7 +47,7 @@ export function DiagnosticsPage({ diagnostics, routing = null, routingError = nu
         const rates = formatSampleRateRanges(device)
         return <div key={device.uid} data-diagnostics-device={device.uid}>
           <strong>{device.label.trim() || tSettings('box.settings.unnamedDevice')}</strong>
-          <dl>
+          <dl className="journey-metrics journey-diagnostic-rates">
             <div>
               <dt>{tSettings('box.settings.nominalRate')}</dt>
               <dd aria-label={device.nominalSampleRate > 0 ? undefined : tSettings('box.settings.sampleRateUnknown')}>
@@ -63,7 +63,7 @@ export function DiagnosticsPage({ diagnostics, routing = null, routingError = nu
       })}
       {routingDevices.map(device => <div key={device.uid} data-diagnostics-device={device.uid}>
         <strong>{device.name}</strong>
-        <dl><div>
+        <dl className="journey-metrics journey-diagnostic-rates"><div>
           <dt>{tSettings('box.settings.nominalRate')}</dt>
           <dd>{formatSampleRate(device.rate ?? 0)}</dd>
         </div></dl>
