@@ -309,7 +309,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     handshake!("install-blocked".to_string(),"install-blocked");
     handle.update(cx,|_,w,cx|library(&view,w,cx,"library-drive-sync"))??;
     let root=project.parent().unwrap();let broken=root.join("Broken graph fixture");let empty=root.join("Empty native fixture");
-    wait!(p,w,app=>!p.drive_snapshot.busy&&p.drive_snapshot.projects.get(&broken)==Some(&drive_state::ProjectState::Blocked)&&p.drive_snapshot.projects.get(&empty)==Some(&drive_state::ProjectState::Blocked));
+    wait!(p,w,app=>!p.drive_snapshot.busy&&p.drive_snapshot.projects.get(&broken)==Some(&drive_state::ProjectState::Blocked)&&p.drive_snapshot.projects.get(&empty)==Some(&drive_state::ProjectState::Synced));
     wait!(p,w,app=>p.library.read(app).project_snapshot().as_array().unwrap().iter().any(|row|row["dir"].as_str()==broken.to_str()));
     handle.update(cx,|_,w,cx|badge(&view,w,cx,&broken))??;
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,"blocked-real-projects"))??;

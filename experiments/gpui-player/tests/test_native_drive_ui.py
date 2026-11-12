@@ -115,7 +115,12 @@ def helper_pids(pid):
 
 
 def remote_document(state):
-    rows = [row for row in state['files'] if row['name'] == 'project.json' and not row['trashed']]
+    # The library now also publishes the empty native fixture's own
+    # project.json, so pick the song project's document by its parent folder.
+    folders = {row['id']: row['name'] for row in state['files']
+               if row['mimeType'] == 'application/vnd.google-apps.folder' and not row['trashed']}
+    rows = [row for row in state['files'] if row['name'] == 'project.json' and not row['trashed']
+            and folders.get((row['parents'] or [''])[0]) == 'Drive song fixture']
     assert len(rows) == 1, [(row['name'], row['id']) for row in rows]
     return json.loads(base64.b64decode(rows[0]['contentBase64']))
 
@@ -389,9 +394,14 @@ with tempfile.TemporaryDirectory(prefix='singz-drive-ui-') as temporary:
             assert all(not identity.samefile(previous) for previous, _ in states), (
                 'Duplicate project identity', directory)
             states.append((identity, status))
-        for name in ('Broken graph fixture', 'Empty native fixture'):
+        # Native empty projects publish to Drive since 3ce6fa7e, so the empty
+        # fixture syncs; only the project whose graph is missing stays blocked.
+        published = {row['name'] for row in final['files'] if row['mimeType'] == 'application/vnd.google-apps.folder'
+                     and not row['trashed']}
+        assert 'Empty native fixture' in published and 'Broken graph fixture' not in published, published
+        for name, want in (('Broken graph fixture', 'blocked'), ('Empty native fixture', 'synced')):
             expected = project.parent/name
-            assert [status for identity, status in states if identity.samefile(expected)] == ['blocked']
+            assert [status for identity, status in states if identity.samefile(expected)] == [want]
         assert blocked['drive']['scheduler']['dirty'] != 0
         (out/'result.json').write_text(json.dumps({'actualOAuthCallbacks': 2, 'stages': 2, 'sizesPerStage': 2,
             'realUploadSaveFollowup': True, 'realCancellation': True, 'actualBlockedProjects': True,
