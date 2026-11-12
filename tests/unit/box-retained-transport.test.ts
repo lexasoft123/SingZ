@@ -212,6 +212,17 @@ describe('BoxTransport retained restore', () => {
     expect(h.transport.getSnapshot().playing).toBe(false)
   })
 
+  it.each(['0', '144000'])('restores a never-played stopped song at frame %s with accepted gain', async frame => {
+    const h = fixture()
+    const stopped = retainedStatus('7', 'stopped', { renderedProjectFrame: frame, audibleProjectFrame: frame, masterGain: 0.23 })
+    h.api.setCurrent(stopped)
+    vi.mocked(h.api.box.restoreRetainedPlayback).mockResolvedValue({ ok: true, value: { ...restore('7'), recovery: retainedRecovery(stopped) } })
+    await expect(h.transport.restoreRetained({ epoch: 'epoch', generation: '7' })).resolves.toBe(true)
+    expect(h.transport.getSnapshot()).toMatchObject({ playing: false, position: Number(frame) / 48000, masterVolume: 0.23 })
+    expect(h.transport.getSnapshot().active?.project.settings).toMatchObject({ masterVolume: 0.23, tempo: 1.25, transpose: 2 })
+    for (const call of Object.values(h.lifecycle)) expect(call).not.toHaveBeenCalled()
+  })
+
   it('commits fresh second-read frames, controls, route, project, and item rather than the initial DTO', async () => {
     const h = fixture()
     const freshStatus: DesktopPlaybackStatus = {

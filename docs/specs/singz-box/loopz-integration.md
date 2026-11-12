@@ -182,10 +182,15 @@ After a native prepare succeeds, main validates the project in the background
 and associates a service-lifetime project descriptor with that host epoch and
 generation; a failed association is logged and leaves native playback intact.
 A fresh TV session reads the authoritative reconcile snapshot and, when the
-epoch and generation match a commandable running or paused transport, performs
-a read-only reattach: it restores the real project, synchronized lyrics,
+epoch and generation match a commandable transport on a running host (playing,
+pre-roll, paused, stopped before first Play, or completed), performs a read-only
+reattach: it restores the real project, synchronized lyrics,
 current native controls and position without open, reprepare, Play or Settings
-replay. Missing or stale metadata, changed project files, invalid lyrics or a
+replay. A stopped song transport on a running host is a silent opened song,
+including after a seek before first Play; native Stop instead stops the host and
+changes the session state, which remains non-restorable. Natural completion
+keeps a running host with a completed transport and remains restorable for replay.
+Missing or stale metadata, changed project files, invalid lyrics or a
 non-commandable host instead show a remote-scoped notice with Refresh and an
 explicit Stop before another project opens. Stop is checked against both
 service epoch and native generation inside the host's serialized queue, so a

@@ -1,5 +1,5 @@
 import type { BoxMetronomeOverride, BoxRetainedPlaybackRecovery, BoxRetainedPlaybackRestore } from '../../../shared/box-contract'
-import { retainedPlaybackSnapshot } from '../../../shared/box-retained-playback'
+import { commandableRetainedPlayback, retainedPlaybackSnapshot } from '../../../shared/box-retained-playback'
 import type {
   LyricLine,
   ProjectInfo,
@@ -434,11 +434,7 @@ export class BoxTransport {
         throw new Error('Retained playback project identity changed before restore.')
       }
       if (candidate.lyrics.length === 0) throw new Error(t('box.player.lyricsRequired'))
-      const transportCommandable = status.transportState === 'playing' || status.transportState === 'pre-roll' ||
-        status.transportState === 'paused' || status.transportState === 'completed'
-      const terminal = status.terminalReason !== 'none' && status.terminalReason !== ''
-      if (status.state !== 'running' || status.hostState !== 'running' || !transportCommandable ||
-          terminal || status.error !== '') {
+      if (!commandableRetainedPlayback(status)) {
         throw new Error('Retained native playback is not commandable; use explicit Stop.')
       }
       const duration = Number(status.durationFrames) / status.format.sampleRate

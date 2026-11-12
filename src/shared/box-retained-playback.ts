@@ -14,6 +14,26 @@ const text = (value: unknown, maximum = 4096): value is string =>
 const hash = (value: unknown): value is string => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value)
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 
+/** NativePlaybackSession::status() reports Prepared with its last host status
+ * (Closed) until openOutput() is called; the initial transport is Stopped at
+ * its prepared start frame. A Box scrub before Play follows MultitrackEngine's
+ * non-playing seek path, which prepares a new generation at that target
+ * (engine.ts seek()/scheduleNativePrepareAhead(), then
+ * DesktopNativePlaybackClient.configFor()); it does not call native seek(),
+ * which only accepts Running. See native/playback/native_playback_session.cpp
+ * status()/openOutput()/seek() and native/electron/playback_addon_bridge.cpp
+ * state-name mappings. This never-opened state is commandable by opening then
+ * starting on first Play. Explicit Stop instead reports the stopped session
+ * state; natural end keeps the host running with a completed transport. */
+export function commandableRetainedPlayback(status: DesktopPlaybackStatus): boolean {
+  const healthy = status.terminalReason === 'none' && status.error === ''
+  const neverOpened = status.state === 'prepared' && status.hostState === 'closed' &&
+    status.transportState === 'stopped'
+  const opened = status.state === 'running' && status.hostState === 'running' &&
+    transports.has(status.transportState)
+  return healthy && (neverOpened || opened)
+}
+
 function jsonClone(value: unknown, maximum: number): unknown {
   const json = JSON.stringify(value, (_key, item) => {
     if (typeof item === 'bigint' || typeof item === 'function' || typeof item === 'symbol' ||

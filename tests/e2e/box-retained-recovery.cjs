@@ -9,7 +9,7 @@ const path = require('node:path')
 const { createProject, mutateLyrics } = require('../shared/box-retained-fixture.cjs')
 const { startHost, connectHost, assertNoPhysical, delay, eventually } = require('../shared/box-host-client.cjs')
 const { startBoxHostRecorder } = require('../shared/box-host-recorder.cjs')
-const { launchUi, closeUi, openInitial, waitRestored, adjustVocals, waitStopFallback } = require('../shared/box-retained-ui.cjs')
+const { launchUi, closeUi, waitRestored, adjustVocals, waitStopFallback } = require('../shared/box-retained-ui.cjs')
 
 const root = path.resolve(__dirname, '../..')
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-box-retained-'))
@@ -91,14 +91,76 @@ async function run() {
     assert.equal(initialized.ok, true, JSON.stringify(initialized))
     await routing()
   })
+  await watchdog.run('queue opens a never-played song and restores it at zero and after a silent seek', 120, async () => {
+    let page = await launch()
+    await page.waitForSelector('[data-project-dir]', { timeout: 60000 })
+    await page.locator('.box-song-row', { hasText: fixture.name }).click()
+    await page.getByRole('button', { name: 'Add to queue', exact: true }).click()
+    await page.locator('[data-focus="details-back"]').click()
+    await page.locator('.box-navigation button').filter({ hasText: 'Queue' }).click()
+    await page.locator('[data-queue-index="0"]').click()
+    // Queue selection deliberately asks for confirmation even with no current
+    // song; confirming opens the selected song paused, as the recovery case needs.
+    await page.locator('[data-switch-confirm]').click()
+    await page.waitForSelector('.box-player[data-active-song]', { timeout: 60000 })
+    await eventually('opened song is prepared with its output closed before any Play', status, value =>
+      value.state === 'prepared' && value.hostState === 'closed' && value.transportState === 'stopped' && value.renderedProjectFrame === '0')
+    await adjustVocals(page)
+    let previousGeneration = null
+    for (const frame of ['0', '144000']) {
+      if (frame !== '0') {
+        // A paused scrub discards and re-prepares the unopened generation at
+        // the new start frame; the host remains closed until first Play.
+        await page.locator('[data-control="seek"]').evaluate(input => {
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '3')
+          input.dispatchEvent(new Event('input', { bubbles: true }))
+          input.dispatchEvent(new Event('change', { bubbles: true }))
+        })
+      }
+      const before = await eventually(`silent transport parks at ${frame}`, status, value =>
+        value.state === 'prepared' && value.hostState === 'closed' &&
+        value.transportState === 'stopped' && value.renderedProjectFrame === frame)
+      if (previousGeneration !== null) assert.notEqual(before.generation, previousGeneration)
+      previousGeneration = before.generation
+      await recovered(before.generation, fixture)
+      recorder.reset(); recorder.start()
+      await close()
+      page = await launch()
+      await waitRestored(page, fixture, status)
+      assert.equal(await page.locator('.box-player').getAttribute('data-playing'), 'false')
+      const after = await status()
+      assert.equal(after.generation, before.generation)
+      assert.equal(after.renderedProjectFrame, frame)
+      assert.equal(after.transportState, 'stopped')
+      assert.equal(after.masterGain, before.masterGain)
+      assert.equal(after.lanes.find(lane => lane.id === 'vocals').gain, before.lanes.find(lane => lane.id === 'vocals').gain)
+      recorder.assertNoMutations()
+      assert.ok(recorder.observedRequests > 0)
+      recorder.stop()
+    }
+    const restored = await status()
+    await page.locator('[data-control="seek"]').evaluate(input => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '5')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const scrubbed = await eventually('scrub after restore re-prepares a closed generation', status, value =>
+      value.generation !== restored.generation && value.state === 'prepared' && value.hostState === 'closed' &&
+      value.transportState === 'stopped' && value.renderedProjectFrame === '240000')
+    await recovered(scrubbed.generation, fixture)
+    await page.locator('[data-control="play"]').click()
+    const resumed = await eventually('Play opens and starts the restored scrub target', status, value =>
+      value.generation === scrubbed.generation && value.state === 'running' && value.hostState === 'running' &&
+      value.transportState === 'playing' && BigInt(value.renderedProjectFrame) >= 240000n)
+    assert.equal(resumed.generation, scrubbed.generation)
+  })
   let baseline
-  await watchdog.run('real UI opens the stems-only project and associates its graph', 75, async () => {
-    const page = await launch()
-    await openInitial(page, fixture)
+  await watchdog.run('real UI keeps the started stems-only project and associates its graph', 75, async () => {
+    const page = ui.page
     const running = await eventually('real native generation advances', status, value =>
       value.state === 'running' && value.transportState === 'playing' && BigInt(value.renderedProjectFrame) > 0n && value.masterGain === 0, 20000)
     const bound = await recovered(running.generation, fixture)
-    assert.equal(bound.recovery.descriptor.lanes.find(lane => lane.id === 'vocals').gain, 1)
+    assert.equal(bound.recovery.descriptor.lanes.find(lane => lane.id === 'vocals').gain, running.lanes.find(lane => lane.id === 'vocals').gain)
     await adjustVocals(page)
     const controlled = await eventually('remote ArrowLeft changes the accepted native stem gain', status, value =>
       value.generation === running.generation && value.lanes.find(lane => lane.id === 'vocals').gain < 1)
@@ -161,8 +223,18 @@ async function run() {
     recorder.assertNoMutations()
     assert.ok(recorder.observedRequests > 0, 'protected phase must observe requests through the recorder')
     recorder.stop()
-    await page.locator('[data-retained-stop]').click()
+    assert.equal(await page.locator('[data-surface="retained-playback"] [role="alert"]').textContent(),
+      'This song could not be restored. Stop it to choose another song.')
+    await page.locator('[data-retained-refresh]').focus()
+    await page.keyboard.press('ArrowRight')
+    assert.equal(await page.locator('[data-retained-stop]').evaluate(button => button === document.activeElement), true)
+    await page.keyboard.press('ArrowLeft')
+    assert.equal(await page.locator('[data-retained-refresh]').evaluate(button => button === document.activeElement), true)
+    await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('Enter')
     await eventually('explicit Stop unloads the exact retained generation', status, value => value === null || value.state === 'unloaded')
+    await page.waitForFunction(() => document.activeElement?.matches('[data-catalog-index="0"], [data-focus="catalog-retry"], .box-navigation button.on') &&
+      !document.querySelector('[data-retained-stop]'))
     await routing()
     await close()
   })

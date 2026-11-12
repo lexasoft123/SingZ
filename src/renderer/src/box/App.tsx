@@ -7,7 +7,7 @@ import { MultitrackEngine } from '../audio/engine'
 import { boxNativePlaybackPolicy } from './playback-policy'
 import { useLocale } from '../i18n'
 import { Catalog, type CatalogRow } from './Catalog'
-import { focusPrimaryNavigation, moveSpatialFocus, pickMixerFocusId, rangeOwnsArrow, remoteScope, seekKeepsFocus } from './focus'
+import { catalogFocusTarget, focusPrimaryNavigation, moveSpatialFocus, pickMixerFocusId, rangeOwnsArrow, remoteScope, seekKeepsFocus } from './focus'
 import { LatestOpenIntent } from './open-intent'
 import { Player } from './Player'
 import { BoxMicrophones } from './microphones'
@@ -809,7 +809,7 @@ export default function BoxApp(): React.JSX.Element {
       const list = root.querySelector<HTMLElement>('.box-song-list')
       if (list) list.scrollTop = catalogScroll.current
       const index = Math.max(0, collectionSnapshot.entries.findIndex(entry => entry.id === selectedEntry?.id))
-      target = query(`[data-catalog-index="${index}"]`) ?? query('[data-focus="catalog-retry"]') ?? query('.box-navigation button.on')
+      target = catalogFocusTarget(root, index)
     } else if (route === 'details') target = query('[data-detail-primary]:not(:disabled)') ?? query('[data-focus="details-back"]')
     else if (route === 'settings') target = query('.box-settings button:not(:disabled)')
     else if (route === 'account') target = query('[data-account-primary]:not(:disabled)') ?? query('[data-focus="account-back"]')
@@ -922,7 +922,10 @@ export default function BoxApp(): React.JSX.Element {
         <p role={metronomeError ? 'alert' : 'status'}>{metronomeError ?? tSettings('box.settings.metronomeChecking')}</p>
         {metronomeError && <button className="pill" disabled={metronomeBusy} onClick={() => { void hydrate(false) }}>{tSettings('box.settings.metronomeRetry')}</button>}
       </section>}
-      {!active && window.singz.boxAudioPersistent && <RetainedPlayback onRestore={hydrated ? restoreRetained : undefined} />}
+      {!active && window.singz.boxAudioPersistent && <RetainedPlayback onRestore={hydrated ? restoreRetained : undefined} onStopped={() => {
+        goCatalog()
+        setFocusVersion(version => version + 1)
+      }} />}
       <div className="box-safe-surface" inert={!hydrated} style={{ transform: `scale(${safeScale})`, left: safeArea * 16, top: safeArea * 9 }}>
         {hydrated && <div className="box-hub-slot" hidden={route !== 'home'} inert={route !== 'home'}>
           <JourneyHub

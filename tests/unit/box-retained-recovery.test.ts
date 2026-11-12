@@ -18,6 +18,7 @@ import {
 } from '../../src/shared/types'
 import { validateBoxRetainedProject } from '../../src/main/box-audio/retained-project'
 import { restoreBoxRetainedPlayback } from '../../src/main/box-audio/retained-recovery'
+import { neverOpenedRetainedStatus } from '../shared/box-retained-native-fixture'
 
 const roots: string[] = []
 const lyricsDocument = {
@@ -361,6 +362,14 @@ describe('trusted retained recovery reader', () => {
     expect(result.recovery.status).toEqual(status)
   })
 
+  it.each(['0', '144000'])('restores the native prepared/closed/stopped status at frame %s with native gain and song settings', async frame => {
+    const f = await fixture()
+    const status: DesktopPlaybackStatus = neverOpenedRetainedStatus('7', frame, { masterGain: 0.23 })
+    const result = await restore(f, async () => snapshot(f, status))
+    expect(result.recovery.status).toEqual(status)
+    expect(result.project.settings).toEqual(f.meta.settings)
+  })
+
   it('accepts frame and native-control progression without treating it as stale project identity', async () => {
     const f = await fixture()
     const first = snapshot(f)
@@ -513,8 +522,13 @@ describe('trusted retained recovery reader', () => {
     { state: 'output-open', hostState: 'open', transportState: 'completed', terminalReason: 'none' },
     { state: 'output-open', hostState: 'running', transportState: 'paused', terminalReason: 'none' },
     { state: 'running', hostState: 'open', transportState: 'paused', terminalReason: 'none' },
+    { state: 'running', hostState: 'stopped', transportState: 'stopped', terminalReason: 'none' },
+    { state: 'running', hostState: 'closed', transportState: 'stopped', terminalReason: 'none' },
     { state: 'preparing', hostState: 'closed', transportState: 'stopped', terminalReason: 'none' },
     { state: 'prepared', hostState: 'open', transportState: 'paused', terminalReason: 'none' },
+    { state: 'prepared', hostState: 'closed', transportState: 'paused', terminalReason: 'none' },
+    { state: 'prepared', hostState: 'closed', transportState: 'stopped', terminalReason: 'device-lost' },
+    { state: 'prepared', hostState: 'closed', transportState: 'stopped', terminalReason: 'none', error: 'provider failed' },
     { state: 'stopped', hostState: 'stopped', transportState: 'stopped', terminalReason: 'none' },
     { state: 'output-open', hostState: 'closed', transportState: 'paused', terminalReason: 'none' },
     { state: 'running', hostState: 'error', transportState: 'playing', terminalReason: 'error' },

@@ -85,7 +85,11 @@ device. The driver closes the actual `BrowserWindow`, then relaunches Box while
 the independent native host stays alive. A qualifying run must observe the real
 UI project, synchronized lyrics, current native controls and position, and the
 same host epoch and generation through close and read-only reattach after
-relaunch. Reattachment requires a commandable running or paused transport;
+relaunch. The same driver first selects a queued song without Play and verifies
+read-only restore at frame zero and after a silent seek, including current gains.
+Its fallback also checks localized copy, remote Left/Right between Refresh and
+Stop, and catalog focus after confirmed release. Reattachment requires a
+commandable transport on a running host, including stopped before first Play;
 Refresh while retained is safe and preserves that identity. Explicit Stop is
 the controlled fallback and must confirm release of the reviewed identity.
 Final end-to-end qualification is still required; do not infer a PASS from the

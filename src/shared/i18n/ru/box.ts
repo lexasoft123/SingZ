@@ -239,7 +239,7 @@ export const box: Record<keyof typeof english | 'box.catalog.songs_few' | 'box.c
   'box.retained.body': 'Остановите эту песню, прежде чем открывать другую. Её проект и текст не восстановлены.',
   'box.retained.refresh': 'Обновить',
   'box.retained.stop': 'Остановить песню',
-  'box.retained.restoreFailed': 'Не удалось восстановить предыдущую песню. Обновите её состояние или остановите её.',
+  'box.retained.restoreFailed': 'Не удалось восстановить песню. Остановите её, чтобы выбрать другую.',
   'box.retained.restoreUnavailable': 'Восстановить песню невозможно. Обновите её состояние или остановите её.',
   'box.retained.restoreTimedOut': 'Предыдущая песня восстанавливается слишком долго. Обновите её состояние или остановите её.',
   'box.retained.statusUnavailable': 'Не удалось получить состояние звука.',
