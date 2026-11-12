@@ -1040,7 +1040,11 @@ fn copy_tree(from: &Path, to: &Path) {
             copy_tree(&entry.path(), &to.join(entry.file_name()));
         }
     } else {
+        // A backup restore keeps file times. fs::copy does on macOS but not on
+        // Linux, where new times would legitimately refresh project.json's hashes.
         fs::copy(from, to).unwrap();
+        let modified = fs::metadata(from).unwrap().modified().unwrap();
+        fs::File::options().write(true).open(to).unwrap().set_modified(modified).unwrap();
     }
 }
 #[test]
