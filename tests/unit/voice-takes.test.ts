@@ -119,5 +119,28 @@ describe('voice take storage', () => {
     const s = new VoiceTakeStore({ rootDir: root, native: fakeNative({ ok: false, deviceLost: true }) }); const started = await s.start(request); expect(started.ok).toBe(true)
     const result = await s.stop('device-lost', 'seek'); expect(result.take?.status).toBe('partial-device-lost')
   })
+
+  it('marks latency measured-trim when capture stats expose no input latency', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
+    const s = new VoiceTakeStore({ rootDir: root, native: fakeNative() }); const started = await s.start(request); expect(started.ok).toBe(true)
+    await s.stop(); const takeId = started.ok ? started.takeId : ''
+    const sidecar = JSON.parse(readFileSync(join(root, 'song-1', `${takeId}.json`), 'utf8'))
+    expect(sidecar.latencySource).toBe('measured-trim')
+  })
+
+  it('rejects concurrent record starts while waiting for the first sample', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
+    const native = fakeNative(); let ready = false
+    native.captureStats = async () => ready ? { firstSampleCaptured: true, firstSampleHostNs: '1000', lastSampleHostNs: '1000', sampleRate: 44100, firstSampleQuality: 'hardware' as const } : { firstSampleCaptured: false, sampleRate: 44100 }
+    const first = new VoiceTakeStore({ rootDir: root, native }); const pending = first.start(request)
+    await new Promise(resolve => setTimeout(resolve, 10)); expect(await first.start(request)).toMatchObject({ ok: false, reason: 'busy' })
+    ready = true; expect((await pending).ok).toBe(true); await first.cancel()
+  })
+
+  it('clears a prior finalized take when the next take is cancelled', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root); const s = store(root)
+    expect((await s.start(request)).ok).toBe(true); await s.stop(); expect((await s.start(request)).ok).toBe(true); await s.cancel()
+    expect(await s.stop()).toMatchObject({ ok: false, reason: 'error' })
+  })
 })
 

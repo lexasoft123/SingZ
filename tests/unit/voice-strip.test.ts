@@ -369,7 +369,18 @@ describe('stable song identity', () => {
     expect(stableVoiceSongId({ path: '/x', projectDir: '/lib/Wild World' })).toBe(
       stableVoiceSongId({ path: '/other', projectDir: '/lib/Wild World/' })
     )
-    expect(stableVoiceSongId({ path: '/x', projectDir: '/lib/One' })).not.toBe(stableVoiceSongId({ path: '/x', projectDir: '/lib/Two' }))
+    expect(stableVoiceSongId({ path: '/x', projectDir: '/lib//Wild World' })).toBe(
+      stableVoiceSongId({ path: '/x', projectDir: '/lib/Wild World' })
+    )
+    expect(stableVoiceSongId({ path: '/x', projectDir: 'C:\\lib\\Wild World\\' })).toBe(
+      stableVoiceSongId({ path: '/x', projectDir: 'C:/lib/Wild World' })
+    )
+  })
+  it('does not mix up projects that share a folder name in different parents', () => {
+    expect(stableVoiceSongId({ path: '/a', projectDir: '/lib/one/Untitled' })).not.toBe(
+      stableVoiceSongId({ path: '/a', projectDir: '/lib/two/Untitled' })
+    )
+    expect(stableVoiceSongId({ path: '/a', projectDir: '/lib/Old' })).not.toBe(stableVoiceSongId({ path: '/a', projectDir: '/lib/New' }))
   })
   it('is a directory-safe slug, not the per-launch load token', () => {
     expect(stableVoiceSongId({ path: 'C:\\Music\\a b/é?.mp3', projectDir: null })).toMatch(/^song-[0-9a-f]{16}$/)

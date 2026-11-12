@@ -22,7 +22,7 @@ export type VoiceTakeNative = {
   cancelTake(args: { generation: bigint }): Promise<{ ok: boolean; error?: string }>
   stopCapture?(generation: bigint): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
   captureStats?(): Promise<{ firstSampleCaptured?: boolean; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; sampleRate?: number; lastSampleHostNs?: string; inputLatencyFrames?: number; inputLevel?: VoiceInputLevel; takeActive?: boolean }>
-  presentationQuery(args: { songId: string; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; sampleRate?: number; initialDiscontinuitySerial?: number }): Promise<{ ok: boolean; found?: boolean; paused?: boolean; startPositionSec?: number; songSeconds?: number; projectFrame?: number; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; latencySource?: 'reported' | 'measured-trim'; discontinuitySerial?: number; seekDuringCallback?: boolean; error?: string }>
+  presentationQuery(args: { songId: string; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; sampleRate?: number; outputSampleRate?: number; trimInputLatency?: boolean; initialDiscontinuitySerial?: number }): Promise<{ ok: boolean; found?: boolean; paused?: boolean; sampleRate?: number; startPositionSec?: number; songSeconds?: number; projectFrame?: number; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; latencySource?: 'reported' | 'measured-trim'; discontinuitySerial?: number; seekDuringCallback?: boolean; error?: string }>
   playTake(args: { takeId: string; path: string; startPositionSec: number; mode: VoicePlayTakeRequest['mode']; generation: bigint; gain?: number; tempo?: number }): Promise<{ ok: boolean; error?: string; startHostTimeNs?: string }>
   stopTake(generation?: bigint): Promise<{ ok: boolean; error?: string }>
   level(): Promise<VoiceInputLevel>
@@ -51,6 +51,7 @@ type Active = {
   inputLatencyFrames: number
   outputLatencyFrames: number
   graphLatencyFrames: number
+  outputSampleRate?: number
   latencySource: 'reported' | 'measured-trim'
   settings: VoiceTakeSettingsPoint[]
   generation: bigint
@@ -86,6 +87,7 @@ const readWavInfo = async (path: string): Promise<{ sampleRate: number; dataByte
 
 export class VoiceTakeStore {
   private active: Active | null = null
+  private starting = false
   private playGeneration: bigint | null = null
   private finalizedTake: VoiceTakeSummary | null = null
   private readonly root: string
@@ -110,13 +112,14 @@ export class VoiceTakeStore {
   }
 
   async start(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult> {
-    if (this.active) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
+    if (this.active || this.starting) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
     if (!validId(request.songId) || !request.input || !Number.isFinite(request.input.channelIndex) || request.input.channelIndex < 0 || !Number.isFinite(request.tempo) || !Number.isFinite(request.transposeSemitones)) return { ok: false, reason: 'error', message: 'Invalid recording request.' }
     const takeId = randomUUID()
     const paths = this.takePaths(request.songId, takeId)
     await mkdir(paths.dir, { recursive: true })
     const generation = BigInt(`0x${takeId.replace(/-/g, '').slice(0, 15)}`)
     let captureAttempted = false
+    this.starting = true
     try {
       captureAttempted = true
       const result = await this.options.native.recordTake({ dir: paths.dir, takeId, generation, deviceName: request.input.deviceName, channelIndex: request.input.channelIndex })
@@ -135,17 +138,20 @@ export class VoiceTakeStore {
           active.lastSampleHostNs = stamp.lastSampleHostNs ?? stamp.firstSampleHostNs
           active.firstSampleQuality = stamp.firstSampleQuality
           active.sampleRate = stamp.sampleRate
-          const raw = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate })
+          const raw = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, trimInputLatency: false })
           if (!raw.ok || raw.found === false || raw.paused || raw.seekDuringCallback) active.placementFault = true
           else {
             active.inputLatencyFrames = stamp.inputLatencyFrames ?? 0
             active.outputLatencyFrames = raw.outputLatencyFrames ?? 0
             active.graphLatencyFrames = raw.graphLatencyFrames ?? 0
-            const placed = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames })
+            active.outputSampleRate = raw.sampleRate
+            const placed = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, outputSampleRate: raw.sampleRate, inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames, trimInputLatency: true })
             if (!placed.ok || placed.found === false || placed.paused || placed.seekDuringCallback) active.placementFault = true
             else {
               active.startPositionSec = placed.startPositionSec ?? placed.songSeconds ?? 0
-              active.latencySource = placed.latencySource ?? (stamp.firstSampleQuality === 'unknown' ? 'measured-trim' : 'reported')
+              // Native captureStats currently has no input-latency measurement; measured-trim
+              // explicitly records that input latency is unknown and none was applied.
+              active.latencySource = stamp.inputLatencyFrames === undefined ? 'measured-trim' : placed.latencySource ?? (stamp.firstSampleQuality === 'unknown' ? 'measured-trim' : 'reported')
               active.discontinuitySerial = placed.discontinuitySerial
             }
           }
@@ -161,6 +167,7 @@ export class VoiceTakeStore {
       return { ok: true, takeId }
     } finally {
       if (captureAttempted && !this.active && this.options.native.stopCapture) await this.options.native.stopCapture(generation).catch(() => undefined)
+      this.starting = false
     }
   }
 
@@ -180,7 +187,7 @@ export class VoiceTakeStore {
     const stats = await this.options.native.captureStats!().catch(() => undefined)
     if (!stats?.lastSampleHostNs) return
     active.lastSampleHostNs = stats.lastSampleHostNs
-    const placement = await this.query({ songId: active.request.songId, firstSampleHostNs: stats.lastSampleHostNs, firstSampleQuality: stats.firstSampleQuality, inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames, sampleRate: stats.sampleRate ?? active.sampleRate, initialDiscontinuitySerial: active.discontinuitySerial })
+    const placement = await this.query({ songId: active.request.songId, firstSampleHostNs: stats.lastSampleHostNs, firstSampleQuality: stats.firstSampleQuality, inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames, sampleRate: stats.sampleRate ?? active.sampleRate, outputSampleRate: active.outputSampleRate, trimInputLatency: true, initialDiscontinuitySerial: active.discontinuitySerial })
     if (!placement.found) return
     if (placement.ok && active.discontinuitySerial !== undefined && placement.discontinuitySerial !== undefined && placement.discontinuitySerial !== active.discontinuitySerial) {
       await this.stop(undefined, 'seek')
@@ -232,6 +239,7 @@ export class VoiceTakeStore {
   }
 
   async cancel(): Promise<{ ok: boolean; error?: string }> {
+    this.finalizedTake = null
     if (!this.active) return { ok: false, error: 'No recording is active.' }
     const active = this.active
     this.active = null

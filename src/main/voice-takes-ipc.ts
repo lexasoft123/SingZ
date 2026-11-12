@@ -22,7 +22,10 @@ export const createVoiceTakeNative = (): VoiceTakeNative => ({
       return { ok: true, found: false, latencySource: 'measured-trim' as const }
     let hostNs: bigint
     try { hostNs = BigInt(args.firstSampleHostNs) } catch { return { ok: true, found: false, latencySource: 'measured-trim' as const } }
-    const trimNs = BigInt(Math.max(0, Math.round(((args.inputLatencyFrames ?? 0) + (args.outputLatencyFrames ?? 0) + (args.graphLatencyFrames ?? 0)) * 1e9 / args.sampleRate)))
+    const inputTrimNs = args.trimInputLatency ? (args.inputLatencyFrames ?? 0) * 1e9 / args.sampleRate : 0
+    const outputRate = args.outputSampleRate ?? args.sampleRate
+    const outputTrimNs = ((args.outputLatencyFrames ?? 0) + (args.graphLatencyFrames ?? 0)) * 1e9 / outputRate
+    const trimNs = BigInt(Math.max(0, Math.round(inputTrimNs + outputTrimNs)))
     const adjustedHostNs = hostNs > trimNs ? hostNs - trimNs : 0n
     const raw = await desktopAudioProcess.call<{
       found: boolean; projectFrame?: number; songSeconds?: number; rate?: number; sampleRate?: number;
@@ -30,7 +33,7 @@ export const createVoiceTakeNative = (): VoiceTakeNative => ({
       paused?: boolean; seekDuringCallback?: boolean; generation?: string | number
     }>('binding', 'presentationQuery', [adjustedHostNs.toString()])
     return {
-      ok: true, found: raw.found, projectFrame: raw.projectFrame, songSeconds: raw.songSeconds,
+      ok: true, found: raw.found, projectFrame: raw.projectFrame, songSeconds: raw.songSeconds, sampleRate: raw.sampleRate,
       startPositionSec: raw.songSeconds, paused: raw.paused, outputLatencyFrames: raw.outputLatencyFrames,
       graphLatencyFrames: raw.graphLatencyFrames, discontinuitySerial: raw.discontinuitySerial,
       seekDuringCallback: raw.seekDuringCallback,

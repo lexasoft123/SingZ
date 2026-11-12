@@ -737,13 +737,14 @@ export function createBridgeVoiceApi(
 
 /**
  * A song identity that survives restarts (the per-launch load token does not):
- * the project folder name for a project, else the source path, hashed to a
- * slug that is safe as a directory name.
+ * the project's full directory path for a project, else the source path, hashed
+ * to a slug that is safe as a directory name. Projects carry no id of their own
+ * (project.json has none), so renaming or moving a project folder starts it with
+ * no takes; two folders with the same name in different parents stay distinct.
  */
 export function stableVoiceSongId(src: { path: string; projectDir: string | null }): string {
-  const key = src.projectDir
-    ? `project:${src.projectDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''}`
-    : `file:${src.path}`
+  const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/(.)\/+$/, '$1')
+  const key = src.projectDir ? `project:${norm(src.projectDir)}` : `file:${norm(src.path)}`
   // FNV-1a, two 32-bit lanes with different multipliers: 64 bits, no crypto needed.
   let h1 = 0x811c9dc5
   let h2 = 0x01000193
