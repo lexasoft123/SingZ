@@ -379,7 +379,7 @@ fn busy_after_marks_never_starve_queued_saves_at_shutdown_and_the_projects_stay_
     service.finish_by(Instant::now() + Duration::from_millis(400));
     // The real writer is cancelled out of its 60 s retry window at the deadline.
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-    let (mut saved, mut refused) = (vec![], vec![]);
+    let (mut saved, mut refused, mut cancelled) = (vec![], vec![], vec![]);
     while let Ok(event) = rx.try_recv() {
         match event {
             Event::Saved(epoch, _, _, _, _, warnings, _) => {
@@ -387,23 +387,41 @@ fn busy_after_marks_never_starve_queued_saves_at_shutdown_and_the_projects_stay_
                 assert!(warnings.iter().any(|w| w.contains("already marked")), "{warnings:?}");
                 saved.push(epoch);
             }
-            Event::SaveFailed(epoch, error) => {
+            Event::SaveFailed(epoch, error) if error.contains("nothing was saved") => {
                 // Safe refusal: the first edge could not run (the real lease was
                 // held by the first save's retrying second edge), so nothing
                 // was published.
-                assert!(error.contains("nothing was saved"), "{error}");
                 refused.push(epoch);
+            }
+            Event::SaveFailed(epoch, error) => {
+                // The second save's first edge can win the lease before the
+                // first save's second edge takes it; under load its commit then
+                // meets the deadline. The commit is cancelled before publishing
+                // and the project stays marked from its first edge.
+                assert!(
+                    error.starts_with("Custom track save cancelled")
+                        || error.starts_with("Project save did not finish before shutdown"),
+                    "{error}"
+                );
+                cancelled.push(epoch);
             }
             _ => {}
         }
     }
-    assert!(saved.contains(&1), "{saved:?} {refused:?}");
-    assert_eq!(saved.len() + refused.len(), 2, "{saved:?} {refused:?}");
+    assert!(saved.contains(&1), "{saved:?} {refused:?} {cancelled:?}");
+    assert_eq!(
+        saved.len() + refused.len() + cancelled.len(),
+        2,
+        "{saved:?} {refused:?} {cancelled:?}"
+    );
     let dirs = store.snapshot().unwrap().dirs;
     assert!(dirs.contains_key(f.dir.to_str().unwrap()));
     if saved.contains(&2) {
         assert!(committed(&second));
         assert!(dirs.contains_key(second.to_str().unwrap()));
+    } else if cancelled.contains(&2) {
+        assert!(!committed(&second), "a cancelled commit must not publish");
+        assert!(dirs.contains_key(second.to_str().unwrap()), "its first edge marked it");
     } else {
         assert!(!committed(&second), "a refused save must not publish");
         assert!(!dirs.contains_key(second.to_str().unwrap()));

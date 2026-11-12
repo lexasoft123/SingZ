@@ -64,8 +64,9 @@ fn writer_retry_delay(retries: usize) -> std::time::Duration {
 enum CrashPoint {
     AfterBytes,
 }
+// The OS error and the step that was busy, so an exhausted retry names it.
 #[derive(Debug)]
-struct LedgerFileBusy(std::io::Error);
+struct LedgerFileBusy(std::io::Error, String);
 impl std::fmt::Display for LedgerFileBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0, f)
@@ -253,10 +254,7 @@ impl Store {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
                 Err(error) => {
-                    return Err(match error.downcast::<LedgerFileBusy>() {
-                        Ok(busy) => busy.0.into(),
-                        Err(error) => error,
-                    });
+                    return Err(surface_busy(error, &self.directory, attempt + 1, None));
                 }
             }
         }
@@ -518,8 +516,8 @@ impl Store {
         mut publication_stage: impl FnMut(bool),
         cancel: &dyn Fn() -> bool,
     ) -> Result<Snapshot> {
-        fs::create_dir_all(&self.directory)?;
-        let dir = self.directory.canonicalize()?;
+        fs::create_dir_all(&self.directory).context("Sync ledger directory create")?;
+        let dir = self.directory.canonicalize().context("Sync ledger directory resolve")?;
         let started = std::time::Instant::now();
         let _lease = loop {
             match lease(&dir) {
@@ -607,18 +605,17 @@ impl Store {
                         // A cancel that arrived during the wait must not publish
                         // a fresh candidate.
                         if retry_cancelled(cancel) {
-                            return Err(match error.downcast::<LedgerFileBusy>() {
-                                Ok(busy) => busy.0.into(),
-                                Err(error) => error,
-                            });
+                            return Err(surface_busy(
+                                error,
+                                &dir,
+                                attempt + 1,
+                                Some(retry_started),
+                            ));
                         }
                         attempts.set(attempt + 1);
                         continue;
                     }
-                    return Err(match error.downcast::<LedgerFileBusy>() {
-                        Ok(busy) => busy.0.into(),
-                        Err(error) => error,
-                    });
+                    return Err(surface_busy(error, &dir, attempt + 1, Some(retry_started)));
                 }
             }
         }
@@ -813,12 +810,84 @@ fn ledger_read_io<T>(
             note_real_busy(hook_passed);
             // A ledger's delete-pending handle can deny open/metadata briefly.
             // A denied directory is not a replace race: surface it immediately.
-            before_io(SnapshotIo::Directory)?;
-            fs::read_dir(dir)?.next().transpose()?;
-            Err(LedgerFileBusy(error).into())
+            directory_check(dir, || before_io(SnapshotIo::Directory))
+                .with_context(|| format!("Sync ledger directory check after busy {step:?}"))?;
+            Err(LedgerFileBusy(error, format!("{step:?}")).into())
         }
-        result => Ok(result?),
+        result => result.with_context(|| format!("Sync ledger {step:?}")),
     }
+}
+/// A busy ledger step that is no longer retried returns its original OS error
+/// (so a persistent ACL denial is never reported as churn), named by its step.
+fn surface_busy(
+    error: anyhow::Error,
+    dir: &Path,
+    attempts: usize,
+    started: Option<std::time::Instant>,
+) -> anyhow::Error {
+    match error.downcast::<LedgerFileBusy>() {
+        Ok(LedgerFileBusy(error, step)) => {
+            let elapsed = started.map(|started| format!(" over {:?}", started.elapsed()));
+            let state = busy_state(dir);
+            anyhow::Error::new(error).context(format!(
+                "Sync ledger {step} stayed busy through {attempts} attempt(s){}{state}",
+                elapsed.unwrap_or_default()
+            ))
+        }
+        Err(error) => error,
+    }
+}
+#[cfg(windows)]
+fn busy_state(dir: &Path) -> String {
+    let staged: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            name.ends_with(".tmp")
+                .then(|| format!("{name} is {}", directory_state(&entry.path())))
+        })
+        .collect();
+    format!(
+        "; ledger file is {}, directory is {}, staged: [{}]",
+        directory_state(&dir.join(NAME)),
+        directory_state(dir),
+        staged.join(", ")
+    )
+}
+/// Whether the rename's source and target can each be opened for delete: a
+/// sharing violation names the side some other handle holds without delete
+/// sharing.
+#[cfg(windows)]
+fn rename_state(source: &Path, target: &Path) -> String {
+    use std::os::windows::fs::OpenOptionsExt;
+    let probe = |path: &Path| match OpenOptions::new()
+        .access_mode(0x0001_0000) // DELETE
+        .share_mode(7)
+        .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
+        .open(path)
+    {
+        Ok(_) => format!("deletable, {}", directory_state(path)),
+        Err(error) => format!("not deletable ({error}), {}", directory_state(path)),
+    };
+    format!("; source is {}; target is {}", probe(source), probe(target))
+}
+#[cfg(not(windows))]
+fn rename_state(_: &Path, _: &Path) -> String {
+    String::new()
+}
+#[cfg(not(windows))]
+fn busy_state(_: &Path) -> String {
+    String::new()
+}
+fn directory_check(
+    dir: &Path,
+    before_io: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    before_io()?;
+    fs::read_dir(dir)?.next().transpose()?;
+    Ok(())
 }
 fn bytes_with_hook(
     dir: &Path,
@@ -959,14 +1028,20 @@ pub(crate) fn lease(dir: &Path) -> Result<crate::file_lease::Lease> {
             let meta = match fs::symlink_metadata(&path) {
                 Ok(meta) => meta,
                 Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(error.into());
+                    return Err(error).context("Sync ledger lock create");
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error).context("Sync ledger lock metadata"),
             };
             ensure!(ordinary(&meta), "Invalid sync intent lock");
-            let file = OpenOptions::new().read(true).write(true).open(&path)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .context("Sync ledger lock open")?;
+            let opened = file.metadata().context("Sync ledger lock opened metadata")?;
+            let current = fs::symlink_metadata(&path).context("Sync ledger lock current metadata")?;
             ensure!(
-                same(&meta, &file.metadata()?) && same(&meta, &fs::symlink_metadata(&path)?),
+                same(&meta, &opened) && same(&meta, &current),
                 "Sync intent lock changed"
             );
             file
@@ -1171,11 +1246,11 @@ fn publication_io<T>(
             if step == WriterIo::StageOpen {
                 note_stage_denial(dir);
             }
-            before_io(WriterIo::Directory)?;
-            fs::read_dir(dir)?.next().transpose()?;
-            Err(LedgerFileBusy(error).into())
+            directory_check(dir, || before_io(WriterIo::Directory))
+                .with_context(|| format!("Sync ledger directory check after busy {step:?}"))?;
+            Err(LedgerFileBusy(error, format!("{step:?}")).into())
         }
-        result => Ok(result?),
+        result => result.with_context(|| format!("Sync ledger {step:?}")),
     }
 }
 // Windows scanners (Defender, Search) open a just-written file without delete
@@ -1200,9 +1275,12 @@ fn publish_candidate(
     windows: bool,
     expected: &Option<Vec<u8>>,
     retry: &Option<RenameRetry<'_>>,
+    source: &Path,
     operation: impl Fn() -> std::io::Result<()>,
 ) -> Result<()> {
     let mut first = true;
+    let denied_since = std::time::Instant::now();
+    let mut logged = false;
     loop {
         if first {
             first = false;
@@ -1217,6 +1295,14 @@ fn publish_candidate(
         let Some(retry) = retry else {
             return Err(error);
         };
+        if !logged && denied_since.elapsed() >= std::time::Duration::from_secs(5) {
+            logged = true;
+            eprintln!(
+                "Sync ledger {step:?} has been denied for {:?}: {error:#}{}",
+                denied_since.elapsed(),
+                rename_state(source, &dir.join(NAME))
+            );
+        }
         let tried = retry.attempts.get();
         let remaining = retry.budget.saturating_sub(retry.started.elapsed());
         if tried + 1 >= retry.limit || remaining.is_zero() || retry_cancelled(retry.cancel) {
@@ -1239,6 +1325,34 @@ fn publish_candidate(
         }
         retry.attempts.set(tried + 1);
     }
+}
+// The first ledger appears atomically and never replaces one that appeared
+// meanwhile (AlreadyExists). Unix links the flushed candidate. Windows renames
+// it without replacement instead: a ledger born as a hard link whose staging
+// name is then removed was observed to refuse the next replace with access
+// denied for the whole 60 s retry budget under scanner load, while its source
+// and target both stayed openable for delete.
+#[cfg(not(windows))]
+fn publish_new(staged: &Path, ledger: &Path) -> std::io::Result<()> {
+    fs::hard_link(staged, ledger)
+}
+#[cfg(windows)]
+fn publish_new(staged: &Path, ledger: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    let wide = |path: &Path| -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    };
+    let (from, to) = (wide(staged), wide(ledger));
+    // No MOVEFILE_REPLACE_EXISTING: an existing ledger fails with
+    // ERROR_ALREADY_EXISTS, the same outcome as a refused hard link.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 fn publish_with_hook(
     dir: &Path,
@@ -1314,6 +1428,7 @@ fn publish_with_hook(
             windows,
             &document.bytes,
             &rename_retry,
+            &pending.0,
             || fs::rename(&pending.0, dir.join(NAME)),
         )?;
     } else {
@@ -1324,7 +1439,8 @@ fn publish_with_hook(
             windows,
             &document.bytes,
             &rename_retry,
-            || fs::hard_link(&pending.0, dir.join(NAME)),
+            &pending.0,
+            || publish_new(&pending.0, &dir.join(NAME)),
         )
         .context("Sync intent appeared during publication")?;
     }

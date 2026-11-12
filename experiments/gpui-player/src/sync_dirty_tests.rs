@@ -1614,3 +1614,23 @@ fn rejected_operation_reference_publishes_neither_a_mark_nor_authority() {
     assert_eq!(f.store.commit_operation(&[f.dir("Deleted")],"delete-accepted","retry").unwrap(),sequence);
     assert_eq!(f.store.snapshot().unwrap().seq,sequence);
 }
+// The first ledger never replaces one that appeared meanwhile, and on Windows
+// it is the staged candidate itself, moved: no second link is created and
+// removed (that ledger refused its next replace for the whole retry budget).
+#[test]
+fn first_publication_never_replaces_a_ledger_and_leaves_no_second_name() {
+    let f = Fixture::new();
+    fs::create_dir_all(&f.store.directory).unwrap();
+    let staged = f.store.directory.join(staging_name());
+    let ledger = f.store.directory.join(NAME);
+    fs::write(&staged, b"first").unwrap();
+    publish_new(&staged, &ledger).unwrap();
+    assert_eq!(fs::read(&ledger).unwrap(), b"first");
+    #[cfg(windows)]
+    assert!(!staged.exists(), "the first ledger was linked, not moved");
+    let _ = fs::remove_file(&staged);
+    fs::write(&staged, b"second").unwrap();
+    let error = publish_new(&staged, &ledger).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
+    assert_eq!(fs::read(&ledger).unwrap(), b"first");
+}
