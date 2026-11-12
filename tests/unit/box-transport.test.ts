@@ -3,6 +3,7 @@ import type { EngineTrackInput, TrackState } from '../../src/renderer/src/audio/
 import type { ParsedGraphDocument } from '../../src/shared/graph-document'
 import type { DesktopAudioHostDevice, DesktopAudioHostInventoryResult, ProjectInfo, ProjectListItem, ProjectSettings, SingzApi } from '../../src/shared/types'
 import { BoxTransport, type BoxEngine } from '../../src/renderer/src/box/transport'
+import { createKeyChanger } from '../../src/renderer/src/box/key-change'
 import { LatestOpenIntent } from '../../src/renderer/src/box/open-intent'
 
 class FakeEngine implements BoxEngine {
@@ -1300,7 +1301,7 @@ describe('BoxTransport key change review follow-ups', () => {
     new Promise<'pending'>(resolve => setTimeout(() => resolve('pending'), 20))
   ])
 
-  it('cancelOpen releases the waiting open and key promise without inspecting ahead of its save', async () => {
+  it('cancelOpen releases only the waiting open while the key save remains pending', async () => {
     const { api } = host()
     const saveStarted = deferred<unknown>()
     const finishSave = deferred<unknown>()
@@ -1316,13 +1317,14 @@ describe('BoxTransport key change review follow-ups', () => {
     const openOutcome = await outcomeWithin(opening)
     const keyOutcome = await outcomeWithin(key)
     finishSave.resolve({ ok: true, dir: '/a', songPath: '/a/original.wav', inLibrary: true })
-    await Promise.all([opening, key])
     expect(openOutcome).toBe(false)
-    expect(keyOutcome).toMatchObject({ ok: false, error: expect.stringContaining('superseded') })
+    expect(keyOutcome).toBe('pending')
+    expect(await key).toEqual({ ok: true })
+    expect(await opening).toBe(false)
     expect(api.registerSource).not.toHaveBeenCalled()
   })
 
-  it('a newer open releases the superseded open and key promise while the save remains serialized', async () => {
+  it('a newer open releases only the superseded open while the key save remains serialized', async () => {
     const { api } = host()
     const saveStarted = deferred<unknown>()
     const finishSave = deferred<unknown>()
@@ -1340,9 +1342,66 @@ describe('BoxTransport key change review follow-ups', () => {
     expect(await second).toBe(true)
     expect(api.registerSource).not.toHaveBeenCalledWith('/a/original.wav')
     finishSave.resolve({ ok: true, dir: '/a', songPath: '/a/original.wav', inLibrary: true })
-    await Promise.all([first, key])
     expect(firstOutcome).toBe(false)
-    expect(keyOutcome).toMatchObject({ ok: false, error: expect.stringContaining('superseded') })
+    expect(keyOutcome).toBe('pending')
+    expect(await key).toEqual({ ok: true })
+    expect(await first).toBe(false)
     expect(transport.getSnapshot().active?.item.dir).toBe('/b')
+  })
+
+  it('Sing B then cancelOpen does not error or hide a saved key change on A', async () => {
+    const saveStarted = deferred<unknown>()
+    const finishSave = deferred<unknown>()
+    const inspectionStarted = deferred<unknown>()
+    const finishInspection = deferred<unknown>()
+    const refreshStarted = deferred<unknown>()
+    const finishRefresh = deferred<unknown>()
+    const { api, saves } = host({ b: () => {
+      inspectionStarted.resolve(undefined)
+      return finishInspection.promise
+    } })
+    vi.mocked(api.saveProject).mockImplementation((async (songPath: string, _name: string, settings: ProjectSettings) => {
+      saveStarted.resolve(undefined)
+      await finishSave.promise
+      saves.push({ songPath, settings })
+      return { ok: true, dir: '/a', songPath, inLibrary: true }
+    }) as never)
+    const { transport } = makeTransport(api)
+    let draft: { dir: string; value: number } | null = null
+    const errors: (string | null)[] = []
+    const saveResults: ({ ok: true } | { ok: false; error: string })[] = []
+    const changeKey = createKeyChanger<ProjectListItem>({
+      dirOf: entry => entry.dir,
+      save: async (entry, value) => {
+        const result = await transport.saveSongTranspose(entry, stale(2), value)
+        saveResults.push(result)
+        return result
+      },
+      refresh: async () => {
+        refreshStarted.resolve(undefined)
+        await finishRefresh.promise
+      },
+      setDraft: update => { draft = update(draft) },
+      setError: message => { errors.push(message) },
+      selectedDir: () => '/a'
+    })
+    const key = changeKey(item('/a', 'Song A'), 3)
+    await saveStarted.promise
+    const opening = transport.open(item('/b', 'Song B'))
+    await inspectionStarted.promise
+    expect(transport.cancelOpen()).toBe(true)
+    finishInspection.resolve({ ok: true, path: '/b/original.wav', name: 'Song B', size: 0, project: project('/b') })
+    finishSave.resolve(undefined)
+    const refreshOutcome = await outcomeWithin(refreshStarted.promise)
+    const draftBeforeRefresh = draft
+    finishRefresh.resolve(undefined)
+    await key
+    expect(await opening).toBe(false)
+    expect(refreshOutcome).not.toBe('pending')
+    expect(saveResults).toEqual([{ ok: true }])
+    expect(errors).toEqual([null])
+    expect(draftBeforeRefresh).toEqual({ dir: '/a', value: 3 })
+    expect(draft).toBeNull()
+    expect(saves.at(-1)?.settings.transpose).toBe(3)
   })
 })

@@ -889,8 +889,7 @@ export class BoxTransport {
       }
       return pending.pendingSettings ?? pending.acceptedSettings
     })
-    const settled = await this.waitForSave(pending.controlTail)
-    if (settled === SAVE_WAIT_SUPERSEDED) return fail(new Error('The key change was superseded.'))
+    await pending.controlTail
     return outcome
   }
 
