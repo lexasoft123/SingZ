@@ -1,4 +1,4 @@
-import type { BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from '../shared/box-audio'
+import type { BoxMicrophoneLevels, BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from '../shared/box-audio'
 import { retainedPlaybackSnapshot } from '../shared/box-retained-playback'
 import type { BoxRetainedPlaybackSnapshot } from '../shared/box-contract'
 import { app, utilityProcess, type UtilityProcess } from 'electron'
@@ -384,6 +384,7 @@ export async function boxPrepareRetainedPlayback(
 /** Host-owned analysis service; reads are safe during transport uncertainty. */
 export const boxMicrophones = {
   snapshot: (): Promise<BoxMicrophoneSnapshot> => { requireBoxAudioSocket(); return boxAudioProcess!.call('service', 'microphones', []) },
+  levels: (): Promise<BoxMicrophoneLevels> => { requireBoxAudioSocket(); return boxAudioProcess!.call('service', 'microphoneLevels', []) },
   setSelection: async (edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> => {
     requireBoxAudioSocket()
     // An earlier lost reply may have committed this revision. Read authoritative

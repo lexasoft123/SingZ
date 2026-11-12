@@ -23,6 +23,44 @@ function fake() {
   return { runtime, calls }
 }
 describe.skipIf(process.platform === 'win32')('persistent Box audio control', () => {
+  it('contains a rejection thrown while formatting an out-of-queue level failure', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-meter-encode-'))
+    const { runtime } = fake()
+    runtime.microphones = { levels: async () => { throw { toString() { throw new Error('format failed') } } }, snapshot: async () => ({} as any), setSelection: async () => ({} as any) }
+    const host = await startBoxAudioHost(join(dir, 'audio.sock'), runtime)
+    const client = createBoxAudioClient(join(dir, 'audio.sock'), { timeoutMs: 100 })
+    try { await expect(client.call('service', 'microphoneLevels', [])).rejects.toThrow(/connection|closed|lost/i) }
+    finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
+  it('bounds and coalesces stalled meter reads while transport controls remain available', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-meter-stall-'))
+    const { runtime } = fake()
+    let release!: (value: any) => void
+    const levels = vi.fn(() => new Promise<any>(resolve => { release = resolve }))
+    runtime.microphones = { levels, snapshot: async () => ({} as any), setSelection: async () => ({} as any) }
+    const host = await startBoxAudioHost(join(dir, 'audio.sock'), runtime)
+    const client = createBoxAudioClient(join(dir, 'audio.sock'), { timeoutMs: 700 })
+    try {
+      for (let retry = 0; retry < 3; ++retry) {
+        let meterSettled = false
+        const reading = expect(client.call('service', 'microphoneLevels', []).finally(() => { meterSettled = true })).rejects.toThrow('levels timed out')
+        await vi.waitFor(() => expect(levels).toHaveBeenCalledTimes(1))
+        // This must complete while the meter's underlying native promise is unresolved.
+        expect(await client.call('owner', 'startPlayback', [1, '1'])).toEqual({ ok: true })
+        expect(meterSettled).toBe(false)
+        await reading
+      }
+      expect(levels).toHaveBeenCalledTimes(1)
+      release({ generation: '1', levels: null })
+      await new Promise<void>(resolve => setImmediate(resolve))
+      levels.mockResolvedValueOnce({ generation: '1', levels: null })
+      expect(await client.call('service', 'microphoneLevels', [])).toMatchObject({ generation: '1', levels: null })
+      expect(levels).toHaveBeenCalledTimes(2)
+      runtime.owner.takeMicrophoneLevels = vi.fn()
+      await expect(client.call('owner', 'takeMicrophoneLevels', [])).rejects.toThrow('Unknown Box audio command')
+      expect(runtime.owner.takeMicrophoneLevels).not.toHaveBeenCalled()
+    } finally { release?.({ generation: '1', levels: null }); await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
   it('preserves optional trailing arguments through the real JSON client/server boundary', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-audio-optional-'))
     const { runtime } = fake()
@@ -106,6 +144,7 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       const f = fake()
       f.runtime.microphones = {
         snapshot: async () => ({ generation: '77' } as any),
+        levels: async () => ({ generation: '77', levels: null } as any),
         setSelection: async (edit) => { f.calls.push(['edit', edit.expectedRevision]); return { ok: false, code: 'stale', error: 'stale', snapshot: null } }
       }
       return f
@@ -215,12 +254,15 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
     runtime.owner.rendererDetached = (id: number) => { if (id === 2) { generation = '0'; cancelled = true } }
     runtime.microphones = {
       snapshot: async () => ({ generation, revision: '7', levels: { peak: [.2] } } as any),
+      levels: async () => ({ generation, levels: { channelIndices: [0], peak: [.2], rms: [.1] } } as any),
       setSelection: async edit => ({ ok: false, code: 'stale', error: 'stale', snapshot: { revision: '7' } as any })
     }
     const host = await startBoxAudioHost(path, runtime)
     const first = createBoxAudioClient(path), second = createBoxAudioClient(path)
     try {
       expect(await first.call('service', 'microphones', [])).toMatchObject({ generation: '123' })
+      // The 20 Hz level read is a read-only service call stamped with the host epoch.
+      expect(await first.call('service', 'microphoneLevels', [])).toMatchObject({ generation: '123', epoch: host.epoch, levels: { peak: [.2] } })
       await expect(first.call('owner', 'begin', [2, {}, '9', () => {}])).rejects.toThrow('owned by the audio host')
       await expect(first.call('owner', 'cancel', [2, '123'])).rejects.toThrow('owned by the audio host')
       await first.call('owner', 'beginMonitor', [2, {}])

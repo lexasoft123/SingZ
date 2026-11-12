@@ -42,6 +42,7 @@ export async function runBoxAudioHost(authority: BoxAudioHostAuthority): Promise
     routingCapabilities: () => { initialize(); return routing!.boxRoutingCapabilities() },
     microphones: {
       snapshot: async () => { if (!microphones) throw new Error('Microphone supervisor starting'); return microphones.snapshot() },
+      levels: async () => { if (!microphones) throw new Error('Microphone supervisor starting'); return microphones.levels() },
       setSelection: async edit => { if (!microphones) throw new Error('Microphone supervisor starting'); return microphones.setSelection(edit) }
     },
     shutdown: async () => {

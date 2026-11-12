@@ -1,7 +1,7 @@
 import { connect, type Socket } from 'node:net'
 import { lstat } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { BOX_AUDIO_VERSION, BOX_AUDIO_PENDING, BOX_AUDIO_REQUEST_BYTES, BOX_AUDIO_REPLY_BYTES, boxAudioCounter, boxAudioReadOnly, boxAudioMeasurementMethod, type BoxAudioTarget } from '../../shared/box-audio'
+import { BOX_MICROPHONE_LEVEL_TIMEOUT_MS, BOX_AUDIO_VERSION, BOX_AUDIO_PENDING, BOX_AUDIO_REQUEST_BYTES, BOX_AUDIO_REPLY_BYTES, boxAudioCounter, boxAudioReadOnly, boxAudioMeasurementMethod, type BoxAudioTarget } from '../../shared/box-audio'
 import { boxAudioLines, boxAudioEncode, boxAudioMeasurementFromWire } from './wire'
 
 export class BoxAudioUncertainError extends Error {
@@ -122,7 +122,7 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
           if (key) sinks.delete(key)
           if (!readOnly) { uncertain = true; unknownEpoch = sentEpoch }
           reject(readOnly ? new Error('Box audio query timed out') : new BoxAudioUncertainError('Box audio mutation timed out; outcome unknown'))
-        }, options.timeoutMs ?? 120_000)
+        }, options.timeoutMs ?? (target === 'service' && method === 'microphoneLevels' ? BOX_MICROPHONE_LEVEL_TIMEOUT_MS * 2 : 120_000))
         pending.set(id, { resolve: (value, replyEpoch) => {
           try {
             const decoded = boxAudioMeasurementMethod(target, method)

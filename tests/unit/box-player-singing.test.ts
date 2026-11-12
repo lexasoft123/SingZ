@@ -7,7 +7,8 @@ import { box as en } from '../../src/shared/i18n/en/box'
 import { box as ru } from '../../src/shared/i18n/ru/box'
 import { box as zh } from '../../src/shared/i18n/zh-CN/box'
 import { clampTranspose, createKeyChanger, stepTranspose, TRANSPOSE_MAX, TRANSPOSE_MIN } from '../../src/renderer/src/box/key-change'
-import { MICROPHONE_SINGING_PEAK, microphoneMeterFill, microphoneMeterState, microphoneSlotStatus } from '../../src/renderer/src/box/microphones'
+import { MICROPHONE_SINGING_PEAK, microphoneLevelDb, microphoneMeterState, microphoneSlotStatus } from '../../src/renderer/src/box/microphones'
+import { PLAYER_METER_SIZE } from '../../src/renderer/src/box/MicrophoneMeter'
 import { SongDetails } from '../../src/renderer/src/box/SongDetails'
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void
@@ -39,7 +40,9 @@ describe('player microphone meter readability', () => {
     expect(settingsCss).not.toMatch(/\.player-meters > \.player-microphone-row|\.player-microphone-row > span:first-child|\.player-microphone-level/)
     expect(px(rule('.player-microphone-name'), 'font-size')).toBeGreaterThanOrEqual(18)
     expect(px(rule('.player-meters .mic-meter-state'), 'font-size')).toBeGreaterThanOrEqual(18)
-    expect(px(rule('.player-meters .mic-meter-bar'), 'height')).toBeGreaterThanOrEqual(16)
+    // The kit mini meter is 9 px at size 1; the player scales it to the old 16 px bar.
+    expect(9 * PLAYER_METER_SIZE).toBeGreaterThanOrEqual(16); expect(9 * PLAYER_METER_SIZE).toBeLessThanOrEqual(17)
+    expect(px(rule('.player-meters .mic-meter-bar'), 'width')).toBeGreaterThanOrEqual(120)
     const rowsHeight = 2 * px(rule('.player-microphone-name'), 'line-height') + px(rule('.player-meters'), 'gap')
     expect(rowsHeight).toBeLessThanOrEqual(px(rule('.player-transport'), 'height'))
   })
@@ -72,11 +75,12 @@ describe('microphone meter state', () => {
     for (const kind of ['off', 'starting', 'no-input', 'unavailable'] as const) expect(microphoneMeterState({ kind })).toBe(kind)
     expect(microphoneSlotStatus(undefined, 0).kind).toBe('unavailable')
   })
-  it('fills the bar on a dB scale', () => {
-    expect(microphoneMeterFill(0)).toBe(0)
-    expect(microphoneMeterFill(1)).toBe(1)
-    expect(microphoneMeterFill(0.01)).toBeCloseTo(0.2, 5)
-    expect(microphoneMeterFill(1e-9)).toBe(0)
+  it('converts linear peak to dBFS for the kit meter, silence being -Infinity', () => {
+    expect(microphoneLevelDb(1)).toBe(0)
+    expect(microphoneLevelDb(0.5)).toBeCloseTo(-6.0206, 4)
+    expect(microphoneLevelDb(0.01)).toBeCloseTo(-40, 6)
+    expect(microphoneLevelDb(MICROPHONE_SINGING_PEAK)).toBeCloseTo(-30.46, 2)
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) expect(microphoneLevelDb(bad)).toBe(Number.NEGATIVE_INFINITY)
   })
 })
 

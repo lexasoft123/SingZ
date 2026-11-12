@@ -5,7 +5,7 @@ import { laneLabel, stemLabel, TRACK_META } from '../model'
 import { t } from './i18n'
 import { playbackStatusKey, type PlaybackStatus } from './playback-status'
 import { MicrophoneMeter } from './MicrophoneMeter'
-import { microphoneSlotStatus, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
+import { useMicrophoneSlotState, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 
 export type MixerTab = 'main' | 'stems'
 
@@ -109,12 +109,11 @@ export function Mixer({
 
 /** Input observation only: private analysis does not control monitor gain/mute. */
 export function MixerMicrophoneRow({ id, microphones, snapshot: snapshotProp }: { id: 'mic1' | 'mic2'; microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
-  const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
   const channel = id === 'mic1' ? 0 : 1
-  const status = microphoneSlotStatus(snapshot, channel)
+  const state = useMicrophoneSlotState(microphones, snapshotProp, channel)
   const label = t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')
-  return <div className={`mixer-row mixer-mic-row${status.kind === 'level' ? '' : ' unavailable'}`} data-mix-row={id}>
+  return <div className={`mixer-row mixer-mic-row${state === 'singing' || state === 'quiet' || state === 'loud' ? '' : ' unavailable'}`} data-mix-row={id}>
     <div className="mixer-channel"><i /><div><strong>{label}</strong></div></div>
-    <div className="mixer-level"><MicrophoneMeter status={status} channel={channel} meterId={id} /></div>
+    <div className="mixer-level"><MicrophoneMeter source={microphones} snapshot={snapshotProp} slot={channel} meterId={id} /></div>
   </div>
 }

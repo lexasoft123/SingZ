@@ -1,8 +1,10 @@
+import { readAlsaCaptureTiming, type AlsaCaptureTiming } from './meter-trace'
 import { performance } from 'node:perf_hooks'
-import { BOX_HOST_ANALYSIS_OWNER, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
+import { BOX_HOST_ANALYSIS_OWNER, type BoxMicrophoneLevels, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
 import type { CaptureAnalysisWindow, CaptureInputDevice, CaptureStartConfig, CaptureStartResult, CaptureStateName, CaptureStats } from '../../shared/types'
 import { microphoneCounter, validMicrophoneSelection, type MicrophoneDocument, type MicrophoneStore } from './microphone-store'
 
+type MicrophoneLevelValues = NonNullable<BoxMicrophoneSnapshot['levels']>
 type Awaitable<T> = T | Promise<T>
 export interface MicrophoneAnalysisOwner {
   devices(): Awaitable<{ ok: boolean; devices: CaptureInputDevice[]; error?: string }>
@@ -10,6 +12,7 @@ export interface MicrophoneAnalysisOwner {
   cancel(id: number, generation: string): Awaitable<{ ok: boolean; cancelled?: boolean; error?: string }>
   state(): Awaitable<{ state: CaptureStateName; ownershipGeneration: string; error: string }>
   stats(): Awaitable<CaptureStats>
+  takeMicrophoneLevels(): Awaitable<CaptureStats['microphoneLevels']>
 }
 interface Options {
   epoch: string
@@ -19,8 +22,8 @@ interface Options {
   now?: () => number
   log?: (message: string) => void
 }
-/** Analysis owns a private tap only. All control operations, including reads,
- * share one queue; native cancel joins the reader before the next begin. */
+/** Analysis owns a private tap only. Controls and full snapshots share one
+ * queue; fast levels are generation-fenced. Native cancel joins before begin. */
 export class MicrophoneAnalysisSupervisor {
   readonly ready: Promise<void>
   private chain: Promise<unknown> = Promise.resolve()
@@ -40,6 +43,10 @@ export class MicrophoneAnalysisSupervisor {
   private offlineAt: number | null = null
   private generationCounter = BigInt(Date.now()) * 1000n
   private pitch: { window: CaptureAnalysisWindow; at: number } | null = null
+  private readonly tracing = process.env.SINGZ_BOX_METER_TRACE === '1'
+  private hardwareGeneration: string | null = null
+  private hardware: AlsaCaptureTiming[] | null = null
+  private peakSinceFast: { generation: string; peak: number[]; at: number } | null = null
   private value: BoxMicrophoneSnapshot
   private now: () => number
   constructor(private readonly options: Options) {
@@ -93,7 +100,46 @@ export class MicrophoneAnalysisSupervisor {
       if (state.ownershipGeneration === this.value.generation) throw new Error('Microphone shutdown was not confirmed')
     }
     this.value.generation = '0'; this.value.active = null; this.value.levels = null; this.value.pitch = null
-    this.pitch = null; this.runningAt = null; this.offlineAt = null; this.startedRunning = false
+    this.pitch = null; this.peakSinceFast = null; this.runningAt = null; this.offlineAt = null; this.startedRunning = false
+  }
+  /** Validated copy of a native level read for `generation`, else null. The fast native
+   * read drains interval peaks; diagnostics/snapshots observe only the latest block. Every read also
+   * folds into `peakSinceFast`, so a snapshot or tick read can never swallow a
+   * transient that the fast level path has not delivered yet. */
+  private readLevels(levels: CaptureStats['microphoneLevels'], generation: string): MicrophoneLevelValues | null {
+    if (!(levels?.valid && levels.ownershipGeneration === generation && levels.channelIndices &&
+      levels.channelIndices.length === levels.peak.length && levels.peak.length === levels.rms.length &&
+      levels.peak.every(Number.isFinite) && levels.rms.every(Number.isFinite))) return null
+    const held = this.peakSinceFast
+    const peak = levels.peak.map((value, index) => Math.max(value, held?.generation === generation && this.now() - held.at < 250 ? held.peak[index] ?? 0 : 0))
+    this.peakSinceFast = { generation, peak: peak.slice(), at: this.now() }
+    return { channelIndices: [...levels.channelIndices], peak, rms: [...levels.rms] }
+  }
+  /** Fresh level read for the renderer's display-aligned meters: one native meter read, no
+   * state/selection/pitch work and no whole-snapshot clone. It is read-only, so it
+   * does not join the control queue; a generation change during the await is
+   * caught by the ownership-generation check. Peak is the loudest block since the
+   * previous fast read. */
+  async levels(): Promise<BoxMicrophoneLevels> {
+    const receiveNs = this.tracing ? process.hrtime.bigint().toString() : undefined
+    const generation = this.value.generation
+    const empty = { epoch: this.options.epoch, generation, levels: null }
+    if (this.disposed || generation === '0' || this.value.phase !== 'running' || !this.value.active) return empty
+    const width = this.value.active.enabledChannels.length
+    if (this.tracing && this.hardwareGeneration !== generation) {
+      this.hardwareGeneration = generation; this.hardware = null
+      void readAlsaCaptureTiming().then(value => { if (this.hardwareGeneration === generation) this.hardware = value })
+    }
+    const native = await this.options.owner.takeMicrophoneLevels()
+    const readNs = this.tracing ? process.hrtime.bigint().toString() : undefined
+    const levels = this.readLevels(native, generation)
+    if (this.value.generation !== generation || !levels || levels.peak.length !== width) return empty
+    this.peakSinceFast = null
+    const trace = this.tracing && native?.trace ? { ...native.trace,
+      points: native.trace.points.map((point, i) => ({ ...point, matched: point.matched && levels.peak[i] === native.peak[i] })),
+      hostReceiveNs: receiveNs!, hostReadNs: readNs!, hostSendNs: process.hrtime.bigint().toString(),
+      hardware: this.hardware, device: this.value.active!.device, label: this.value.active!.label } : undefined
+    return { epoch: this.options.epoch, generation, levels, ...(trace ? { trace } : {}) }
   }
   private async observe(): Promise<void> {
     if (this.value.generation === '0') return
@@ -118,11 +164,7 @@ export class MicrophoneAnalysisSupervisor {
     this.runningAt ??= this.now()
     if (this.now() - this.runningAt >= 5000) this.failures = 0
     this.value.phase = 'running'; this.value.reason = ''; this.value.detail = ''
-    const levels = (await this.options.owner.stats()).microphoneLevels
-    this.value.levels = levels?.valid && levels.ownershipGeneration === this.value.generation && levels.channelIndices &&
-      levels.channelIndices.length === levels.peak.length && levels.peak.length === levels.rms.length &&
-      levels.peak.every(Number.isFinite) && levels.rms.every(Number.isFinite)
-      ? { channelIndices: [...levels.channelIndices], peak: [...levels.peak], rms: [...levels.rms] } : null
+    this.value.levels = this.readLevels((await this.options.owner.stats()).microphoneLevels, this.value.generation)
     this.value.pitch = this.pitch && this.pitch.window.ownershipGeneration === this.value.generation
       ? { frequency: this.pitch.window.frequency, clarity: this.pitch.window.clarity, ageMs: Math.max(0, this.now() - this.pitch.at) } : null
   }

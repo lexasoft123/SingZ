@@ -2120,57 +2120,12 @@ body.win:not(.glass) .drop-overlay {
 }
 
 .mic-meter {
-  position: relative;
-  height: 22px;
   margin-top: 7px;
-  overflow: hidden;
-  background:
-    linear-gradient(90deg, transparent 0 66.66%, rgba(255, 180, 75, 0.06) 66.66% 83.33%, rgba(255, 98, 76, 0.08) 83.33%),
-    #0c0b09;
-  border: 1px solid var(--line-strong);
-  border-radius: 5px;
 }
 
-.mic-meter-fill {
-  position: absolute;
-  inset: 4px auto 4px 4px;
-  max-width: calc(100% - 8px);
-  border-radius: 2px;
-  background: linear-gradient(90deg, #5e8f82 0 67%, #d5a54e 82%, #d46655 100%);
-  box-shadow: 0 0 8px rgba(94, 143, 130, 0.3);
-  transition: width 80ms linear;
+.mic-meter.error {
+  opacity: 0.6;
 }
-
-.mic-meter-peak {
-  position: absolute;
-  top: 3px;
-  bottom: 3px;
-  width: 1px;
-  background: #f6dca9;
-  opacity: 0.9;
-  transition: left 80ms linear;
-}
-
-.mic-meter.error .mic-meter-fill,
-.mic-meter.error .mic-meter-peak {
-  opacity: 0;
-}
-
-.mic-meter-tick {
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  color: rgba(243, 230, 205, 0.38);
-  font: 8px/18px var(--font-mono);
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
-  padding-left: 2px;
-  pointer-events: none;
-}
-
-.mic-meter-tick.tick-48 { left: 33.33%; }
-.mic-meter-tick.tick-24 { left: 66.66%; }
-.mic-meter-tick.tick-12 { left: 83.33%; }
-.mic-meter-tick.tick-0 { right: 2px; }
 
 .mic-preview-status {
   min-height: 16px;
@@ -2619,8 +2574,6 @@ body.win:not(.glass) .drop-overlay {
     animation: none;
   }
 
-  .mic-meter-fill,
-  .mic-meter-peak,
   .dsp-graph-node-meter > span {
     transition: none;
   }
@@ -5557,8 +5510,7 @@ body.win:not(.glass) .modal-card.lyed-card {
 .song-output-placeholder { width: 134px; }
 .pill.song-output-trigger { gap: 8px; height: 30px; padding: 0 10px; border-radius: 8px; }
 .song-output-trigger-value { min-width: 56px; font: 10px var(--font-mono); font-variant-numeric: tabular-nums; }
-.output-mini-track { position: relative; display: block; width: 28px; height: 12px; overflow: hidden; background: var(--panel-deep); border-radius: 2px; }
-.output-peak-fill { display: block; width: 0; height: 100%; background: var(--sz-success); }
+.output-mini-track { position: relative; display: block; width: 56px; --sz-meter-gap: 1px; }
 .output-clip-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--line-strong); }
 .has-clip .output-clip-dot { background: var(--danger); box-shadow: 0 0 7px color-mix(in srgb, var(--danger) 45%, transparent); }
 .train-pop.song-output-pop { width: 328px; padding: 20px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--panel); box-shadow: 0 20px 60px #0008, inset 0 1px 0 #ffffff06; }
@@ -5589,9 +5541,7 @@ body.win:not(.glass) .modal-card.lyed-card {
 .output-clip-reset { display: inline-flex; align-items: center; gap: 4px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; background: none; color: var(--faint); font: 9px var(--font-mono); cursor: pointer; }
 .output-clip-reset i { width: 4px; height: 4px; background: currentColor; border-radius: 1px; }
 .has-clip .output-clip-reset { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); background: color-mix(in srgb, var(--danger) 8%, transparent); }
-.output-meter-track { height: 14px; position: relative; overflow: hidden; background: var(--panel-deep); border: 1px solid var(--line); border-radius: 3px; }
-.output-meter-track::after { content: ''; position: absolute; inset: 0; background: repeating-linear-gradient(to right, transparent 0 5px, var(--panel) 5px 7px); pointer-events: none; }
-.output-meter-track .output-peak-fill { background: linear-gradient(to right, var(--sz-success) 0 80%, var(--accent) 80% 95%, var(--danger) 95%); background-size: 286px 100%; }
+.output-meter-track { position: relative; }
 .output-meter-ticks span:nth-child(2) { left: 40%; }
 .output-meter-ticks span:nth-child(3) { left: 70%; }
 .output-meter-ticks span:nth-child(4) { left: 90%; }

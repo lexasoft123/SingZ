@@ -12,6 +12,7 @@ import type {
 } from '../shared/types'
 
 const box: BoxAPI = {
+  ...(process.env.SINGZ_BOX_METER_TRACE === '1' ? { meterTraceEnabled: true as const } : {}),
   getState: () => ipcRenderer.invoke('box:state-get'),
   setPreferences: (preferences) => ipcRenderer.invoke('box:preferences-set', preferences),
   saveQueue: (queue) => ipcRenderer.invoke('box:queue-save', queue),
@@ -24,6 +25,7 @@ const box: BoxAPI = {
   stopRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-stop', expected),
   restoreRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-restore', expected),
   microphones: () => ipcRenderer.invoke('box:microphones'),
+  microphoneLevels: () => ipcRenderer.invoke('box:microphone-levels'),
   setMicrophoneSelection: edit => ipcRenderer.invoke('box:microphone-selection-set', edit),
   routingSnapshot: () => ipcRenderer.invoke('box:routing-snapshot'),
   routingEdit: edit => ipcRenderer.invoke('box:routing-edit', edit),

@@ -1,8 +1,11 @@
+import type { CaptureMeterTrace } from './types'
 /** Local control protocol only. PCM and mutable native clock metadata never enter it. */
 export const BOX_AUDIO_VERSION = 1
 export const BOX_AUDIO_REQUEST_BYTES = 1024 * 1024
 export const BOX_AUDIO_REPLY_BYTES = 16 * 1024 * 1024
 export const BOX_AUDIO_PENDING = 64
+/** Meter queries must settle quickly without occupying the transport control queue. */
+export const BOX_MICROPHONE_LEVEL_TIMEOUT_MS = 500
 export type BoxAudioTarget = 'owner' | 'binding' | 'export' | 'routing' | 'service'
 export interface BoxAudioCommand {
   version: 1; type: 'request'; epoch: string; id: string
@@ -16,7 +19,7 @@ export interface BoxAudioReply {
 export const boxAudioCounter = (value: unknown): value is string =>
   typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value)
 export const boxAudioReadOnly = (target: BoxAudioTarget, method: string): boolean =>
-  target === 'service' && (method === 'reconcile' || method === 'associateRetainedProject' || method === 'microphones') ||
+  target === 'service' && (method === 'reconcile' || method === 'associateRetainedProject' || method === 'microphones' || method === 'microphoneLevels') ||
   target === 'routing' && method === 'capabilities' ||
   target === 'owner' && new Set(['devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus',
     'playbackProviders', 'playbackCapability', 'playbackStatus', 'state', 'stats']).has(method)
@@ -87,6 +90,22 @@ export interface BoxMicrophoneSnapshot {
   levels: { channelIndices: number[]; peak: number[]; rms: number[] } | null
   /** Age on the host monotonic clock. */
   pitch: { frequency: number; clarity: number; ageMs: number } | null
+}
+export interface BoxMeterTrace extends CaptureMeterTrace {
+  hostReceiveNs: string; hostReadNs: string; hostSendNs: string
+  hardware: Array<{ card: string; id: string; pcm: string; subdevice: string; rate: number; channels: number;
+    periodFrames: number; bufferFrames: number; periodMs: number; bufferMs: number }> | null
+  device: string; label: string
+}
+/** Level-only read for the on-screen meters; much smaller than a snapshot. */
+export interface BoxMicrophoneLevels {
+  /** Present only with SINGZ_BOX_METER_TRACE=1 in the host. */
+  trace?: BoxMeterTrace
+  epoch: string
+  /** Capture generation the levels belong to; '0' when none. */
+  generation: string
+  /** Null unless the native meter is valid for `generation`. Peak is the loudest block since the previous level read. */
+  levels: { channelIndices: number[]; peak: number[]; rms: number[] } | null
 }
 export interface BoxMicrophoneSelectionEdit {
   expectedRevision: string

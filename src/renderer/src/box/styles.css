@@ -167,7 +167,7 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .player-meters { display: flex; flex-direction: column; justify-content: center; gap: 4px; margin-left: 4px; white-space: nowrap; }
 .player-microphone-row { display: flex; align-items: center; gap: 10px; }
 .player-microphone-name { width: 54px; font-size: 18px; line-height: 24px; font-weight: 600; color: var(--sz-text); }
-.player-meters .mic-meter-bar { width: 120px; height: 16px; }
+.player-meters .mic-meter-bar { flex: 0 0 120px; width: 120px; }
 .player-meters .mic-meter-state { width: 92px; font-size: 18px; line-height: 24px; }
 .player-hints { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; font-size: 14px; color: var(--sz-dim); min-height: 18px; }
 .player-hints b { font: 12px var(--sz-font-mono); color: var(--sz-text); margin-left: 16px; margin-right: 5px; }
@@ -292,13 +292,10 @@ body.win:not(.glass) .box-tv .modal-scrim { background: rgba(18, 16, 13, .96); b
 
 /* Microphone meter: large bar and a plain word, shared by the player and the mixer. */
 .mic-meter { display: flex; align-items: center; gap: 14px; min-width: 0; }
-.mic-meter-bar { display: block; flex: 1 1 auto; width: 100%; min-width: 80px; height: 16px; overflow: hidden; background: var(--sz-line-strong); border-radius: 8px; }
-.mic-meter-bar > span { display: block; width: 100%; height: 100%; transform-origin: left; background: var(--sz-accent); border-radius: 8px; }
+.mic-meter-bar { display: block; flex: 1 1 auto; width: 100%; min-width: 80px; }
 .mic-meter-state { flex: 0 0 150px; font-size: 22px; line-height: 28px; font-weight: 650; color: var(--sz-dim); }
 .mic-meter[data-mic-state="singing"] .mic-meter-state { color: var(--sz-success); }
-.mic-meter[data-mic-state="singing"] .mic-meter-bar > span { background: var(--sz-success); }
 .mic-meter[data-mic-state="loud"] .mic-meter-state { color: var(--sz-danger); }
-.mic-meter[data-mic-state="loud"] .mic-meter-bar > span { background: var(--sz-danger); }
 .player-meters .mic-meter { gap: 8px; }
 .mixer-level .mic-meter { flex: 1; }
 /* Key change on song details. */

@@ -3,6 +3,7 @@
 #include <memory>
 #include <array>
 #include <span>
+#include <chrono>
 #include <loopz/audio_scene.hpp>
 namespace singz {
 namespace box_input_detail {
@@ -13,7 +14,21 @@ std::optional<loopz::AudioReadResult> readEnabledChannels(
 }
 // Private native-rate analysis tap of the LoopZ-owned capture bus. Lifecycle calls run on
 // the routing control owner; stop drains its reader before releasing the lease.
+// Opt-in diagnostics allocated on the control reader, never the capture callback.
+struct BoxMeterTracePoint {
+  uint64_t sampleHostTimeNs{}, deliveryNs{}, analysisNs{}, serial{}, epoch{};
+  uint32_t frames{}, queueDepth{}, quality{};
+  double rate{};
+  float peak{};
+};
+struct BoxInputMeterTrace {
+  uint64_t readNs{};
+  uint32_t queueDepth{};
+  std::array<BoxMeterTracePoint, 64> points{};
+  std::array<bool, 64> matched{};
+};
 struct BoxInputMeter {
+  std::unique_ptr<BoxInputMeterTrace> trace;
   bool valid{false};
   uint32_t channels{0};
   std::array<float, 64> peak{}, rms{};
@@ -21,7 +36,7 @@ struct BoxInputMeter {
 };
 class BoxInputCapture final {
  public:
-  BoxInputCapture();
+  explicit BoxInputCapture(std::chrono::milliseconds peakHold = std::chrono::milliseconds{250});
   ~BoxInputCapture();
   BoxInputCapture(const BoxInputCapture&) = delete;
   BoxInputCapture& operator=(const BoxInputCapture&) = delete;
@@ -30,7 +45,8 @@ class BoxInputCapture final {
                         std::span<const uint32_t> enabledChannels = {});
   void stop(bool retainPrepared = false);
   AudioInputStats stats() const;
-  BoxInputMeter meter() const;
+  // Diagnostics observe the latest block; only the fast meter drains the hold.
+  BoxInputMeter meter(bool consumePeak = false) const;
   AudioInputState state() const;
   std::string lastError() const;
  private:

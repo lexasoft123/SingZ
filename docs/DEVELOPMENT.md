@@ -1256,6 +1256,10 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
   GPU Chromium composites on strong enough for glass (`body.glass`,
   `src/main/glass.ts`). Every blur needs its `body.win:not(.glass)` twin;
   `tests/unit/windows-no-blur.test.ts` enforces it.
+- Fast meter polling follows actual surface and document visibility; mounted but
+  hidden controls retain only slow state reads. Diagnostic stats must not drain
+  peaks held for the visible meter, and stalled meter queries must leave the
+  transport control queue available.
 - The pitch strip repaints only when position/view/size/transpose/melody/mic
   trail change; idle karaoke must stay at ~0% GPU.
 
