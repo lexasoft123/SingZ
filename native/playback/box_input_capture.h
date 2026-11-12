@@ -3,6 +3,7 @@
 #include <memory>
 #include <array>
 #include <span>
+#include <chrono>
 #include <loopz/audio_scene.hpp>
 namespace singz {
 namespace box_input_detail {
@@ -21,7 +22,7 @@ struct BoxInputMeter {
 };
 class BoxInputCapture final {
  public:
-  BoxInputCapture();
+  explicit BoxInputCapture(std::chrono::milliseconds peakHold = std::chrono::milliseconds{250});
   ~BoxInputCapture();
   BoxInputCapture(const BoxInputCapture&) = delete;
   BoxInputCapture& operator=(const BoxInputCapture&) = delete;

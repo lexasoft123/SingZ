@@ -30,6 +30,8 @@ uint64_t nowNs() {
 }
 } // namespace
 struct BoxInputCapture::Impl {
+  explicit Impl(std::chrono::milliseconds hold) : peakHoldNs(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::max(hold, std::chrono::milliseconds{1})).count())) {}
+  const uint64_t peakHoldNs;
   BoxInputTap tap;
   std::array<uint32_t, 64> enabledChannels{};
   uint32_t enabledCount = 0, analysisIndex = 0;
@@ -86,7 +88,7 @@ struct BoxInputCapture::Impl {
           meterSequence.fetch_add(1, std::memory_order_acq_rel);
           std::atomic_thread_fence(std::memory_order_release);
           const auto readAt = meterReadAt.load(std::memory_order_relaxed);
-          const bool holding = current >= readAt && current - readAt < 250000000;
+          const bool holding = current >= readAt && current - readAt < peakHoldNs;
           for (uint32_t c = 0; c < enabledCount; ++c) {
             float high = 0;
             double sum = 0;
@@ -159,7 +161,7 @@ struct BoxInputCapture::Impl {
     }
   }
 };
-BoxInputCapture::BoxInputCapture() : impl_(std::make_unique<Impl>()) {}
+BoxInputCapture::BoxInputCapture(std::chrono::milliseconds peakHold) : impl_(std::make_unique<Impl>(peakHold)) {}
 BoxInputCapture::~BoxInputCapture() { stop(); }
 AudioInputResult BoxInputCapture::start(const AudioInputConfig &config,
                                         AudioInputSink sink,

@@ -35,6 +35,7 @@ const COUNTER = /^(0|[1-9][0-9]{0,19})$/
 export const MICROPHONE_LEVEL_POLL_MS = 50
 export const MICROPHONE_STATE_POLL_MS = 1000
 export const MICROPHONE_IDLE_POLL_MS = 2000
+export const MICROPHONE_LEGACY_POLL_MS = 200
 /** A level or read older than this is never shown. */
 export const MICROPHONE_FRESH_MS = 750
 
@@ -87,6 +88,8 @@ export class BoxMicrophones {
   private levelPolling = false
   private nextLevelAttempt = 0
   private levelFailures = 0
+  private legacyLevelEpoch: string | null = null
+  private wasWatching = false
   private pendingEdit = false
   /** Bumped by every edit so a read that started earlier cannot overwrite it. */
   private editSeq = 0
@@ -118,7 +121,6 @@ export class BoxMicrophones {
   }
   subscribe = (listener: () => void): (() => void) => {
     const first = !this.fastListeners.size
-    if (first) { this.subscribedAt = this.now(); this.lastPollStartedAt = Number.NEGATIVE_INFINITY; this.lastLevelPollStartedAt = Number.NEGATIVE_INFINITY }
     this.fastListeners.add(listener)
     const unsubscribe = this.subscribeState(listener)
     if (first) this.retime()
@@ -148,6 +150,12 @@ export class BoxMicrophones {
     if (this.disposed || !this.connected) return
     clearInterval(this.timer)
     const watching = this.watching()
+    if (watching && !this.wasWatching) {
+      this.subscribedAt = this.now()
+      this.lastPollStartedAt = this.lastLevelPollStartedAt = Number.NEGATIVE_INFINITY
+      this.nextLevelAttempt = 0; this.levelFailures = 0
+    }
+    this.wasWatching = watching
     this.timer = setInterval(() => this.tick(), watching ? MICROPHONE_LEVEL_POLL_MS : MICROPHONE_IDLE_POLL_MS)
     if (watching) this.tick()
   }
@@ -155,8 +163,12 @@ export class BoxMicrophones {
     this.expire()
     const time = this.now()
     if (this.watching()) {
-      if (time - this.lastLevelPollStartedAt >= MICROPHONE_LEVEL_POLL_MS - 5) void this.pollLevels()
-      if (time - this.lastPollStartedAt >= MICROPHONE_STATE_POLL_MS) void this.poll()
+      if (this.legacyLevelEpoch !== null && this.legacyLevelEpoch === this.value.epoch) {
+        if (time - this.lastPollStartedAt >= MICROPHONE_LEGACY_POLL_MS) void this.poll()
+      } else {
+        if (time - this.lastLevelPollStartedAt >= MICROPHONE_LEVEL_POLL_MS - 5) void this.pollLevels()
+        if (time - this.lastPollStartedAt >= MICROPHONE_STATE_POLL_MS) void this.poll()
+      }
     } else if (time - this.lastPollStartedAt >= MICROPHONE_IDLE_POLL_MS - 5) void this.poll()
   }
   /** Re-read the host now (Settings refresh, stale edit). */
@@ -183,6 +195,7 @@ export class BoxMicrophones {
   private apply(host: BoxMicrophoneSnapshot, startedAt = Number.POSITIVE_INFINITY): void {
     const time = this.now()
     this.lastReadAt = time
+    if (host.epoch !== this.value.epoch) this.legacyLevelEpoch = null
     const channels: Record<string, number[]> = Object.create(null)
     for (const [uid, list] of Object.entries(host.selection.channels)) channels[uid] = [...list]
     const raw = validLevels(host.phase, host.generation, host.active, host.levels)
@@ -232,19 +245,31 @@ export class BoxMicrophones {
     this.levelPolling = true
     this.lastLevelPollStartedAt = this.now()
     const seq = this.editSeq
+    const epoch = this.value.epoch
     try {
       const result = await this.api.microphoneLevels()
-      if (this.disposed || seq !== this.editSeq) return
-      if (!result.ok) { this.levelFailed(result.error); return }
+      if (this.disposed || seq !== this.editSeq || epoch !== this.value.epoch) return
+      if (!result.ok) { if (!this.useLegacyLevels(result.error, epoch)) this.levelFailed(result.error); return }
       this.levelFailures = 0; this.nextLevelAttempt = 0
       this.applyLevels(result.value)
     } catch (error) {
-      if (!this.disposed && seq === this.editSeq) this.levelFailed(String(error))
+      if (!this.disposed && seq === this.editSeq && epoch === this.value.epoch && !this.useLegacyLevels(String(error), epoch)) this.levelFailed(String(error))
     } finally { this.levelPolling = false }
   }
+  /** Old persistent hosts remain valid during a UI upgrade. Probe once per epoch. */
+  private useLegacyLevels(detail: string, epoch: string | null): boolean {
+    if (epoch !== this.value.epoch || !/Unknown Box audio command$/i.test(detail.trim())) return false
+    this.legacyLevelEpoch = epoch
+    this.nextLevelAttempt = 0; this.levelFailures = 0
+    this.lastPollStartedAt = Number.NEGATIVE_INFINITY
+    void this.poll()
+    return true
+  }
   private levelFailed(detail: string): void {
-    this.nextLevelAttempt = this.now() + [1000, 2000, 4000, 5000][Math.min(this.levelFailures++, 3)]
-    this.unreachable(detail)
+    const firstTimeout = this.levelFailures === 0 && /timed?\s*out|timeout/i.test(detail)
+    this.nextLevelAttempt = this.now() + (firstTimeout ? MICROPHONE_LEVEL_POLL_MS : [1000, 2000, 4000, 5000][Math.min(this.levelFailures, 3)])
+    ++this.levelFailures
+    if (!firstTimeout) this.unreachable(detail)
   }
   private applyLevels(host: BoxMicrophoneLevels): void {
     const active = this.value.active

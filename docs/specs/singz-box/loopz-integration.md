@@ -218,7 +218,11 @@ additionally read `service.microphoneLevels` (levels only; the peak is the loude
 capture block since the previous level read) at 20 Hz, and only while a meter is
 subscribed; the full snapshot is then read once a second, or every 2 s with no
 meter on screen. The renderer feeds the UI-kit `PeakMeter` through
-`PeakMeterHandle.push`, so a reading never renders React. Hardware
+`PeakMeterHandle.push`, so a reading never renders React. An older persistent
+host may lack the level-only command during a UI upgrade: cache that capability
+by host epoch and use fresh full snapshots at 5 Hz until the host changes, without
+reporting a microphone fault. A single level timeout keeps valid readings through
+a prompt retry. Hardware
 microphone monitoring continues independently, and selection/analysis never
 creates an audible microphone route.
 

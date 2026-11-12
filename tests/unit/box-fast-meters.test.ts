@@ -8,18 +8,32 @@ import SongOutput from '../../src/renderer/src/components/SongOutput'
 import { PlayerMicrophoneMeters } from '../../src/renderer/src/box/Player'
 import type { MultitrackEngine } from '../../src/renderer/src/audio/engine'
 import { MicrophoneMeter } from '../../src/renderer/src/box/MicrophoneMeter'
-import { MICROPHONE_LEVEL_POLL_MS, MICROPHONE_SINGING_HOLD_MS, microphoneLevelDb, microphoneSlotLevel, useMicrophoneSnapshot } from '../../src/renderer/src/box/microphones'
+import { MICROPHONE_LEVEL_POLL_MS, MICROPHONE_SINGING_HOLD_MS, microphoneLevelDb, microphoneSlotLevel, microphoneSlotStatus, useMicrophoneSnapshot } from '../../src/renderer/src/box/microphones'
 import { MicrophoneAnalysisSupervisor, type MicrophoneAnalysisOwner } from '../../src/main/box-audio/microphones'
 import type { MicrophoneDocument } from '../../src/main/box-audio/microphone-store'
 import type { CaptureInputDevice, CaptureStartResult, CaptureStats } from '../../src/shared/types'
 import { device, fakeHost, newStore } from './box-microphone-host-fake'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+type MeterContext = { liveWidth: number; paints: number; globalAlpha: number; fillStyle: string; clearRect(): void; save(): void; restore(): void; beginPath(): void; roundRect(): void; fill(): void; clip(): void; fillRect(x: number, y: number, w: number): void }
+let canvases = new Map<HTMLCanvasElement, MeterContext>()
 let frames = new Map<number, FrameRequestCallback>(), frameId = 0, clock = 0
 beforeEach(async () => {
   vi.useFakeTimers(); vi.setSystemTime(1_000_000); await prepareBoxLocale('en')
   vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
   document.body.classList.remove('modal-open')
+  canvases = new Map()
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 120, height: 16, x: 0, y: 0, top: 0, left: 0, bottom: 16, right: 120, toJSON: () => ({}) })
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function(this: HTMLCanvasElement) {
+    let context = canvases.get(this)
+    if (!context) {
+      context = { liveWidth: 0, paints: 0, globalAlpha: 1, fillStyle: '',
+        clearRect() { this.liveWidth = 0; this.paints++ }, save() {}, restore() { this.globalAlpha = 1 }, beginPath() {}, roundRect() {}, fill() {}, clip() {},
+        fillRect(_x, _y, width) { if (this.globalAlpha === 1) this.liveWidth = Math.max(this.liveWidth, width) } }
+      canvases.set(this, context)
+    }
+    return context as unknown as CanvasRenderingContext2D
+  } as never)
   frames = new Map(); frameId = 0; clock = 0
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
@@ -77,11 +91,46 @@ describe('fresh level reads (no 1 s staleness)', () => {
 })
 const microphoneChannelPeak = (store: ReturnType<typeof newStore>, channel: number): number | null => microphoneSlotLevel(store.getSnapshot(), channel)
 
+describe('host version skew', () => {
+  it('uses fresh full-poll levels for an old host without publishing unavailable, and reprobes a new epoch', async () => {
+    const host = fakeHost(), store = newStore(host)
+    store.connect(); await vi.advanceTimersByTimeAsync(0)
+    host.api.microphoneLevels.mockResolvedValue({ ok: false, error: 'Error: Unknown Box audio command', code: 'audio-state' } as never)
+    const states: string[] = []
+    const unsubscribe = store.subscribe(() => states.push(microphoneSlotStatus(store.getSnapshot(), 0).kind))
+    await vi.advanceTimersByTimeAsync(2000)
+    host.patch({ levels: { channelIndices: [0, 1], peak: [.8, .5], rms: [.1, .1] } })
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(states).not.toContain('unavailable')
+    expect(microphoneChannelPeak(store, 0)).toBe(.8)
+    expect(host.api.microphoneLevels).toHaveBeenCalledTimes(1)
+    expect(host.api.microphones.mock.calls.length).toBeGreaterThanOrEqual(24)
+    host.api.microphoneLevels.mockImplementation(async () => ({ ok: true, value: { epoch: host.snapshot.epoch, generation: host.snapshot.generation, levels: host.snapshot.levels } }))
+    host.restart(); await vi.advanceTimersByTimeAsync(350)
+    expect(store.getSnapshot().epoch).toBe('e2')
+    expect(host.api.microphoneLevels.mock.calls.length).toBeGreaterThan(1)
+    unsubscribe(); store.dispose()
+  })
+})
+
 describe('stalled and stale level reads', () => {
+  it('silently retries a single 500 ms level timeout without blanking the meter', async () => {
+    const host = fakeHost(), store = newStore(host)
+    store.connect(); await vi.advanceTimersByTimeAsync(0)
+    host.api.microphoneLevels.mockImplementationOnce(() => new Promise((_resolve, reject) => setTimeout(() => reject(new Error('Microphone levels timed out')), 500)))
+    const states: string[] = []
+    const unsubscribe = store.subscribe(() => states.push(microphoneSlotStatus(store.getSnapshot(), 0).kind))
+    host.patch({ levels: { channelIndices: [0, 1], peak: [.8, .5], rms: [.1, .1] } })
+    await vi.advanceTimersByTimeAsync(700)
+    expect(states).not.toContain('unavailable')
+    expect(store.getSnapshot().phase).toBe('running')
+    expect(microphoneChannelPeak(store, 0)).toBe(.8)
+    unsubscribe(); store.dispose()
+  })
   it('backs off repeated settled failures instead of retrying with every state recovery', async () => {
     const host = fakeHost(), store = newStore(host)
     const attempts: number[] = []
-    host.api.microphoneLevels.mockImplementation(async () => { attempts.push(Date.now()); return { ok: false, error: 'timeout' } })
+    host.api.microphoneLevels.mockImplementation(async () => { attempts.push(Date.now()); return { ok: false, error: 'Host disconnected' } })
     store.connect(); await vi.advanceTimersByTimeAsync(0)
     const unsubscribe = store.subscribe(() => undefined)
     await vi.advanceTimersByTimeAsync(5000)
@@ -98,7 +147,7 @@ describe('stalled and stale level reads', () => {
     const unsubscribe = store.subscribe(() => undefined)
     await vi.advanceTimersByTimeAsync(5000)
     expect(host.api.microphoneLevels).toHaveBeenCalledTimes(1)
-    reject(new Error('timeout')); await vi.advanceTimersByTimeAsync(0)
+    reject(new Error('Host disconnected')); await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(950)
     expect(host.api.microphoneLevels).toHaveBeenCalledTimes(1)
     host.patch({ levels: { channelIndices: [0, 1], peak: [0.7, 0.5], rms: [0.1, 0.1] } })
@@ -110,6 +159,22 @@ describe('stalled and stale level reads', () => {
 })
 
 describe('meter visibility demand and cleanup', () => {
+  it('resumes a retained fast subscription without an unreachable phase while the fresh read settles', async () => {
+    const host = fakeHost(), store = newStore(host)
+    store.connect(); await vi.advanceTimersByTimeAsync(0)
+    const phases: string[] = []
+    const unsubscribe = store.subscribe(() => phases.push(store.getSnapshot().phase))
+    await vi.advanceTimersByTimeAsync(100)
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(2900)
+    host.api.microphones.mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve({ ok: true, value: host.snapshot }), 100)))
+    hidden.mockReturnValue(false); document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(phases).not.toContain('unreachable')
+    expect(store.getSnapshot().phase).toBe('running')
+    unsubscribe(); store.dispose()
+  })
   it('keeps hidden state-only observers running across the slow polling interval', async () => {
     const host = fakeHost(), store = newStore(host)
     store.connect(); await vi.advanceTimersByTimeAsync(0)
@@ -175,7 +240,7 @@ describe('kit PeakMeter is fed by push, not by React renders', () => {
     await act(async () => { root.render(createElement(Profiler, { id: 'meter', onRender: () => { commits++ } }, children(store))) })
     return { host, store, container, commits: () => commits, stop: () => { act(() => root.unmount()); store.dispose(); container.remove() } }
   }
-  const liveFill = (container: HTMLElement): number => Math.max(0, ...[...container.querySelectorAll<HTMLElement>('.sz-meter-live')].map(brick => Number(/scaleX\(([\d.]+)\)/.exec(brick.style.transform)?.[1] ?? 0)))
+  const liveFill = (container: HTMLElement): number => Math.max(0, ...[...container.querySelectorAll<HTMLElement>('.sz-meter-live')].map(brick => Number(/scaleX\(([\d.]+)\)/.exec(brick.style.transform)?.[1] ?? 0)), ...[...container.querySelectorAll('canvas')].map(canvas => canvases.get(canvas)?.liveWidth ?? 0))
   const sing = (host: ReturnType<typeof fakeHost>, peak: number) => host.patch({ levels: { channelIndices: [0, 1], peak: [peak, peak], rms: [0.1, 0.1] } })
 
   it('20 readings move the meter and leave the React render count unchanged', async () => {
@@ -187,7 +252,8 @@ describe('kit PeakMeter is fed by push, not by React renders', () => {
     expect(commits()).toBe(before)
     // The pushes did reach the meter: the loudest brick is lit well above an idle meter.
     expect(liveFill(container)).toBeGreaterThan(0)
-    expect(container.querySelectorAll('.sz-meter-brick').length).toBe(40)
+    expect(container.querySelectorAll('.sz-meter-canvas').length).toBe(1)
+    expect(container.querySelectorAll('.sz-meter-brick').length).toBe(0)
     expect(container.querySelector('.mic-meter-state')?.textContent).toBe('Singing')
     stop()
   })

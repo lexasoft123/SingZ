@@ -23,6 +23,15 @@ function fake() {
   return { runtime, calls }
 }
 describe.skipIf(process.platform === 'win32')('persistent Box audio control', () => {
+  it('contains a rejection thrown while formatting an out-of-queue level failure', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-meter-encode-'))
+    const { runtime } = fake()
+    runtime.microphones = { levels: async () => { throw { toString() { throw new Error('format failed') } } }, snapshot: async () => ({} as any), setSelection: async () => ({} as any) }
+    const host = await startBoxAudioHost(join(dir, 'audio.sock'), runtime)
+    const client = createBoxAudioClient(join(dir, 'audio.sock'), { timeoutMs: 100 })
+    try { await expect(client.call('service', 'microphoneLevels', [])).rejects.toThrow(/connection|closed|lost/i) }
+    finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
   it('bounds and coalesces stalled meter reads while transport controls remain available', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-meter-stall-'))
     const { runtime } = fake()

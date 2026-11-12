@@ -293,7 +293,7 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
         } catch (error) { send({ version: 1, type: 'reply', epoch, id: request.id, ok: false, error: String(error).slice(0, 2000) }) }
         finally { --pending; --queuedCommands; queuedBytes -= bytes }
       }
-      if (request.target === 'service' && request.method === 'microphoneLevels') void execute()
+      if (request.target === 'service' && request.method === 'microphoneLevels') void execute().catch(() => socket.destroy())
       else queue = queue.then(execute).catch(() => { socket.destroy() })
     }, frameProgress)
     socket.on('data', chunk => { try { parse(typeof chunk === 'string' ? Buffer.from(chunk) : chunk) } catch { socket.destroy() } })

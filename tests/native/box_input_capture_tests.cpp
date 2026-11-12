@@ -512,7 +512,8 @@ int main() {
             .inputDevices()
             .empty()); // producer is not physical inventory
   CHECK(hardware->opens == 0 && hardware->outputOpens == 0);
-  BoxInputCapture capture;
+  // Keep behavior assertions independent of a heavily loaded runner's 250 ms scheduling window.
+  BoxInputCapture capture{std::chrono::seconds(2)};
   AudioInputConfig config;
   config.deviceUid = "fixture:microphone";
   config.channel = 1;
@@ -545,6 +546,8 @@ int main() {
   eventually([&] { return capture.meter().peak[0] > .9f; });
   hardware->amplitude.store(.01f);
   eventually([&] { const auto m = capture.meter(); return m.valid && m.peak[0] < .02f; });
+  // Deliberately exceed the production hold window: fixture timing is injectable.
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
   // Snapshot/tick/diagnostic observations must never drain the fast reader's peak.
   for (unsigned reader = 0; reader < 8; ++reader)
     CHECK(capture.meter().peak[0] < .02f);
@@ -557,7 +560,7 @@ int main() {
   eventually([&] { return capture.meter().peak[0] > .9f; });
   hardware->amplitude.store(.01f);
   eventually([&] { return capture.meter().peak[0] < .02f; });
-  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  std::this_thread::sleep_for(std::chrono::milliseconds(2100));
   CHECK(capture.meter(true).peak[0] < .02f);
   hardware->amplitude.store(.2f);
   // A private subscription must survive a physical failure: LoopZ reopens
