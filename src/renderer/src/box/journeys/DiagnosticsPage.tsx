@@ -1,12 +1,17 @@
 import { Button } from '@singz/ui'
-import type { BoxDiagnostics } from '../../../../shared/box-contract'
+import type { BoxDiagnostics, BoxRoutingState } from '../../../../shared/box-contract'
 import { getLocale } from '../../../../shared/i18n/core'
-import { summarizeAudio } from './format'
+import { formatSampleRate, formatSampleRateRanges } from '../settings-model'
+import { tSettings } from '../settings-i18n'
+import { summarizeAudio, type JourneyAudioInventory } from './format'
 import { tJourney } from './i18n'
 import { ErrorNotice, LoadingNotice, PageFrame } from './ui'
 
-export function DiagnosticsPage({ diagnostics, loading, error, onRefresh, onAudio, onSetup, onBack }: {
+export function DiagnosticsPage({ diagnostics, routing = null, routingError = null, audioInventory = null, loading, error, onRefresh, onAudio, onSetup, onBack }: {
   diagnostics: BoxDiagnostics | null
+  routing?: BoxRoutingState | null
+  routingError?: string | null
+  audioInventory?: JourneyAudioInventory | null
   loading: boolean
   error: string | null
   onRefresh: () => void
@@ -15,6 +20,12 @@ export function DiagnosticsPage({ diagnostics, loading, error, onRefresh, onAudi
   onBack: () => void
 }) {
   const audio = summarizeAudio(diagnostics?.audio)
+  const currentRouting = routingError ? null : routing
+  const restoration = currentRouting?.snapshot.restoration
+  const inventoryDevices = audioInventory?.ok ? audioInventory.devices : []
+  const routingDevices = currentRouting?.inventory.devices.filter(device =>
+    device.rate && !inventoryDevices.some(inventoryDevice => inventoryDevice.uid === device.uid)
+  ) ?? []
   const booleanText = (value: boolean): string => tJourney(value ? 'journey.diagnostics.yes' : 'journey.diagnostics.no')
   return <PageFrame title={tJourney('journey.diagnostics.title')} subtitle={tJourney('journey.diagnostics.subtitle')} onBack={onBack}>
     <ErrorNotice error={error} /><LoadingNotice active={loading && !diagnostics} />
@@ -29,6 +40,34 @@ export function DiagnosticsPage({ diagnostics, loading, error, onRefresh, onAudi
       {audio.detail === 'redacted' && <p>{tJourney('journey.diagnostics.redacted')}</p>}
       {audio.ready !== null && <p>{tJourney('journey.diagnostics.ready', { value: booleanText(audio.ready) })}</p>}
       {audio.playing !== null && <p>{tJourney('journey.diagnostics.playing', { value: booleanText(audio.playing) })}</p>}
+      <p>{restoration
+        ? tSettings('box.settings.routing.revisions', { saved: restoration.desiredGeneration, active: restoration.activeGeneration })
+        : tSettings('box.settings.routing.statusUnavailable')}</p>
+      {inventoryDevices.map(device => {
+        const rates = formatSampleRateRanges(device)
+        return <div key={device.uid} data-diagnostics-device={device.uid}>
+          <strong>{device.label.trim() || tSettings('box.settings.unnamedDevice')}</strong>
+          <dl className="journey-metrics journey-diagnostic-rates">
+            <div>
+              <dt>{tSettings('box.settings.nominalRate')}</dt>
+              <dd aria-label={device.nominalSampleRate > 0 ? undefined : tSettings('box.settings.sampleRateUnknown')}>
+                {formatSampleRate(device.nominalSampleRate)}
+              </dd>
+            </div>
+            <div>
+              <dt>{tSettings('box.settings.supportedRates')}</dt>
+              <dd aria-label={rates === '—' ? tSettings('box.settings.sampleRatesUnknown') : undefined}>{rates}</dd>
+            </div>
+          </dl>
+        </div>
+      })}
+      {routingDevices.map(device => <div key={device.uid} data-diagnostics-device={device.uid}>
+        <strong>{device.name}</strong>
+        <dl className="journey-metrics journey-diagnostic-rates"><div>
+          <dt>{tSettings('box.settings.nominalRate')}</dt>
+          <dd>{formatSampleRate(device.rate ?? 0)}</dd>
+        </div></dl>
+      </div>)}
       <p className="journey-note">{tJourney('journey.diagnostics.safeAudio')}</p>
     </section>
     {diagnostics?.cec && <section className="journey-section" data-cec-status={diagnostics.cec.state}>

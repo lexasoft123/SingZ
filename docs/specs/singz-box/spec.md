@@ -53,8 +53,8 @@ is an open product decision, not permission to duplicate desktop logic.
 ### Singer-facing terms
 
 One name per concept on the TV, in English, Russian and Simplified Chinese. The
-spec's internal words (catalog, collection, library, preparation) stay in
-engineering text and keys; they never appear on screen.
+spec's internal words (catalog, collection, library) stay in engineering text
+and keys; they never appear on screen.
 
 | Concept | On screen (EN / RU / zh-CN) | Retired names |
 | --- | --- | --- |

@@ -153,7 +153,7 @@ let app = null
 
   await watchdog.run('preview Sing starts A without its original', 90, async () => {
     await page.locator('.box-song-row', { hasText: 'Fixture A' }).click()
-    await page.getByText('The original recording is absent. The prepared stems will be used instead.').waitFor()
+    await page.getByText('The original recording is not on this Box. The backing tracks will be used instead.').waitFor()
     await page.getByRole('button', { name: 'Sing', exact: true }).click()
     await page.waitForSelector('.box-player[data-active-song]', { timeout: 60000 })
     check(await page.locator('.box-player').getAttribute('data-playing') === 'true', 'preview Sing starts the verified song')

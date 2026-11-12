@@ -7,8 +7,6 @@ import type {
 } from '../../../shared/types'
 import { tSettings, tMicrophone } from './settings-i18n'
 import {
-  formatSampleRate,
-  formatSampleRateRanges,
   initialSettingsState,
   inputDevices,
   outputApplyIssue,
@@ -228,7 +226,7 @@ export function Settings({
               <span className="settings-radio" aria-hidden="true" />
               <span className="settings-device-copy">
                 <strong>{deviceName(device)}</strong>
-                <span>{tSettings('box.settings.outputChannels', { count: device.outputChannels })} · {formatSampleRate(device.nominalSampleRate)}</span>
+                <span>{tSettings('box.settings.outputChannels', { count: device.outputChannels })}</span>
               </span>
               <span className="settings-row-badges">
                 {device.defaultOutput && <small>{tSettings('box.settings.defaultOutput')}</small>}
@@ -268,33 +266,18 @@ export function Settings({
         </div>
 
         <div className="settings-input-list" aria-label={tSettings('box.settings.inputList')}>
-          {inputs.map(device => {
-            const rates = formatSampleRateRanges(device)
-            return <article
-              className="settings-input-row"
-              key={device.uid}
-              data-settings-input={device.uid}
-              data-remote-focus
-              tabIndex={0}
-            >
-              <div className="settings-input-name">
-                <strong>{deviceName(device)}</strong>
-                <span>{tSettings('box.settings.inputChannels', { count: device.inputChannels })}</span>
-              </div>
-              <dl>
-                <div>
-                  <dt>{tSettings('box.settings.nominalRate')}</dt>
-                  <dd aria-label={device.nominalSampleRate > 0 ? undefined : tSettings('box.settings.sampleRateUnknown')}>
-                    {formatSampleRate(device.nominalSampleRate)}
-                  </dd>
-                </div>
-                <div>
-                  <dt>{tSettings('box.settings.supportedRates')}</dt>
-                  <dd aria-label={rates === '—' ? tSettings('box.settings.sampleRatesUnknown') : undefined}>{rates}</dd>
-                </div>
-              </dl>
-            </article>
-          })}
+          {inputs.map(device => <article
+            className="settings-input-row"
+            key={device.uid}
+            data-settings-input={device.uid}
+            data-remote-focus
+            tabIndex={0}
+          >
+            <div className="settings-input-name">
+              <strong>{deviceName(device)}</strong>
+              <span>{tSettings('box.settings.inputChannels', { count: device.inputChannels })}</span>
+            </div>
+          </article>)}
           {!loading && inputs.length === 0 &&
             (inventoryError !== null || (parentError !== null && inventory === null)) &&
             <div className="settings-empty settings-input-empty">
@@ -360,7 +343,7 @@ export function PhysicalInputsPanel({ preview, selection, onSelect, microphones,
     <div className="settings-input-list" aria-label={tMicrophone('box.microphones.physicalChannels')}>
       {devices.map(device => <section key={device.uid} data-settings-physical-device={device.uid}>
         <div className="settings-input-name"><strong>{device.name}</strong>
-          <span>{tSettings('box.settings.inputChannels', { count: device.inputChannels })}{device.rate ? ` · ${formatSampleRate(device.rate)}` : ''}</span>
+          <span>{tSettings('box.settings.inputChannels', { count: device.inputChannels })}</span>
         </div>
         <div role="group" aria-label={tMicrophone('box.microphones.deviceChannelGroup', { device: device.name })}>
           {physicalChannels(device).map(({ channel, name }) => {

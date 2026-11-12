@@ -1,4 +1,4 @@
-import type { BoxPlatformSnapshot } from '../../../../shared/box-contract'
+import type { BoxPlatformSnapshot, BoxStorageSnapshot } from '../../../../shared/box-contract'
 import type { DesktopAudioHostInventoryResult } from '../../../../shared/types'
 import { lookupPlural } from '../../../../shared/i18n/core'
 import { tJourney, type JourneyKey } from './i18n'
@@ -76,4 +76,9 @@ export function audioReadyText(counts: { outputs: number; inputs: number }): str
 /** Settings row status for paired phones: a word, never a bare "0"; each count takes its own plural form. */
 export function phonesStatus(count: number): string {
   return count === 0 ? tJourney('journey.phones.none') : lookupPlural('journey.phones.count', count)
+}
+
+export function storageStatus(storage: BoxStorageSnapshot | null): string {
+  if (!storage) return tJourney('journey.unavailable')
+  return storage.cacheBytes > 0 ? formatBytes(storage.cacheBytes) : tJourney('journey.storage.none')
 }

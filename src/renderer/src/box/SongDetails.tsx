@@ -64,7 +64,7 @@ export function SongDetails({
                   : inspection?.message ?? t('box.details.errorBody')
   return <main className="box-details" data-surface="details" data-collection-id={entry.id} aria-label={t('box.details.label')}>
     <div className="detail-back"><Button data-focus="details-back" onClick={onBack}>← {t('box.navigation.catalog')}</Button></div>
-    <div className="detail-identity"><p aria-label={identity.artist ? undefined : t('box.metadata.artistUnknown')}>{identity.artist ?? '—'}</p><h1>{identity.title}</h1></div>
+    <div className="detail-identity"><p aria-label={identity.artist ? undefined : t('box.metadata.artistUnknown')}>{identity.artist ?? t('box.metadata.artistUnknown')}</p><h1>{identity.title}</h1></div>
     <dl className="detail-metadata">
       <div><dt>{t('box.details.originalKey')}</dt><dd aria-label={metadata?.key ? undefined : t('box.metadata.keyUnknown')}>{metadata ? keyText(metadata) : '—'}</dd></div>
       <div><dt>{t('box.details.tempo')}</dt><dd aria-label={metadata?.bpm ? undefined : t('box.metadata.tempoUnknown')}>{metadata ? bpmText(metadata) : '—'}{metadata?.bpm ? <small>{t('box.metadata.bpm')}</small> : null}</dd></div>
