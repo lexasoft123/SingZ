@@ -16,7 +16,8 @@ pub struct Snapshot {
 enum Kind { List, Download(String), Cancel }
 struct Request { serial:u64,kind:Kind }
 pub struct Service {
-    commands:SyncSender<Request>,
+    /// Dropped before joining the worker, which waits on it without a timer.
+    commands:Option<SyncSender<Request>>,
     snapshot:Arc<Mutex<Snapshot>>,
     serial:Arc<AtomicU64>,
     alive:Arc<AtomicBool>,
@@ -37,12 +38,9 @@ impl Service {
         let shared=snapshot.clone();let current=serial.clone();let live=alive.clone();
         let worker=thread::Builder::new().name("gpui-drive-reader".into()).spawn(move|| {
             let cache=config_dir.join("gdrive/downloads");
+            // Sleeps until a request arrives or Drop closes the channel.
             while live.load(Ordering::Acquire) {
-                let request=match receive.recv_timeout(Duration::from_millis(100)) {
-                    Ok(request)=>request,
-                    Err(mpsc::RecvTimeoutError::Timeout)=>continue,
-                    Err(mpsc::RecvTimeoutError::Disconnected)=>break,
-                };
+                let Ok(request)=receive.recv() else {break};
                 let id=request.serial;
                 if id!=current.load(Ordering::Acquire) {continue;}
                 if matches!(request.kind,Kind::Cancel) {
@@ -86,7 +84,7 @@ impl Service {
             Ok(worker)=>Some(worker),
             Err(error)=>{publish(&snapshot,0,|s|s.message=format!("Drive downloads unavailable: {error}"));None},
         };
-        Self{commands,snapshot,serial,alive,worker}
+        Self{commands:Some(commands),snapshot,serial,alive,worker}
     }
     fn enqueue(&self,kind:Kind)->Result<()> {
         anyhow::ensure!(self.worker.is_some(),"Drive download worker is unavailable");
@@ -99,7 +97,7 @@ impl Service {
                 if matches!(kind,Kind::List) {state.rows=None;}
             }
         }
-        if let Err(error)=self.commands.try_send(Request{serial:id,kind}) {
+        if let Err(error)=self.commands.as_ref().context("Drive download queue is unavailable")?.try_send(Request{serial:id,kind}) {
             publish(&self.snapshot,id,|s|{s.busy=false;s.message="Drive download queue is full; try again.".into();});
             return Err(error).context("Drive download queue is unavailable");
         }
@@ -117,6 +115,7 @@ impl Drop for Service {
     fn drop(&mut self) {
         self.alive.store(false,Ordering::Release);
         self.serial.fetch_add(1,Ordering::AcqRel);
+        drop(self.commands.take());
         if let Some(worker)=self.worker.take(){let _=worker.join();}
     }
 }

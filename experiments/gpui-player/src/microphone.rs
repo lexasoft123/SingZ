@@ -489,6 +489,8 @@ impl Drop for Service {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Release);
         self.latest.fetch_add(1, Ordering::AcqRel);
+        // Wake an idle worker that is blocked on its queue.
+        let _ = self.requests.try_send(Request::Stop(self.latest.load(Ordering::Acquire)));
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -1092,7 +1094,14 @@ fn worker(
     let mut session: Option<Session> = None;
     let mut poll = Instant::now();
     while alive.load(Ordering::Acquire) {
-        match requests.recv_timeout(Duration::from_millis(20)) {
+        // The 20 ms tick only exists to poll a live capture's status. With no
+        // capture the worker sleeps until a request (or Drop's wake) arrives.
+        let received = if session.is_some() {
+            requests.recv_timeout(Duration::from_millis(20))
+        } else {
+            requests.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+        };
+        match received {
             #[cfg(feature = "ui-tests")]
             Ok(Request::OwnedRecording(generation, take_id, reply)) => {
                 let result = (|| -> Result<RecordingPaths> {

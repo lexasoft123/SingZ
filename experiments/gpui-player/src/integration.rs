@@ -2544,6 +2544,24 @@ mod tests {
         assert_eq!(malformed.graph_generation,absent.graph_generation);
     }
     #[test]
+    fn a_paused_helper_is_polled_slowly_and_a_moving_one_at_the_playing_rate() {
+        let mut packet=captured_lane_reply();
+        packet["playing"]=serde_json::json!(false);
+        packet["countingIn"]=serde_json::json!(false);
+        // A decaying held peak far below audibility is not motion.
+        packet["outputPeak"]=serde_json::json!(transport_actor::METER_REST/2.);
+        packet.as_object_mut().unwrap().remove("countInHeard");
+        let status=|packet:&Value|Status::parse(packet).unwrap();
+        assert_eq!(transport_actor::status_period_for(&status(&packet),false,false),transport_actor::STATUS_IDLE);
+        assert!(transport_actor::STATUS_IDLE>=Duration::from_millis(500));
+        for (key,value) in [("playing",serde_json::json!(true)),("outputPeak",serde_json::json!(0.2))] {
+            let mut moving=packet.clone();moving[key]=value;
+            assert_eq!(transport_actor::status_period_for(&status(&moving),false,false),transport_actor::STATUS_ACTIVE,"{key}");
+        }
+        assert_eq!(transport_actor::status_period_for(&status(&packet),true,false),transport_actor::STATUS_ACTIVE,"input monitor");
+        assert_eq!(transport_actor::status_period_for(&status(&packet),false,true),transport_actor::STATUS_ACTIVE,"training cue");
+    }
+    #[test]
     fn unknown_graph_transport_is_unavailable_without_breaking_playback() {
         let mut packet=captured_lane_reply();
         packet["playing"]=serde_json::json!(true);

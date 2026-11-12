@@ -44,6 +44,64 @@ void latchTerminal(NativePlaybackCallbackState* state,
   saturate(&state->terminalFailures);
 }
 
+// Output below -140 dBFS everywhere in the block.
+bool blockIsSilent(const AudioHostRenderBlock& block) noexcept {
+  if (block.output == nullptr) return true;
+  for (uint32_t channel = 0; channel < block.outputChannels; ++channel) {
+    const float* samples = block.output[channel];
+    if (samples == nullptr) continue;
+    for (uint32_t frame = 0; frame < block.frames; ++frame)
+      if (std::fabs(samples[frame]) > 1.0e-7F) return false;
+  }
+  return true;
+}
+
+// Whether this block may be skipped. Render thread only. A host discontinuity,
+// a route or stream change, a live input or anything the transport still has
+// queued is the graph's business, so each of them ends a skip and restarts the
+// silence window.
+bool quietSkipThisBlock(NativePlaybackCallbackState* state,
+                        const AudioHostRenderBlock& block) noexcept {
+  if (state->quietPredicate == nullptr || state->quietSkipped == nullptr) return false;
+  const bool identityChanged =
+      !state->quietIdentityValid || state->quietRoute != block.routeGeneration ||
+      state->quietStream != block.streamGeneration;
+  state->quietRoute = block.routeGeneration;
+  state->quietStream = block.streamGeneration;
+  state->quietIdentityValid = true;
+  const uint32_t activity =
+      state->quietActivity != nullptr
+          ? state->quietActivity->load(std::memory_order_acquire) : 0u;
+  const bool activityChanged = activity != state->quietSeenActivity;
+  state->quietSeenActivity = activity;
+  if (identityChanged || activityChanged || block.discontinuity != AudioHostDiscontinuityNone ||
+      block.input != nullptr || !state->quietPredicate(state->quietContext)) {
+    state->quietFrames = 0;
+    state->quietSkipping = false;
+    return false;
+  }
+  return state->quietSkipping;
+}
+
+// After a rendered block: count silent frames at rest, and start skipping once
+// a whole second of them has passed (reverb and effect tails, meter decay).
+void quietNoteRendered(NativePlaybackCallbackState* state,
+                       const AudioHostRenderBlock& block) noexcept {
+  if (state->quietPredicate == nullptr || state->quietSkipped == nullptr) return;
+  if (block.input != nullptr || block.discontinuity != AudioHostDiscontinuityNone ||
+      !state->quietPredicate(state->quietContext) || !blockIsSilent(block)) {
+    state->quietFrames = 0;
+    return;
+  }
+  state->quietFrames += block.frames;
+  if (block.sampleRate > 0.0 &&
+      static_cast<double>(state->quietFrames) >= block.sampleRate) {
+    state->quietSkipping = true;
+    state->heldOutputPeak = 0.0F;
+    state->outputPeak.store(0.0F, std::memory_order_relaxed);
+  }
+}
+
 // One generation's render of one (sub)block: today's whole callback body.
 bool renderGeneration(NativePlaybackCallbackState* state,
                       const AudioHostRenderBlock& block) noexcept {
@@ -57,12 +115,18 @@ bool renderGeneration(NativePlaybackCallbackState* state,
                   NativePlaybackCallbackTerminalReason::RenderUnavailable);
     return false;
   }
+  if (quietSkipThisBlock(state, block)) {
+    silence(block);
+    state->quietSkipped(state->quietContext, block);
+    return true;
+  }
   if (!zdsp::renderAudioHostGraph(state->adapter, block)) {
     silence(block);
     latchTerminal(state,
                   NativePlaybackCallbackTerminalReason::RenderUnavailable);
     return false;
   }
+  quietNoteRendered(state, block);
   if (state->outputLimiter.state != nullptr) {
     const auto meter = zdsp::builtinMeter(state->outputLimiter);
     // 20 dB/s release keeps short peaks visible between status polls.

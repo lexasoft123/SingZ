@@ -49,9 +49,20 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                     cx.background_executor().timer(Duration::from_millis(25)).await;
                 }
             }}; }
+            // The driver is test scaffolding inside the measured process: it polls
+            // briskly after a request (steps are timed) and slowly once the
+            // harness has been silent for a second (a paused or idle phase), so
+            // it does not inflate the idle CPU it is there to measure.
+            let mut quiet_polls = 0_u32;
             loop {
                 let request = dir.join("request.json");
-                if !request.exists() { cx.background_executor().timer(Duration::from_millis(25)).await; continue; }
+                if !request.exists() {
+                    quiet_polls = quiet_polls.saturating_add(1);
+                    let wait = if quiet_polls > 40 { 100 } else { 25 };
+                    cx.background_executor().timer(Duration::from_millis(wait)).await;
+                    continue;
+                }
+                quiet_polls = 0;
                 let command: serde_json::Value = serde_json::from_slice(&std::fs::read(&request)?)?;
                 std::fs::remove_file(&request)?;
                 let action = command["action"].as_str().ok_or_else(||anyhow::anyhow!("missing action"))?.to_owned();
@@ -407,16 +418,20 @@ pub fn run_visible(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, 
             // While recording, the window must stay visible and key (D-02 5.3): count the
             // idle-loop ticks on which it was not, so a run another app disturbed is rejected.
             let (mut recording, mut ticks, mut lost, mut poll) = (false, 0_u64, 0_u64, true);
+            let mut quiet_polls = 0_u32; // see the first driver loop: slow once the harness is silent
             loop {
                 let request = dir.join("request.json");
                 if !request.exists() {
+                    quiet_polls = quiet_polls.saturating_add(1);
                     if recording && poll {
                         let fit = handle.update(cx, |_, window, _| window.is_visible() && window.is_window_active())?;
                         ticks += 1; lost += u64::from(!fit);
                     }
-                    cx.background_executor().timer(Duration::from_millis(25)).await;
+                    let wait = if quiet_polls > 40 && !recording { 100 } else { 25 };
+                    cx.background_executor().timer(Duration::from_millis(wait)).await;
                     continue;
                 }
+                quiet_polls = 0;
                 let command: serde_json::Value = serde_json::from_slice(&std::fs::read(&request)?)?;
                 std::fs::remove_file(&request)?;
                 let action = command["action"].as_str().ok_or_else(|| anyhow::anyhow!("missing action"))?.to_owned();

@@ -538,9 +538,215 @@ void checkResidentRequestSupersedesPendingStage() {
   std::remove(path.c_str());
 }
 
+// A feeder with nothing to refill and no lane consuming (paused, stopped) must
+// not spin at its busy cadence, and a control-side jump must still wake it at
+// once rather than wait out the quiet sleep.
+void checkQuietFeederBacksOffAndJumpWakesIt() {
+  const auto path = encodeFlac(kFrames, kRate, 2);
+  singz::StreamingLaneGroup group;
+  check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+        "the quiet-feeder lane opens");
+  check(group.prime(0) == singz::DecodedAudioStatus::Ok, "the quiet-feeder lane primes");
+  group.start();
+  // Let it fill to its target and settle.
+  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  const uint64_t before = group.loopTurnsForTesting();
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  const uint64_t quietTurns = group.loopTurnsForTesting() - before;
+  std::fprintf(stderr, "quiet feeder turns in 1 s: %llu\n",
+               static_cast<unsigned long long>(quietTurns));
+  // 4 ms polling would be about 250 turns; a 50 ms quiet wait is about 20.
+  check(quietTurns <= 60, "a quiet feeder backs off instead of polling at 4 ms");
+  const uint64_t turnsBeforeJump = group.loopTurnsForTesting();
+  const auto t0 = std::chrono::steady_clock::now();
+  (void)group.requestJump(kFrames / 2);
+  while (group.loopTurnsForTesting() == turnsBeforeJump &&
+         std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(500))
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  const double wakeMs =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  std::fprintf(stderr, "jump woke the quiet feeder after %.2f ms\n", wakeMs);
+  check(wakeMs < 20.0, "a jump wakes a quiet feeder at once, not after its sleep");
+  group.stop();
+  std::remove(path.c_str());
+}
+
+// Waits until the feeder has just begun a fresh idle wait, so a control call
+// made next lands at the START of its 50 ms sleep and cannot be rescued by the
+// timer.
+void settleIntoFreshQuietWait(const singz::StreamingLaneGroup& group) {
+  uint64_t turns = group.loopTurnsForTesting();
+  const auto t0 = std::chrono::steady_clock::now();
+  while (group.loopTurnsForTesting() == turns &&
+         std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(500))
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+}
+
+uint64_t residentEnd(const singz::StreamingLaneGroup& group) {
+  uint64_t start = 0, end = 0;
+  (void)zdsp::streamingWindowResident(const_cast<singz::StreamingLaneGroup&>(group).window(0),
+                                      &start, &end);
+  return end;
+}
+
+// A paused streamed loop has its fill capped just past the loop end B. Taking
+// the loop away must wake a quiet feeder at once: a Play right after would
+// otherwise run past B before anything beyond it is resident.
+void checkClearLoopWakesAQuietFeeder() {
+  const auto path = encodeFlac(kFrames, kRate, 2);
+  singz::StreamingLaneGroup group;
+  check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+        "the loop-exit lane opens");
+  const uint64_t loopEnd = 120000;
+  group.setLoop(100000, loopEnd);
+  check(group.prime(110000) == singz::DecodedAudioStatus::Ok, "the loop-exit lane primes");
+  group.start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  check(residentEnd(group) <= loopEnd + 16, "the fill is capped at the loop end");
+  settleIntoFreshQuietWait(group);
+  group.clearLoop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  const uint64_t after = residentEnd(group);
+  std::fprintf(stderr, "resident end 15 ms after clearLoop: %llu (loop end %llu)\n",
+               static_cast<unsigned long long>(after), static_cast<unsigned long long>(loopEnd));
+  check(after > loopEnd + 30000,
+        "clearLoop wakes the feeder, so frames past the old loop end are resident before a resume");
+  group.stop();
+  std::remove(path.c_str());
+}
+
+// A wake that contends for the wake mutex exactly while the feeder holds a
+// FALSE predicate and is about to sleep must still end the sleep at once. The
+// seam runs with the predicate already false; the waker is started there and
+// held across the sleep entry, so an implementation whose wake() does not
+// synchronise with the wait loses the notification and sleeps the full 50 ms.
+struct WakeContention {
+  singz::StreamingLaneGroup* group{nullptr};
+  std::atomic<int> calls{0};
+  std::atomic<bool> fired{false};
+  std::atomic<bool> ready{false};  // published (release) after every field below is written
+  std::thread waker;
+  std::chrono::steady_clock::time_point released;
+  uint64_t turnsAtSeam{0};
+};
+void contendingWake(void* raw) {
+  auto* c = static_cast<WakeContention*>(raw);
+  // The first waits are short (demand still settling); contend in a quiet one.
+  if (c->calls.fetch_add(1) < 4 || c->fired.exchange(true)) return;
+  c->turnsAtSeam = c->group->loopTurnsForTesting();
+  c->waker = std::thread([c] { (void)c->group->requestJump(kFrames / 3); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));  // let it reach the mutex
+  c->released = std::chrono::steady_clock::now();
+  c->ready.store(true, std::memory_order_release);
+}
+void checkWakeContendingWithTheWaitIsNotLost() {
+  const auto path = encodeFlac(kFrames, kRate, 2);
+  singz::StreamingLaneGroup group;
+  check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+        "the contention lane opens");
+  check(group.prime(0) == singz::DecodedAudioStatus::Ok, "the contention lane primes");
+  WakeContention contention;
+  contention.group = &group;
+  group.setWaitSeamForTesting(&contendingWake, &contention);
+  group.start();
+  const auto t0 = std::chrono::steady_clock::now();
+  while (!contention.ready.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3))
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  check(contention.ready.load(std::memory_order_acquire), "the feeder reached a quiet wait");
+  if (contention.ready.load(std::memory_order_acquire)) {
+    const auto t1 = std::chrono::steady_clock::now();
+    while (group.loopTurnsForTesting() <= contention.turnsAtSeam + 1 &&
+           std::chrono::steady_clock::now() - t1 < std::chrono::milliseconds(500))
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - contention.released).count();
+    std::fprintf(stderr, "contended wake ended the sleep %.2f ms after the seam released\n", ms);
+    check(ms < 25.0, "a wake held across the sleep entry ends the sleep at once");
+  }
+  if (contention.waker.joinable()) contention.waker.join();
+  group.stop();
+  std::remove(path.c_str());
+}
+
+// A jump stage that the render thread commits just after the feeder began its
+// quiet sleep: the commit cannot wake it. At 192 kHz and 4x the stage lasts
+// 32768 / (192000 * 4) = 42.7 ms, so the sleep must be bounded by that. The
+// consumer here is the real node at 4x, paced in real time.
+void checkCommitAfterQuietWaitEntryNeverStarves192kHz4x(int repeat) {
+  constexpr uint32_t kHighRate = 192000;
+  constexpr uint32_t kCallback = 512;
+  const auto path = encodeFlac(1200000, kHighRate, 2);
+  singz::StreamingLaneGroup group;
+  check(group.addLane(openRead(path), {}, kHighRate) == singz::DecodedAudioStatus::Ok,
+        "the 192 kHz lane opens");
+  std::vector<uint8_t> storage(zdsp::streamingWindowSourceStateBytes() + 64);
+  uint8_t* aligned = storage.data() +
+      ((64 - (reinterpret_cast<uintptr_t>(storage.data()) & 63u)) & 63u);
+  zdsp::ProcessorHandle node = zdsp::createPositionedStreamingSource(
+      {{1}, group.window(0), 0, 0},
+      {aligned, static_cast<uint32_t>(zdsp::streamingWindowSourceStateBytes())});
+  check(node.state != nullptr && prepareSource(node, 2, kHighRate), "the node prepares");
+  check(group.prime(0) == singz::DecodedAudioStatus::Ok, "the lane primes");
+  group.start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  settleIntoFreshQuietWait(group);
+  const uint64_t target = 400000 + 100000ull * static_cast<uint64_t>(repeat);
+  const uint64_t token = group.requestJump(target);
+  // Let the feeder stage it, then land the commit just after it sleeps again.
+  const auto t0 = std::chrono::steady_clock::now();
+  while (group.stats(0).stages == 0 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2))
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  check(group.stats(0).stages >= 1, "the jump is staged");
+  settleIntoFreshQuietWait(group);
+  check(group.commitJump(token, target), "the render thread commits the stage");
+  std::vector<std::vector<float>> slice(2, std::vector<float>(kCallback, 0.0F));
+  std::vector<float*> pointers{slice[0].data(), slice[1].data()};
+  uint64_t position = target;
+  const auto commitAt = std::chrono::steady_clock::now();
+  const uint64_t startedBefore = group.stats(0).starvedBlocks;
+  for (int callback = 0; callback < 100; ++callback) {
+    zdsp::MutableAudioBusView view{};
+    view.channels = pointers.data();
+    view.channelCount = 2;
+    view.frames = {kCallback};
+    zdsp::TransportContext transport{};
+    transport.validFields = zdsp::TransportValidProjectSamples | zdsp::TransportValidProjectRateQ32;
+    transport.stateFlags = zdsp::TransportStatePlaying;
+    transport.projectTimeSamples = static_cast<int64_t>(position);
+    transport.projectRateQ32 = 4 * zdsp::kProjectRateOneQ32;
+    zdsp::ProcessContext context{};
+    context.interfaceVersion = zdsp::kProcessorInterfaceVersion;
+    context.structSize = zdsp::kProcessContextV1RequiredSize;
+    context.transport = &transport;
+    context.sampleRate = {static_cast<double>(kHighRate)};
+    context.frames = {kCallback};
+    node.functions->process(node.state, &context, nullptr, 0, &view, 1);
+    position += 4ull * kCallback;
+    // Real time, on an absolute schedule so sleep overshoot cannot slow the
+    // consumer below the 4x rate: 512 frames at 192 kHz per callback.
+    std::this_thread::sleep_until(commitAt + std::chrono::microseconds(
+        1000000ull * kCallback * static_cast<uint64_t>(callback + 1) / kHighRate));
+  }
+  const uint64_t starved = group.stats(0).starvedBlocks - startedBefore;
+  std::fprintf(stderr, "192 kHz / 4x commit after quiet-wait entry: %llu starved callbacks\n",
+               static_cast<unsigned long long>(starved));
+  check(starved == 0, "a commit just after the quiet wait began never starves at 192 kHz / 4x");
+  group.stop();
+  (void)node.functions->deactivate(node.state);
+  (void)node.functions->destroy(node.state);
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  checkClearLoopWakesAQuietFeeder();
+  checkWakeContendingWithTheWaitIsNotLost();
+  for (int repeat = 0; repeat < 3; ++repeat)
+    checkCommitAfterQuietWaitEntryNeverStarves192kHz4x(repeat);
+  checkQuietFeederBacksOffAndJumpWakesIt();
   checkResidentRequestSupersedesPendingStage();
   if (std::getenv("SINGZ_STAGING_RESIDENT_ONLY") != nullptr) return failures ? 1 : 0;
   {

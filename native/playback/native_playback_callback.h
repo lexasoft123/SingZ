@@ -28,6 +28,28 @@ struct NativePlaybackCallbackState {
   std::atomic<uint32_t> outputClippedBlocks{0};
   AudioHostTerminalCauseLatch firstTerminalCause{};
   std::atomic<uint32_t> terminalFailures{0};
+
+  // Idle shortcut. A paused or stopped transport with nothing queued renders
+  // silence; once the output has been silent for a whole tail window the
+  // callback writes zeros and skips the graph until something wants it again.
+  // The device keeps running and the transport clock keeps counting through
+  // `quietSkipped`, so host timing is untouched. All three are null on a graph
+  // that does not opt in, and nothing is skipped then.
+  void* quietContext{nullptr};
+  // Render thread: transport at rest, no command or parameter queued.
+  bool (*quietPredicate)(void*) noexcept{nullptr};
+  // Render thread: a block was skipped; keep the transport clock counting.
+  void (*quietSkipped)(void*, const AudioHostRenderBlock&) noexcept{nullptr};
+  // Bumped by the control thread for graph input that is not in a queue the
+  // predicate can see (a preview click); any change ends a skip.
+  const std::atomic<uint32_t>* quietActivity{nullptr};
+  // Render-thread only.
+  uint32_t quietSeenActivity{0};
+  uint64_t quietFrames{0};
+  bool quietSkipping{false};
+  bool quietIdentityValid{false};
+  uint64_t quietRoute{0};
+  uint64_t quietStream{0};
 };
 
 // One generation replacing another ON THE RUNNING STREAM. The session fills

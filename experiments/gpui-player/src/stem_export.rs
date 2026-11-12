@@ -180,7 +180,8 @@ struct Shared {
     events: Mutex<VecDeque<Event>>,
 }
 pub struct Service {
-    tx: SyncSender<Request>,
+    /// Dropped before joining the worker, which waits on it without a timer.
+    tx: Option<SyncSender<Request>>,
     shared: Arc<Shared>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -196,12 +197,10 @@ impl Service {
         });
         let state = shared.clone();
         let worker = thread::spawn(move || {
-            while !state.stopped.load(Ordering::Acquire)
-                || !state.pending.lock().unwrap().is_empty()
-            {
-                let Ok(request) = rx.recv_timeout(Duration::from_millis(30)) else {
-                    continue;
-                };
+            // An idle worker sleeps until a request or the Service's Drop closes
+            // the channel; queued requests are still delivered (and cancelled
+            // by `stopped`) before the disconnect is seen.
+            while let Ok(request) = rx.recv() {
                 let cancel = || {
                     state.stopped.load(Ordering::Acquire)
                         || state.cancelled.lock().unwrap().contains(&request.id)
@@ -235,7 +234,7 @@ impl Service {
             }
         });
         Self {
-            tx,
+            tx: Some(tx),
             shared,
             worker: Some(worker),
         }
@@ -256,6 +255,8 @@ impl Service {
         pending.insert(id);
         if self
             .tx
+            .as_ref()
+            .context("Export worker stopped")?
             .try_send(Request {
                 id,
                 plan,
@@ -280,6 +281,7 @@ impl Service {
 impl Drop for Service {
     fn drop(&mut self) {
         self.shared.stopped.store(true, Ordering::Release);
+        drop(self.tx.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

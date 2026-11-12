@@ -769,6 +769,60 @@ void decodedSeekThenStopKeepsItsTimePitchBoundaryPrepared() {
   std::remove(path.c_str());
 }
 
+// A streamed loop caps the feeder's fill at the loop end. Replacing the loop
+// with a longer non-looping region while paused (what GPUI does when looping is
+// turned off with a selection kept) must lift that cap, or playback runs past
+// the old end into audio that was never decoded.
+void nonLoopingRegionPastAStreamedLoopEndDoesNotStarve() {
+  std::vector<float> tone(800000, 0.25F);
+  const auto path = writeWav("loop-to-region.wav", 1, tone, 48000);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  auto *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto request = config();
+  request.streamLanes = true;
+  std::vector<singz::NativePlaybackLaneSource> lanes;
+  lanes.push_back(lane("lead", path));
+  CHECK(session.prepare(std::move(request), std::move(lanes), 1).ok);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  for (int i = 0; i < 40; ++i) {
+    CHECK(fake->drive(256));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  const uint64_t loopEnd = 140000;
+  CHECK(session.setLoop(1, 100000, static_cast<int64_t>(loopEnd)).ok);
+  // Play naturally up to just short of the loop end (a seek's own stage would
+  // decode past it and hide the cap): the feeder then fills only to B + 2.
+  CHECK(session.seek(1, 100000).ok);
+  for (int i = 0; i < 2000 && session.status().renderedProjectFrame < static_cast<int64_t>(loopEnd) - 1500; ++i) {
+    CHECK(fake->drive(256));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  CHECK(session.status().renderedProjectFrame >= static_cast<int64_t>(loopEnd) - 1500);
+  CHECK(session.status().renderedProjectFrame < static_cast<int64_t>(loopEnd));
+  CHECK(session.pause(1).ok);
+  CHECK(fake->drive(256));
+  std::this_thread::sleep_for(std::chrono::milliseconds(700));  // feeder idles, fill capped at the loop end
+  CHECK(session.setRegion(1, 100000, 300000, false).ok);
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  CHECK(session.resume(1).ok);
+  const auto before = session.status().lanes[0].starvedBlocks;
+  bool soundPastEnd = false;
+  for (int i = 0; i < 200; ++i) {
+    CHECK(fake->drive(256));
+    if (session.status().renderedProjectFrame > static_cast<int64_t>(loopEnd) + 4000)
+      soundPastEnd = soundPastEnd || std::any_of(fake->left.begin(), fake->left.begin() + 256,
+          [](float v) { return std::abs(v) > 0.001F; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const auto status = session.status();
+  CHECK(status.renderedProjectFrame > static_cast<int64_t>(loopEnd) + 4000);
+  CHECK(status.lanes[0].starvedBlocks == before);
+  CHECK(soundPastEnd);
+  CHECK(session.unload(1).ok);
+  std::remove(path.c_str());
+}
+
 void streamingSeekReturnsBeforeDecoder() {
   struct DecoderGate {
     std::atomic<bool> enabled{false};
@@ -3254,6 +3308,52 @@ void countInLandsOnAnchorMidSong() {
   cleanupLanes.push_back(lane("cleanup", wav));
   CHECK(session.prepare(std::move(cleanupConfig), std::move(cleanupLanes), 2).ok);
   CHECK(session.unload(2).ok);
+  std::remove(wav.c_str());
+}
+
+// A count-in paused part-way keeps its landing pending. That must not keep the
+// graph rendering silence forever, and Resume must still land on the anchor.
+void pausedMidSongCountInGoesQuietAndStillLands() {
+  constexpr uint32_t landing = 19200;
+  std::vector<float> song(40000, 0.1F);
+  std::fill(song.begin() + landing, song.end(), 0.3F);
+  const std::string wav = writeWav("count-in-pause-quiet.wav", 1, song);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  singz::NativePlaybackPrepareConfig request = config();
+  request.cuePlan = cueRequest(true, 1, 0.0);
+  request.cuePlan->entrySeconds = 0.0;
+  request.cuePlan->countInAnchorSeconds = 0.4;
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(std::move(request), std::move(lanes), 1).ok);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  CHECK(fake->drive(256, singz::AudioHostDiscontinuityStart));
+  for (int i = 0; i < 7; ++i) CHECK(fake->drive(256));
+  CHECK(session.pause(1).ok);
+  CHECK(fake->drive(256));
+  for (int i = 0; i < 230; ++i) CHECK(fake->drive(256));  // > 1 s at 48 kHz
+  auto *graph = fake->renderingGraph();
+  CHECK(graph != nullptr && graph->quietSkipping);
+  const auto paused = session.status();
+  CHECK(paused.remainingPreRollFrames > 0 && paused.remainingPreRollFrames < landing);
+  CHECK(session.resume(1).ok);
+  fake->captureOutput = true;
+  fake->outputTrace.clear();
+  const uint32_t remaining = static_cast<uint32_t>(paused.remainingPreRollFrames);
+  uint32_t rendered = 0;
+  while (rendered < remaining + 1000) {
+    const uint32_t block = std::min<uint32_t>(256, remaining + 1000 - rendered);
+    CHECK(fake->drive(block));
+    rendered += block;
+  }
+  fake->captureOutput = false;
+  CHECK(!graph->quietSkipping);
+  CHECK(fake->outputTrace.size() >= remaining + 1000);
+  CHECK(near(fake->outputTrace[remaining - 1], 0.0F, 0.00001F));
+  CHECK(near(fake->outputTrace[remaining], pcm16(0.3F), 0.0001F));
+  CHECK(session.unload(1).ok);
   std::remove(wav.c_str());
 }
 
@@ -6779,6 +6879,123 @@ void publicationAndCancellation() {
   std::remove(wav.c_str());
 }
 
+// A paused graph with nothing queued is silent after its tail, and the callback
+// then stops rendering it. Each way back to work must end the skip.
+struct QuietGateProbe {
+  zdsp::AudioHostGraphAdapter adapter{};
+  singz::NativePlaybackCallbackState callback;
+  singz::NativePlaybackRenderRouter router;
+  std::atomic<uint32_t> activity{0};
+  bool atRest{true};
+  std::array<float, 8> left{};
+  std::array<float, 8> right{};
+  QuietGateProbe() {
+    // No graph behind the adapter: any render attempt is a counted failure,
+    // so "the graph was asked to render" is observable without a session.
+    callback.adapter = &adapter;
+    callback.quietContext = &atRest;
+    callback.quietPredicate = [](void *context) noexcept {
+      return *static_cast<bool *>(context);
+    };
+    callback.quietSkipped = [](void *, const singz::AudioHostRenderBlock &) noexcept {};
+    callback.quietActivity = &activity;
+    callback.quietIdentityValid = true;
+    callback.quietRoute = 1;
+    callback.quietStream = 1;
+    callback.quietSkipping = true;
+    router.current.store(&callback, std::memory_order_release);
+  }
+  // True when the callback rendered the graph (and so ended the skip).
+  bool render(uint32_t discontinuity = 0, bool withInput = false) {
+    float *output[]{left.data(), right.data()};
+    const float *input[]{left.data(), right.data()};
+    singz::AudioHostRenderBlock block{
+        withInput ? input : nullptr, output, 0, 2, 8, 8, 48000.0, 1, 1, 1, 0,
+        0, 0, false, false, 0, 0, true, true, 0, discontinuity, true};
+    std::fill(left.begin(), left.end(), 1.0F);
+    std::fill(right.begin(), right.end(), 1.0F);
+    (void)singz::nativePlaybackRender(&router, block);
+    return adapter.renderFailures.load(std::memory_order_relaxed) != 0;
+  }
+  bool silent() const {
+    return std::all_of(left.begin(), left.end(), [](float v) { return v == 0.0F; });
+  }
+};
+
+void quietGateSkipsOnlyAtRestAndEndsOnAnyWork() {
+  {
+    QuietGateProbe probe;
+    CHECK(!probe.render() && probe.silent() && probe.callback.quietSkipping);
+  }
+  {
+    QuietGateProbe probe;
+    probe.atRest = false;  // a command, a parameter, or a moving transport
+    CHECK(probe.render() && !probe.callback.quietSkipping);
+  }
+  {
+    QuietGateProbe probe;
+    probe.activity.fetch_add(1);  // a preview click
+    CHECK(probe.render() && !probe.callback.quietSkipping);
+  }
+  {
+    QuietGateProbe probe;
+    CHECK(probe.render(singz::AudioHostDiscontinuityStart) && !probe.callback.quietSkipping);
+  }
+  {
+    QuietGateProbe probe;
+    CHECK(probe.render(0, true) && !probe.callback.quietSkipping);  // a live input route
+  }
+  {
+    QuietGateProbe probe;
+    probe.callback.quietRoute = 2;  // the route changed under the stream
+    CHECK(probe.render() && !probe.callback.quietSkipping);
+  }
+  {
+    QuietGateProbe probe;
+    probe.callback.quietPredicate = nullptr;  // a graph that never opted in
+    CHECK(probe.render());
+  }
+}
+
+// End to end on the real session: playing, then paused, the graph goes quiet
+// after its tail, the stream clock keeps counting through skipped blocks, and
+// Play's first block renders sound.
+void quietSkipKeepsTheClockAndResumesWithSound() {
+  const auto wav = writeWav("quiet-skip.wav", 1, std::vector<float>(96000 * 4, 0.25F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  auto *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  std::vector<singz::NativePlaybackLaneSource> lanes;
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 1).ok);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  for (int i = 0; i < 8; ++i) CHECK(fake->drive(256));
+  CHECK(session.pause(1).ok);
+  CHECK(fake->drive(256));
+  // 1.2 s of paused blocks at 48 kHz: past the tail window.
+  for (int i = 0; i < 225; ++i) CHECK(fake->drive(256));
+  auto *graph = fake->renderingGraph();
+  CHECK(graph != nullptr && graph->quietSkipping);
+  const uint64_t clockBefore = session.status().continuousFrame;
+  for (int i = 0; i < 10; ++i) {
+    CHECK(fake->drive(256));
+    CHECK(std::all_of(fake->left.begin(), fake->left.begin() + 256,
+                      [](float v) { return v == 0.0F; }));
+  }
+  CHECK(session.status().continuousFrame == clockBefore + 10 * 256);
+  CHECK(graph->quietSkipping);
+  CHECK(session.resume(1).ok);
+  // The very first callback after Play must already be rendered and carry the
+  // song: a skipped first block would be a gap at the start of every resume.
+  CHECK(fake->drive(256));
+  CHECK(!graph->quietSkipping);
+  CHECK(std::any_of(fake->left.begin(), fake->left.begin() + 256,
+                    [](float v) { return std::abs(v) > 0.001F; }));
+  CHECK(session.status().transportState == singz::NativePlaybackTransportState::Playing);
+  CHECK(session.unload(1).ok);
+  std::remove(wav.c_str());
+}
+
 void callbackTerminalLatch() {
   zdsp::AudioHostGraphAdapter adapter{};
   singz::NativePlaybackCallbackState callback;
@@ -8286,6 +8503,10 @@ int main() {
     std::puts("native playback region tests: ok");
     return 0;
   }
+  nonLoopingRegionPastAStreamedLoopEndDoesNotStarve();
+  quietGateSkipsOnlyAtRestAndEndsOnAnyWork();
+  quietSkipKeepsTheClockAndResumesWithSound();
+  pausedMidSongCountInGoesQuietAndStillLands();
   decodedSeekThenStopKeepsItsTimePitchBoundaryPrepared();
   streamingSeekReturnsBeforeDecoder();
   outputMeterSeparatesStereoEnergyFromPeaks();

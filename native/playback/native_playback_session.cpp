@@ -959,6 +959,27 @@ struct PreparedPlaybackTransport {
     publishTelemetry();
   }
 
+  /* Render thread. True when this transport is at rest with nothing for the
+     next block to apply: the graph's output is then silence that only effect
+     tails still shape, and the callback may stop rendering it. A deferred
+     count-in landing does not keep it awake: the landing only resolves while
+     running, and Resume or Start (a queued command) wakes the graph first. */
+  bool atRestForSkip() const noexcept {
+    return (callbackState == NativePlaybackTransportState::Paused ||
+            callbackState == NativePlaybackTransportState::Stopped) &&
+           pendingCommandCount == 0 &&
+           pendingDiscontinuity.reason == zdsp::DiscontinuityReason::None &&
+           commandRead.load(std::memory_order_acquire) ==
+               commandWrite.load(std::memory_order_acquire);
+  }
+
+  /* Render thread. A skipped block still moves the stream clock and the
+     published telemetry exactly as a rendered, paused block does. */
+  void skipBlock(uint32_t frames) noexcept {
+    callbackContinuousFrame += frames;
+    publishTelemetry();
+  }
+
   bool enqueue(PlaybackTransportCommand command) noexcept {
     const uint32_t write = commandWrite.load(std::memory_order_relaxed);
     const uint32_t read = commandRead.load(std::memory_order_acquire);
@@ -2932,6 +2953,29 @@ struct PreparedPlaybackGraph {
   PreparedPlaybackTransport transport{};
   zdsp::AudioHostGraphAdapter adapter{};
   NativePlaybackCallbackState callback{};
+  // Bumped for graph input the render thread cannot see in a queue.
+  std::atomic<uint32_t> quietActivity{0};
+  static bool quietPredicate(void *context) noexcept {
+    auto *graph = static_cast<PreparedPlaybackGraph *>(context);
+    if (graph->cueSource.state != nullptr) {
+      const zdsp::ScheduledCueOneShotStatus click =
+          zdsp::scheduledCueOneShotStatus(graph->cueSource);
+      if (click.pending != 0 || click.started != click.completed) return false;
+    }
+    return graph->transport.atRestForSkip() &&
+           graph->parameters.snapshotAvailable() == 0;
+  }
+  static void quietSkipped(void *context,
+                           const AudioHostRenderBlock &block) noexcept {
+    static_cast<PreparedPlaybackGraph *>(context)->transport.skipBlock(
+        block.frames);
+  }
+  void armQuietSkip() noexcept {
+    callback.quietContext = this;
+    callback.quietPredicate = &quietPredicate;
+    callback.quietSkipped = &quietSkipped;
+    callback.quietActivity = &quietActivity;
+  }
   // The session's render router, shared so that a graph whose callback never
   // quiesced (quarantined) keeps the object the host still dereferences alive.
   std::shared_ptr<NativePlaybackRenderRouter> router;
@@ -3821,6 +3865,7 @@ struct PreparedPlaybackGraph {
     adapter.runner = &runner;
     adapter.transport = {slicePreparedPlaybackTransport, &transport};
     callback.adapter = &adapter;
+    armQuietSkip();
     return zdsp::okStatus();
   }
 
@@ -4352,6 +4397,7 @@ struct PreparedPlaybackGraph {
     adapter.runner = &runner;
     adapter.transport = {slicePreparedPlaybackTransport, &transport};
     callback.adapter = &adapter;
+    armQuietSkip();
     return zdsp::okStatus();
   }
 
@@ -4457,9 +4503,15 @@ struct PreparedPlaybackGraph {
   }
 
   bool enqueuePreviewClick(NativePlaybackPreviewClickSound sound) noexcept {
-    return cueSource.state != nullptr &&
-           zdsp::enqueueScheduledCueOneShot(
-               cueSource, static_cast<uint32_t>(sound));
+    // Publish the click first, then bump the activity: a render thread that
+    // sees the bump also sees the click, and one that has not yet seen the bump
+    // still sees the click pending (the quiet predicate checks it), so a
+    // delayed producer cannot strand it behind a skip.
+    const bool queued = cueSource.state != nullptr &&
+                        zdsp::enqueueScheduledCueOneShot(
+                            cueSource, static_cast<uint32_t>(sound));
+    quietActivity.fetch_add(1u, std::memory_order_release);
+    return queued;
   }
 
   zdsp::ScheduledCueOneShotStatus previewClickStatus() const noexcept {
@@ -8123,6 +8175,11 @@ NativePlaybackResult NativePlaybackSession::setRegion(uint64_t generation,
   if (!impl_->prepared->transport.setRegion(startFrame, endFrame))
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded transport command mailbox is full");
+  // A non-looping region ends any loop: the feeder's fill was capped at the old
+  // loop end, and a region that runs past it needs that cap gone (and the
+  // feeder woken) before the transport gets there.
+  if (impl_->prepared->streaming != nullptr)
+    impl_->prepared->streaming->clearLoop();
   return impl_->success(generation);
 }
 

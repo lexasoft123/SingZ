@@ -30,6 +30,8 @@ enum Command {
     Suspend(u64),
     Wake(u64),
 }
+/// Worker turn length while nothing is running or pending.
+const IDLE_TURN: Duration = Duration::from_millis(1000);
 pub struct Service {
     commands: SyncSender<Command>,
     events: Receiver<Event>,
@@ -185,6 +187,7 @@ impl Drop for Service {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Release);
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        let _ = self.commands.try_send(Command::Wake(self.epoch.load(Ordering::Acquire)));
         crate::drive_http::wake_cancelled_requests();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -463,7 +466,8 @@ fn worker(
             // Disabled Drive still acknowledges storage-worker fences.
             // It must not break the otherwise independent native picker.
             while alive.load(Ordering::Acquire) {
-                match commands.recv_timeout(Duration::from_millis(25)) {
+                // Nothing to schedule: sleep until a command (Drop sends a Wake).
+                match commands.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected) {
                     Ok(Command::Suspend(e)) if e == epoch.load(Ordering::Acquire) => {
                         publish(shared, |s| s.suspended = true)
                     }
@@ -503,9 +507,11 @@ fn worker(
     let mut last_dirty = crate::sync_dirty::Snapshot::default();
     let mut snapshot_conflict = false;
     let mut local_failure = false;
+    // A command that arrived while the loop slept; handled first next turn.
+    let mut deferred: Option<Command> = None;
     while alive.load(Ordering::Acquire) {
         let iteration = (|| -> Result<()> {
-            while let Ok(command) = commands.try_recv() {
+            while let Some(command) = deferred.take().or_else(|| commands.try_recv().ok()) {
                 let command_epoch = match &command {
                     Command::Action(e, _)
                     | Command::Root(e, _)
@@ -962,7 +968,16 @@ fn worker(
                 }
             });
         }
-        thread::sleep(Duration::from_millis(25));
+        // The scheduler's own clocks are seconds (debounce 4 s, launch 8 s), so
+        // with nothing running or pending the ledger is read at IDLE_TURN and a
+        // command wakes the loop at once instead of waiting out the sleep.
+        let busy = active_run.is_some() || manual_requested || local_failure || verify_pending || snapshot_conflict;
+        let turn = if busy { Duration::from_millis(25) } else { IDLE_TURN };
+        match commands.recv_timeout(turn) {
+            Ok(command) => deferred = Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => thread::sleep(turn),
+        }
     }
     scheduler.stop();
     Ok(())

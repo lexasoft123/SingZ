@@ -38,6 +38,23 @@ impl PendingAdoption {
     }
 }
 
+/// Status cadence while playing, counting in, cueing or monitoring.
+pub(super) const STATUS_ACTIVE: Duration = Duration::from_millis(33);
+/// Status cadence for a paused helper: nothing moves, so a status only has to
+/// notice a lost device or an external change. Every command resets to
+/// `STATUS_ACTIVE`, so the first status after a Play is not delayed by it.
+pub(super) const STATUS_IDLE: Duration = Duration::from_millis(500);
+/// An output meter below this (-80 dBFS) is at rest: the helper's held peak only
+/// decays geometrically and takes tens of seconds to reach exactly zero.
+pub(super) const METER_REST: f32 = 1.0e-4;
+/// How often to ask the helper for status given what the last one reported.
+pub(super) fn status_period_for(status: &Status, monitor_lease: bool, training: bool) -> Duration {
+    if status.playing || status.counting_in || status.cue.active || status.output_peak > METER_REST || monitor_lease || training {
+        STATUS_ACTIVE
+    } else {
+        STATUS_IDLE
+    }
+}
 pub(super) fn run(
     requests: Receiver<Request>,
     jobs: jobs::Sender,
@@ -61,6 +78,7 @@ pub(super) fn run(
     let mut active_training: Option<(u64, u64)> = None;
     let mut monitor_lease = false;
     let mut poll = Instant::now();
+    let mut status_period = STATUS_ACTIVE;
     let mut recovery_inflight = None;
     let mut provider_inflight = false;
     let mut pending_adoption: Option<PendingAdoption> = None;
@@ -139,12 +157,17 @@ pub(super) fn run(
             jobs.hooks.idle_recv.store(false, Ordering::Release);
             received
         } else {
-            requests.recv_timeout(Duration::from_millis(33).saturating_sub(poll.elapsed()))
+            requests.recv_timeout(status_period.saturating_sub(poll.elapsed()))
         };
         let (request, mut admission) = match request {
             Ok(Request::Admitted(request, permit)) => (Ok(*request), Some(permit)),
             request => (request, None),
         };
+        // Any command can change what the helper is doing: poll at the playing
+        // rate until a status shows it at rest again.
+        if request.as_ref().is_ok_and(|request| !matches!(request, Request::Wake)) {
+            status_period = STATUS_ACTIVE;
+        }
         if alive.load(Ordering::Acquire)
             && request
                 .as_ref()
@@ -1580,7 +1603,7 @@ pub(super) fn run(
         if !alive.load(Ordering::Acquire) {
             break;
         }
-        if poll.elapsed() >= Duration::from_millis(33) {
+        if poll.elapsed() >= status_period {
             poll = Instant::now();
             if let Some(child) = connection
                 .as_mut()
@@ -1589,6 +1612,7 @@ pub(super) fn run(
                 let epoch = child.epoch;
                 match child.command("status") {
                     Ok(s) => {
+                        status_period = status_period_for(&s, monitor_lease, active_training.is_some());
                         *telemetry.lock().unwrap_or_else(|e| e.into_inner()) = Some((epoch, s));
                     }
                     Err(e) => {

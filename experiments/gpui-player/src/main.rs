@@ -29,6 +29,7 @@ mod ui_timeline;
 mod timeline_viewport;
 mod alloc_probe;
 mod frame_demand;
+mod poll_cadence;
 mod playhead_overlay;
 mod timeline_host;
 mod ruler_clearance;
@@ -489,6 +490,8 @@ struct DeletePending {
     restore: Option<DeleteRestore>,
 }
 struct Player {
+    /// A poll drained a non-telemetry event; keeps `poll_cadence` fast.
+    poll_hot: bool,
     desktop_shutdown_done: bool,
     desktop_window_state: Option<desktop_window_state::StateStore>,
     practice: Option<training_run::Run>,
@@ -1365,13 +1368,22 @@ impl Player {
             backend.inventory();
         }
         if backend.is_some() {
+            let kicks = poll_cadence::channel();
             cx.spawn(async move |this, cx| {
+                let mut cadence = poll_cadence::Cadence::new(Instant::now());
                 loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(16))
-                        .await;
-                    if this.update(cx, |this, cx| this.poll_backend(cx)).is_err() {
-                        break;
+                    let sleep = cx.background_executor().timer(cadence.wait(Instant::now()));
+                    // A render (any input that changed the screen) kicks the
+                    // loop awake instead of waiting out the idle sleep.
+                    let kicked = futures_lite::future::or(
+                        async { sleep.await; false },
+                        async { kicks.recv().await.is_ok() },
+                    ).await;
+                    if kicked { cadence.activity(Instant::now()); }
+                    match this.update(cx, |this, cx| { this.poll_backend(cx); std::mem::take(&mut this.poll_hot) || this.playing || this.loading }) {
+                        Ok(true) => cadence.activity(Instant::now()),
+                        Ok(false) => {}
+                        Err(_) => break,
                     }
                 }
             })
@@ -1444,6 +1456,7 @@ impl Player {
             source_publication_fault: None,
             #[cfg(feature="ui-tests")]
             notice_close_bounds: Default::default(),
+            poll_hot: false,
             lyric_document: Arc::new(project_lyrics::fixture()),
             lyrics_sidebar,
             lyrics_sidebar_intent:lyrics_resolution::Intent::Auto,lyrics_sidebar_job:lyrics_resolution::Intent::Auto,lyrics_sidebar_next:None,lyrics_sidebar_editor_after:false,lyrics_sidebar_import_after:None,lyrics_sidebar_rename_after:None,lyrics_sidebar_needs:vec![],lyrics_sidebar_download:None,
@@ -2759,6 +2772,9 @@ impl Player {
         self.sync_audio_provider(cx);
         if let Some(store)=&mut self.desktop_window_state{store.save_if_due(Instant::now());}
         let events = self.backend.as_ref().map(|b| b.drain()).unwrap_or_default();
+        // Only an event that is not routine telemetry keeps the loop fast: a
+        // paused helper still reports status, which must not defeat backing off.
+        self.poll_hot |= events.iter().any(|event| !matches!(event, integration::Event::Status(..)));
         for event in events {
             // Telemetry arrives ~25 Hz even while paused; it only repaints the
             // root when something the root shows actually changed.
@@ -5487,6 +5503,7 @@ impl Player {
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         waveform::release_evicted(window);
+        poll_cadence::kick();
         self.sync_audio_provider(cx);
         #[cfg(feature="ui-tests")]
         self.notice_close_bounds.set(None);

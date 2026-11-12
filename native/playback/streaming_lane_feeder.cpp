@@ -40,6 +40,13 @@ uint32_t nextStage(uint32_t state, uint32_t phase) noexcept {
 // a loop's fill ends this far past its end — otherwise the window's leading
 // edge starves the final frame before every wrap.
 constexpr uint64_t kLoopTailFrames = 2;
+// Idle poll of the feeder thread: short while a lane's demand is moving so a
+// scrub is chased within a block or two, long when nothing is consuming.
+constexpr auto kBusyIdleWait = std::chrono::milliseconds(4);
+constexpr auto kQuietIdleWait = std::chrono::milliseconds(50);
+// With a jump stage published and uncommitted: half of the shortest time the
+// stage can last (see loop()).
+constexpr auto kStageIdleWait = std::chrono::milliseconds(20);
 
 // A seek's stage that has not been swapped in after this long is not going to
 // be: its seek was refused, superseded or landed somewhere else. Long enough
@@ -614,7 +621,7 @@ size_t StreamingLaneGroup::stageJump(uint64_t sourceFrame) {
     if (stageLane(lane, sourceFrame))
       ++staged;
   }
-  wake_.notify_all();
+  wake();
   return staged;
 }
 
@@ -623,6 +630,7 @@ size_t StreamingLaneGroup::stagePreparedStart(uint64_t sourceFrame) {
   size_t staged = 0;
   for (auto& lane : lanes_)
     if (stageLane(*lane, sourceFrame)) ++staged;
+  wake();
   return staged;
 }
 
@@ -631,7 +639,7 @@ uint64_t StreamingLaneGroup::requestJump(uint64_t sourceFrame) noexcept {
   jumpSequence_.store(token - 1, std::memory_order_seq_cst);
   jumpFrame_.store(sourceFrame, std::memory_order_seq_cst);
   jumpSequence_.store(token, std::memory_order_seq_cst);
-  wake_.notify_all();
+  wake();
   return token;
 }
 
@@ -705,6 +713,9 @@ bool StreamingLaneGroup::commitJump(uint64_t token, uint64_t frame) noexcept {
     lane.stage.store(nextStage(state, kStageSwapped), std::memory_order_release);
   }
   completedJump_.store(token, std::memory_order_release);
+  // Render thread: no wake() here (it takes a mutex). The feeder adopts the
+  // swapped ring within its idle wait, and the swap only ever happens when the
+  // transport moves, which a quiet feeder detects as a moving demand.
   return true;
 }
 
@@ -715,14 +726,17 @@ void StreamingLaneGroup::setLoop(uint64_t startFrame, uint64_t endFrame) {
     loopStart_ = startFrame;
     loopEnd_ = endFrame;
   }
-  wake_.notify_all();
+  wake();
 }
 
 void StreamingLaneGroup::clearLoop() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   loopEnabled_ = false;
   loopStart_ = 0;
   loopEnd_ = 0;
+  lock.unlock();
+  // The fill was capped at the loop end; without the cap the lanes need more.
+  wake();
 }
 
 bool StreamingLaneGroup::sampleAt(size_t index, uint32_t channel,
@@ -1039,8 +1053,22 @@ bool StreamingLaneGroup::waveformComplete() const noexcept {
   return true;
 }
 
+void StreamingLaneGroup::wake() noexcept {
+  // The epoch changes under the same small mutex the feeder waits on, so a
+  // wake can never fall between the feeder's predicate check and its sleep.
+  // This is NOT mutex_ (held across decoder I/O): it is only ever held for the
+  // few instructions around the epoch and the wait entry.
+  {
+    std::lock_guard<std::mutex> lock(wakeMutex_);
+    wakeEpoch_.fetch_add(1, std::memory_order_release);
+  }
+  wake_.notify_all();
+}
+
 void StreamingLaneGroup::loop() {
   while (running_.load(std::memory_order_acquire)) {
+    const uint64_t seen = wakeEpoch_.load(std::memory_order_acquire);
+    loopTurns_.fetch_add(1, std::memory_order_relaxed);
     bool progressed = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1053,8 +1081,45 @@ void StreamingLaneGroup::loop() {
     // Nothing to do: every lane is as far ahead as it is allowed to be. Wake
     // on a timer rather than spin, and short enough that a scrub is chased
     // within a block or two.
-    std::unique_lock<std::mutex> lock(mutex_);
-    wake_.wait_for(lock, std::chrono::milliseconds(4));
+    // Only a moving demand needs the short poll. While nothing consumes the
+    // rings (paused, stopped, finished) the demand of every lane is the same
+    // as last round, the rings already hold targetAheadFrames, and anything
+    // that changes that from the control side (seek, jump, loop, stage, stop)
+    // calls wake(). Playing starts consuming; the first block it plays is
+    // already resident and the poll is back to 4 ms within one idle wait.
+    bool moving = false;
+    // A published jump stage is waiting for the render thread to commit it
+    // (or just has, and waits to be adopted). The commit cannot wake us, and
+    // the stage holds only stageFrames of audio: at 192 kHz and 4x that is
+    // 32768 / (192000 * 4) = 42.7 ms. Sleep at most half of that, so the
+    // refill starts well inside it; the committed jump then shows as a moving
+    // demand and the poll drops to 4 ms.
+    bool stagePending = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (std::unique_ptr<Lane>& lane : lanes_) {
+        uint64_t demand = lane->lastIdleDemand;
+        if (!zdsp::streamingWindowDemand(&lane->window, &demand))
+          demand = lane->residentStart;
+        if (demand != lane->lastIdleDemand) moving = true;
+        lane->lastIdleDemand = demand;
+        if (stagePhase(lane->stage.load(std::memory_order_acquire)) != kStageIdle)
+          stagePending = true;
+      }
+    }
+    const auto idleWait = moving ? kBusyIdleWait
+                                 : (stagePending ? kStageIdleWait : kQuietIdleWait);
+    std::unique_lock<std::mutex> lock(wakeMutex_);
+    const auto woken = [&] {
+      return wakeEpoch_.load(std::memory_order_acquire) != seen ||
+             !running_.load(std::memory_order_acquire);
+    };
+    if (!woken()) {
+      // The predicate is false and wakeMutex_ is held: a wake() that lands
+      // now must block until the wait below has released it, then notify.
+      if (waitSeam_ != nullptr) waitSeam_(waitSeamContext_);
+      wake_.wait_for(lock, idleWait);
+    }
   }
 }
 
@@ -1073,7 +1138,7 @@ void StreamingLaneGroup::stop() {
     waveformThread_.join();
   if (!running_.exchange(false, std::memory_order_acq_rel))
     return;
-  wake_.notify_all();
+  wake();
   if (thread_.joinable())
     thread_.join();
 }

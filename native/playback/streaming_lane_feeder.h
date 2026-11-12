@@ -245,9 +245,23 @@ class StreamingLaneGroup {
   // thread, so a test can drive the whole protocol deterministically. Returns
   // true when any lane made progress.
   bool serviceOnceForTesting();
+  // Turns the feeder thread has taken (busy or idle); a test reads the idle
+  // cadence from it.
+  // Called by the idle feeder with the wake mutex held, AFTER its predicate
+  // has come back false and immediately before it sleeps: a test can start a
+  // wake() here and hold it across the sleep entry. Set before start().
+  void setWaitSeamForTesting(void (*seam)(void*), void* context) noexcept {
+    waitSeam_ = seam;
+    waitSeamContext_ = context;
+  }
+  [[nodiscard]] uint64_t loopTurnsForTesting() const noexcept {
+    return loopTurns_.load(std::memory_order_relaxed);
+  }
 
  private:
   struct Lane {
+    // The demand seen by the previous idle round (feeder thread, mutex_).
+    uint64_t lastIdleDemand{~0ull};
     std::unique_ptr<StreamingAudioSource> source;
     // Null when the file already matches the device. Recreated on every seek:
     // its filter history belongs to the audio before the jump, and there is no
@@ -359,6 +373,8 @@ class StreamingLaneGroup {
   void adoptSwap(Lane& lane, uint32_t state);
   void loop();
   void waveformLoop();
+  // Wake the feeder thread now, from any control-domain thread.
+  void wake() noexcept;
 
   // Single control-domain writer, feeder reader: even sequence = published.
   std::atomic<uint64_t> jumpSequence_{0};
@@ -380,6 +396,14 @@ class StreamingLaneGroup {
   uint64_t loopEnd_{0};
   mutable std::mutex mutex_;
   std::condition_variable wake_;
+  // Guards wakeEpoch_ for the wait only; never held across decoder I/O.
+  std::mutex wakeMutex_;
+  void (*waitSeam_)(void*){nullptr};
+  void* waitSeamContext_{nullptr};
+  // Bumped by every wake(): the feeder waits on it, so a wake that lands
+  // between its last pass and its sleep is not lost.
+  std::atomic<uint64_t> wakeEpoch_{0};
+  std::atomic<uint64_t> loopTurns_{0};
   std::atomic<bool> running_{false};
 
  public:
