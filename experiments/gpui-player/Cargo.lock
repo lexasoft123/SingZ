@@ -6621,7 +6621,7 @@ dependencies = [
 [[package]]
 name = "singz-uikit"
 version = "0.1.0"
-source = "git+https://github.com/lexasoft123/singz-ui.git?rev=1c1081adc21975a346faeed1b48ebff20348935f#1c1081adc21975a346faeed1b48ebff20348935f"
+source = "git+https://github.com/lexasoft123/singz-ui.git?rev=395cef25979db15f1cd28bce5300e5e6d084d4c0#395cef25979db15f1cd28bce5300e5e6d084d4c0"
 dependencies = [
  "anyhow",
  "gpui-kit",

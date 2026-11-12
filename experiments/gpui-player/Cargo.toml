@@ -12,7 +12,7 @@ test-hooks = []
 gpui-kit = "=0.9.0"
 # Enable native offscreen rendering without gpui-kit optional fast-backend features.
 gpui-test-platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["test-support"] }
-singz-uikit = { git = "https://github.com/lexasoft123/singz-ui.git", rev = "1c1081adc21975a346faeed1b48ebff20348935f" }
+singz-uikit = { git = "https://github.com/lexasoft123/singz-ui.git", rev = "395cef25979db15f1cd28bce5300e5e6d084d4c0" }
 anyhow = "1"
 async-channel = "=2.5.0"
 base64 = "=0.22.1"
