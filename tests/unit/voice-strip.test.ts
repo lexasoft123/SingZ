@@ -410,7 +410,7 @@ describe('listening', () => {
     const { c, api, engine } = await withTake()
     clock = 0
     await c.listen('take')
-    expect(api.play).toHaveBeenCalledWith({ takeId: 'take-1', mode: 'take', gain: takeGain(80, false) })
+    expect(api.play).toHaveBeenCalledWith({ takeId: 'take-1', mode: 'take', gain: takeGain(100, false) })
     expect(engine.play).toHaveBeenCalledTimes(1) // only the recording start
     expect(c.state).toBe('playing-take')
     clock = 11_000
@@ -425,7 +425,7 @@ describe('listening', () => {
     expect(engine.setTempo).toHaveBeenCalledWith(0.8)
     expect(engine.setTranspose).toHaveBeenCalledWith(-2)
     expect(engine.seek).toHaveBeenCalledWith(42)
-    expect(api.play).toHaveBeenCalledWith({ takeId: 'take-1', mode: 'with-song', gain: takeGain(80, false) })
+    expect(api.play).toHaveBeenCalledWith({ takeId: 'take-1', mode: 'with-song', gain: takeGain(100, false) })
     expect(engine._playing).toBe(true)
     await c.stopListening()
     expect(engine._playing).toBe(false)
@@ -450,6 +450,10 @@ describe('take level, mute and solo (VS-PLAY-004/006)', () => {
     await r.c.toggleRecord()
     return r
   }
+  it('defaults the take level to the native maximum', () => {
+    expect(INITIAL_VOICE_MODEL.level).toBe(100)
+    expect(takeGain(INITIAL_VOICE_MODEL.level, false)).toBeCloseTo(0.891, 3)
+  })
   it('maps the fader to linear gain: 100 is the native maximum (-1 dB), 0 and mute are silent, no boost', () => {
     expect(takeGain(100, false)).toBeCloseTo(0.891, 3)
     expect(takeGain(100, false)).toBeLessThanOrEqual(0.891)
@@ -523,6 +527,38 @@ describe('take level, mute and solo (VS-PLAY-004/006)', () => {
     expect(engine.stems.get('vocals')).toBe(false)
     expect(engine.stems.get('drums')).toBe(false)
     expect(engine.stems.get('bass')).toBe(true)
+    c.dispose()
+  })
+  it('dispose while api.play is still pending restores the stems, stops native play and never starts listening', async () => {
+    let finish!: (v: { ok: boolean }) => void
+    const { c, engine, api } = await withTake()
+    api.play.mockImplementation(() => new Promise<{ ok: boolean }>((r) => { finish = r }))
+    c.toggleSolo()
+    const listening = c.listen('with-song')
+    await vi.waitFor(() => expect(api.play).toHaveBeenCalled())
+    expect(engine.stems.get('vocals')).toBe(true)
+    c.dispose()
+    expect(engine.stems.get('vocals')).toBe(false)
+    expect(engine.stems.get('drums')).toBe(false)
+    expect(engine.stems.get('bass')).toBe(true)
+    expect(engine._playing).toBe(false)
+    await vi.waitFor(() => expect(api.stopPlay).toHaveBeenCalled())
+    finish({ ok: true })
+    await listening
+    expect(c.getSnapshot().listen).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('a song change while api.play is pending cancels the listen', async () => {
+    let finish!: (v: { ok: boolean }) => void
+    const { c, api } = await withTake()
+    api.play.mockImplementation(() => new Promise<{ ok: boolean }>((r) => { finish = r }))
+    const listening = c.listen('take')
+    await vi.waitFor(() => expect(api.play).toHaveBeenCalled())
+    await c.setSong('song-2')
+    finish({ ok: true })
+    await listening
+    expect(c.getSnapshot().listen).toBeNull()
+    expect(api.stopPlay).toHaveBeenCalled()
     c.dispose()
   })
   it('without solo the stems are left alone', async () => {

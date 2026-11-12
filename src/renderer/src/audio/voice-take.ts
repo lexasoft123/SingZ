@@ -155,7 +155,8 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   clipped: false,
   takeMuted: false,
   solo: false,
-  level: 80,
+  /** Take level: 100 is the native maximum (-1 dB), the sensible default. */
+  level: 100,
   elapsedSec: 0,
   announce: { seq: 0, key: null }
 }
@@ -227,6 +228,8 @@ export class VoiceController {
   private disposed = false
   private startToken = 0
   private soloedStems: string[] | null = null
+  private listenToken = 0
+  private pendingListen: VoiceListenMode | null = null
   private readonly now: () => number
 
   constructor(private readonly deps: VoiceControllerDeps) {
@@ -320,6 +323,16 @@ export class VoiceController {
     this.startToken++
     // A listen ends synchronously here, before any await: stems restored, song
     // paused, listen state cleared (stopListening does all three).
+    if (this.pendingListen) {
+      // A listen still starting: cancel it and undo what it did so far.
+      const mode = this.pendingListen
+      this.listenToken++
+      this.pendingListen = null
+      this.restoreStems(this.soloedStems)
+      this.soloedStems = null
+      if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
+      await this.deps.api.stopPlay().catch(() => undefined)
+    }
     if (this.model.listen) await this.stopListening()
     if (this.model.recording && this.recordingId) {
       this.recordingId = null
@@ -558,6 +571,16 @@ export class VoiceController {
   async discard(): Promise<void> {
     const tk = this.model.take
     if (!tk || this.model.recording) return
+    if (this.pendingListen) {
+      // A listen still starting: cancel it and undo what it did so far.
+      const mode = this.pendingListen
+      this.listenToken++
+      this.pendingListen = null
+      this.restoreStems(this.soloedStems)
+      this.soloedStems = null
+      if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
+      await this.deps.api.stopPlay().catch(() => undefined)
+    }
     if (this.model.listen) await this.stopListening()
     this.set({ take: null, error: null, ...this.say('announceDiscarded') })
     await this.deps.api.remove(this.model.songId ?? '', tk.takeId).catch(() => undefined)
@@ -572,7 +595,12 @@ export class VoiceController {
   async listen(mode: VoiceListenMode): Promise<void> {
     const tk = this.model.take
     const { engine, api } = this.deps
-    if (!tk || this.model.recording || this.model.listen) return
+    if (!tk || this.model.recording || this.model.listen || this.pendingListen) return
+    // From here until the listen settles, abortActivity can cancel it: every
+    // continuation below checks the token and does nothing once it is stale.
+    const token = ++this.listenToken
+    this.pendingListen = mode
+    const stale = (): boolean => token !== this.listenToken
     let startedSong = false
     try {
       if (mode === 'take') {
@@ -580,6 +608,7 @@ export class VoiceController {
       } else {
         await engine.setTempo(tk.tempo)
         await engine.setTranspose(tk.transpose)
+        if (stale()) return
         // Play first, then seek: a seek on a paused, never-played song asks the
         // native engine to prepare a route before Play (see report, D1), and
         // that can throw. Cost: the song is audible from its current position
@@ -588,15 +617,22 @@ export class VoiceController {
           await engine.play()
           startedSong = true
         }
+        if (stale()) {
+          if (startedSong && engine.playing) engine.pause()
+          return
+        }
         engine.seek(tk.startSec)
       }
     } catch {
+      if (stale()) return
       // Never hide a failure: show it, and leave the song as we found it.
       if (startedSong && engine.playing) engine.pause()
+      this.pendingListen = null
       this.set({ error: 'error' })
       return
     }
-    const soloed = mode === 'with-song' && this.model.solo ? this.muteStems() : null
+    // Recorded BEFORE the await so a teardown during it can restore the stems.
+    this.soloedStems = mode === 'with-song' && this.model.solo ? this.muteStems() : null
     let ok = true
     try {
       const res = await api.play({ takeId: tk.takeId, mode, gain: takeGain(this.model.level, this.model.takeMuted) })
@@ -604,13 +640,17 @@ export class VoiceController {
     } catch {
       ok = false
     }
+    // Torn down meanwhile: abortActivity already stopped native play and
+    // restored everything; setting listen or a timer now would resurrect it.
+    if (stale()) return
+    this.pendingListen = null
     if (!ok) {
-      this.restoreStems(soloed)
+      this.restoreStems(this.soloedStems)
+      this.soloedStems = null
       if (mode === 'with-song') engine.pause()
       this.set({ error: 'error' })
       return
     }
-    this.soloedStems = soloed
     this.listenStartedMs = this.now()
     this.listenSawPlaying = engine.playing
     this.set({ listen: mode })

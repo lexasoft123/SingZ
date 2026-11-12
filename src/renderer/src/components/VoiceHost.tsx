@@ -59,10 +59,21 @@ export default function VoiceHost({
     }
     place()
     setSlot(el)
-    const bar = document.querySelector('.transport')
-    const mo = new MutationObserver(schedule)
-    if (bar) mo.observe(bar, { childList: true, subtree: true })
-    if (bar?.parentElement) mo.observe(bar.parentElement, { childList: true }) // the bar itself replaced
+    // Observe the transport bar and its parent; when the bar is replaced,
+    // observe the new one.
+    let observedBar: Element | null = null
+    const mo = new MutationObserver(() => {
+      const now = document.querySelector('.transport')
+      if (now !== observedBar) watch(now)
+      schedule()
+    })
+    const watch = (bar: Element | null): void => {
+      mo.disconnect()
+      observedBar = bar
+      if (bar) mo.observe(bar, { childList: true, subtree: true })
+      if (bar?.parentElement) mo.observe(bar.parentElement, { childList: true })
+    }
+    watch(document.querySelector('.transport'))
     return () => {
       mo.disconnect()
       if (raf) cancelAnimationFrame(raf)
