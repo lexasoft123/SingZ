@@ -68,7 +68,59 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                                 "liveTextures": waveform.live_textures,
                                 "mainThreadRasterizations": waveform.main_thread_rasterizations,
                                 "backgroundRasterizations": waveform.background_rasterizations,
-                                "lanePlayheadPaintAllocations": super::alloc_probe::count()}))
+                                "lanePlayheadPaintAllocations": super::alloc_probe::count(),
+                                "lyricPitchPaintAllocations": super::alloc_probe::text_count(),
+                                "pitchPaintAllocations": super::alloc_probe::pitch_count(),
+                                "pitchTracePathEngineAllocations": super::alloc_probe::exempt_count(),
+                                "countdownAnimationAllocations": super::alloc_probe::animation_count(),
+                                "lyricPaints": super::alloc_probe::lyric_paints(),
+                                "pitchPaints": super::alloc_probe::pitch_paints(),
+                                "pitchTracePaints": super::pitch_strip::trace_paints(),
+                                "advancingWords": super::lyrics_view::paint_counts().0,
+                                "advancingGlowDraws": super::lyrics_view::paint_counts().1,
+                                "countdownSpritePaints": super::lyrics_view::paint_counts().2,
+                                "countdownSpriteRequests": super::lyrics_view::paint_counts().3,
+                                "lyricShapeMisses": super::lyrics_view::shape_misses(),
+                                "pitchLabelMisses": super::pitch_strip::label_misses(),
+                                "pitchTraceMisses": super::pitch_strip::trace_misses(),
+                                "lyricShapeEntries": handle.update(cx, |_, _, app| view.read(app).shape_cache.borrow().len())?,
+                                "pitchLabelEntries": super::pitch_strip::label_count()}))
+                        }
+                        // Paused sweep of the lyric timeline at 120 Hz steps: every frame
+                        // moves the position (so active words, the feathered band and the
+                        // pitch strip's playhead all change) and draws. Run it once to warm
+                        // the caches and again to measure.
+                        "lyric-pitch-sweep" => {
+                            let start = command["start"].as_f64().unwrap_or(0.);
+                            let frames = command["frames"].as_u64().unwrap_or(600);
+                            anyhow::ensure!(start.is_finite() && start >= 0. && frames > 0, "invalid sweep");
+                            for frame in 0..frames {
+                                handle.update(cx, |_, window, app| -> anyhow::Result<()> {
+                                    anyhow::ensure!(!window.is_visible() && !window.is_window_active(), "scenario window became visible");
+                                    view.update(app, |p, cx| { p.playhead.seek(start + frame as f64 / 120.); cx.notify(); });
+                                    let _ = window.draw(app);
+                                    Ok(())
+                                })??;
+                                // Yield now and then so the helper's status traffic is serviced.
+                                if frame % 50 == 49 { cx.background_executor().timer(Duration::from_millis(1)).await; }
+                            }
+                            Ok(serde_json::json!({"frames": frames}))
+                        }
+                        // Karaoke shows the lyric canvas and the pitch strip.
+                        "karaoke" => {
+                            handle.update(cx, |_, window, app| {
+                                view.update(app, |p, cx| { p.karaoke = true; p.transport.update(cx, |t, cx| t.set_karaoke(true, cx)); cx.notify(); });
+                                super::ui_training_run::draw(window, app);
+                            })?;
+                            Ok(serde_json::json!({"karaoke": true}))
+                        }
+                        "seek" => {
+                            let to = command["to"].as_f64().unwrap_or(0.);
+                            // `native` also moves the audio engine, as a click on a lyric does; without it
+                            // the engine keeps its own position and playback pulls the playhead back.
+                            let native = command["native"].as_bool().unwrap_or(false);
+                            handle.update(cx, |_, window, app| { view.update(app, |p, cx| { p.playhead.seek(to); if native { p.seek_native(cx); } cx.notify(); }); let _ = window.draw(app); })?;
+                            Ok(serde_json::json!({"to": to}))
                         }
                         "seed-meter" => {
                             let held = command["held"].as_f64().unwrap_or(1.) as f32;

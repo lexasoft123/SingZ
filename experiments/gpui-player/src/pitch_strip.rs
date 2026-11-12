@@ -6,6 +6,8 @@ use singz_uikit::tokens::*;
 use singz_uikit::{
     TransportIcon, colored_icon, small_ghost_pill, tracked_label, tracked_text, zoom_chip,
 };
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::{cell::{Cell, RefCell}, rc::Rc};
 pub enum PitchEvent {
@@ -173,6 +175,10 @@ impl PitchStrip {
         self.trail.borrow_mut().clear();
         self.hits = 0;
         self.total = 0;
+        // The trace cache identifies pitch data by address; new data (for
+        // example a re-run analysis) must never reuse a trace built from the
+        // old Arc, even if the allocator hands back the same address.
+        clear_labels();
         self.data = Some(data);
         cx.notify();
     }
@@ -435,19 +441,21 @@ fn scene(
                     b
                 },
                 move |_, b, w, cx| {
-                    paint_roll(
-                        b,
-                        data.as_deref(),
-                        &trail.borrow(),
-                        transpose,
-                        position,
-                        note_bars,
-                        fit,
-                        view_start,
-                        view_end,
-                        w,
-                        cx,
-                    )
+                    crate::alloc_probe::scope_pitch(|| {
+                        paint_roll(
+                            b,
+                            data.as_deref(),
+                            &trail.borrow(),
+                            transpose,
+                            position,
+                            note_bars,
+                            fit,
+                            view_start,
+                            view_end,
+                            w,
+                            cx,
+                        )
+                    })
                 },
             )
             .absolute()
@@ -583,36 +591,137 @@ fn rect(w: &mut Window, x: Pixels, y: Pixels, width: Pixels, height: Pixels, col
     ));
 }
 
-fn text(
-    w: &mut Window,
-    cx: &mut App,
-    label: &str,
-    x: Pixels,
-    baseline: Pixels,
-    font_size: f32,
-    color: u32,
-    right: bool,
-) {
-    let line = w.text_system().shape_line(
-        label.to_owned().into(),
+/// What a cached roll label says. Notes are keyed by MIDI number (octave
+/// labels and the fixture's `A2` are notes too), so a lookup never builds a
+/// string; a warning is arbitrary text, keyed by hash and checked on a hit.
+#[derive(Clone, Copy)]
+enum Label<'a> {
+    Note(i32),
+    Warning(&'a str),
+}
+
+struct LabelEntry {
+    line: ShapedLine,
+    /// Only warnings keep their text, to reject a hash collision.
+    warning: Option<Box<str>>,
+}
+
+/// Bound on cached labels. A roll shows a few dozen distinct notes at a few
+/// sizes; when the bound is hit (many zoom levels, or an endless run of
+/// distinct transposes) the cache starts over.
+const MAX_LABELS: usize = 512;
+
+static LABEL_MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Everything the f0 trace path depends on. The data is identified by address
+/// and shape; the cache is also cleared when the project changes.
+#[derive(PartialEq)]
+struct TraceKey {
+    data: usize,
+    f0_len: usize,
+    duration: u64,
+    hop: u64,
+    start: u64,
+    end: u64,
+    geometry: [u32; 4],
+    range: [u32; 2],
+    transpose: i32,
+}
+
+static TRACE_MISSES: AtomicU64 = AtomicU64::new(0);
+static TRACE_PAINTS: AtomicU64 = AtomicU64::new(0);
+
+/// `paint_path` calls for the f0 trace since launch (test counter).
+#[cfg(feature = "ui-tests")]
+pub(crate) fn trace_paints() -> u64 {
+    TRACE_PAINTS.load(Ordering::Relaxed)
+}
+
+thread_local! {
+    static TRACE: RefCell<Option<(TraceKey, Option<Path<Pixels>>)>> = const { RefCell::new(None) };
+    static LABELS: RefCell<HashMap<(u8, u64, u32, u32), LabelEntry>> = RefCell::new(HashMap::new());
+}
+
+/// Pitch label shape-cache misses since launch (test counter).
+#[cfg(feature = "ui-tests")]
+pub(crate) fn label_misses() -> u64 {
+    LABEL_MISSES.load(Ordering::Relaxed)
+}
+
+/// Pitch trace path rebuilds since launch (test counter).
+#[cfg(feature = "ui-tests")]
+pub(crate) fn trace_misses() -> u64 {
+    TRACE_MISSES.load(Ordering::Relaxed)
+}
+
+/// Drop every cached label and the cached trace path; called when the project changes.
+pub(crate) fn clear_labels() {
+    LABELS.with(|labels| labels.borrow_mut().clear());
+    TRACE.with(|trace| *trace.borrow_mut() = None);
+}
+
+#[cfg(feature = "ui-tests")]
+pub(crate) fn label_count() -> usize {
+    LABELS.with(|labels| labels.borrow().len())
+}
+
+fn label_color(color: u32) -> Hsla {
+    if color > 0xffffff { rgba(color).into() } else { rgb(color).into() }
+}
+
+fn shape_label(window: &Window, text: &str, font_size: f32, color: u32) -> ShapedLine {
+    window.text_system().shape_line(
+        text.to_owned().into(),
         px(font_size),
         &[TextRun {
-            len: label.len(),
-            font: Font {
-                family: MONO_400.into(),
-                ..Default::default()
-            },
-            color: if color > 0xffffff {
-                rgba(color).into()
-            } else {
-                rgb(color).into()
-            },
+            len: text.len(),
+            font: Font { family: MONO_400.into(), ..Default::default() },
+            color: label_color(color),
             background_color: None,
             underline: None,
             strikethrough: None,
         }],
         None,
-    );
+    )
+}
+
+/// The shaped line for `label` at `font_size` in `color`, shaped once.
+fn label_line(w: &Window, label: Label, font_size: f32, color: u32) -> ShapedLine {
+    use std::hash::{Hash, Hasher};
+    let (kind, id) = match label {
+        Label::Note(midi) => (0u8, midi as i64 as u64),
+        Label::Warning(text) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            (1, hasher.finish())
+        }
+    };
+    let key = (kind, id, font_size.to_bits(), color);
+    LABELS.with(|labels| {
+        let mut labels = labels.borrow_mut();
+        if let Some(entry) = labels.get(&key) {
+            let same = match label {
+                Label::Warning(text) => entry.warning.as_deref() == Some(text),
+                Label::Note(_) => true,
+            };
+            if same {
+                return entry.line.clone();
+            }
+        }
+        LABEL_MISSES.fetch_add(1, Ordering::Relaxed);
+        if labels.len() >= MAX_LABELS {
+            labels.clear();
+        }
+        let (line, warning) = match label {
+            Label::Note(midi) => (shape_label(w, &crate::project_pitch::note_name(midi), font_size, color), None),
+            Label::Warning(text) => (shape_label(w, text, font_size, color), Some(text.into())),
+        };
+        labels.insert(key, LabelEntry { line: line.clone(), warning });
+        line
+    })
+}
+
+fn paint_line(w: &mut Window, cx: &mut App, line: &ShapedLine, x: Pixels, baseline: Pixels, right: bool) {
     let height = line.ascent + line.descent;
     // Canvas2D fillText takes an alphabetic baseline. Compensate for the
     // window's CSS line-box policy rather than treating ascent as an origin.
@@ -621,6 +730,20 @@ fn text(
         baseline - w.text_baseline(line.ascent, line.descent, height),
     );
     let _ = line.paint(origin, height, TextAlign::Left, None, w, cx);
+}
+
+fn text(
+    w: &mut Window,
+    cx: &mut App,
+    label: Label,
+    x: Pixels,
+    baseline: Pixels,
+    font_size: f32,
+    color: u32,
+    right: bool,
+) {
+    let line = label_line(w, label, font_size, color);
+    paint_line(w, cx, &line, x, baseline, right);
 }
 
 fn paint_roll(
@@ -701,7 +824,7 @@ fn paint_roll(
                 text(
                     w,
                     cx,
-                    &format!("C{}", midi / 12 - 1),
+                    Label::Note(midi),
                     x0 - px(5.),
                     y_of(midi as f32) + px(kb_font * 0.31),
                     kb_font,
@@ -809,25 +932,7 @@ fn paint_roll(
     if note_visible && (note_bars || row_h >= 6.) {
         let label_x = note_x + px(3.);
         let label_y = y - bar_h / 2. - px(2.);
-        let label_width = w
-            .text_system()
-            .shape_line(
-                "A2".into(),
-                px(11.),
-                &[TextRun {
-                    len: 2,
-                    font: Font {
-                        family: MONO_400.into(),
-                        ..Default::default()
-                    },
-                    color: rgb(0xfff0d7).into(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            )
-            .width;
+        let label_width = label_line(w, Label::Note(45), 11., 0xfff0d7).width;
         if note_bars {
             w.paint_quad(quad(
                 Bounds::new(
@@ -844,7 +949,7 @@ fn paint_roll(
         text(
             w,
             cx,
-            "A2",
+            Label::Note(45),
             label_x,
             label_y,
             11.,
@@ -894,38 +999,64 @@ fn paint_native_notes(
             bounds: Bounds::new(point(x0, b.top()), size(width, b.size.height)),
         }),
         |w| {
-            let mut path = PathBuilder::stroke(px(1.));
-            let mut connected = false;
-            let mut points = 0;
-            // Aggregate to display columns when zoomed out, retaining no per-frame allocations beyond the path.
-            let first =
-                ((start * duration / data.hop.max(0.001)).floor() as usize).min(data.f0.len());
-            let last = ((end * duration / data.hop.max(0.001)).ceil() as usize).min(data.f0.len());
-            let stride = ((last - first) as f32 / f32::from(width).max(1.))
-                .floor()
-                .max(1.) as usize;
-            for index in (first..last).step_by(stride) {
-                let hz = data.f0[index];
-                if hz <= 0. {
-                    connected = false;
-                    continue;
-                }
-                let point = point(
-                    x(index as f64 * data.hop),
-                    y(crate::project_pitch::midi(hz) + transpose as f32),
-                );
-                if connected {
-                    path.line_to(point);
-                } else {
-                    path.move_to(point);
-                }
-                connected = true;
-                points += 1;
-            }
-            if note_bars && points > 1 {
-                if let Ok(path) = path.build() {
-                    w.paint_path(path, rgba(0xffd6964d));
-                }
+            // The faint f0 trace only shows with note bars. Its path depends on
+            // the view, size and transpose, not the playhead, so build it once
+            // per key instead of tessellating it every frame.
+            if note_bars {
+                let key = TraceKey {
+                    data: data as *const crate::project_pitch::Pitch as usize,
+                    f0_len: data.f0.len(),
+                    duration: duration.to_bits(),
+                    hop: data.hop.to_bits(),
+                    start: start.to_bits(),
+                    end: end.to_bits(),
+                    geometry: [x0, width, b.top(), b.size.height].map(|v| f32::from(v).to_bits()),
+                    range: [lo.to_bits(), hi.to_bits()],
+                    transpose,
+                };
+                TRACE.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    if cache.as_ref().map(|(cached, _)| cached) != Some(&key) {
+                        TRACE_MISSES.fetch_add(1, Ordering::Relaxed);
+                        let mut path = PathBuilder::stroke(px(1.));
+                        let mut connected = false;
+                        let mut points = 0;
+                        // Aggregate to display columns when zoomed out.
+                        let first = ((start * duration / data.hop.max(0.001)).floor() as usize)
+                            .min(data.f0.len());
+                        let last = ((end * duration / data.hop.max(0.001)).ceil() as usize)
+                            .min(data.f0.len());
+                        let stride = ((last - first) as f32 / f32::from(width).max(1.))
+                            .floor()
+                            .max(1.) as usize;
+                        for index in (first..last).step_by(stride) {
+                            let hz = data.f0[index];
+                            if hz <= 0. {
+                                connected = false;
+                                continue;
+                            }
+                            let point = point(
+                                x(index as f64 * data.hop),
+                                y(crate::project_pitch::midi(hz) + transpose as f32),
+                            );
+                            if connected {
+                                path.line_to(point);
+                            } else {
+                                path.move_to(point);
+                            }
+                            connected = true;
+                            points += 1;
+                        }
+                        let built = if points > 1 { path.build().ok() } else { None };
+                        *cache = Some((key, built));
+                    }
+                    if let Some((_, Some(path))) = cache.as_ref() {
+                        // GPUI clones and scales the path's vertices inside `paint_path`
+                        // (three allocations a frame); the probe reports those separately.
+                        TRACE_PAINTS.fetch_add(1, Ordering::Relaxed);
+                        crate::alloc_probe::exempt(|| w.paint_path(path.clone(), rgba(0xffd6964d)));
+                    }
+                });
             }
             let seg_font = (row * 0.75).clamp(if note_bars { 11. } else { 9. }, 13.).round();
             let mut last_label_x = b.left() - px(100.);
@@ -967,27 +1098,9 @@ fn paint_native_notes(
                     BorderStyle::Solid,
                 ));
                 if note_bars || row >= 6. {
-                    let label = crate::project_pitch::note_name(note.midi as i32 + transpose);
+                    let label = Label::Note(note.midi as i32 + transpose);
                     if note_bars {
-                        let label_width = w
-                            .text_system()
-                            .shape_line(
-                                label.clone().into(),
-                                px(seg_font),
-                                &[TextRun {
-                                    len: label.len(),
-                                    font: Font {
-                                        family: MONO_400.into(),
-                                        ..Default::default()
-                                    },
-                                    color: rgb(0xfff0d7).into(),
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                }],
-                                None,
-                            )
-                            .width;
+                        let label_width = label_line(w, label, seg_font, 0xfff0d7).width;
                         let label_start = if sx > x0 { sx } else { x0 } + px(3.);
                         let shifted = label_start < last_label_end + px(5.);
                         let label_x = if shifted { last_label_end + px(5.) } else { label_start };
@@ -1006,11 +1119,11 @@ fn paint_native_notes(
                                 rgba(0),
                                 BorderStyle::Solid,
                             ));
-                            text(w, cx, &label, label_x, label_y, seg_font, 0xfff0d7, false);
+                            text(w, cx, label, label_x, label_y, seg_font, 0xfff0d7, false);
                             last_label_end = label_x + label_width;
                         }
                     } else if ex - sx >= px(34.) && sx - last_label_x >= px(30.) {
-                        text(w, cx, &label, sx + px(3.), top - bar / 2. - px(2.), seg_font, 0xffd696d9, false);
+                        text(w, cx, label, sx + px(3.), top - bar / 2. - px(2.), seg_font, 0xffd696d9, false);
                         last_label_x = sx;
                     }
                 }
@@ -1032,7 +1145,7 @@ fn paint_native_notes(
                 text(
                     w,
                     cx,
-                    warning,
+                    Label::Warning(warning),
                     x0 + px(10.),
                     b.top() + px(20.),
                     10.,
@@ -1046,7 +1159,16 @@ fn paint_native_notes(
 #[cfg(test)]
 mod tests {
     use super::beat_progress_visible;
-    use crate::project_pitch::Pitch;
+    use crate::project_pitch::{Pitch, note_name};
+    #[test]
+    fn keyboard_octave_and_fixture_labels_are_plain_note_labels() {
+        // The roll caches these by MIDI number rather than building a string
+        // per frame, so the note name must be exactly what the old code drew.
+        for midi in (0..=108).step_by(12) {
+            assert_eq!(note_name(midi), format!("C{}", midi / 12 - 1));
+        }
+        assert_eq!(note_name(45), "A2");
+    }
     #[test]
     fn beat_note_follows_the_typed_analysis_flag_not_the_warning_text() {
         let mut pitch = Pitch::default();

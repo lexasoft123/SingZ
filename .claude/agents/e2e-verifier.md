@@ -262,6 +262,7 @@ drive_retirement 300 s, lyrics_live 1200 s, lyrics_real 3900 s, Qwen drivers 900
 | `test_native_input.py` | sys.argv, see the driver and NATIVE_INTEGRATION.md "Verification" | - | hidden | unmeasured |
 | `test_native_library_import.py` | <app> <out> | - | hidden | unmeasured |
 | `test_native_locale_ui.py` | <app> <out> | - | hidden; 2x display (existing 2x assertions) | unmeasured |
+| `test_native_lyric_pitch_paint.py` | <app> <out> | --negative-control | hidden | unmeasured |
 | `test_native_lyrics_align.py` | <app> <out> | - | hidden | unmeasured |
 | `test_native_lyrics_editor.py` | <app> <out> | - | hidden | unmeasured |
 | `test_native_lyrics_envelope.py` | <helper> <out> | - | hidden | unmeasured |

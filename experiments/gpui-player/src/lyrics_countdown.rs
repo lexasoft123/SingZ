@@ -8,13 +8,32 @@ pub enum Kind {
     Dots(u8),
     Seconds(u32),
 }
+/// "N s" captions for every second count a song can show, built once so the
+/// lyric paint never formats one per frame.
+const SECONDS_LABELS: usize = 3600;
+
+fn seconds_labels() -> &'static [String] {
+    static LABELS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LABELS.get_or_init(|| (0..SECONDS_LABELS).map(|n| format!("{n} s")).collect())
+}
+
+/// Build the caption table now (project load) rather than in the first paint.
+pub fn warm() {
+    let _ = seconds_labels();
+}
+
 impl Kind {
-    pub fn text(self) -> String {
+    /// The caption; borrowed for every cue a song can produce.
+    pub fn text(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow::{Borrowed, Owned};
         match self {
-            Self::Dots(1) => "●".into(),
-            Self::Dots(2) => "● ●".into(),
-            Self::Dots(_) => "● ● ●".into(),
-            Self::Seconds(value) => format!("{value} s"),
+            Self::Dots(1) => Borrowed("●"),
+            Self::Dots(2) => Borrowed("● ●"),
+            Self::Dots(_) => Borrowed("● ● ●"),
+            Self::Seconds(value) => match seconds_labels().get(value as usize) {
+                Some(label) => Borrowed(label.as_str()),
+                None => Owned(format!("{value} s")),
+            },
         }
     }
     pub fn tracking(self) -> f32 {
@@ -140,6 +159,20 @@ impl PulseClock {
 #[cfg(test)]
 mod tests {
     use super::{Cue, Kind, PulseClock, at, pulse_level};
+    use std::borrow::Cow;
+
+    #[test]
+    fn every_caption_a_song_can_show_is_borrowed_not_formatted_per_frame() {
+        // Lyric paint asks for the caption every frame; an owned String there was an
+        // allocation per frame. Dots and every second count up to an hour borrow.
+        for kind in [Kind::Dots(1), Kind::Dots(2), Kind::Dots(3), Kind::Seconds(0), Kind::Seconds(4), Kind::Seconds(3599)] {
+            assert!(matches!(kind.text(), Cow::Borrowed(_)), "{kind:?} formats its caption");
+        }
+        assert_eq!(Kind::Seconds(12).text(), "12 s");
+        assert_eq!(Kind::Dots(2).text(), "● ●");
+        // Beyond the table the caption is still right, just formatted.
+        assert_eq!(Kind::Seconds(4000).text(), "4000 s");
+    }
     use std::time::{Duration, Instant};
     #[test]
     fn lyric_countdown_first_line_runway_and_exact_last_three_seconds() {

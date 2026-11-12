@@ -544,6 +544,18 @@ be shown to fail against the pre-change code or a deliberate negative control.
 - **Acceptance**: N1-N4 on the full reference scenario at the interim gate;
   highlight standard unchanged; the 120 Hz figures recorded as "not measured,
   panel unavailable" until the re-run before Q-15.
+- **Accepted a1 exception (2026-11-12)**: the faint f0 trace still costs 3
+  allocations per frame inside GPUI's `Window::paint_path` (lyon tessellation
+  for the 1 px stroke). The probe reports them separately as
+  `pitchTracePathEngineAllocations`; app-side lyric and pitch paint is at 0.
+  A cached CPU-rasterised trace cannot be pixel-identical, because GPUI
+  rasterises paths through the backend's MSAA path texture on each platform.
+  Removing them needs a vendor change (paint a shared path) or an offscreen
+  GPUI render, which is decided with stage a2. Two smaller, recorded
+  exceptions go with it: GPUI's per-frame animation-frame request while a
+  countdown cue plays (`countdownAnimationAllocations`), and a countdown
+  caption's first, cold appearance before UIKit has prepared it. Steady
+  lyric and pitch paint, warm captions included, is at 0.
 
 ## 10. Not verified
 

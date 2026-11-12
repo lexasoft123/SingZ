@@ -32,6 +32,7 @@ mod timeline_host;
 mod ruler_clearance;
 mod restart_cycle;
 mod lyrics_countdown;
+mod lyrics_view;
 mod lyric_scroll_geometry;
 #[cfg(feature="ui-tests")]
 mod ui_lyrics_countdown;
@@ -430,7 +431,6 @@ impl Drop for PaintTimer {
         }
     }
 }
-type ShapeKey = (String, [u32; 4], u32);
 type LyricLayout = Vec<(f32, f32, Vec<(String, f32, f32, f32)>)>;
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
@@ -713,7 +713,7 @@ struct Player {
     glow_textures: Rc<HashMap<&'static str, Arc<RenderImage>>>,
     glow_bands: Rc<HashMap<&'static str, Vec<Arc<RenderImage>>>>,
     frame_stats: Rc<RefCell<FrameStats>>,
-    shape_cache: Rc<RefCell<HashMap<ShapeKey, ShapedLine>>>,
+    shape_cache: Rc<RefCell<lyrics_view::ShapeCache>>,
     layout_cache: Rc<RefCell<Option<(i32, LyricLayout)>>>,
     lyric_scroll: Rc<Cell<f32>>,
     lyric_scroll_target: Rc<Cell<f32>>,
@@ -1616,7 +1616,7 @@ impl Player {
             glow_textures: Rc::new(lyric_glow::load()),
             glow_bands: Rc::new(lyric_glow::load_bands()),
             frame_stats: Rc::new(RefCell::new(FrameStats::default())),
-            shape_cache: Rc::new(RefCell::new(HashMap::new())),
+            shape_cache: Rc::new(RefCell::new(lyrics_view::ShapeCache::default())),
             layout_cache: Rc::new(RefCell::new(None)),
             lyric_scroll: Rc::new(Cell::new(0.)),
             lyric_scroll_target: Rc::new(Cell::new(0.)),
@@ -3063,6 +3063,8 @@ impl Player {
                     self.native_glows.borrow_mut().clear();
                     *self.layout_cache.borrow_mut() = None;
                     self.shape_cache.borrow_mut().clear();
+                    pitch_strip::clear_labels();
+                    lyrics_countdown::warm();
                     self.lyric_active.set(usize::MAX);
                     self.lyric_scroll.set(0.);
                     self.lyric_scroll_target.set(0.);
@@ -3450,6 +3452,7 @@ impl Player {
                     self.lyric_document = Arc::default();
                     self.native_glows.borrow_mut().clear();
                     self.shape_cache.borrow_mut().clear();
+                    pitch_strip::clear_labels();
                     *self.layout_cache.borrow_mut() = None;
                     self.lyric_hits.borrow_mut().clear();
                     self.enter_desktop_catalog(cx);
@@ -4696,6 +4699,7 @@ impl Player {
         let stats = self.frame_stats.clone();
         let profile = gated_env!("SINGZ_GPUI_PROFILE").is_some()
             || gated_env!("SINGZ_GPUI_OFFSCREEN_BENCHMARK").is_some();
+        let inject_alloc = gated_env!("SINGZ_C72_INJECT_ALLOC").is_some();
         let shapes = self.shape_cache.clone();
         let layouts = self.layout_cache.clone();
         let scrolling = self.lyric_scroll.clone();
@@ -4772,59 +4776,29 @@ impl Player {
             .child(
                 canvas(
                     |b, _, _| b,
-                    move |_, b, w, cx| {
+                    move |_, b, w, cx| alloc_probe::scope_text(|| {
+                        // Negative control for the allocation probe (ui-tests builds only).
+                        if inject_alloc { std::hint::black_box(Box::new(0_u64)); }
                         let _timer = profile.then(|| PaintTimer {
                             start: Instant::now(),
                             stats: stats.clone(),
                         });
+                        let mut cache = shapes.borrow_mut();
                         // Warm the next caption and the finite dot vocabulary
-                        // while paused too. UIKit prepares masks off-thread.
+                        // while paused too. UIKit prepares masks off-thread; the
+                        // prepared sprites are retained in `cache`, so a steady
+                        // frame neither formats a caption nor builds UIKit's key.
                         if let Some(cue)=countdown_preload {
-                            let _=singz_uikit::request_lyric_countdown_sprite(&cue.kind.text(),cue.kind.tracking(),w,cx);
+                            let _=cache.countdown_sprite(&cue.kind.text(),cue.kind.tracking(),w,cx);
                             if let lyrics_countdown::Kind::Seconds(seconds)=cue.kind {
-                                if seconds>4 {let _=singz_uikit::request_lyric_countdown_sprite(&format!("{} s",seconds-1),1.,w,cx);}
+                                if seconds>4 {let _=cache.countdown_sprite(&lyrics_countdown::Kind::Seconds(seconds-1).text(),1.,w,cx);}
                             }
-                            for text in ["● ● ●","● ●","●"] {let _=singz_uikit::request_lyric_countdown_sprite(text,5.,w,cx);}
+                            for text in ["● ● ●","● ●","●"] {let _=cache.countdown_sprite(text,5.,w,cx);}
                         }
-                        let font = Font {
-                            family: "SingZ Display 650".into(),
-                            ..Default::default()
-                        };
-                        let mut cached_shapes = shapes.borrow_mut();
-                        let mut shape = |text: &str, color: Hsla, scale: f32, window: &Window| {
-                            let key = (
-                                text.to_owned(),
-                                [
-                                    color.h.to_bits(),
-                                    color.s.to_bits(),
-                                    color.l.to_bits(),
-                                    color.a.to_bits(),
-                                ],
-                                scale.to_bits(),
-                            );
-                            cached_shapes
-                                .entry(key)
-                                .or_insert_with(|| {
-                                    window.text_system().shape_line(
-                                        text.to_string().into(),
-                                        px(17.5 * scale),
-                                        &[TextRun {
-                                            len: text.len(),
-                                            font: font.clone(),
-                                            color,
-                                            background_color: None,
-                                            underline: None,
-                                            strikethrough: None,
-                                        }],
-                                        None,
-                                    )
-                                })
-                                .clone()
-                        };
                         let mut cached_layout = layouts.borrow_mut();
                         let width_key = f32::from(b.size.width).round() as i32;
                         if cached_layout.as_ref().map(|entry| entry.0) != Some(width_key) {
-                            let space = f32::from(shape(" ", rgb(TEXT).into(), 1., w).width);
+                            let space = f32::from(cache.shape(" ", rgb(TEXT).into(), 1., w).width);
                             let available = f32::from(b.size.width) - 40.;
                             let mut lines = Vec::new();
                             let mut top = 18.;
@@ -4835,7 +4809,7 @@ impl Player {
                                 for word in &lyric_line.words {
                                     let text = word.text.as_str();
                                     let width =
-                                        f32::from(shape(text, rgb(TEXT).into(), 1., w).width);
+                                        f32::from(cache.shape(text, rgb(TEXT).into(), 1., w).width);
                                     if x > 0. && x + width > available {
                                         x = 0.;
                                         row += 1.;
@@ -4850,7 +4824,7 @@ impl Player {
                             *cached_layout = Some((width_key, lines));
                         }
                         let lines = &cached_layout.as_ref().unwrap().1;
-                        let base_metrics = shape(" ", rgb(TEXT).into(), 1., w);
+                        let base_metrics = cache.shape(" ", rgb(TEXT).into(), 1., w);
                         let base_baseline =
                             w.text_baseline(base_metrics.ascent, base_metrics.descent, px(25.375));
                         let (active_top, active_height, _) = &lines[active];
@@ -4938,15 +4912,16 @@ impl Player {
                                 }
                                 if let Some((cue,level))=countdown.filter(|(cue,_)|cue.line==i) {
                                     let origin=point(b.left()+scroll_handle.offset().x+px(20.),y+px(7.));
-                                    let sprite=singz_uikit::request_lyric_countdown_sprite(&cue.kind.text(),cue.kind.tracking(),w,cx);
+                                    let sprite=cache.countdown_sprite(&cue.kind.text(),cue.kind.tracking(),w,cx);
                                     let ready=sprite.is_some_and(|sprite|singz_uikit::paint_lyric_countdown(sprite,origin,if cfg!(target_os="windows"){0}else{level},w));
                                     {let mut clock=countdown_clock.borrow_mut();clock.bounds=Some((f32::from(origin.x),f32::from(origin.y),f32::from(b.size.width)-40.,11.));clock.sprite_ready=ready;}
-                                    if !countdown_suspended&&!cfg!(target_os="windows"){w.request_animation_frame();}
+                                    if ready {lyrics_view::note_countdown_paint();}
+                                    if !countdown_suspended&&!cfg!(target_os="windows"){alloc_probe::exempt_animation(||w.request_animation_frame());}
                                 }
                                 let y=y+px(cue_height);
                                 let scale = if i == active && line_started { 1.03 } else { 1. };
                                 let baseline_adjustment = if i == active && line_started {
-                                    let metrics = shape(" ", rgb(TEXT).into(), scale, w);
+                                    let metrics = cache.shape(" ", rgb(TEXT).into(), scale, w);
                                     base_baseline * scale
                                         - w.text_baseline(
                                             metrics.ascent,
@@ -4980,17 +4955,16 @@ impl Player {
                                         && position >= word_start
                                         && position < word_end
                                     {
-                                        document
-                                            .masks
-                                            .get(text)
-                                            .map(|mask| native_glows.borrow_mut().get(text, mask))
+                                        document.masks.get(text).map(|mask| {
+                                            cache.glow_bands(text, || native_glows.borrow_mut().get(text, mask))
+                                        })
                                     } else {
                                         None
                                     };
                                     if i == active && line_started && position >= word_start && position < word_end
                                     {
                                         if let Some(texture) = native_bands
-                                            .as_ref()
+                                            .as_deref()
                                             .and_then(|b| b.last())
                                             .or_else(|| glow_textures.get(text.as_str()))
                                         {
@@ -5012,7 +4986,7 @@ impl Player {
                                         }
                                     }
                                     if i != active || !line_started {
-                                        let _ = shape(text, color.into(), scale, w).paint(
+                                        let _ = cache.shape(text, color.into(), scale, w).paint(
                                             origin,
                                             px(25.375 * scale),
                                             TextAlign::Left,
@@ -5035,7 +5009,7 @@ impl Player {
                                     // Snap the transformed line's paint offset separately from
                                     // its local baseline, as Blink does for vector text. Word
                                     // advances retain their fractional positions inside the line.
-                                    let metrics = shape(" ", color.into(), scale, w);
+                                    let metrics = cache.shape(" ", color.into(), scale, w);
                                     let line_left = b.left() + scroll_handle.offset().x + px(6.);
                                     let local_baseline =
                                         px((7. + row) * scale - height * (scale - 1.) / 2.)
@@ -5056,7 +5030,7 @@ impl Player {
                                     // Approved native paint: readable base, amber feather, then
                                     // a continuous bright core and cached halo. Preserve these
                                     // alpha layers; Electron's flatter paint is not this baseline.
-                                    let _ = shape(text, color.into(), scale, w).paint(
+                                    let _ = cache.shape(text, color.into(), scale, w).paint(
                                         paint_origin,
                                         px(25.375 * scale),
                                         TextAlign::Left,
@@ -5064,7 +5038,7 @@ impl Player {
                                         w,
                                         cx,
                                     );
-                                    let amber = shape(text, rgb(ACCENT).into(), scale, w);
+                                    let amber = cache.shape(text, rgb(ACCENT).into(), scale, w);
                                     let solid = (edge - feather).clamp(0., width * scale);
                                     if solid > 0. {
                                         w.with_content_mask(
@@ -5098,7 +5072,7 @@ impl Player {
                                         }
                                         let alpha = 1. - (slice as f32 + 0.5) / 12.;
                                         let ink =
-                                            shape(text, rgb(ACCENT).alpha(alpha).into(), scale, w);
+                                            cache.shape(text, rgb(ACCENT).alpha(alpha).into(), scale, w);
                                         w.with_content_mask(
                                             Some(ContentMask {
                                                 bounds: Bounds::new(
@@ -5120,6 +5094,7 @@ impl Player {
                                     }
                                     // 18px feathered band moves through glyphs, never selects a letter.
                                     if position >= word_start && position < word_end && p > 0. {
+                                        lyrics_view::note_advancing_word();
                                         let pen = p * width * scale;
                                         let light_width = 18.;
                                         let texture_bounds = Bounds::new(
@@ -5139,7 +5114,7 @@ impl Player {
                                                 Some(ContentMask { bounds: clip }),
                                                 |w| {
                                                     if let Some(bands) = native_bands
-                                                        .as_ref()
+                                                        .as_deref()
                                                         .or_else(|| glow_bands.get(text.as_str()))
                                                     {
                                                         let index =
@@ -5156,12 +5131,13 @@ impl Player {
                                                         )
                                                         .is_ok()
                                                         {
+                                                            lyrics_view::note_glow_draw();
                                                             stats
                                                                 .borrow_mut()
                                                                 .advancing_glow_draws += 1;
                                                         }
                                                     }
-                                                    let leading = shape(
+                                                    let leading = cache.shape(
                                                         text,
                                                         rgb(0xffdf9c).alpha(intensity).into(),
                                                         scale,
@@ -5182,7 +5158,7 @@ impl Player {
                                 }
                             }
                         });
-                    },
+                    }),
                 )
                 .absolute()
                 .top_0()
