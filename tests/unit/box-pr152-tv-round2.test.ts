@@ -64,4 +64,22 @@ describe('PR #152 round 2, fix 3: Right from a row enters the primary action', (
     for (const action of ['select', 'up', 'down', 'remove']) expect(html).toContain(`data-queue-action="${action}"`)
     expect(html).toContain('data-remote-right="[data-queue-action=select]"')
   })
+  it('Down from the list lands on Select song and Left from it returns to the selected row (negative control: on 2e8acc53 neither attribute exists, so geometry picks Remove / stays put)', () => {
+    const html = renderQueue()
+    expect(html).toContain('class="queue-list" aria-label="')
+    expect(/class="queue-list"[^>]*data-remote-down="\[data-queue-action=select\]"/.test(html)).toBe(true)
+    expect(/<button[^>]*data-remote-left="\[data-queue-index\]"[^>]*data-queue-action="select"|<button[^>]*data-queue-action="select"[^>]*data-remote-left="\[data-queue-index\]"/.test(html)).toBe(true)
+    expect(/data-queue-index="0" data-current="true"/.test(html)).toBe(true)
+    expect(/data-queue-index="1" data-current/.test(html)).toBe(false)
+    const row = new El(['[data-queue-index]'])
+    const other = new El(['[data-queue-index]'])
+    other.dataset.current = 'true'
+    const select = new El(['[data-queue-action=select]'])
+    const group = select as never as { closest(s: string): unknown; contains(e: unknown): boolean; getAttribute(a: string): string }
+    group.closest = candidate => candidate === '[data-remote-left]' ? select : null
+    group.contains = element => element === select
+    group.getAttribute = () => '[data-queue-index]'
+    const scope = { contains: () => true }
+    expect(sideExit(scope as never, select as never, [row, other, select] as never, 'ArrowLeft')).toBe(other)
+  })
 })

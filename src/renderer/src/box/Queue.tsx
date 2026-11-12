@@ -55,7 +55,7 @@ export function Queue({
       <Button data-queue-return onClick={onClose}>{active ? t('box.mix.back') : t('box.navigation.catalog')}</Button>
     </div>
     <div className="queue-columns">{['#', t('box.metadata.artist'), t('box.metadata.song'), t('box.metadata.key'), t('box.metadata.bpm'), t('box.metadata.range'), t('box.metadata.time'), ''].map((name, index) => <span key={index}>{name}</span>)}</div>
-    <div className="queue-list" aria-label={t('box.queue.list')} data-remote-right="[data-queue-action=select]">{items.length ? items.map((item, index) => {
+    <div className="queue-list" aria-label={t('box.queue.list')} data-remote-right="[data-queue-action=select]" data-remote-down="[data-queue-action=select]">{items.length ? items.map((item, index) => {
       const metadata = rows[item.dir]?.metadata
       const readiness = rows[item.dir]?.inspection?.readiness
       const isCurrent = active?.item.dir === item.dir
@@ -67,7 +67,7 @@ export function Queue({
         localHasStems: item.hasStems,
         readiness
       })
-      return <button className="queue-row" type="button" data-queue-index={index} data-project-dir={item.dir} key={item.dir} onFocus={() => onRemember(item.dir)} onClick={() => onChoose(item)}>
+      return <button className="queue-row" type="button" data-queue-index={index} data-current={item.dir === selectedDir ? 'true' : undefined} data-project-dir={item.dir} key={item.dir} onFocus={() => onRemember(item.dir)} onClick={() => onChoose(item)}>
         <span className="queue-number">{index + 1}</span>
         <span aria-label={identity.artist ? undefined : t('box.metadata.artistUnknown')}>{identity.artist ?? '—'}</span>
         <strong>{identity.title}</strong>
@@ -80,7 +80,7 @@ export function Queue({
     }) : <div className="queue-empty"><h2>{t('box.queue.emptyTitle')}</h2><p>{t('box.queue.emptyBody')}</p><Button data-empty-browse onClick={onBrowse}>{t('box.queue.browse')}</Button></div>}</div>
     <div className="queue-action-band">
       <div className="queue-actions">
-        <Button variant="primary" data-queue-action="select" disabled={!selected} onClick={() => selected && onChoose(selected)}>{selectedIsCurrent ? t('box.mix.back') : t('box.queue.select')}</Button>
+        <Button variant="primary" data-queue-action="select" data-remote-left="[data-queue-index]" disabled={!selected} onClick={() => selected && onChoose(selected)}>{selectedIsCurrent ? t('box.mix.back') : t('box.queue.select')}</Button>
         <Button data-queue-action="up" disabled={!selected || selectedIndex <= 0} onClick={() => selected && onMove(selected.dir, -1)}>{t('box.queue.up')}</Button>
         <Button data-queue-action="down" disabled={!selected || selectedIndex >= items.length - 1} onClick={() => selected && onMove(selected.dir, 1)}>{t('box.queue.down')}</Button>
         <Button data-queue-action="remove" disabled={!selected} onClick={() => selected && onRemove(selected.dir)}>{t('box.queue.remove')}</Button>
