@@ -12,6 +12,8 @@
  * sets them yet: monitoring is inert until M2.
  */
 import type {
+  VoiceArmRequest,
+  VoiceArmResult,
   VoiceInputLevel,
   VoicePlayTakeRequest,
   VoiceRecordSettingsChange,
@@ -52,6 +54,9 @@ export interface VoiceTakeApi {
   stopPlay(): Promise<unknown>
   remove(songId: string, takeId: string): Promise<unknown>
   level(): Promise<VoiceInputLevel | null>
+  /** Open the chosen input so the meter is live (armed); disarm releases it. */
+  arm(req: VoiceArmRequest): Promise<VoiceArmResult>
+  disarm(): Promise<unknown>
 }
 
 /** The slice of MultitrackEngine the strip drives. */
@@ -95,6 +100,8 @@ export interface VoiceTake {
   /** Ratio, 1 = 100%. Updated while recording when the singer changes it. */
   tempo: number
   transpose: number
+  /** The take's settings over its own time (point 0 = start), for Listen with song. */
+  timeline: { atSec: number; tempo: number; transpose: number }[]
   changed: boolean
   kept: boolean
   partial: boolean
@@ -209,6 +216,17 @@ const BRIDGE_MISSING = 'voice bridge unavailable'
  */
 const MUTED_BY_SOLO = new WeakMap<object, string[]>()
 
+/** What a Listen with song changed on the engine, so it can put back only that. */
+interface ListenSettings {
+  saved: { tempo: number; transpose: number }
+  /** The values this listen applied (the take's start state, then its timeline). */
+  applied: { tempo?: number; transpose?: number }
+  /** True while the engine's setTempo/setTranspose calls for it are still pending. */
+  inFlight: boolean
+  restoreWhenSettled: boolean
+  done: boolean
+}
+
 export class VoiceController {
   private model: VoiceModel = INITIAL_VOICE_MODEL
   private readonly listeners = new Set<() => void>()
@@ -227,6 +245,10 @@ export class VoiceController {
   private songEpoch = 0
   private disposed = false
   private startToken = 0
+  private armToken = 0
+  private armOpen = false
+  private listenSettings: ListenSettings | null = null
+  private listenTimelineIdx = 1
   private soloedStems: string[] | null = null
   private listenToken = 0
   private pendingListen: VoiceListenMode | null = null
@@ -321,22 +343,16 @@ export class VoiceController {
   private async abortActivity(): Promise<void> {
     // An in-flight start undoes itself when it resolves (see startRecording).
     this.startToken++
+    this.armToken++
+    this.releaseArm()
     // A listen ends synchronously here, before any await: stems restored, song
     // paused, listen state cleared (stopListening does all three).
-    if (this.pendingListen) {
-      // A listen still starting: cancel it and undo what it did so far.
-      const mode = this.pendingListen
-      this.listenToken++
-      this.pendingListen = null
-      this.restoreStems(this.soloedStems)
-      this.soloedStems = null
-      if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
-      await this.deps.api.stopPlay().catch(() => undefined)
-    }
+    if (this.pendingListen) await this.cancelPendingListen()
     if (this.model.listen) await this.stopListening()
     if (this.model.recording && this.recordingId) {
       this.recordingId = null
       await this.deps.api.recordStop().catch(() => undefined)
+      await this.forceDisarm()
     }
   }
 
@@ -391,7 +407,9 @@ export class VoiceController {
   async arm(): Promise<void> {
     const m = this.model
     if (m.armed) {
+      this.armToken++
       this.set({ armed: false, ...this.say('announceDisarmed') })
+      this.releaseArm()
       return
     }
     if (recordBlock(m) !== null) return
@@ -405,7 +423,38 @@ export class VoiceController {
       await this.refreshInputs()
       if (recordBlock(this.model) !== null) return
     }
+    // Armed means the input is open and the meter live: ask main to open it,
+    // and only then show the strip armed.
+    const token = ++this.armToken
+    const input = this.model.inputs.find((i) => i.id === this.model.input)
+    let res: VoiceArmResult
+    try {
+      res = await this.deps.api.arm({ input: { deviceName: input?.label ?? '', channelIndex: 0 } })
+    } catch (err) {
+      if (token !== this.armToken) return
+      this.set(err instanceof Error && err.message === BRIDGE_MISSING ? { error: 'no-bridge' } : { error: 'error' })
+      return
+    }
+    if (token !== this.armToken) {
+      // Disarmed or torn down while main was opening the input.
+      if (res.ok) void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
+      return
+    }
+    if (!res.ok) {
+      if (res.reason === 'permission') this.set({ perm: 'denied' })
+      else if (res.reason === 'no-input') this.set({ inputMissing: true })
+      else this.set({ error: res.reason === 'busy' ? 'busy' : 'error' })
+      return
+    }
+    this.armOpen = true
     this.set({ armed: true, clipped: false, ...this.say('announceArmed') })
+  }
+
+  /** Release the armed input in main (idempotent; the take path keeps it open). */
+  private releaseArm(): void {
+    if (!this.armOpen) return
+    this.armOpen = false
+    void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
   }
 
   /** The Record button, the R key and the strip all end up here. */
@@ -489,6 +538,7 @@ export class VoiceController {
     }
     const startPos = engine.position
     this.recordingId = res.takeId
+    this.armOpen = false // main reuses the open input for the take
     this.startedAtMs = this.now()
     this.lastTickMs = this.startedAtMs
     this.lastPos = engine.position
@@ -506,6 +556,7 @@ export class VoiceController {
         durationSec: 0,
         tempo: engine.tempo,
         transpose: engine.transpose,
+        timeline: [{ atSec: 0, tempo: engine.tempo, transpose: engine.transpose }],
         changed: false,
         kept: false,
         partial: false,
@@ -518,9 +569,19 @@ export class VoiceController {
   private async undoStart(songId: string, takeId: string): Promise<void> {
     await this.deps.api.recordStop().catch(() => undefined)
     await this.deps.api.remove(songId, takeId).catch(() => undefined)
+    await this.forceDisarm()
+  }
+
+  /** Release the input in main whatever this controller believes (disarm is idempotent there). */
+  private async forceDisarm(): Promise<void> {
+    this.armToken++
+    this.armOpen = false
+    await Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
   }
 
   private failStart(reason: 'permission' | 'no-input' | 'busy' | 'error'): void {
+    void this.forceDisarm()
+    if (this.model.armed) this.set({ armed: false })
     if (reason === 'permission') this.set({ starting: false, perm: 'denied' })
     else if (reason === 'no-input') this.set({ starting: false, inputMissing: true })
     else this.set({ starting: false, error: reason === 'busy' ? 'busy' : 'error' })
@@ -542,10 +603,12 @@ export class VoiceController {
     } catch {
       res = { ok: false, reason: 'error' }
     }
+    // The take is over, so the input is no longer held open for it.
+    void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
     if (this.disposed) return
     if (res.ok && res.take) {
       this.set({
-        take: { ...this.fromSummary(res.take, false, cur?.n ?? this.takeCount), changed: res.take.settingsChanged || !!cur?.changed },
+        take: { ...this.withTimeline(this.fromSummary(res.take, false, cur?.n ?? this.takeCount), cur), changed: res.take.settingsChanged || !!cur?.changed },
         stoppedBy: reason === 'user' ? null : reason,
         ...this.say('announceReview')
       })
@@ -555,11 +618,16 @@ export class VoiceController {
     this.set({
       error: res.reason === 'device-lost' ? 'device-lost' : 'error',
       take: salvaged
-        ? { ...this.fromSummary(salvaged, false, cur?.n ?? this.takeCount), partial: true }
+        ? { ...this.withTimeline(this.fromSummary(salvaged, false, cur?.n ?? this.takeCount), cur), partial: true }
         : cur && elapsed > 0 && res.reason === 'device-lost'
           ? { ...cur, durationSec: elapsed, partial: true }
           : null
     })
+  }
+
+  /** The stored take with the settings changes seen while recording appended after its start state. */
+  private withTimeline(base: VoiceTake, cur: VoiceTake | null): VoiceTake {
+    return cur && cur.timeline.length > 1 ? { ...base, timeline: [base.timeline[0]!, ...cur.timeline.slice(1)] } : base
   }
 
   keep(): void {
@@ -600,14 +668,29 @@ export class VoiceController {
     // continuation below checks the token and does nothing once it is stale.
     const token = ++this.listenToken
     this.pendingListen = mode
+    const ls: ListenSettings | null =
+      mode === 'with-song'
+        ? { saved: { tempo: engine.tempo, transpose: engine.transpose }, applied: {}, inFlight: true, restoreWhenSettled: false, done: false }
+        : null
+    this.listenSettings = ls
+    this.listenTimelineIdx = 1
     const stale = (): boolean => token !== this.listenToken
     let startedSong = false
     try {
       if (mode === 'take') {
         if (engine.playing) engine.pause()
       } else {
-        await engine.setTempo(tk.tempo)
-        await engine.setTranspose(tk.transpose)
+        try {
+          ls!.applied.tempo = tk.tempo
+          await engine.setTempo(tk.tempo)
+          ls!.applied.transpose = tk.transpose
+          await engine.setTranspose(tk.transpose)
+        } finally {
+          // The restore of an aborted listen waited for these calls to land:
+          // before they settle the engine still reads the old values.
+          ls!.inFlight = false
+          if (ls!.restoreWhenSettled) this.restoreFrom(ls!)
+        }
         if (stale()) return
         // Play first, then seek: a seek on a paused, never-played song asks the
         // native engine to prepare a route before Play (see report, D1), and
@@ -628,6 +711,7 @@ export class VoiceController {
       // Never hide a failure: show it, and leave the song as we found it.
       if (startedSong && engine.playing) engine.pause()
       this.pendingListen = null
+      this.requestRestore()
       this.set({ error: 'error' })
       return
     }
@@ -642,12 +726,17 @@ export class VoiceController {
     }
     // Torn down meanwhile: abortActivity already stopped native play and
     // restored everything; setting listen or a timer now would resurrect it.
-    if (stale()) return
+    if (stale()) {
+      // Torn down while main was starting playback: make sure it is not left playing.
+      if (ok) void Promise.resolve(api.stopPlay()).catch(() => undefined)
+      return
+    }
     this.pendingListen = null
     if (!ok) {
       this.restoreStems(this.soloedStems)
       this.soloedStems = null
       if (mode === 'with-song') engine.pause()
+      this.requestRestore()
       this.set({ error: 'error' })
       return
     }
@@ -663,6 +752,43 @@ export class VoiceController {
     this.restoreStems(this.soloedStems)
     this.soloedStems = null
     if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
+    this.requestRestore()
+    await this.deps.api.stopPlay().catch(() => undefined)
+  }
+
+  /** Put back the singer's tempo and transpose once this listen's own changes have landed. */
+  private requestRestore(): void {
+    const ls = this.listenSettings
+    if (!ls) return
+    if (ls.inFlight) ls.restoreWhenSettled = true
+    else this.restoreFrom(ls)
+  }
+
+  /** Restore a field only if the engine still holds what the listen set: a value the singer changed since is theirs. */
+  private restoreFrom(ls: ListenSettings): void {
+    if (ls.done) return
+    ls.done = true
+    if (this.listenSettings === ls) this.listenSettings = null
+    const { engine } = this.deps
+    const { applied, saved } = ls
+    if (applied.tempo !== undefined && Math.abs(engine.tempo - applied.tempo) < 1e-4 && Math.abs(applied.tempo - saved.tempo) > 1e-4) {
+      void engine.setTempo(saved.tempo).catch(() => undefined)
+    }
+    if (applied.transpose !== undefined && engine.transpose === applied.transpose && applied.transpose !== saved.transpose) {
+      void engine.setTranspose(saved.transpose).catch(() => undefined)
+    }
+  }
+
+  /** Cancel a listen that is still starting and undo what it did so far. */
+  private async cancelPendingListen(): Promise<void> {
+    const mode = this.pendingListen
+    if (!mode) return
+    this.listenToken++
+    this.pendingListen = null
+    this.restoreStems(this.soloedStems)
+    this.soloedStems = null
+    if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
+    this.requestRestore()
     await this.deps.api.stopPlay().catch(() => undefined)
   }
 
@@ -701,7 +827,13 @@ export class VoiceController {
       const cur = m.take
       let take = cur
       if (cur && (Math.abs(cur.tempo - engine.tempo) > 1e-4 || cur.transpose !== engine.transpose)) {
-        take = { ...cur, tempo: engine.tempo, transpose: engine.transpose, changed: true }
+        take = {
+          ...cur,
+          tempo: engine.tempo,
+          transpose: engine.transpose,
+          changed: true,
+          timeline: [...cur.timeline, { atSec: (nowMs - this.startedAtMs) / 1000, tempo: engine.tempo, transpose: engine.transpose }]
+        }
         void Promise.resolve(
           this.deps.api.recordSettings({
             takeId: cur.takeId,
@@ -721,10 +853,22 @@ export class VoiceController {
       // re-anchors it on a seek), so it ends where the SONG passes its end, not
       // after a wall-clock length. The span is in song time: the take's seconds
       // times the tempo it was recorded at, which Listen with song restores.
+      if (m.listen === 'with-song') this.replayTimeline(m.take, heard)
       const songPastEnd =
-        m.listen === 'with-song' && engine.position >= m.take.startSec + m.take.durationSec * m.take.tempo
+        m.listen === 'with-song' && engine.position >= m.take.startSec + songSpan(m.take)
       const aloneDone = m.listen === 'take' && heard >= m.take.durationSec
       if (aloneDone || songPastEnd || songStopped) void this.stopListening()
+    }
+  }
+
+  /** Apply the take's later tempo/transpose points as its own time reaches them. */
+  private replayTimeline(take: VoiceTake, takeSec: number): void {
+    const { engine } = this.deps
+    while (this.listenTimelineIdx < take.timeline.length && takeSec >= take.timeline[this.listenTimelineIdx]!.atSec) {
+      const pt = take.timeline[this.listenTimelineIdx++]!
+      if (this.listenSettings) Object.assign(this.listenSettings.applied, { tempo: pt.tempo, transpose: pt.transpose })
+      void engine.setTempo(pt.tempo).catch(() => undefined)
+      void engine.setTranspose(pt.transpose).catch(() => undefined)
     }
   }
 
@@ -776,6 +920,7 @@ export class VoiceController {
       durationSec: s.durationSec,
       tempo: s.tempo,
       transpose: s.transposeSemitones,
+      timeline: [{ atSec: 0, tempo: s.tempo, transpose: s.transposeSemitones }],
       changed: s.settingsChanged,
       kept,
       partial: s.status === 'partial-device-lost' || s.status === 'partial-error',
@@ -838,6 +983,18 @@ export function takeGain(level: number, muted: boolean): number {
   return Math.min(TAKE_GAIN_MAX, 10 ** (takeGainDb(level) / 20))
 }
 
+/** The take's length in SONG time: each stretch of its timeline at the tempo it ran at. */
+export function songSpan(take: Pick<VoiceTake, 'durationSec' | 'tempo' | 'timeline'>): number {
+  const pts = take.timeline.length > 0 ? take.timeline : [{ atSec: 0, tempo: take.tempo, transpose: 0 }]
+  let span = 0
+  for (let i = 0; i < pts.length; i++) {
+    const from = Math.min(pts[i]!.atSec, take.durationSec)
+    const to = i + 1 < pts.length ? Math.min(pts[i + 1]!.atSec, take.durationSec) : take.durationSec
+    span += Math.max(0, to - from) * pts[i]!.tempo
+  }
+  return span
+}
+
 /** dBFS (-60..0) to a 0..1 meter fraction. */
 export const meterFraction = (db: number): number => Math.max(0, Math.min(1, (db + 60) / 60))
 
@@ -862,7 +1019,9 @@ export function createBridgeVoiceApi(
     play: call('play'),
     stopPlay: call('stopPlay'),
     remove: call('remove'),
-    level: call('level')
+    level: call('level'),
+    arm: call('arm'),
+    disarm: call('disarm')
   }
 }
 

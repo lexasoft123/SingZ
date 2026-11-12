@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { boxAudioPersistentLifetime } from '../shared/box-audio'
 import type { BoxAPI } from '../shared/box-contract'
-import type { VoiceRecordSettingsChange, VoiceRecordStartRequest, VoicePlayTakeRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
+import type { VoiceArmRequest, VoiceArmResult, VoiceRecordSettingsChange, VoiceRecordStartRequest, VoicePlayTakeRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
 import type {
   GlassVerdict,
   LogEntry,
@@ -45,6 +45,8 @@ const box: BoxAPI = {
 }
 
 export type VoiceTakeApi = {
+  arm(request: VoiceArmRequest): Promise<VoiceArmResult>
+  disarm(): Promise<{ ok: boolean; error?: string }>
   recordStart(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult>
   recordStop(reason?: 'device-lost' | 'error'): Promise<VoiceRecordStopResult>
   recordSettings(change: VoiceRecordSettingsChange): Promise<{ ok: boolean; error?: string }>
@@ -56,6 +58,8 @@ export type VoiceTakeApi = {
 }
 
 const voiceTakes: VoiceTakeApi = {
+  arm: request => ipcRenderer.invoke('voice:arm', request),
+  disarm: () => ipcRenderer.invoke('voice:disarm'),
   recordStart: request => ipcRenderer.invoke('voice:record-start', request),
   recordStop: reason => ipcRenderer.invoke('voice:record-stop', reason),
   recordSettings: change => ipcRenderer.invoke('voice:record-settings', change),

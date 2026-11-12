@@ -17,6 +17,7 @@ import {
   recordBlock,
   stableVoiceSongId,
   takeGain,
+  songSpan,
   VOICE_STATES,
   VoiceController,
   type VoiceEnginePort,
@@ -74,6 +75,8 @@ function fakeApi(over: Partial<VoiceTakeApi> = {}): VoiceTakeApi & Record<keyof 
     stopPlay: vi.fn(async () => ({ ok: true })),
     remove: vi.fn(async () => ({ ok: true })),
     level: vi.fn(async () => ({ peakDb: -20, rmsDb: -30 })),
+    arm: vi.fn(async () => ({ ok: true as const })),
+    disarm: vi.fn(async () => ({ ok: true })),
     ...over
   }
   return api as never
@@ -105,7 +108,7 @@ afterEach(() => vi.useRealTimers())
 
 describe('primaryState precedence (spec 4.1)', () => {
   const m = (over: Partial<VoiceModel>): VoiceModel => ({ ...INITIAL_VOICE_MODEL, songId: 's', ...over })
-  const take = { takeId: 't', n: 1, startSec: 0, durationSec: 5, tempo: 1, transpose: 0, changed: false, kept: false, partial: false, recovered: false }
+  const take = { takeId: 't', n: 1, startSec: 0, durationSec: 5, tempo: 1, transpose: 0, timeline: [{ atSec: 0, tempo: 1, transpose: 0 }], changed: false, kept: false, partial: false, recovered: false }
   it('orders error > recording > playing > review > permission > missing > monitoring > armed > idle', () => {
     expect(primaryState(m({}))).toBe('idle')
     expect(primaryState(m({ armed: true }))).toBe('armed')
@@ -616,6 +619,245 @@ describe('Listen with song follows the song position (D4) and surfaces start err
     engine.play.mockRejectedValue(new Error('no audio'))
     await c.listen('with-song')
     expect(c.getSnapshot().error).toBe('error')
+    c.dispose()
+  })
+})
+
+describe('arm opens the input (spec: armed = input open, meter live)', () => {
+  it('asks main to open the chosen input before showing armed, and disarms on toggle', async () => {
+    const { c, api } = await setup()
+    await c.arm()
+    expect(api.arm).toHaveBeenCalledWith({ input: { deviceName: 'Scarlett 2i2', channelIndex: 0 } })
+    expect(c.state).toBe('armed')
+    await c.arm()
+    expect(api.disarm).toHaveBeenCalledTimes(1)
+    expect(c.state).toBe('idle')
+    c.dispose()
+  })
+  it('a failed arm is a recoverable state and the strip is not left armed', async () => {
+    for (const [reason, state] of [['permission', 'permission-needed'], ['no-input', 'input-missing'], ['busy', 'error-recoverable']] as const) {
+      const { c } = await setup({ arm: vi.fn(async () => ({ ok: false as const, reason, message: '' })) })
+      await c.arm()
+      expect(c.getSnapshot().armed).toBe(false)
+      expect(c.state).toBe(state)
+      c.dispose()
+    }
+  })
+  it('a song change or dispose while armed disarms; recording reuses the input without re-arming', async () => {
+    const a = await setup()
+    await a.c.arm()
+    await a.c.setSong('song-2')
+    expect(a.api.disarm).toHaveBeenCalled()
+    a.c.dispose()
+    const b = await setup()
+    await b.c.arm()
+    b.c.dispose()
+    expect(b.api.disarm).toHaveBeenCalled()
+    const r = await setup()
+    await r.c.arm()
+    r.api.disarm.mockClear()
+    await r.c.toggleRecord()
+    expect(r.api.arm).toHaveBeenCalledTimes(1)
+    expect(r.api.disarm).not.toHaveBeenCalled() // the take now owns the input
+    r.c.dispose()
+  })
+  it('a disarm while main is still opening the input releases it afterwards', async () => {
+    let done!: (v: { ok: true }) => void
+    const { c, api } = await setup({ arm: vi.fn(() => new Promise<{ ok: true }>((r) => { done = r })) })
+    const arming = c.arm()
+    await vi.waitFor(() => expect(api.arm).toHaveBeenCalled())
+    await c.setSong('song-2')
+    done({ ok: true })
+    await arming
+    expect(c.getSnapshot().armed).toBe(false)
+    expect(api.disarm).toHaveBeenCalled()
+    c.dispose()
+  })
+})
+
+describe('releasing the input on teardown', () => {
+  /** A fake main that, like the real store, keeps an armed input (stale) after a stop until disarmed. */
+  function staleStore() {
+    const st = { armed: false, stale: false, recording: false }
+    return {
+      st,
+      api: {
+        arm: vi.fn(async () => { st.armed = true; return { ok: true as const } }),
+        disarm: vi.fn(async () => { st.armed = false; st.stale = false; return { ok: true } }),
+        recordStart: vi.fn(async () => {
+          if (st.stale) return { ok: false as const, reason: 'busy' as const, message: 'stale generation' }
+          st.recording = true
+          return { ok: true as const, takeId: 'take-1' }
+        }),
+        recordStop: vi.fn(async () => {
+          st.recording = false
+          if (st.armed) st.stale = true
+          return { ok: true, take: summary() }
+        })
+      }
+    }
+  }
+  it('arm, record, change song: recordStop then disarm, and recording again works', async () => {
+    const { st, api } = staleStore()
+    const { c, api: a } = await setup(api as never)
+    await c.arm()
+    await c.toggleRecord()
+    await c.setSong('song-2')
+    expect(a.recordStop).toHaveBeenCalled()
+    expect(a.disarm.mock.invocationCallOrder.at(-1)).toBeGreaterThan(a.recordStop.mock.invocationCallOrder[0])
+    expect(st.armed).toBe(false)
+    expect(st.stale).toBe(false)
+    await c.refreshInputs()
+    await c.toggleRecord()
+    expect(c.state).toBe('recording')
+    c.dispose()
+  })
+  it('an unarmed record then an abort still disarms', async () => {
+    const { st, api } = staleStore()
+    const { c, api: a } = await setup(api as never)
+    await c.toggleRecord()
+    st.armed = true // main armed it as part of the take
+    await c.setSong(null)
+    expect(a.disarm).toHaveBeenCalled()
+    expect(st.armed).toBe(false)
+    c.dispose()
+  })
+  it('an in-flight start that is undone also disarms', async () => {
+    let resolve!: (v: { ok: true; takeId: string }) => void
+    const { c, api } = await setup({ recordStart: vi.fn(() => new Promise<{ ok: true; takeId: string }>((r) => { resolve = r })) })
+    const started = c.toggleRecord()
+    await vi.waitFor(() => expect(api.recordStart).toHaveBeenCalled())
+    await c.setSong('song-2')
+    api.disarm.mockClear()
+    resolve({ ok: true, takeId: 'late' })
+    await started
+    expect(api.disarm).toHaveBeenCalled()
+    c.dispose()
+  })
+})
+
+describe('settings restore races (D6)', () => {
+  const withTake = async () => {
+    const r = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary({ tempo: 1, transposeSemitones: 0 }) })) })
+    await r.c.toggleRecord()
+    await r.c.toggleRecord()
+    r.engine._tempo = 0.8
+    r.engine._tr = -3
+    return r
+  }
+  it('an abort while setTempo is still applying restores once it lands', async () => {
+    const { c, engine } = await withTake()
+    let land!: () => void
+    engine.setTempo.mockImplementationOnce((r: number) => new Promise<void>((res) => { land = () => { engine._tempo = r; res() } }))
+    const listening = c.listen('with-song')
+    await vi.waitFor(() => expect(engine.setTempo).toHaveBeenCalled())
+    await c.setSong('song-2') // abort: the engine still reads 0.8 here
+    expect(engine._tempo).toBe(0.8)
+    land()
+    await listening
+    await vi.waitFor(() => expect(engine._tempo).toBe(0.8)) // landed 1, then restored
+    expect(engine.setTempo).toHaveBeenLastCalledWith(0.8)
+    c.dispose()
+  })
+  it('an abort while setTranspose is applying restores transpose too', async () => {
+    const { c, engine } = await withTake()
+    let land!: () => void
+    engine.setTranspose.mockImplementationOnce((v: number) => new Promise<void>((res) => { land = () => { engine._tr = v; res() } }))
+    const listening = c.listen('with-song')
+    await vi.waitFor(() => expect(engine.setTranspose).toHaveBeenCalled())
+    c.dispose()
+    land()
+    await listening
+    await vi.waitFor(() => expect(engine._tr).toBe(-3))
+  })
+  it('a value the singer changed during the listen is theirs and is not restored', async () => {
+    const { c, engine } = await withTake()
+    await c.listen('with-song') // applied 1 / 0
+    engine._tempo = 1.2 // the singer moves tempo
+    await c.stopListening()
+    expect(engine._tempo).toBe(1.2)
+    await vi.waitFor(() => expect(engine._tr).toBe(-3)) // transpose untouched by them: restored
+    c.dispose()
+  })
+})
+
+describe('Listen with song replays the take settings and restores the singer settings (D6)', () => {
+  const recordWithChange = async () => {
+    const r = await setup()
+    await r.c.toggleRecord()
+    clock = 4000
+    r.engine._pos = 33.2
+    r.engine._tempo = 0.8
+    r.engine._tr = -3
+    r.c.tick() // a change at ~4 s into the take
+    clock = 6000
+    await r.c.toggleRecord()
+    return r
+  }
+  it('applies later timeline points when the take reaches them', async () => {
+    const { c, engine } = await recordWithChange()
+    expect(c.getSnapshot().take?.timeline).toEqual([
+      { atSec: 0, tempo: 1, transpose: 0 },
+      { atSec: 4, tempo: 0.8, transpose: -3 }
+    ])
+    engine._tempo = 1
+    engine._tr = 0
+    clock = 10_000
+    await c.listen('with-song')
+    expect(engine._tempo).toBe(1)
+    clock = 12_000 // 2 s into the take: not yet
+    c.tick()
+    expect(engine._tempo).toBe(1)
+    clock = 14_100 // 4.1 s in
+    c.tick()
+    await vi.waitFor(() => expect(engine._tempo).toBe(0.8))
+    expect(engine._tr).toBe(-3)
+    c.dispose()
+  })
+  it('restores the singer tempo and transpose on stop, abort and error', async () => {
+    for (const how of ['stop', 'dispose', 'setSong', 'error'] as const) {
+      const r = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary({ tempo: 1, transposeSemitones: 0 }) })) })
+      await r.c.toggleRecord()
+      await r.c.toggleRecord()
+      r.engine._tempo = 0.8
+      r.engine._tr = -3
+      if (how === 'error') r.api.play.mockResolvedValue({ ok: false })
+      await r.c.listen('with-song')
+      if (how === 'stop') await r.c.stopListening()
+      if (how === 'dispose') r.c.dispose()
+      if (how === 'setSong') await r.c.setSong('song-2')
+      await vi.waitFor(() => expect(r.engine._tempo, how).toBe(0.8))
+      expect(r.engine._tr, how).toBe(-3)
+      r.c.dispose()
+    }
+  })
+  it('a teardown during an in-flight play that then succeeds stops native playback again', async () => {
+    let finish!: (v: { ok: boolean }) => void
+    const { c, api } = await recordWithChange()
+    api.play.mockImplementation(() => new Promise<{ ok: boolean }>((r) => { finish = r }))
+    const listening = c.listen('take')
+    await vi.waitFor(() => expect(api.play).toHaveBeenCalled())
+    c.dispose()
+    api.stopPlay.mockClear()
+    finish({ ok: true })
+    await listening
+    expect(api.stopPlay).toHaveBeenCalled()
+  })
+  it('song span follows the timeline, not just the first tempo', () => {
+    expect(songSpan({ durationSec: 10, tempo: 1, timeline: [{ atSec: 0, tempo: 1, transpose: 0 }, { atSec: 4, tempo: 0.5, transpose: 0 }] })).toBeCloseTo(4 + 3, 6)
+  })
+})
+
+describe('seek-stopped note (D4)', () => {
+  it('shows the seek copy in take-review, not only outside it', async () => {
+    const { c, engine } = await setup()
+    await c.toggleRecord()
+    clock = 100
+    engine._pos = 90
+    c.tick()
+    await vi.waitFor(() => expect(c.state).toBe('take-review'))
+    const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
+    expect(html).toContain('Recording stopped because the song position changed.')
     c.dispose()
   })
 })

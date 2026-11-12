@@ -132,8 +132,9 @@ function statusLine(
       text: t('player.voice.msgListenSong', { tempo: Math.round(m.take.tempo * 100), transpose: sgn(m.take.transpose) })
     }
   }
+  // A take stopped by a seek or a pause reads as that first, then as a review.
+  if (m.stoppedBy === 'seek' && state === 'take-review') return { cls: 'warn', text: t('player.voice.msgSeekStopped') }
   if (state === 'take-review') return { cls: '', text: t('player.voice.msgReview') }
-  if (m.stoppedBy === 'seek') return { cls: 'warn', text: t('player.voice.msgSeekStopped') }
   if (state === 'armed') return { cls: '', text: t('player.voice.msgArmed') }
   return null
 }

@@ -1,22 +1,56 @@
 import { ipcMain } from 'electron'
 import { desktopAudioProcess } from './audio-process'
-import { VOICE_IPC, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
+import { VOICE_IPC, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
 import { VoiceTakeStore, createUnavailableVoiceNative, type VoiceTakeNative } from './voice-takes'
 
-export const createVoiceTakeNative = (): VoiceTakeNative => ({
-  recordTake: async args => {
+const normalizeDeviceLabel = (value: string): string => value.trim().replace(/\s+\([^()]*\)\s*$/, '').trim().toLocaleLowerCase()
+
+export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess = desktopAudioProcess): VoiceTakeNative => {
+  const desktopAudioProcess = audioProcess
+  let captureGeneration: bigint | undefined
+  let captureDeviceName = ''
+  const chooseDevice = async (deviceName: string, channelIndex: number): Promise<{ ok: true; device: import('../shared/types').CaptureInputDevice; channel: number } | { ok: false; reason: 'no-input'; error: string }> => {
     const devices = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['inputDevices']>>>('binding', 'inputDevices', [])
-    if (!devices.ok) return { ok: false, error: devices.error }
-    const chosen = devices.devices.find(device => device.label === args.deviceName) ?? devices.devices.find(device => device.isDefault) ?? devices.devices[0]
-    if (!chosen) return { ok: false, error: 'No microphone input is available.' }
-    const started = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['beginCapture']>>>(
-      'binding', 'beginCapture', [{ deviceUid: chosen.uid, inputChannel: Math.min(args.channelIndex ?? 0, chosen.channels - 1) }, args.generation, () => undefined])
-    if (!started.ok) return { ok: false, error: started.error }
-    return desktopAudioProcess.call('binding', 'recordTake', [args.dir, args.takeId, args.generation])
+    if (!devices.ok) return { ok: false, reason: 'no-input', error: devices.error }
+    const requested = deviceName.trim()
+    const unique = (matches: typeof devices.devices) => matches.length === 1 ? matches[0] : undefined
+    const chosen = requested
+      ? unique(devices.devices.filter(device => device.uid === requested)) ??
+        unique(devices.devices.filter(device => device.label === requested)) ??
+        unique(devices.devices.filter(device => normalizeDeviceLabel(device.label) === normalizeDeviceLabel(requested)))
+      : devices.devices.find(device => device.isDefault) ?? devices.devices[0]
+    if (!chosen) return { ok: false, reason: 'no-input', error: 'The selected microphone is unavailable.' }
+    return { ok: true, device: chosen, channel: Math.min(channelIndex, chosen.channels - 1) }
+  }
+  const openCapture = async (deviceName: string, channelIndex: number, generation: bigint): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; deviceName?: string; generation?: bigint }> => {
+    if (captureGeneration !== undefined) {
+      const state = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['captureState']>>>('binding', 'captureState', [])
+      if (state.state === 'running' && state.ownershipGeneration === captureGeneration.toString()) return { ok: true, generation: captureGeneration, deviceName: captureDeviceName }
+      captureGeneration = undefined; captureDeviceName = ''
+    }
+    const selected = await chooseDevice(deviceName, channelIndex)
+    if (!selected.ok) return selected
+    const started = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['beginCapture']>>>('binding', 'beginCapture', [{ deviceUid: selected.device.uid, inputChannel: selected.channel }, generation, () => undefined])
+    if (!started.ok) return { ok: false, reason: 'error', error: started.error }
+    captureGeneration = generation; captureDeviceName = selected.device.label
+    return { ok: true, generation, deviceName: captureDeviceName }
+  }
+  return {
+  armCapture: args => openCapture(args.deviceName, args.channelIndex, BigInt(Date.now()) * 1000n + 1n),
+  disarmCapture: async generation => { if (captureGeneration && (!generation || generation === captureGeneration)) { const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'cancelCapture', [captureGeneration]); captureGeneration = undefined; captureDeviceName = ''; return result } return { ok: true } },
+  recordTake: async args => {
+    const generation = args.generation ?? (BigInt(Date.now()) * 1000n + 1n)
+    const started = await openCapture(args.deviceName ?? '', args.channelIndex ?? 0, generation)
+    if (!started.ok) return started
+    const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'recordTake', [args.dir, args.takeId, started.generation ?? generation])
+    return { ...result, generation: started.generation ?? generation, deviceName: started.deviceName }
   },
   finishTake: args => desktopAudioProcess.call('binding', 'finishTake', [args.generation]),
   cancelTake: args => desktopAudioProcess.call('binding', 'cancelTake', [args.generation]),
-  stopCapture: generation => desktopAudioProcess.call('binding', 'cancelCapture', [generation]),
+  stopCapture: async generation => {
+    try { return await desktopAudioProcess.call<{ ok: boolean; cancelled?: boolean; error?: string }>('binding', 'cancelCapture', [generation]) }
+    finally { if (captureGeneration === generation) { captureGeneration = undefined; captureDeviceName = '' } }
+  },
   presentationQuery: async args => {
     if (!args.firstSampleHostNs || !args.sampleRate || !Number.isFinite(args.sampleRate) || args.sampleRate <= 0)
       return { ok: true, found: false, latencySource: 'measured-trim' as const }
@@ -42,11 +76,13 @@ export const createVoiceTakeNative = (): VoiceTakeNative => ({
   },
   playTake: args => desktopAudioProcess.call('binding', 'playTake', [{ path: args.path, mode: args.mode, startPositionSec: args.startPositionSec, ...(args.gain === undefined ? {} : { gain: args.gain }), ...(args.tempo === undefined ? {} : { tempo: args.tempo }) }, args.generation]),
   stopTake: generation => desktopAudioProcess.call('binding', 'stopTake', generation === undefined ? [] : [generation]),
+  captureStats: () => desktopAudioProcess.call('binding', 'captureStats', []),
   level: async () => {
     const stats = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['captureStats']>>>('binding', 'captureStats', [])
     return (stats as Awaited<ReturnType<import('./capture').NativeCaptureBinding['captureStats']>> & { inputLevel: VoiceInputLevel }).inputLevel
   }
-})
+  }
+}
 
 export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   const startValid = (value: unknown): value is VoiceRecordStartRequest => {
@@ -61,6 +97,12 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
     const play = value as VoicePlayTakeRequest
     return Boolean(play && typeof play === 'object' && typeof play.takeId === 'string' && (play.mode === 'take' || play.mode === 'with-song') && (play.gain === undefined || Number.isFinite(play.gain)))
   }
+  const armValid = (value: unknown): value is VoiceArmRequest => {
+    const arm = value as VoiceArmRequest
+    return Boolean(arm && typeof arm === 'object' && arm.input && typeof arm.input.deviceName === 'string' && Number.isFinite(arm.input.channelIndex) && arm.input.channelIndex >= 0)
+  }
+  ipcMain.handle(VOICE_IPC.arm, async (_event, request: unknown) => { try { return armValid(request) ? await store.arm(request) : { ok: false, reason: 'error' as const, message: 'Invalid arm request.' } } catch { return { ok: false, reason: 'error' as const, message: 'Microphone could not be armed.' } } })
+  ipcMain.handle(VOICE_IPC.disarm, async () => { try { return await store.disarm() } catch { return { ok: false, error: 'Microphone could not be disarmed.' } } })
   ipcMain.handle(VOICE_IPC.recordStart, async (_event, request: unknown) => { try { return startValid(request) ? await store.start(request) : { ok: false, reason: 'error' as const, message: 'Invalid recording request.' } } catch { return { ok: false, reason: 'error' as const, message: 'Recording could not start.' } } })
   ipcMain.handle(VOICE_IPC.recordStop, async (_event, reason?: 'device-lost' | 'error') => { try { return await store.stop(reason) } catch { return { ok: false, reason: 'error' as const, message: 'The take could not be finalized.' } } })
   ipcMain.handle(VOICE_IPC.recordSettings, async (_event, change: unknown) => { try { return settingsValid(change) ? await store.settings(change) : { ok: false, error: 'Invalid recording settings.' } } catch { return { ok: false, error: 'Recording settings could not be applied.' } } })

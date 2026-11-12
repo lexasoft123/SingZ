@@ -571,6 +571,13 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(core_host_tests PRIVATE SingZ::zcore_legacy)
   add_test(NAME core_host_tests COMMAND core_host_tests)
 
+  add_executable(audio_input_latency_tests
+    "${ZCORE_ROOT}/tests/native/audio_input_latency_tests.cpp")
+  target_compile_definitions(audio_input_latency_tests PRIVATE SINGZ_CORE_TESTS=1)
+  target_include_directories(audio_input_latency_tests PRIVATE "${ZCORE_ROOT}")
+  target_link_libraries(audio_input_latency_tests PRIVATE SingZ::zcore_device)
+  add_test(NAME audio_input_latency_tests COMMAND audio_input_latency_tests)
+
   add_executable(audio_host_tests
     ${SINGZ_REPO_ROOT}/tests/native/audio_host_tests.cpp)
   target_compile_features(audio_host_tests PRIVATE cxx_std_20)

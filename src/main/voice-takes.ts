@@ -17,11 +17,13 @@ import type {
 import { VOICE_TAKE_SIDECAR_VERSION } from '../shared/voice-take'
 
 export type VoiceTakeNative = {
-  recordTake(args: { dir: string; takeId: string; generation: bigint; deviceName?: string; channelIndex?: number }): Promise<{ ok: boolean; error?: string }>
+  armCapture(args: { deviceName: string; channelIndex: number }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; generation?: bigint; deviceName?: string }>
+  disarmCapture(generation?: bigint): Promise<{ ok: boolean; error?: string }>
+  recordTake(args: { dir: string; takeId: string; generation?: bigint; deviceName?: string; channelIndex?: number }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; generation?: bigint; deviceName?: string }>
   finishTake(args: { generation: bigint }): Promise<{ ok: boolean; path?: string; frames?: number; sampleRate?: number; droppedBlocks?: number; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; deviceLost?: boolean; reason?: string; error?: string; message?: string }>
   cancelTake(args: { generation: bigint }): Promise<{ ok: boolean; error?: string }>
   stopCapture?(generation: bigint): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
-  captureStats?(): Promise<{ firstSampleCaptured?: boolean; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; sampleRate?: number; lastSampleHostNs?: string; inputLatencyFrames?: number; inputLevel?: VoiceInputLevel; takeActive?: boolean }>
+  captureStats(): Promise<{ firstSampleCaptured?: boolean; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; sampleRate?: number; lastSampleHostNs?: string; inputLatencyFrames?: number; inputLatencySource?: 'reported' | 'unknown'; inputLatencyStable?: boolean; inputBufferFrames?: number; inputLevel?: VoiceInputLevel; takeActive?: boolean }>
   presentationQuery(args: { songId: string; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; sampleRate?: number; outputSampleRate?: number; trimInputLatency?: boolean; initialDiscontinuitySerial?: number }): Promise<{ ok: boolean; found?: boolean; paused?: boolean; sampleRate?: number; startPositionSec?: number; songSeconds?: number; projectFrame?: number; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; latencySource?: 'reported' | 'measured-trim'; discontinuitySerial?: number; seekDuringCallback?: boolean; error?: string }>
   playTake(args: { takeId: string; path: string; startPositionSec: number; mode: VoicePlayTakeRequest['mode']; generation: bigint; gain?: number; tempo?: number }): Promise<{ ok: boolean; error?: string; startHostTimeNs?: string }>
   stopTake(generation?: bigint): Promise<{ ok: boolean; error?: string }>
@@ -63,7 +65,9 @@ type Active = {
   monitor?: ReturnType<typeof setInterval>
   lastSampleHostNs?: string
   finalized?: VoiceTakeSummary
+  actualDeviceName?: string
 }
+type ArmedCapture = { generation: bigint; deviceName: string; channelIndex: number }
 
 const summary = (sidecar: VoiceTakeSidecar): VoiceTakeSummary => ({
   takeId: sidecar.takeId, songId: sidecar.songId, createdAt: sidecar.createdAt,
@@ -92,6 +96,8 @@ const readWavInfo = async (path: string): Promise<{ sampleRate: number; dataByte
 export class VoiceTakeStore {
   private active: Active | null = null
   private starting = false
+  private arming = false
+  private armed: ArmedCapture | null = null
   private playGeneration: bigint | null = null
   private finalizedTake: VoiceTakeSummary | null = null
   private readonly root: string
@@ -102,6 +108,25 @@ export class VoiceTakeStore {
     this.root = options.rootDir ?? join(app.getPath('userData'), 'voice-takes')
     this.now = options.now ?? (() => new Date())
     this.query = options.placementQuery ?? options.native.presentationQuery
+  }
+
+  async arm(request: { input: { deviceName: string; channelIndex: number } }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; message?: string }> {
+    if (this.active || this.starting || this.arming) return { ok: false, reason: 'busy', message: 'A voice take is already recording or arming.' }
+    if (this.armed) return { ok: true }
+    this.arming = true
+    try {
+      const result = await this.options.native.armCapture(request.input)
+      if (!result.ok || result.generation === undefined) return { ok: false, reason: result.reason ?? 'error', message: result.error ?? 'The microphone could not be armed.' }
+      this.armed = { generation: result.generation, deviceName: result.deviceName ?? request.input.deviceName, channelIndex: request.input.channelIndex }
+      return { ok: true }
+    } finally { this.arming = false }
+  }
+
+  async disarm(): Promise<{ ok: boolean; error?: string }> {
+    if (this.active || this.starting || this.arming) return { ok: false, error: 'A voice take is active or starting.' }
+    const armed = this.armed
+    this.armed = null
+    return this.options.native.disarmCapture(armed?.generation)
   }
 
   private songDir(songId: string): string {
@@ -116,26 +141,29 @@ export class VoiceTakeStore {
   }
 
   async start(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult> {
-    if (this.active || this.starting) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
+    if (this.active || this.starting || this.arming) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
     this.finalizedTake = null
     if (!validId(request.songId) || !request.input || !Number.isFinite(request.input.channelIndex) || request.input.channelIndex < 0 || !Number.isFinite(request.tempo) || !Number.isFinite(request.transposeSemitones)) return { ok: false, reason: 'error', message: 'Invalid recording request.' }
     const takeId = randomUUID()
     const paths = this.takePaths(request.songId, takeId)
     const generation = BigInt(`0x${takeId.replace(/-/g, '').slice(0, 15)}`)
     let captureAttempted = false
+    let captureGeneration = generation
     this.starting = true
     try {
       await mkdir(paths.dir, { recursive: true })
       captureAttempted = true
-      const result = await this.options.native.recordTake({ dir: paths.dir, takeId, generation, deviceName: request.input.deviceName, channelIndex: request.input.channelIndex })
+      const result = await this.options.native.recordTake({ dir: paths.dir, takeId, generation: this.armed?.generation ?? generation, deviceName: this.armed?.deviceName ?? request.input.deviceName, channelIndex: this.armed?.channelIndex ?? request.input.channelIndex })
+      captureGeneration = result.generation ?? this.armed?.generation ?? generation
       if (!result.ok) return { ok: false, reason: 'error', message: result.error ?? 'Recording could not start.' }
       const active: Active = {
       request, takeId, dir: paths.dir, wavPath: paths.wav, createdAt: this.now().toISOString(),
       startPositionSec: 0, inputLatencyFrames: 0, outputLatencyFrames: 0, graphLatencyFrames: 0,
       latencySource: 'reported',
-      settings: [{ atSec: 0, tempo: request.tempo, transposeSemitones: request.transposeSemitones }], generation
+      settings: [{ atSec: 0, tempo: request.tempo, transposeSemitones: request.transposeSemitones }], generation: result.generation ?? this.armed?.generation ?? generation
       }
-      if (this.options.native.captureStats) {
+      active.actualDeviceName = result.deviceName ?? this.armed?.deviceName ?? request.input.deviceName
+      {
         const stamp = await this.waitForFirstSample()
         if (!stamp || !stamp.firstSampleHostNs || !stamp.sampleRate) { active.placementFault = true }
         else {
@@ -146,7 +174,8 @@ export class VoiceTakeStore {
           const raw = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, trimInputLatency: false })
           if (!raw.ok || raw.found === false || raw.paused || raw.seekDuringCallback) active.placementFault = true
           else {
-            active.inputLatencyFrames = stamp.inputLatencyFrames ?? 0
+            const reported = stamp.inputLatencySource === 'reported' && stamp.inputLatencyStable !== false
+            active.inputLatencyFrames = reported ? stamp.inputLatencyFrames ?? 0 : 0
             active.outputLatencyFrames = raw.outputLatencyFrames ?? 0
             active.graphLatencyFrames = raw.graphLatencyFrames ?? 0
             active.outputSampleRate = raw.sampleRate
@@ -154,9 +183,7 @@ export class VoiceTakeStore {
             if (!placed.ok || placed.found === false || placed.paused || placed.seekDuringCallback) active.placementFault = true
             else {
               active.startPositionSec = placed.startPositionSec ?? placed.songSeconds ?? 0
-              // Native captureStats currently has no input-latency measurement; measured-trim
-              // explicitly records that input latency is unknown and none was applied.
-              active.latencySource = stamp.inputLatencyFrames === undefined ? 'measured-trim' : placed.latencySource ?? (stamp.firstSampleQuality === 'unknown' ? 'measured-trim' : 'reported')
+              active.latencySource = reported ? 'reported' : 'measured-trim'
               active.discontinuitySerial = placed.discontinuitySerial
             }
           }
@@ -169,29 +196,29 @@ export class VoiceTakeStore {
           songTitle: request.songTitle, songArtist: request.songArtist, createdAt: active.createdAt,
           startPositionSec: active.startPositionSec, durationSec: 0, sampleRate: active.sampleRate, channels: 1,
           inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
-          graphLatencyFrames: active.graphLatencyFrames, latencySource: active.latencySource, input: request.input,
+          graphLatencyFrames: active.graphLatencyFrames, latencySource: active.latencySource, input: { ...request.input, deviceName: active.actualDeviceName ?? request.input.deviceName },
           settings: active.settings, matchPercent: null, monitoring: false, status: 'recovered', name: null,
           audio: { fileName: `${active.takeId}.wav`, format: 'wav-pcm16', byteSize: 0, checksum: null }
         })
       }
       this.active = active
       this.finalizedTake = null
-      if (active.firstSampleHostNs && this.options.native.captureStats) {
+      if (active.firstSampleHostNs) {
         active.monitor = setInterval(() => { void this.checkDiscontinuity(active) }, 250)
         active.monitor.unref()
       }
       return { ok: true, takeId }
     } finally {
-      if (captureAttempted && !this.active && this.options.native.stopCapture) await this.options.native.stopCapture(generation).catch(() => undefined)
+      if (captureAttempted && !this.active && !this.armed && this.options.native.stopCapture) await this.options.native.stopCapture(captureGeneration).catch(() => undefined)
       this.starting = false
     }
   }
 
-  private async waitForFirstSample(): Promise<{ firstSampleHostNs?: string; lastSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; sampleRate?: number; inputLatencyFrames?: number } | null> {
+  private async waitForFirstSample(): Promise<{ firstSampleHostNs?: string; lastSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; sampleRate?: number; inputLatencyFrames?: number; inputLatencySource?: 'reported' | 'unknown'; inputLatencyStable?: boolean; inputBufferFrames?: number } | null> {
     for (let attempt = 0; attempt < 20; attempt++) {
-      const stats = await this.options.native.captureStats!().catch(() => undefined)
+      const stats = await this.options.native.captureStats().catch(() => undefined)
       if (stats?.firstSampleCaptured && stats.firstSampleHostNs !== undefined) {
-        try { return { firstSampleHostNs: BigInt(stats.firstSampleHostNs).toString(), lastSampleHostNs: stats.lastSampleHostNs, firstSampleQuality: stats.firstSampleQuality, sampleRate: stats.sampleRate, inputLatencyFrames: stats.inputLatencyFrames } } catch { return null }
+        try { return { firstSampleHostNs: BigInt(stats.firstSampleHostNs).toString(), lastSampleHostNs: stats.lastSampleHostNs, firstSampleQuality: stats.firstSampleQuality, sampleRate: stats.sampleRate, inputLatencyFrames: stats.inputLatencyFrames, inputLatencySource: stats.inputLatencySource, inputLatencyStable: stats.inputLatencyStable, inputBufferFrames: stats.inputBufferFrames } } catch { return null }
       }
       await new Promise(resolve => setTimeout(resolve, 50))
     }
@@ -200,7 +227,7 @@ export class VoiceTakeStore {
 
   private async checkDiscontinuity(active: Active): Promise<void> {
     if (this.active !== active || !active.firstSampleHostNs) return
-    const stats = await this.options.native.captureStats!().catch(() => undefined)
+    const stats = await this.options.native.captureStats().catch(() => undefined)
     if (!stats?.lastSampleHostNs) return
     active.lastSampleHostNs = stats.lastSampleHostNs
     const placement = await this.query({ songId: active.request.songId, firstSampleHostNs: stats.lastSampleHostNs, firstSampleQuality: stats.firstSampleQuality, inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames, sampleRate: stats.sampleRate ?? active.sampleRate, outputSampleRate: active.outputSampleRate, trimInputLatency: true, initialDiscontinuitySerial: active.discontinuitySerial })
@@ -239,7 +266,7 @@ export class VoiceTakeStore {
         songTitle: active.request.songTitle, songArtist: active.request.songArtist, createdAt: active.createdAt,
         startPositionSec: active.startPositionSec, durationSec, sampleRate, channels: 1,
         inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
-        graphLatencyFrames: active.graphLatencyFrames, latencySource: placementMiss ? 'measured-trim' : active.latencySource, input: active.request.input,
+        graphLatencyFrames: active.graphLatencyFrames, latencySource: placementMiss ? 'measured-trim' : active.latencySource, input: { ...active.request.input, deviceName: active.actualDeviceName ?? active.request.input.deviceName },
         settings: active.settings, matchPercent: null, monitoring: false,
         status: finished.deviceLost || reason === 'device-lost' ? 'partial-device-lost' : !finished.ok || reason === 'error' || placementMiss ? 'partial-error' : 'complete',
         name: null, audio: { fileName: basename(wavPath), format: 'wav-pcm16', byteSize: file.size, checksum: null }
@@ -250,7 +277,7 @@ export class VoiceTakeStore {
     } catch (error) {
       return { ok: false, reason: 'error', message: error instanceof Error && !error.message.includes('/') ? error.message : 'The take could not be finalized.' }
     } finally {
-      if (this.options.native.stopCapture) await this.options.native.stopCapture(active.generation).catch(() => undefined)
+      if (!this.armed && this.options.native.stopCapture) await this.options.native.stopCapture(active.generation).catch(() => undefined)
     }
   }
 
@@ -265,7 +292,7 @@ export class VoiceTakeStore {
       await Promise.all([rm(active.wavPath, { force: true }), rm(join(active.dir, `${active.takeId}.json`), { force: true })])
       return result
     } finally {
-      if (this.options.native.stopCapture) await this.options.native.stopCapture(active.generation).catch(() => undefined)
+      if (!this.armed && this.options.native.stopCapture) await this.options.native.stopCapture(active.generation).catch(() => undefined)
     }
   }
 
@@ -374,12 +401,15 @@ export class VoiceTakeStore {
 }
 
 export const createUnavailableVoiceNative = (): VoiceTakeNative => ({
+  async armCapture() { return { ok: false, error: 'Voice recording is unavailable.' } },
+  async disarmCapture() { return { ok: false, error: 'Voice recording is unavailable.' } },
   async recordTake() { return { ok: false, error: 'Voice recording is unavailable.' } },
   async finishTake() { return { ok: false, error: 'Voice recording is unavailable.' } },
   async cancelTake() { return { ok: false, error: 'Voice recording is unavailable.' } },
   async presentationQuery() { return { ok: false, error: 'Voice recording is unavailable.' } },
   async playTake() { return { ok: false, error: 'Voice playback is unavailable.' } },
   async stopTake() { return { ok: false, error: 'Voice playback is unavailable.' } },
+  async captureStats() { return { inputLevel: { peakDb: -120, rmsDb: -120 }, firstSampleCaptured: false } },
   async level() { return { peakDb: -120, rmsDb: -120 } }
 })
 

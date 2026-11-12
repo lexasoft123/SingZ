@@ -68,6 +68,15 @@ export type VoiceRecordStartResult =
   | { ok: true; takeId: string }
   | { ok: false; reason: 'permission' | 'no-input' | 'busy' | 'error'; message: string }
 
+/** Arm opens the chosen input so the meter is live (spec: armed = input open, meter live); disarm releases it. */
+export interface VoiceArmRequest {
+  input: { deviceName: string; channelIndex: number }
+}
+
+export type VoiceArmResult =
+  | { ok: true }
+  | { ok: false; reason: 'permission' | 'no-input' | 'busy' | 'error'; message: string }
+
 export interface VoiceRecordStopResult {
   ok: boolean
   take?: VoiceTakeSummary
@@ -107,5 +116,7 @@ export const VOICE_IPC = {
   play: 'voice:play',
   stopPlay: 'voice:stop-play',
   remove: 'voice:remove',
-  level: 'voice:level'
+  level: 'voice:level',
+  arm: 'voice:arm',
+  disarm: 'voice:disarm'
 } as const

@@ -701,6 +701,24 @@ describe('desktop native playback facade', () => {
     ...patch
   })
 
+  it('re-prepares a fresh song on the platform provider, not the default wasapi pref (macOS)', async () => {
+    vi.stubGlobal('navigator', { platform: 'MacIntel' })
+    const h = seamHarness(generation => playing(generation))
+    ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'coreaudio', available: true }, { id: 'wasapi', available: false, detail: 'Available only on Windows' }])
+    const inventory = h.api.audioHostDevices as unknown as ReturnType<typeof vi.fn>
+    const base = { lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: null, metronome: h.metronome, countIn: false, positionSeconds: 3, durationSeconds: 10,
+      sampleRate: 48_000, masterGain: 0, playbackRate: 1, transpose: 0, training: null, loop: null }
+    expect(await h.client.prepareAhead({ provider: 'coreaudio', ...base })).toBe(true)
+    inventory.mockClear()
+    const engineRequest = { ...base, lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', volume: 1, muted: false, solo: false }],
+      positionSeconds: 20, nativeAudioProvider: 'wasapi', graphDocument: null }
+    await expect(h.client.reprepareRetainedAhead(engineRequest as never)).resolves.toBe(true)
+    expect(inventory.mock.calls.map(call => call[0])).toEqual(['coreaudio'])
+    await h.client.unload()
+  })
+
   describe.each(['coreaudio', 'wasapi'] as const)('%s output routing', provider => {
     const routes = (h: ReturnType<typeof seamHarness>, sampleRate = 44_100) => {
       const inventory = h.api.audioHostDevices as unknown as ReturnType<typeof vi.fn>

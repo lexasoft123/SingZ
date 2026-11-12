@@ -128,6 +128,7 @@ struct CaptureOwner {
   bool takePresent = false;
   uint64_t takeGeneration = 0;
   uint32_t sampleRate = 0;
+  singz::AudioInputResult inputResult{};
   uint64_t generation = 0;
   uint64_t lastDroppedEvents = 0;
   uint64_t lastOverwrittenWindows = 0;
@@ -633,6 +634,7 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
   owner.lastDroppedEvents = 0;
   owner.lastOverwrittenWindows = 0;
   owner.sampleRate = 0;
+  owner.inputResult = {};
   owner.takeWriter.resetCaptureTelemetry();
   const auto modelPath = getString(env, argv[0], "crepeModelPath");
   try {
@@ -669,6 +671,7 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
     });
   }, &inventory, enabledChannels);
   owner.sampleRate = static_cast<uint32_t>(result.sampleRate);
+  owner.inputResult = result;
   owner.lastState = result.state;
   owner.lastError = result.error;
   if (!result.ok) stopLocked(generation, true);
@@ -765,6 +768,16 @@ napi_value stats(napi_env env, napi_callback_info) {
   set(env, inputLevel, "rmsDb", numberValue(env, level.rmsDb));
   set(env, result, "inputLevel", inputLevel);
   set(env, result, "sampleRate", uintValue(env, owner.sampleRate));
+  // Capture timestamps already refer to the first sample. Buffer duration is
+  // separate telemetry; subtracting it here would compensate it twice.
+  const bool inputLatencyStable = owner.inputResult.inputLatencySource == "reported" &&
+      (!owner.inputResult.inputLatencyStable ||
+       owner.inputResult.inputLatencyStable->load(std::memory_order_acquire));
+  set(env, result, "inputLatencyFrames", uintValue(env, owner.inputResult.inputLatencyFrames));
+  set(env, result, "inputBufferFrames", uintValue(env, owner.inputResult.inputBufferFrames));
+  set(env, result, "inputLatencyStable", boolValue(env, inputLatencyStable));
+  set(env, result, "inputLatencySource", stringValue(env,
+      inputLatencyStable ? "reported" : "unknown"));
   setU64(env, result, "lastSampleHostNs", owner.takeWriter.lastSampleHostNs());
   const auto firstSample = owner.takeWriter.firstSample();
   set(env, result, "firstSampleCaptured", boolValue(env, owner.takePresent && firstSample.captured));
