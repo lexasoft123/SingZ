@@ -122,6 +122,7 @@ export class BoxTransport {
    * still-active song becomes controllable again.
    */
   private pendingOpen: number | null = null
+  private openSettledDir: string | null = null
   private disposed = false
   private tearingDown = false
   private teardownPromise: Promise<void> | null = null
@@ -417,7 +418,7 @@ export class BoxTransport {
     if (this.active) throw new Error('A song already owns this transport.')
     const generation = ++this.generation
     // Restore supersedes any pending open; its controls must not wait for that open to settle.
-    this.pendingOpen = null
+    this.pendingOpen = null; this.openSettledDir = null
     this.loadingName = null
     this.lastError = null
     this.committing = true
@@ -578,6 +579,16 @@ export class BoxTransport {
           throw new Error('Stop the previous song before opening another song.')
         }
       }
+      // A key or mix save for this song must reach disk before its settings are read.
+      // Settle until the song has no timer, in-flight or retryable pending save: a key press
+      // accepted during a flush adds work, and open() must read the project after all of it.
+      for (;;) {
+        await this.flushProject(item.dir)
+        if (!this.current(generation)) return false
+        const entry = this.pendingSaves.get(item.dir)
+        if (!entry || (!entry.saving && entry.timer === null && (!entry.pendingSettings || entry.error))) break
+      }
+      this.openSettledDir = item.dir
       const { registration, inspection, lyrics } = await inspectBoxProject(this.api, item)
       if (!this.current(generation)) return false
       if (inspection.readiness !== 'ready' || !registration.ok || !registration.project?.stems || !lyrics) {
@@ -693,14 +704,14 @@ export class BoxTransport {
       this.publish()
       return false
     } finally {
-      if (this.pendingOpen === generation) this.pendingOpen = null
+      if (this.pendingOpen === generation) { this.pendingOpen = null; this.openSettledDir = null }
     }
   }
 
   cancelOpen(): boolean {
     if (this.loadingName === null || this.committing) return false
     this.generation++
-    this.pendingOpen = null
+    this.pendingOpen = null; this.openSettledDir = null
     this.loadingName = null
     this.publish()
     return true
@@ -813,18 +824,54 @@ export class BoxTransport {
     return this.recordControl(() => this.engine.setTranspose(target), true)
   }
 
-  /** Key change for a song that is not loaded: saves its project settings only. */
+  /**
+   * Key change for a song that is not loaded. It joins the same per-project
+   * pending/serialized settings state as mixer edits: the key is merged onto
+   * the latest pending or accepted settings (never a stale inspection row), so
+   * an older scheduled or in-flight save cannot write the old key back and this
+   * save cannot revert newer mix values. open() settles it before reading the project.
+   */
   async saveSongTranspose(item: ProjectListItem, settings: ProjectSettings, semitones: number): Promise<{ ok: true } | { ok: false; error: string }> {
-    if (this.active?.item.dir === item.dir) {
-      try { await this.setTranspose(semitones); return { ok: true } } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
+    const target = clampTranspose(semitones)
+    const fail = (error: unknown): { ok: false; error: string } => ({ ok: false, error: error instanceof Error ? error.message : String(error) })
+    // Once open() has settled this song's saves it reads settings; a key edit after that cannot be honoured.
+    const opening = (): boolean => this.pendingOpen !== null && this.openSettledDir === item.dir
+    if (this.active?.item.dir === item.dir && !opening()) {
+      try { await this.setTranspose(target); return { ok: true } } catch (error) { return fail(error) }
     }
-    const next = { ...settings, transpose: clampTranspose(semitones) }
-    return this.enqueueSave(async () => {
-      try {
-        const result = await this.api.saveProject(item.songPath, item.name, next)
-        return result.ok ? { ok: true as const } : { ok: false as const, error: result.error }
-      } catch (error) { return { ok: false as const, error: error instanceof Error ? error.message : String(error) } }
+    if (opening()) return fail(new Error(t('box.details.keyOpening')))
+    const dir = item.dir
+    let entry = this.pendingSaves.get(dir)
+    if (!entry) {
+      entry = { item, acceptedSettings: settings, controlTail: Promise.resolve(settings), timer: null }
+      this.pendingSaves.set(dir, entry)
+    }
+    const pending = entry
+    let outcome: { ok: true } | { ok: false; error: string } = { ok: true }
+    pending.controlTail = pending.controlTail.then(async () => {
+      // Re-check after earlier controls settled: the song may have started opening meanwhile.
+      if (this.active?.item.dir === dir || opening()) {
+        outcome = fail(new Error(t('box.details.keyOpening')))
+        return pending.pendingSettings ?? pending.acceptedSettings
+      }
+      // An in-flight save moves its settings out of pending and into accepted only when it lands.
+      while (pending.saving) await pending.saving
+      const previous = pending.pendingSettings
+      pending.pendingSettings = { ...(previous ?? pending.acceptedSettings), transpose: target }
+      pending.error = undefined
+      if (pending.timer !== null) { clearTimeout(pending.timer); pending.timer = null }
+      await this.saveProjectEntry(pending)
+      if (pending.error) {
+        // The caller is told this key did not save: do not leave it queued to be retried on Sing or by a later save.
+        outcome = fail(new Error(pending.error))
+        pending.pendingSettings = previous
+        pending.error = undefined
+        if (previous) this.scheduleProjectSave(pending)
+      }
+      return pending.pendingSettings ?? pending.acceptedSettings
     })
+    await pending.controlTail
+    return outcome
   }
 
   async controllerMix(command: { type: 'volume'; target: string; value: number } | { type: 'mute' | 'solo'; target: string; value: boolean }): Promise<void> {

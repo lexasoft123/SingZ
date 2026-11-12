@@ -75,6 +75,7 @@ export const box: Record<keyof typeof english | 'box.catalog.songs_few' | 'box.c
   'box.details.keyOriginal': 'Исходная тональность',
   'box.details.keyOffset': '{offset} полутонов',
   'box.details.keySaved': 'Тональность сохраняется вместе с песней и применится при следующем исполнении.',
+  'box.details.keyOpening': 'Песня открывается. Измените тональность после открытия.',
   'box.details.sing': 'Петь',
   'box.details.opening': 'Открываем…',
   'box.details.opensPaused': "«Петь» сразу запускает воспроизведение.",

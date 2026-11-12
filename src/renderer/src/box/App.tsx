@@ -11,7 +11,7 @@ import { catalogFocusTarget, focusPrimaryNavigation, moveSpatialFocus, pickMixer
 import { LatestOpenIntent } from './open-intent'
 import { Player } from './Player'
 import { BoxMicrophones } from './microphones'
-import { clampTranspose } from './key-change'
+import { createKeyChanger } from './key-change'
 import { Mixer, type MixerTab } from './Mixer'
 import { Queue } from './Queue'
 import { playbackStatus } from './playback-status'
@@ -540,18 +540,22 @@ export default function BoxApp(): React.JSX.Element {
 
   /** Optimistic key while a change is being saved, so quick presses stack instead of reading a stale saved value. */
   const [keyDraft, setKeyDraft] = useState<{ dir: string; value: number } | null>(null)
-  const changeKey = useCallback(async (entry: CollectionEntry, semitones: number) => {
-    const local = entry.local
-    const settings = collection.getSnapshot().rows[entry.id]?.inspection?.project?.settings
-    if (!local || !settings) return
-    const value = clampTranspose(semitones)
-    setActionError(null)
-    setKeyDraft({ dir: local.dir, value })
-    const result = await transport.saveSongTranspose(local, settings, value)
-    if (!result.ok) setActionError(result.error)
-    else if (transport.getSnapshot().active?.item.dir !== local.dir) await collection.verifyCached(entry.id)
-    setKeyDraft(current => current?.dir === local.dir && current.value === value ? null : current)
-  }, [collection, transport])
+  const selectedDirRef = useRef<string | undefined>(undefined)
+  selectedDirRef.current = selectedEntry?.local?.dir
+  const changeKey = useMemo(() => createKeyChanger<CollectionEntry>({
+    dirOf: entry => entry.local?.dir,
+    save: async (entry, value) => {
+      const settings = collection.getSnapshot().rows[entry.id]?.inspection?.project?.settings
+      if (!entry.local || !settings) return { ok: false, error: t('box.details.error') }
+      return transport.saveSongTranspose(entry.local, settings, value)
+    },
+    refresh: async entry => {
+      if (transport.getSnapshot().active?.item.dir !== entry.local?.dir) await collection.verifyCached(entry.id)
+    },
+    setDraft: setKeyDraft,
+    setError: setActionError,
+    selectedDir: () => selectedDirRef.current
+  }), [collection, transport])
 
   const commitQueue = useCallback(async (refs: BoxQueueRef[]): Promise<boolean> => {
     if (!queueStore.commit(refs)) return false

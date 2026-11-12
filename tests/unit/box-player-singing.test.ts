@@ -6,10 +6,22 @@ import { prepareBoxLocale } from '../../src/renderer/src/box/i18n'
 import { box as en } from '../../src/shared/i18n/en/box'
 import { box as ru } from '../../src/shared/i18n/ru/box'
 import { box as zh } from '../../src/shared/i18n/zh-CN/box'
-import { clampTranspose, stepTranspose, TRANSPOSE_MAX, TRANSPOSE_MIN } from '../../src/renderer/src/box/key-change'
+import { clampTranspose, createKeyChanger, stepTranspose, TRANSPOSE_MAX, TRANSPOSE_MIN } from '../../src/renderer/src/box/key-change'
 import { MICROPHONE_SINGING_PEAK, microphoneMeterFill, microphoneMeterState, microphoneSlotStatus } from '../../src/renderer/src/box/microphones'
 import { SongDetails } from '../../src/renderer/src/box/SongDetails'
-import { BoxTransport } from '../../src/renderer/src/box/transport'
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+/** The pre-fix App callback: cleanup compares dir and value, not request identity. */
+function oldKeyChanger(deps: { dirOf(e: { dir: string }): string; save(): Promise<{ ok: true }>; refresh(): Promise<void>; setDraft(u: (c: { dir: string; value: number } | null) => { dir: string; value: number } | null): void; setError(m: string | null): void }) {
+  return async (entry: { dir: string }, value: number): Promise<void> => {
+    deps.setDraft(() => ({ dir: entry.dir, value }))
+    await deps.save(); await deps.refresh()
+    deps.setDraft(current => current?.dir === entry.dir && current.value === value ? null : current)
+  }
+}
 
 const css = readFileSync('src/renderer/src/box/styles.css', 'utf8')
 const rule = (selector: string): string => {
@@ -66,22 +78,52 @@ describe('key change', () => {
     expect(clampTranspose(40)).toBe(12); expect(clampTranspose(-40)).toBe(-12)
     expect(clampTranspose(1.6)).toBe(2); expect(clampTranspose(Number.NaN)).toBe(0)
   })
-  it('transport.setTranspose clamps and goes through the engine and project save path', async () => {
-    const setTranspose = vi.fn(async () => undefined)
-    const recordControl = vi.fn((accepted: () => Promise<void>) => accepted())
-    const fake = { engine: { setTranspose }, recordControl }
-    await (BoxTransport.prototype as unknown as { setTranspose(this: unknown, value: number): Promise<void> }).setTranspose.call(fake, 99)
-    expect(setTranspose).toHaveBeenCalledWith(12)
-    expect(recordControl).toHaveBeenCalledWith(expect.any(Function), true)
+  it('submits only the latest of stacked presses (ABA 1,2,1) and scopes late errors to the selection', async () => {
+    const gates = [deferred<{ ok: true }>(), deferred<{ ok: true }>(), deferred<{ ok: true }>()]
+    let call = 0
+    let draft: { dir: string; value: number } | null = null
+    const errors: (string | null)[] = []
+    const make = (clearByValue: boolean) => {
+      call = 0; draft = null
+      const deps = { dirOf: (entry: { dir: string }) => entry.dir, save: () => gates[call++].promise, refresh: async () => undefined,
+        setDraft: (update: (current: typeof draft) => typeof draft) => { draft = update(draft) }, setError: (message: string | null) => errors.push(message), selectedDir: () => '/a' }
+      return clearByValue ? oldKeyChanger(deps) : createKeyChanger<{ dir: string }>(deps)
+    }
+    const press = async (change: (entry: { dir: string }, value: number) => Promise<void>) => {
+      const runs = [change({ dir: '/a' }, 1), change({ dir: '/a' }, 2), change({ dir: '/a' }, 1)]
+      gates[0].resolve({ ok: true }); await new Promise(resolve => setTimeout(resolve, 0))
+      return runs
+    }
+    // Negative control: the previous value-compare cleanup clears the draft while request 3 is outstanding.
+    await press(make(true))
+    expect(draft).toBeNull()
+    const runs = await press(make(false))
+    expect(draft).toEqual({ dir: '/a', value: 1 })
+    gates[1].resolve({ ok: true }); await new Promise(resolve => setTimeout(resolve, 0))
+    expect(draft).toEqual({ dir: '/a', value: 1 })
+    gates[2].resolve({ ok: true }); await Promise.all(runs)
+    expect(draft).toBeNull()
   })
-  it('saves an unloaded song through saveProject with the new key and the rest of its settings', async () => {
-    const saveProject = vi.fn(async () => ({ ok: true as const }))
-    const fake = { active: null, api: { saveProject }, enqueueSave: <T,>(op: () => Promise<T>) => op() }
-    const settings = { transpose: 2, tempo: 1.1 } as never
-    const result = await (BoxTransport.prototype as unknown as { saveSongTranspose(this: unknown, item: unknown, settings: unknown, value: number): Promise<{ ok: boolean }> })
-      .saveSongTranspose.call(fake, { dir: '/p', songPath: '/p/song.mp3', name: 'A - B' }, settings, -20)
-    expect(result.ok).toBe(true)
-    expect(saveProject).toHaveBeenCalledWith('/p/song.mp3', 'A - B', { transpose: -12, tempo: 1.1 })
+  it('refreshes once the latest settles even when only a superseded request saved', async () => {
+    type Result = { ok: true } | { ok: false; error: string }
+    const gates = [deferred<Result>(), deferred<Result>()]
+    let call = 0, refreshed = 0
+    const change = createKeyChanger<{ dir: string }>({ dirOf: entry => entry.dir, save: () => gates[call++].promise, refresh: async () => { refreshed++ },
+      setDraft: () => undefined, setError: () => undefined, selectedDir: () => '/a' })
+    const runs = [change({ dir: '/a' }, 1), change({ dir: '/a' }, 2)]
+    gates[0].resolve({ ok: true }); gates[1].resolve({ ok: false, error: 'x' }); await Promise.all(runs)
+    expect(refreshed).toBe(1)
+  })
+  it('does not publish a late error after the selection moved', async () => {
+    const gate = deferred<{ ok: false; error: string }>()
+    const errors: (string | null)[] = []
+    let selected = '/a'
+    const change = createKeyChanger<{ dir: string }>({ dirOf: entry => entry.dir, save: () => gate.promise, refresh: async () => undefined,
+      setDraft: () => undefined, setError: message => errors.push(message), selectedDir: () => selected })
+    const run = change({ dir: '/a' }, 1)
+    selected = '/b'
+    gate.resolve({ ok: false, error: 'disk full' }); await run
+    expect(errors).toEqual([null])
   })
 })
 

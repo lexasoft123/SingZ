@@ -124,7 +124,7 @@ function range(id: string, rect: Rect, maximum: number, onNativeStep: (value: nu
 }
 
 class MixerRemoteHarness {
-  readonly root = new FakeRemoteElement('div', 'mixer', { left: 0, top: 0, width: 1440, height: 488 })
+  readonly root = new FakeRemoteElement('div', 'mixer', { left: 0, top: 0, width: 1520, height: 208 })
   readonly playerPlay = button('player:play', { left: 700, top: 800, width: 100, height: 40 })
   readonly gate = new RemoteKeyGate()
   readonly masterSteps: number[] = []
@@ -132,28 +132,28 @@ class MixerRemoteHarness {
   playing = true
   closed = false
   toggleCount = 0
-  private readonly rows = new FakeRemoteElement('div', 'rows', { left: 40, top: 90, width: 1360, height: 300 })
+  private readonly rows = new FakeRemoteElement('div', 'rows', { left: 24, top: 54, width: 1472, height: 142 })
   private readonly tabs: Record<MixerView, FakeRemoteElement>
 
   constructor(view: MixerView, private readonly availableStems: string[]) {
     this.root.dataset.surface = 'mix'
     this.root.dataset.view = view
-    const tabGroup = new FakeRemoteElement('div', 'tabs', { left: 80, top: 20, width: 190, height: 38 })
+    const tabGroup = new FakeRemoteElement('div', 'tabs', { left: 80, top: 5, width: 190, height: 34 })
     tabGroup.className = 'mode-seg'
     this.tabs = {
-      main: button('tab:main', { left: 80, top: 20, width: 90, height: 38 }),
-      stems: button('tab:stems', { left: 174, top: 20, width: 90, height: 38 })
+      main: button('tab:main', { left: 80, top: 5, width: 90, height: 34 }),
+      stems: button('tab:stems', { left: 174, top: 5, width: 90, height: 34 })
     }
     this.tabs.main.onClick = () => this.setView('main')
     this.tabs.stems.onClick = () => this.setView('stems')
     tabGroup.append(this.tabs.main, this.tabs.stems)
-    const play = button('mix:play', { left: 1120, top: 20, width: 90, height: 38 })
+    const play = button('mix:play', { left: 1280, top: 5, width: 90, height: 34 })
     play.dataset.mixPlay = ''
     play.onClick = () => {
       this.toggleCount++
       this.playing = !this.playing
     }
-    const close = button('mix:close', { left: 1220, top: 20, width: 120, height: 38 })
+    const close = button('mix:close', { left: 1380, top: 5, width: 120, height: 34 })
     close.dataset.mixClose = ''
     close.onClick = () => this.close()
     this.root.append(tabGroup, play, close, this.rows)
@@ -170,19 +170,19 @@ class MixerRemoteHarness {
     for (const [name, tab] of Object.entries(this.tabs)) tab.attributes['aria-pressed'] = String(name === view)
     const ids = view === 'main' ? ['master', 'vocals', 'mic1', 'mic2'] : ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other']
     const rendered = ids.map((id, index) => {
-      const top = 100 + index * (view === 'main' ? 70 : 48)
-      const row = new FakeRemoteElement('div', `row:${id}`, { left: 40, top, width: 1360, height: view === 'main' ? 70 : 48 })
+      const top = 56 + index * 34
+      const row = new FakeRemoteElement('div', `row:${id}`, { left: 24, top, width: 1472, height: 34 })
       row.dataset.mixRow = id
       const available = id === 'master' || this.availableStems.includes(id)
       if (available) {
-        const input = range(id, { left: 340, top: top + 8, width: 700, height: 32 }, id === 'master' ? 12 : 0, value => {
+        const input = range(id, { left: 340, top: top + 3, width: 700, height: 28 }, id === 'master' ? 12 : 0, value => {
           if (id === 'master') this.masterSteps.push(value)
           else (this.stemSteps[id] ??= []).push(value)
         })
         row.append(input)
         if (id !== 'master') {
-          const mute = button(`mute:${id}`, { left: 1080, top: top + 7, width: 44, height: 34 })
-          const solo = button(`solo:${id}`, { left: 1134, top: top + 7, width: 44, height: 34 })
+          const mute = button(`mute:${id}`, { left: 1080, top: top + 2, width: 44, height: 30 })
+          const solo = button(`solo:${id}`, { left: 1134, top: top + 2, width: 44, height: 30 })
           row.append(mute, solo)
         }
       }

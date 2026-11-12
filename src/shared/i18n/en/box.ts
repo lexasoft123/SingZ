@@ -71,6 +71,7 @@ export const box = {
   'box.details.keyOriginal': 'Original key',
   'box.details.keyOffset': '{offset} semitones',
   'box.details.keySaved': 'The key is saved with this song and used the next time you sing it.',
+  'box.details.keyOpening': 'The song is opening. Change its key once it has opened.',
   'box.details.sing': 'Sing',
   'box.details.opening': 'Opening…',
   'box.details.opensPaused': "Sing starts playback right away.",

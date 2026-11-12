@@ -73,6 +73,7 @@ export const box: Record<keyof typeof english, string> = {
   'box.details.keyOriginal': '原调',
   'box.details.keyOffset': '{offset} 个半音',
   'box.details.keySaved': '调性会随这首歌保存，下次演唱时沿用。',
+  'box.details.keyOpening': '歌曲正在打开。打开后再更改调性。',
   'box.details.sing': '演唱',
   'box.details.opening': '正在打开…',
   'box.details.opensPaused': "点击演唱会立即开始播放。",
