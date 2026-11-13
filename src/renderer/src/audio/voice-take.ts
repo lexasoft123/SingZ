@@ -153,6 +153,10 @@ export interface VoiceModel {
   }
   /** Monitor level in dB (-60..+12). The take level is `level`; the fader edits one or the other. */
   monitorGainDb: number
+  /** What the fader edits while monitoring is off: the take ('voice') or the monitor level (a preset). */
+  faderMode: 'voice' | 'monitor'
+  /** True during the first monitoring episode of the session: shows the quiet headphones hint. */
+  monitorHint: boolean
   error: VoiceErrorKind | null
   /** Why the last take ended without the singer pressing stop. */
   stoppedBy: 'seek' | 'auto' | null
@@ -182,6 +186,10 @@ export type AnnounceKey =
   | 'announceMonitorOn'
   | 'announceMonitorOff'
 
+/** A safe starting monitor level: a hot microphone at 0 dB can feed back or hurt. */
+export const MONITOR_GAIN_DEFAULT_DB = -12
+const HINT_SEEN = new WeakSet<object>() // engines whose singer has already seen the headphones hint
+
 export const INITIAL_VOICE_MODEL: VoiceModel = {
   songId: null,
   armed: false,
@@ -192,7 +200,9 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   inputMissing: false,
   // Monitoring is never persisted as on: every controller starts off.
   monitor: { avail: 'ok', reason: null, on: false, latency: null, warnings: [] },
-  monitorGainDb: 0,
+  monitorGainDb: MONITOR_GAIN_DEFAULT_DB,
+  faderMode: 'voice',
+  monitorHint: false,
   error: null,
   stoppedBy: null,
   take: null,
@@ -246,6 +256,7 @@ export const canPressRecord = (m: VoiceModel): boolean => m.recording || recordB
 export const CLIP_DB = -0.1
 const SEEK_JUMP_SEC = 0.75
 const STORAGE_KEY = 'singz.voice.input'
+const MONITOR_GAIN_KEY = 'singz.voice.monitorGain'
 const SONG_START_TIMEOUT_MS = 3000
 const MONITOR_STATE_EVERY = 10 // level polls (~50 ms each) per monitor-state check
 const BRIDGE_MISSING = 'voice bridge unavailable'
@@ -319,6 +330,18 @@ export class VoiceController {
     this.now = deps.now ?? (() => Date.now())
     this.restoreStems(MUTED_BY_SOLO.get(deps.engine) ?? null)
     this.saved = this.readStored()
+    this.model = { ...this.model, monitorGainDb: this.readMonitorGain() }
+  }
+
+  private readMonitorGain(): number {
+    try {
+      const raw = this.deps.storage?.getItem(MONITOR_GAIN_KEY)
+      const v = raw === null || raw === undefined ? NaN : Number(raw)
+      if (Number.isFinite(v)) return Math.max(-60, Math.min(12, v))
+    } catch {
+      /* unreadable: the safe default */
+    }
+    return MONITOR_GAIN_DEFAULT_DB
   }
 
   // ── external store ──
@@ -405,6 +428,8 @@ export class VoiceController {
     // An in-flight start undoes itself when it resolves (see startRecording).
     this.startToken++
     this.armToken++
+    this.inputToken++ // a re-arm after an input change must not land on the next song
+    this.rearmPending = false
     this.releaseArm()
     const monitorReleased = this.releaseMonitor() // sync part now; awaited last
     // A listen ends synchronously here, before any await: stems restored, song
@@ -455,7 +480,7 @@ export class VoiceController {
 
   selectInput(id: string): void {
     // The select is disabled while a take records; a stray call must not move the input under it.
-    if (this.model.recording) return
+    if (this.model.recording || this.model.starting) return
     const changed = id !== this.model.input
     const opt = this.model.inputs.find((o) => o.id === id)
     this.set({ input: id })
@@ -481,7 +506,12 @@ export class VoiceController {
     const token = ++this.inputToken
     const stale = (): boolean => token !== this.inputToken || this.disposed
     const rearm = (this.model.armed && !this.armedByMonitor) || this.rearmPending
+    // A toggleMonitor arm still opening on the OLD option must not land: bump armToken so
+    // armInput discards it (it disarms main when it resolves) and release explicitly.
+    const monitorArming = this.monitorPending
+    if (monitorArming) this.armToken++
     await this.releaseMonitor() // also releases an arm that monitoring made
+    if (monitorArming && !stale()) await this.forceDisarm()
     if (stale()) return
     if (rearm) {
       this.rearmPending = true
@@ -1012,6 +1042,7 @@ export class VoiceController {
     const on = available && st.on
     this.monitorOpen = on
     this.set({
+      ...(on ? {} : { monitorHint: false }),
       monitor: { avail, reason, on, latency: on ? st.latency : null, warnings: on ? st.warnings : [] },
       ...(wasOn !== on ? this.say(on ? 'announceMonitorOn' : 'announceMonitorOff') : {})
     })
@@ -1053,7 +1084,14 @@ export class VoiceController {
       // Monitoring needs the input open (meter live): arm it unless the singer already did.
       if (!this.model.armed) {
         const ok = await this.armInput(false)
-        if (stale()) return
+        if (stale()) {
+          // Superseded (input changed, song changed) while arming: do not leave it open.
+          if (ok) {
+            if (this.model.armed) this.set({ armed: false })
+            void this.forceDisarm()
+          }
+          return
+        }
         if (!ok) return
         armedHere = true
       }
@@ -1065,6 +1103,10 @@ export class VoiceController {
       }
       this.applyMonitorState(st)
       if (st.available === true && st.on) {
+        if (!HINT_SEEN.has(this.deps.engine)) {
+          HINT_SEEN.add(this.deps.engine)
+          this.set({ monitorHint: true })
+        }
         this.armedByMonitor = armedHere
       } else {
         undoArm()
@@ -1095,6 +1137,7 @@ export class VoiceController {
     // Release the input too if monitoring was what opened it and no take needs it.
     const disarm = ownArm && !this.model.recording
     this.set({
+      monitorHint: false,
       monitor: { ...this.model.monitor, on: false, latency: null, warnings: [] },
       ...(disarm && this.model.armed ? { armed: false } : {}),
       ...(was ? this.say('announceMonitorOff') : {})
@@ -1103,9 +1146,31 @@ export class VoiceController {
     if (disarm) await this.forceDisarm()
   }
 
-  /** The strip fader while monitoring: live monitor gain (dB), coalesced so only the latest is sent. */
+  /** True when the fader edits the monitor level: while monitoring, or when the singer chose Monitor mode. */
+  get faderEditsMonitor(): boolean {
+    return this.model.monitor.on || this.model.faderMode === 'monitor'
+  }
+
+  toggleFaderMode(): void {
+    if (this.model.monitor.on) return // monitoring locks the fader to the monitor level
+    this.set({ faderMode: this.model.faderMode === 'monitor' ? 'voice' : 'monitor' })
+  }
+
+  /** The strip fader: the monitor level (preset or live) or the take level, per mode. */
+  setFader(v: number): void {
+    if (this.faderEditsMonitor) this.setMonitorFader(v)
+    else this.setLevel(v)
+  }
+
+  /** Monitor gain in dB: remembered, sent live (coalesced) while monitoring. */
   setMonitorFader(v: number): void {
-    this.set({ monitorGainDb: monitorFaderToDb(v) })
+    const gainDb = monitorFaderToDb(v)
+    this.set({ monitorGainDb: gainDb })
+    try {
+      this.deps.storage?.setItem(MONITOR_GAIN_KEY, String(gainDb))
+    } catch {
+      /* private mode */
+    }
     if (!this.model.monitor.on) return
     if (this.monitorGainSending) {
       this.monitorGainDirty = true

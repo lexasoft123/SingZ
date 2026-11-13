@@ -1,13 +1,13 @@
 import { ipcMain, systemPreferences } from 'electron'
 import { desktopAudioProcess } from './audio-process'
-import { VoiceMonitorStore, microphonePermission, type VoiceMonitorNative } from './voice-monitor'
+import { VoiceMonitorStore, microphonePermission, isAudioProcessFailure, type VoiceMonitorNative } from './voice-monitor'
 import { VOICE_IPC, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorState } from '../shared/voice-take'
 
 export function createVoiceMonitorNative(): VoiceMonitorNative {
   return {
     hostDevices: () => desktopAudioProcess.call('owner', 'hostDevices', []),
     inputDevices: () => desktopAudioProcess.call('binding', 'inputDevices', []),
-    voiceMonitorAvailability: async args => { try { return await desktopAudioProcess.call('binding', 'voiceMonitorAvailability', [args]) } catch { return { available: false, reason: 'platform' } } },
+    voiceMonitorAvailability: async args => { try { return await desktopAudioProcess.call('binding', 'voiceMonitorAvailability', [args]) } catch (error) { if (isAudioProcessFailure(error)) throw error; return { available: false, reason: 'platform' } } },
     beginVoiceMonitor: (args, generation) => desktopAudioProcess.call('binding', 'beginVoiceMonitor', [args, generation]),
     setVoiceMonitorGain: gain => desktopAudioProcess.call('binding', 'setVoiceMonitorGain', [gain]),
     voiceMonitorStatus: () => desktopAudioProcess.call('binding', 'voiceMonitorStatus', []),

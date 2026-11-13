@@ -701,6 +701,59 @@ describe('desktop native playback facade', () => {
     ...patch
   })
 
+  it.each([false, true])('ignores period-only CoreAudio inventory changes (song paused: %s)', async (pauseSong) => {
+    let paused = false
+    const h = seamHarness(generation => playing(generation, { transportState: paused ? 'paused' : 'playing' }))
+    const inventory = await h.api.audioHostDevices('coreaudio')
+    const setPeriod = (frames: number): void => {
+      ;(h.api.audioHostDevices as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ...inventory, devices: inventory.devices.map(device => ({
+          ...device, bufferFrames: { ...device.bufferFrames, preferredFrames: frames }
+        }))
+      })
+    }
+    setPeriod(512)
+    await h.start({ countIn: false })
+    if (pauseSong) { paused = true; await h.client.pause() }
+    const before = [...h.calls]
+    for (const frames of Array.from({ length: 100 }, (_, index) => index % 2 === 0 ? 32 : 512)) {
+      setPeriod(frames)
+      await h.client.reconfigure({}, { refreshRoute: true })
+      expect(h.calls).toEqual(before)
+      expect(h.generationNow()).toBe('1')
+      expect(h.client.status?.discontinuities).toBe('0')
+    }
+    if (pauseSong) {
+      paused = false
+      await h.client.resume()
+      expect(h.calls).toEqual([...before, 'resume:1'])
+    }
+    await h.client.unload()
+  })
+
+  it('ignores period-only CoreAudio inventory changes between prepare-ahead and Play', async () => {
+    const h = seamHarness(generation => playing(generation))
+    const inventory = await h.api.audioHostDevices('coreaudio')
+    const setPeriod = (frames: number): void => {
+      ;(h.api.audioHostDevices as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ...inventory, devices: inventory.devices.map(device => ({
+          ...device, bufferFrames: { ...device.bufferFrames, preferredFrames: frames }
+        }))
+      })
+    }
+    const request: DesktopNativePlaybackPrepare = {
+      provider: 'coreaudio', lanes: [{ id: 'v', path: '/allowed/v.flac', gain: 1, muted: false, solo: false }],
+      beat: null, metronome: h.metronome, countIn: false, positionSeconds: 0, durationSeconds: 10,
+      sampleRate: 48_000, masterGain: 0, playbackRate: 1, transpose: 0, training: null, loop: null
+    }
+    setPeriod(512)
+    expect(await h.client.prepareAhead(request)).toBe(true)
+    setPeriod(32)
+    expect(await h.client.prepareAndStart(request)).toBe(true)
+    expect(h.calls).toEqual(['prepare:1', 'open:1', 'start:1'])
+    await h.client.unload()
+  })
+
   it('re-prepares a fresh song on the platform provider, not the default wasapi pref (macOS)', async () => {
     vi.stubGlobal('navigator', { platform: 'MacIntel' })
     const h = seamHarness(generation => playing(generation))

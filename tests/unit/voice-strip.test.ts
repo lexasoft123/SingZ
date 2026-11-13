@@ -816,7 +816,7 @@ describe('live monitoring (M2)', () => {
   it('toggles on and off through monitorSet, with the monitor gain, never persisted as on', async () => {
     const { c, api } = await setup()
     await c.toggleMonitor()
-    expect(api.monitorSet).toHaveBeenLastCalledWith({ input: { deviceName: 'Scarlett 2i2', channelIndex: 0 }, on: true, gainDb: 0 })
+    expect(api.monitorSet).toHaveBeenLastCalledWith({ input: { deviceName: 'Scarlett 2i2', channelIndex: 0 }, on: true, gainDb: -12 })
     expect(c.state).toBe('monitoring-on')
     expect(c.getSnapshot().monitor.latency?.roundTripMs).toBe(6)
     await c.toggleMonitor()
@@ -1240,6 +1240,56 @@ describe('changing the input while armed (main refuses a mismatched armed channe
     expect(viaMonitor.c.getSnapshot().armed).toBe(false)
     viaMonitor.c.dispose()
   })
+  it('a song change during a pending re-arm leaves the new song disarmed with no open input', async () => {
+    let releaseDisarm!: () => void
+    const { c, main } = await armedOn('zen#0')
+    const realDisarm = main.api.disarm.getMockImplementation()!
+    main.api.disarm.mockImplementationOnce(() => new Promise((r) => { releaseDisarm = () => r(realDisarm()) }))
+    main.api.arm.mockClear()
+    c.selectInput('zen#7') // switchInput is now waiting on its forceDisarm
+    await vi.waitFor(() => expect(main.api.disarm).toHaveBeenCalled())
+    const changing = c.setSong('song-2')
+    releaseDisarm()
+    await changing
+    await settle()
+    expect(main.api.arm).not.toHaveBeenCalled() // the re-arm never lands on the new song
+    expect(main.st.armed).toBeNull()
+    expect(c.getSnapshot().armed).toBe(false)
+    c.dispose()
+  })
+  it('a selection during a pending monitor arm leaves nothing armed on the old channel', async () => {
+    let finishArm!: () => void
+    const main = mainModel()
+    const realArm = main.api.arm.getMockImplementation()!
+    main.api.arm.mockImplementationOnce((r) => new Promise((res) => { finishArm = () => res(realArm(r)) }))
+    const r = await setup(main.api as never, undefined, inputs)
+    r.c.selectInput('zen#0')
+    const toggling = r.c.toggleMonitor() // arms zen#0 for the monitor
+    await vi.waitFor(() => expect(main.api.arm).toHaveBeenCalledTimes(1))
+    r.c.selectInput('zen#7')
+    finishArm()
+    await toggling
+    await settle()
+    await vi.waitFor(() => expect(main.st.armed).toBeNull()) // not armed on zen#0, and not re-armed (the monitor owned it)
+    expect(r.c.getSnapshot().armed).toBe(false)
+    expect(r.c.getSnapshot().monitor.on).toBe(false)
+    r.c.dispose()
+  })
+  it('a selection while a take is starting is ignored', async () => {
+    let started!: () => void
+    const { c, main } = await armedOn('zen#0', {
+      recordStart: vi.fn(() => new Promise<{ ok: true; takeId: string }>((r) => { started = () => r({ ok: true, takeId: 'take-1' }) }))
+    } as never)
+    const recording = c.toggleRecord()
+    await vi.waitFor(() => expect(c.getSnapshot().starting).toBe(true))
+    main.api.arm.mockClear()
+    c.selectInput('zen#3')
+    expect(c.getSnapshot().input).toBe('zen#0')
+    started()
+    await recording
+    expect(main.api.arm).not.toHaveBeenCalled()
+    c.dispose()
+  })
   it('a failed re-arm leaves the strip disarmed in the existing state and the select usable', async () => {
     let calls = 0
     const { c } = await armedOn('zen#0', {
@@ -1249,6 +1299,94 @@ describe('changing the input while armed (main refuses a mismatched armed channe
     await vi.waitFor(() => expect(c.getSnapshot().inputMissing).toBe(true))
     expect(c.getSnapshot().armed).toBe(false)
     expect(c.getSnapshot().input).toBe('zen#7')
+    c.dispose()
+  })
+})
+
+describe('monitor level preset, memory and hint', () => {
+  const memory = (init: Record<string, string> = {}) => {
+    const m = new Map(Object.entries(init))
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m }
+  }
+  it('defaults to a safe -12 dB', async () => {
+    expect(INITIAL_VOICE_MODEL.monitorGainDb).toBe(-12)
+    const { c } = await setup()
+    expect(c.getSnapshot().monitorGainDb).toBe(-12)
+    c.dispose()
+  })
+  it('remembers the monitor gain in storage, clamped to -60..+12, and ignores junk', async () => {
+    const store = memory()
+    const a = await setup({}, undefined, undefined, store)
+    a.c.setMonitorFader(0)
+    expect(store.m.get('singz.voice.monitorGain')).toBe('-60')
+    a.c.setMonitorFader(60)
+    expect(store.m.get('singz.voice.monitorGain')).toBe('-17')
+    a.c.dispose()
+    const b = await setup({}, undefined, undefined, store)
+    expect(b.c.getSnapshot().monitorGainDb).toBe(-17)
+    b.c.dispose()
+    for (const [raw, want] of [['99', 12], ['-999', -60], ['loud', -12]] as const) {
+      const r = await setup({}, undefined, undefined, memory({ 'singz.voice.monitorGain': raw }))
+      expect(r.c.getSnapshot().monitorGainDb, raw).toBe(want)
+      r.c.dispose()
+    }
+  })
+  it('monitorSet carries the remembered gain, so monitoring never opens louder than it', async () => {
+    const { c, api } = await setup({}, undefined, undefined, memory({ 'singz.voice.monitorGain': '-30' }))
+    await c.toggleMonitor()
+    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: true, gainDb: -30 }))
+    c.dispose()
+  })
+  it('a preset made while monitoring is off is what monitoring starts with, with nothing sent live', async () => {
+    const { c, api } = await setup()
+    c.toggleFaderMode()
+    c.setFader(50)
+    expect(c.getSnapshot().monitorGainDb).toBe(-24)
+    expect(api.monitorGain).not.toHaveBeenCalled()
+    await c.toggleMonitor()
+    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ gainDb: -24 }))
+    c.dispose()
+  })
+  it('the fader edits the voice level by default, the monitor level in Monitor mode or while monitoring', async () => {
+    const { c, api } = await setup()
+    c.setFader(40)
+    expect(c.getSnapshot().level).toBe(40)
+    expect(c.getSnapshot().monitorGainDb).toBe(-12)
+    c.toggleFaderMode()
+    c.setFader(100)
+    expect(c.getSnapshot().level).toBe(40)
+    expect(c.getSnapshot().monitorGainDb).toBe(12)
+    c.toggleFaderMode()
+    c.setFader(20)
+    expect(c.getSnapshot().level).toBe(20)
+    await c.toggleMonitor()
+    c.toggleFaderMode() // locked to monitor while it is on
+    expect(c.getSnapshot().faderMode).toBe('voice')
+    c.setFader(0)
+    await vi.waitFor(() => expect(api.monitorGain).toHaveBeenCalledWith({ gainDb: -60 }))
+    expect(c.getSnapshot().level).toBe(20)
+    c.dispose()
+  })
+  it('shows the headphones hint once, on the first time monitoring is turned on in the session', async () => {
+    const { c, engine } = await setup()
+    await c.toggleMonitor()
+    expect(c.getSnapshot().monitorHint).toBe(true)
+    expect(renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))).toContain('Use headphones to avoid feedback')
+    await c.toggleMonitor()
+    expect(c.getSnapshot().monitorHint).toBe(false)
+    await c.toggleMonitor()
+    expect(c.getSnapshot().monitorHint).toBe(false) // not shown again, and nothing blocks
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    c.dispose()
+  })
+  it('markup: the mode chip says which level the fader edits', async () => {
+    const { c, engine } = await setup()
+    const render = (): string => renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
+    expect(render()).toContain('aria-label="Fader: voice level. Click to set the monitor level instead"')
+    c.toggleFaderMode()
+    const html = render()
+    expect(html).toContain('aria-label="Fader: monitor level. Click to set the voice level instead"')
+    expect(html).toContain('aria-label="Monitor level"')
     c.dispose()
   })
 })

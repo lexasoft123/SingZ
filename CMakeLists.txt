@@ -271,7 +271,9 @@ add_dependencies(singz_native_playback_callback
 # The render body lives in the header so the lifecycle owner can remain in one
 # source file. Extract the complete marked leaf into the policy/strict compile
 # target; changes to that header force regeneration, including policy fixtures.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/voice_monitor.h native/playback/voice_monitor.cpp native/playback/shared_audio_service.cpp)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/voice_monitor.h native/playback/voice_monitor.cpp native/playback/shared_audio_service.cpp
+  third_party/zcore/zcore/platform/macos/audio_device_macos_buffer.h
+  third_party/zcore/zcore/platform/macos/audio_host_macos_helpers.h)
 file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor.h" _voice_monitor_header)
 string(REGEX MATCH "// SINGZ_VOICE_MONITOR_RT_BEGIN[^@]*// SINGZ_VOICE_MONITOR_RT_END" _voice_monitor_rt "${_voice_monitor_header}")
 if(NOT _voice_monitor_rt)
@@ -747,7 +749,7 @@ if(SINGZ_CORE_TESTS)
   # identical behavior suite. Expected failure proves the checks are sensitive.
   file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor.cpp" _voice_monitor_control)
   foreach(_mutant IN ITEMS ramp clamp finite timestamp xrun mono route buffer steps generation lost song gain latency fade
-      song_optin suitability latency_suitability provider_error sanitized denormal denormal_output route_fade route_reason environments guard_box guard_mix guard_owner inventory settle all_outputs output_map input_channel input_range stale_song_period)
+      song_optin suitability latency_suitability provider_error sanitized denormal denormal_output route_fade route_reason environments guard_box guard_mix guard_owner inventory settle all_outputs output_map input_channel input_range stale_song_period native_route_state)
     if((_mutant STREQUAL "song_optin" OR _mutant STREQUAL "stale_song_period") AND NOT APPLE)
       continue() # This opt-in policy is macOS-only.
     endif()
@@ -822,6 +824,10 @@ if(SINGZ_CORE_TESTS)
       string(REPLACE "config.inputChannels={channel};" "config.inputChannels={0};" _control "${_control}")
     elseif(_mutant STREQUAL "input_range")
       string(REPLACE "if (channel>=input->inputChannels)" "if (false)" _control "${_control}")
+    elseif(_mutant STREQUAL "native_route_state")
+      string(REPLACE "provider==\"coreaudio\" && !config.outputDeviceUid.empty()"
+        "provider==\"coreaudio\" && !config.outputDeviceUid.empty() && (status.state==AudioHostState::Open || status.state==AudioHostState::Running || status.state==AudioHostState::Suspended)"
+        _header "${_header}")
     elseif(_mutant STREQUAL "generation")
       string(REPLACE "generation!=impl_->generation" "false" _control "${_control}")
     elseif(_mutant STREQUAL "lost")
@@ -846,6 +852,46 @@ if(SINGZ_CORE_TESTS)
     add_dependencies(voice_monitor_tests voice_monitor_negative_${_mutant})
     add_test(NAME voice_monitor_negative_${_mutant} COMMAND voice_monitor_negative_${_mutant})
     set_tests_properties(voice_monitor_negative_${_mutant} PROPERTIES WILL_FAIL TRUE)
+  endforeach()
+  # Compile regressions against deliberately broken copies of the REAL zCore
+  # seams; do not edit the pinned submodule. Same parent behavior suite must fail.
+  foreach(_seam IN ITEMS restore_capacity restore_external redundant_notification)
+    if(NOT APPLE)
+      continue() # Shared CoreAudio parent sequences are macOS-only.
+    endif()
+    set(_dir "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-negative-${_seam}")
+    file(MAKE_DIRECTORY "${_dir}")
+    if(_seam STREQUAL "redundant_notification")
+      file(READ "${ZCORE_ROOT}/zcore/platform/macos/audio_host_macos_helpers.h" _original)
+      string(REPLACE "return !readable || !same ? kMacAudioHostFormatChanged : 0u;"
+        "return kMacAudioHostFormatChanged;" _fault "${_original}")
+      set(_definition VOICE_MONITOR_MAC_HELPERS_HEADER)
+    else()
+      file(READ "${ZCORE_ROOT}/zcore/platform/macos/audio_device_macos_buffer.h" _original)
+      if(_seam STREQUAL "restore_capacity")
+        # Old behavior: wait for even a capacity-only song lease to close.
+        string(REPLACE "if (owner.second.changed) return AudioBufferWarningNone;"
+          "return AudioBufferWarningNone;" _fault "${_original}")
+      else()
+        # Ignore the external-value guard: even a CAS failure must not be
+        # misreported as restoration or lose the new baseline for re-arm.
+        string(REPLACE "} else if (current != entry.lastWritten) {"
+          "} else if (false) {" _fault "${_original}")
+      endif()
+      set(_definition VOICE_MONITOR_BUFFER_HEADER)
+    endif()
+    if(_fault STREQUAL _original)
+      message(FATAL_ERROR "Voice monitor zCore seam negative control ${_seam} needs updating")
+    endif()
+    file(WRITE "${_dir}/seam.h" "${_fault}")
+    add_executable(voice_monitor_negative_${_seam}
+      tests/native/voice_monitor_tests.cpp native/playback/shared_audio_service.cpp)
+    target_compile_features(voice_monitor_negative_${_seam} PRIVATE cxx_std_20)
+    target_compile_definitions(voice_monitor_negative_${_seam} PRIVATE ${_definition}="${_dir}/seam.h")
+    target_link_libraries(voice_monitor_negative_${_seam} PRIVATE singz_voice_monitor Threads::Threads)
+    add_dependencies(voice_monitor_tests voice_monitor_negative_${_seam})
+    add_test(NAME voice_monitor_negative_${_seam} COMMAND voice_monitor_negative_${_seam})
+    set_tests_properties(voice_monitor_negative_${_seam} PROPERTIES WILL_FAIL TRUE)
   endforeach()
   add_test(NAME voice_monitor_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_VOICE_MONITOR_RT_MANIFEST}"

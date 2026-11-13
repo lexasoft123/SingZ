@@ -54,13 +54,11 @@ bool permissionGranted() {
   return false;
 #endif
 }
-struct Route { std::string output; bool native{false}; std::vector<uint32_t> channels; };
-Route currentRoute() {
+VoiceMonitorSongRoute currentRoute() {
   auto& service=sharedAudioService();
   const auto status=service.status();
   const auto config=service.activeOutputConfig();
-  return {config.outputDeviceUid,service.providerId()=="coreaudio" &&
-      (status.state==AudioHostState::Open || status.state==AudioHostState::Running || status.state==AudioHostState::Suspended),config.outputChannels};
+  return voiceMonitorSongRoute(config,service.providerId(),status,service.outputRouteGeneration());
 }
 napi_value object(napi_env env) {napi_value o;napi_create_object(env,&o);return o;}
 void boolean(napi_env env,napi_value o,const char* key,bool b) {napi_value v;napi_get_boolean(env,b,&v);napi_set_named_property(env,o,key,v);}
@@ -143,10 +141,29 @@ napi_value gain(napi_env env,napi_callback_info info) {
 napi_value status(napi_env env,napi_callback_info) {
   std::lock_guard lock(control);
   const auto route=currentRoute();
-  if(!monitoredOutput.empty() && (!route.native || route.output!=monitoredOutput || route.channels!=monitoredChannels || !useAllowed())) {host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();}
+  AudioHostConfig output;output.outputDeviceUid=route.output;output.outputChannels=route.channels;
+  if(!monitoredOutput.empty()) {
+    if(!voiceMonitorSameOutput(monitoredOutput,monitoredChannels,output,route.native)) {
+      host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();
+    } else if(!useAllowed()) {
+      host.close();monitoredOutput.clear();monitoredChannels.clear();
+    }
+  }
   const auto r=host.status();auto o=object(env);boolean(env,o,"running",r.running);boolean(env,o,"lost",r.lost);
   if(r.running)latency(env,o,r.latency);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
+  text(env,o,"outputDeviceUid",monitoredOutput);
+  const auto pairCount=std::min(monitoredChannels.size(),size_t{2});
+  napi_value pair;napi_create_array_with_length(env,pairCount,&pair);
+  for(size_t c=0;c<pairCount;++c){napi_value v;napi_create_uint32(env,monitoredChannels[c],&v);napi_set_element(env,pair,c,v);}
+  napi_set_named_property(env,o,"outputChannels",pair);
+  text(env,o,"songOutputGeneration",std::to_string(route.generation));
+  text(env,o,"songStreamGeneration",std::to_string(route.song.streamGeneration));
+  text(env,o,"songHostRouteGeneration",std::to_string(route.song.routeGeneration));
+  number(env,o,"songHostStateCode",static_cast<uint32_t>(route.song.state));
+  number(env,o,"monitorObservedCallbackFrames",r.observedCallbackFrames);
+  number(env,o,"songProcessBufferFrames",route.song.latency.bufferFrames);
+  number(env,o,"songObservedCallbackFrames",route.song.observedCallbackFrames);
   warnings(env,o,r.warnings);return o;
 }
 napi_value end(napi_env env,napi_callback_info info) {

@@ -174,6 +174,7 @@ function statusLine(
   if (m.monitor.on && m.monitor.warnings.length > 0) {
     return { cls: 'warn', text: t('player.voice.monitorWarning', { text: m.monitor.warnings[0]! }) }
   }
+  if (m.monitor.on && m.monitorHint) return { cls: '', text: t('player.voice.monitorHint') }
   if (m.monitor.on) return { cls: '', text: t('player.voice.msgMonitoring') }
   if (state === 'armed') return { cls: '', text: t('player.voice.msgArmed') }
   if (m.monitor.avail !== 'ok') return { cls: 'warn', text: monitorReasonText(m) }
@@ -228,6 +229,7 @@ export default function VoiceStrip({
         : 'player.voice.emptyIdle'
 
   const armed = m.armed || rec
+  const faderMonitor = m.monitor.on || m.faderMode === 'monitor'
   const monitorWhy = monitorReasonText(m)
   const monitorUnavailable = !m.monitor.on && (m.monitor.avail !== 'ok' || m.inputMissing || m.perm === 'denied')
   const monitorLabel = m.monitor.on ? t('player.voice.monitorOn') : t('player.voice.monitorOff')
@@ -280,7 +282,7 @@ export default function VoiceStrip({
           <select
             id="voice-input"
             value={needSetup ? '' : (m.input ?? '')}
-            disabled={needSetup || rec || listening || m.inputs.length === 0}
+            disabled={needSetup || rec || m.starting || listening || m.inputs.length === 0}
             onChange={(e) => controller.selectInput(e.target.value)}
           >
             {needSetup || m.inputs.length === 0 ? (
@@ -336,19 +338,28 @@ export default function VoiceStrip({
           >
             {t('player.voice.soloShort')}
           </button>
+          <button
+            type="button"
+            className={`vs-chip${faderMonitor ? ' active' : ''}`}
+            aria-pressed={faderMonitor}
+            aria-disabled={m.monitor.on}
+            aria-label={faderMonitor ? t('player.voice.faderToVoice') : t('player.voice.faderToMonitor')}
+            title={faderMonitor ? t('player.voice.faderToVoice') : t('player.voice.faderToMonitor')}
+            onClick={() => controller.toggleFaderMode()}
+          >
+            {t('player.voice.faderMonitorShort')}
+          </button>
           <div className="vs-fader">
             <input
               className="vs-vol"
               type="range"
               min={0}
               max={100}
-              value={m.monitor.on ? monitorDbToFader(m.monitorGainDb) : m.level}
-              aria-label={m.monitor.on ? t('player.voice.monitorLevel') : t('player.voice.level')}
-              title={m.monitor.on ? t('player.voice.monitorLevel') : t('player.voice.level')}
-              aria-valuetext={m.monitor.on ? `${m.monitorGainDb} dB` : `${m.level}%`}
-              onChange={(e) =>
-                m.monitor.on ? controller.setMonitorFader(Number(e.target.value)) : controller.setLevel(Number(e.target.value))
-              }
+              value={faderMonitor ? monitorDbToFader(m.monitorGainDb) : m.level}
+              aria-label={faderMonitor ? t('player.voice.monitorLevel') : t('player.voice.level')}
+              title={faderMonitor ? t('player.voice.monitorLevel') : t('player.voice.level')}
+              aria-valuetext={faderMonitor ? `${m.monitorGainDb} dB` : `${m.level}%`}
+              onChange={(e) => controller.setFader(Number(e.target.value))}
             />
           </div>
         </div>

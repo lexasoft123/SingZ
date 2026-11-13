@@ -74,7 +74,7 @@ struct VoiceMonitorHost::Impl {
   ~Impl() { static_assert(offsetof(Impl, render) < offsetof(Impl, host)); }
   bool macOS, running{false}, lost{false};
   uint64_t generation{0}, route{0}, stream{0};
-  uint32_t requested{32}, warningFlags{0};
+  uint32_t requested{32}, warningFlags{0}, observedFrames{0};
   VoiceMonitorLatency latency;
   std::string reason;
   void stop(bool ramp) noexcept {
@@ -133,6 +133,7 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
   }
   self.stop(true); self.generation=generation; self.lost=false; self.warningFlags=0; self.reason.clear();
   const uint32_t outputs=static_cast<uint32_t>(physicalOutputs.size());
+  self.observedFrames=0;
   self.render.outputMask=(uint64_t{1}<<outputs)-1;
   self.render.current=self.render.destination=self.render.step=0; self.render.remaining=0;
   self.render.target.store(0); self.render.silent.store(1); self.render.outputs=outputs;
@@ -193,7 +194,7 @@ bool VoiceMonitorHost::setGain(float gain) noexcept {
 VoiceMonitorStatus VoiceMonitorHost::status() {
   auto& self=*impl_;
   if (self.running) {
-    const auto status=self.host.status(); self.warningFlags |= status.bufferWarnings;
+    const auto status=self.host.status(); self.warningFlags |= status.bufferWarnings; self.observedFrames=status.observedCallbackFrames;
     self.lost=status.state==AudioHostState::DeviceLost || status.terminalReason==AudioHostTerminalReason::DeviceLost;
     if (self.lost) self.reason="device-lost";
     if (!self.lost && status.state==AudioHostState::Running &&
@@ -203,7 +204,7 @@ VoiceMonitorStatus VoiceMonitorHost::status() {
         status.bufferExceedsMaximum) self.stop(false);
     else self.latency=latencyOf(status,self.requested);
   }
-  return {self.running,self.lost,self.latency,warnings(self.warningFlags),self.render.peak.load(),self.render.rms.load(),self.reason};
+  return {self.running,self.lost,self.latency,warnings(self.warningFlags),self.render.peak.load(),self.render.rms.load(),self.reason,self.observedFrames};
 }
 VoiceMonitorResult VoiceMonitorHost::end(uint64_t generation) {
   VoiceMonitorResult result;

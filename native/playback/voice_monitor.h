@@ -100,9 +100,30 @@ struct VoiceMonitorStatus {
   std::vector<std::string> warnings;
   float peak{0}, rms{0};
   std::string reason; // Optional status diagnostic, e.g. route-changed.
+  uint32_t observedCallbackFrames{0};
 };
 VoiceMonitorAvailability classifyVoiceMonitorRoute(const AudioHostInventory&, const std::string& inputUid,
     uint32_t channel, const std::string& outputUid, bool nativeOutput, bool permission, bool macOS);
+struct VoiceMonitorSongRoute {
+  std::string output;
+  bool native{false};
+  std::vector<uint32_t> channels;
+  AudioHostStatus song;
+  uint64_t generation{0};
+};
+inline VoiceMonitorSongRoute voiceMonitorSongRoute(const AudioHostConfig& config,
+    const std::string& provider, const AudioHostStatus& status, uint64_t generation) {
+  // Status/generations are retained for diagnostics only. Unit teardown and
+  // re-prepare do not change the selected native provider/UID/channel map.
+  return {config.outputDeviceUid,provider=="coreaudio" && !config.outputDeviceUid.empty(),
+      config.outputChannels,status,generation};
+}
+// Host Open/Running/Stopped states and stream generations are lifecycle facts,
+// not output identity. A same-UID/pair song re-prepare must retain monitoring.
+inline bool voiceMonitorSameOutput(const std::string& uid, const std::vector<uint32_t>& channels,
+    const AudioHostConfig& current, bool nativeProvider) noexcept {
+  return nativeProvider && current.outputDeviceUid==uid && current.outputChannels==channels;
+}
 inline constexpr uint32_t kVoiceMonitorSettleWaitMs = 25;
 inline constexpr uint32_t kVoiceMonitorMuteWaitMs = 100;
 inline constexpr uint32_t kVoiceMonitorBeginWaitBudgetMs = 4*kVoiceMonitorSettleWaitMs+kVoiceMonitorMuteWaitMs;

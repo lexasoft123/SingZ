@@ -1106,7 +1106,7 @@ export class DesktopNativePlaybackClient {
           try {
             // The system route can change without a Chromium devicechange.
             // Never open a prepared endpoint until its current route matches.
-            const currentRoute = await this.resolveRoute(request)
+            const currentRoute = await this.resolveRoute(request, ahead.route)
             same = !recovering &&
               JSON.stringify(this.configFor(request, currentRoute)) === ahead.signature &&
               request.positionSeconds === ahead.positionSeconds
@@ -1156,7 +1156,7 @@ export class DesktopNativePlaybackClient {
     })
   }
 
-  private async resolveRoute(request: DesktopNativePlaybackPrepare): Promise<PreparedRoute> {
+  private async resolveRoute(request: DesktopNativePlaybackPrepare, retainedRoute?: PreparedRoute): Promise<PreparedRoute> {
     const providers = await window.singz.desktopPlaybackProviders()
     const provider = providers.find((row) => row.id === request.provider)
     if (!provider?.available) throw new Error(provider?.detail ?? 'Native provider is unavailable.')
@@ -1183,17 +1183,27 @@ export class DesktopNativePlaybackClient {
     const outputChannels = request.preferredOutputChannels?.length
       ? [...request.preferredOutputChannels]
       : Array.from({ length: Math.min(2, output.outputChannels) }, (_, index) => index)
+    const sampleRate = Math.round(output.nominalSampleRate || request.sampleRate)
+    const previous = retainedRoute ?? this.route ?? this.ahead?.route
+    // CoreAudio's process-visible period is mutable telemetry, not route
+    // identity. Retain an existing graph's buffer preference when its actual
+    // endpoint/pair/rate is unchanged; the native capacity lease accepts live
+    // smaller buffers without rebuilding or releasing the graph.
+    const sameCoreAudioRoute = request.provider === 'coreaudio' && previous &&
+      previous.outputDeviceUid === output.uid && previous.sampleRate === sampleRate &&
+      previous.outputChannels.length === outputChannels.length &&
+      previous.outputChannels.every((channel, index) => channel === outputChannels[index])
     return {
       outputDeviceUid: output.uid,
       outputChannels,
-      sampleRate: Math.round(output.nominalSampleRate || request.sampleRate),
+      sampleRate,
       // ALSA bufferFrames requests the period, not the ring. Native negotiates
       // the nearest supported period and validates it against its 4096-frame
       // maximum; the ring is sized separately. Ignore cached inventory caps
       // because an active Chromium/preview stream can constrain them to 1024.
       bufferFrames: request.provider === 'alsa'
         ? 256
-        : Math.max(1, output.bufferFrames.preferredFrames || 512)
+        : sameCoreAudioRoute ? previous.bufferFrames : Math.max(1, output.bufferFrames.preferredFrames || 512)
     }
   }
 

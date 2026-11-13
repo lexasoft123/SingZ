@@ -17,6 +17,11 @@ export function microphonePermission(preferences: { getMediaAccessStatus(type: '
 const normalize = (s: string): string => s.trim().replace(/\s+\([^()]*\)\s*$/, '').trim().toLocaleLowerCase()
 const clamp = (n: number): number => Math.max(-60, Math.min(12, n))
 class MonitorCloseError extends Error {}
+// Terminal failures emitted by the audio RPC; ordinary native errors retain ownership.
+export function isAudioProcessFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return /^(?:Audio process exited \(|The audio process stopped\.|The audio process is shutting down|Audio process timed out during |Audio process protocol failed:|Audio process returned a malformed reply|Audio process reply exceeds the protocol limit|Audio command send failed:|Audio command id space exhausted)/.test(error.message)
+}
 let nextGeneration = BigInt(Date.now()) * 1000n
 
 export class VoiceMonitorStore {
@@ -32,6 +37,7 @@ export class VoiceMonitorStore {
   }
   private snapshot(): VoiceMonitorState { return { ...this.current, warnings: [...this.current.warnings] } }
   private fail(reason: VoiceMonitorReason): VoiceMonitorState { this.current = { ...this.current, available: { reason }, ...(this.generation === undefined ? { on: false, latency: null } : {}) }; return this.snapshot() }
+  private processFailed(): VoiceMonitorState { this.clearGeneration(); this.current.warnings = []; return this.fail('error') }
   private async resolve(request: VoiceMonitorAvailabilityRequest): Promise<{ state: VoiceMonitorState; uid?: string; channel?: number }> {
     if (this.platform !== 'darwin') { await this.close(); return { state: this.fail('platform') } }
     if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) { await this.close(); return { state: this.fail('no-input') } }
@@ -50,13 +56,13 @@ export class VoiceMonitorStore {
     this.current.available = true
     return { state: this.snapshot(), uid: device.uid, channel }
   }
-  availability(request: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState> { return this.serial(async () => { try { return (await this.resolve(request)).state } catch (error) { if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail(error instanceof MonitorCloseError ? 'error' : 'platform') } }) }
+  availability(request: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState> { return this.serial(async () => { try { return (await this.resolve(request)).state } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail(error instanceof MonitorCloseError ? 'error' : 'platform') } }) }
   set(request: VoiceMonitorSetRequest): Promise<VoiceMonitorState> { return this.serial(async () => {
     try {
       if (!request.on) { await this.close(); return this.snapshot() }
       if (this.generation !== undefined && this.current.available !== true) {
         let status: Awaited<ReturnType<VoiceMonitorNative['voiceMonitorStatus']>>
-        try { status = await this.native.voiceMonitorStatus() } catch { throw new MonitorCloseError('Monitor status unavailable') }
+        try { status = await this.native.voiceMonitorStatus() } catch (error) { if (isAudioProcessFailure(error)) throw error; throw new MonitorCloseError('Monitor status unavailable') }
         if (!status.running || status.lost) this.clearGeneration()
         else if (this.current.on) return this.snapshot()
       }
@@ -72,10 +78,10 @@ export class VoiceMonitorStore {
       if (!result.ok) { await this.close(); return this.fail(result.reason ?? 'error') }
       this.current = { ...this.current, available: true, on: true, latency: result.latency ?? null, warnings: result.warnings ?? [] }
       return this.snapshot()
-    } catch (error) { if (!(error instanceof MonitorCloseError) && this.generation !== undefined) await this.close().catch(() => undefined); return this.fail('error') }
+    } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError) && this.generation !== undefined) await this.close().catch(() => undefined); return this.fail('error') }
   }) }
-  gain(gainDb: number): Promise<VoiceMonitorState> { return this.serial(async () => { try { const value = clamp(gainDb); if (this.current.on && !(await this.native.setVoiceMonitorGain(value)).ok) { await this.close(); return this.fail('error') } this.current.gainDb = value; return this.snapshot() } catch (error) { if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
-  state(): Promise<VoiceMonitorState> { return this.serial(async () => { try { if (this.current.on) { const status = await this.native.voiceMonitorStatus(); if (status.lost || !status.running) { this.clearGeneration(); return this.fail(status.lost ? 'device-lost' : 'error') } this.current.latency = status.latency ?? this.current.latency; this.current.warnings = status.warnings ?? this.current.warnings } return this.snapshot() } catch (error) { if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
+  gain(gainDb: number): Promise<VoiceMonitorState> { return this.serial(async () => { try { const value = clamp(gainDb); if (this.current.on && !(await this.native.setVoiceMonitorGain(value)).ok) { await this.close(); return this.fail('error') } this.current.gainDb = value; return this.snapshot() } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
+  state(): Promise<VoiceMonitorState> { return this.serial(async () => { try { if (this.current.on) { const status = await this.native.voiceMonitorStatus(); if (status.lost || !status.running) { this.clearGeneration(); return this.fail(status.lost ? 'device-lost' : 'error') } this.current.latency = status.latency ?? this.current.latency; this.current.warnings = status.warnings ?? this.current.warnings } return this.snapshot() } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
   private clearGeneration(): void {
     this.generation = undefined
     this.current.on = false
@@ -89,11 +95,11 @@ export class VoiceMonitorStore {
         const result = await this.native.endVoiceMonitor(generation)
         this.current.warnings = result.warnings ?? []
         if (result.ok) { this.clearGeneration(); return }
-      } catch { /* Reconcile a lost reply with native status below. */ }
+      } catch (error) { if (isAudioProcessFailure(error)) { this.processFailed(); return } /* Reconcile a lost reply with native status below. */ }
       try {
         const status = await this.native.voiceMonitorStatus()
         if (!status.running || status.lost) { this.clearGeneration(); return }
-      } catch { break } // Unknown ownership must be retained until a later status succeeds.
+      } catch (error) { if (isAudioProcessFailure(error)) { this.processFailed(); return } break } // Unknown ownership must be retained until a later status succeeds.
     }
     this.current.available = { reason: 'error' }
     throw new MonitorCloseError('Monitor could not be closed')
