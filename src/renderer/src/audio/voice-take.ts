@@ -696,7 +696,7 @@ export class VoiceController {
    */
   private inputHeld(): boolean {
     const m = this.model
-    return m.armed || m.monitor.on || this.monitorPending || m.recording || m.starting
+    return m.armed || this.armPending || m.monitor.on || this.monitorPending || m.recording || m.starting
   }
 
   /** Close the input in main if no reason holds it any more (idempotent). */
@@ -730,12 +730,22 @@ export class VoiceController {
     }
     // Main opens the input first; only then does the strip show armed. Arm and Monitor share ONE in-flight
     // open (never two api.arm calls racing on the token), and each caller then applies its own result.
-    if (!(await this.openMain())) return false
+    // An explicit arm still opening already holds the input (a monitor that goes stale meanwhile must not release it).
+    if (setArmed) this.armPending++
+    let opened: boolean
+    try {
+      opened = await this.openMain()
+    } finally {
+      if (setArmed) this.armPending--
+    }
+    if (!opened) return false
     if (setArmed) this.set({ armed: true, clipped: false, ...this.say('announceArmed') })
     return true
   }
 
   private opening: Promise<boolean> | null = null
+  /** Explicit arms waiting on the open: a hold on the input from the click, not from the landing. */
+  private armPending = 0
   private openMain(): Promise<boolean> {
     if (!this.opening) {
       this.opening = this.runOpen().finally(() => {

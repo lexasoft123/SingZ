@@ -2521,6 +2521,23 @@ describe('input ownership interleavings', () => {
     expect(api.disarm).toHaveBeenCalledTimes(1)
     c.dispose()
   })
+  it('arm joined to a monitor open, monitor withdrawn at any point around the open landing: the input stays open for the arm (negative control: closed under armed)', async () => {
+    for (let ticks = 0; ticks <= 8; ticks++) {
+      const gate = deferred<{ ok: true }>()
+      const { c, api } = await setup({ arm: vi.fn(() => gate.promise) as never })
+      const monitoring = c.toggleMonitor()
+      await vi.waitFor(() => expect(api.arm).toHaveBeenCalledTimes(1))
+      const arming = c.arm()
+      await Promise.resolve()
+      gate.resolve({ ok: true })
+      for (let i = 0; i < ticks; i++) await Promise.resolve()
+      await c.releaseMonitor() // the monitor goes stale somewhere while the shared open lands
+      await Promise.all([monitoring, arming])
+      expect(c.getSnapshot().armed, `ticks ${ticks}`).toBe(true)
+      expect(api.disarm, `ticks ${ticks}`).not.toHaveBeenCalled()
+      c.dispose()
+    }
+  })
   it('arm then monitor then disarm then monitor off closes the input exactly once, at the end', async () => {
     const { c, api } = await setup()
     await c.arm()
