@@ -683,6 +683,7 @@ fn oversized_connect_proxy_headers_are_bounded_before_endpoint_tls() {
         connect_deadline: Instant::now() + Duration::from_secs(3),
         attempt: &AttemptIo::default(),
         wake: &CancelWake::register(),
+        cancelled: &Cell::new(false),
         poll_interval: POLL_INTERVAL,
         deadline: Instant::now() + Duration::from_secs(3),
     };

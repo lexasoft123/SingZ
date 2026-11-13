@@ -6,7 +6,7 @@ use std::{
     fs::{self, File, OpenOptions},
     future::Future,
     io::{Read, Write},
-    net::TcpStream,
+    net::{Shutdown, TcpStream},
     path::Path,
     sync::{
         Arc, Mutex, OnceLock, Weak,
@@ -299,6 +299,7 @@ struct RequestIo<'a> {
     connect_deadline: Instant,
     attempt: &'a AttemptIo,
     wake: &'a CancelWake,
+    cancelled: &'a Cell<bool>,
     poll_interval: Duration,
     deadline: Instant,
 }
@@ -630,8 +631,13 @@ impl<In: Transport> Connector<In> for DriveConnector {
             match wait_io(async_io::Async::<TcpStream>::connect(*address), timeout) {
                 Ok(stream) => {
                     stream.get_ref().set_nodelay(details.config.no_delay())?;
+                    #[cfg(test)]
+                    if let Some(sockets) = held_test_sockets().lock().unwrap().get(address) {
+                        sockets.lock().unwrap().push(stream.get_ref().try_clone()?);
+                    }
                     return Ok(Some(Box::new(DriveTransport {
                         stream,
+                        failed: false,
                         buffers: LazyBuffers::new(
                             details.config.input_buffer_size(),
                             details.config.output_buffer_size(),
@@ -648,9 +654,55 @@ impl<In: Transport> Connector<In> for DriveConnector {
         Err(last)
     }
 }
+// A cancelled socket close can be deferred by the platform/reactor. Shut it
+// down before returning to the service, which can then acknowledge sign-out.
+// Leave ordinary successful closes to the peer: actively closing every response
+// consumes client TIME_WAIT/ephemeral ports on Windows under short-lived HTTP.
+impl Drop for DriveTransport {
+    fn drop(&mut self) {
+        if self.failed || (TICK.is_set() && TICK.with(|io| io.cancelled.get())) {
+            let _ = self.stream.get_ref().shutdown(Shutdown::Both);
+        }
+    }
+}
+
+#[cfg(test)]
+type HeldTestSockets = std::collections::HashMap<std::net::SocketAddr, Arc<Mutex<Vec<TcpStream>>>>;
+#[cfg(test)]
+fn held_test_sockets() -> &'static Mutex<HeldTestSockets> {
+    static SOCKETS: OnceLock<Mutex<HeldTestSockets>> = OnceLock::new();
+    SOCKETS.get_or_init(Mutex::default)
+}
+// Keep an extra descriptor alive to deterministically widen deferred socket
+// close, independently of the host's reactor/AFD cancellation scheduling.
+#[cfg(test)]
+pub(crate) struct TestHeldSockets {
+    address: std::net::SocketAddr,
+    sockets: Arc<Mutex<Vec<TcpStream>>>,
+}
+#[cfg(test)]
+impl TestHeldSockets {
+    pub(crate) fn new(url: &str) -> Self {
+        let address = url::Url::parse(url).unwrap().socket_addrs(|| None).unwrap()[0];
+        let sockets = Arc::new(Mutex::new(Vec::new()));
+        held_test_sockets().lock().unwrap().insert(address, sockets.clone());
+        Self { address, sockets }
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.sockets.lock().unwrap().len()
+    }
+}
+#[cfg(test)]
+impl Drop for TestHeldSockets {
+    fn drop(&mut self) {
+        held_test_sockets().lock().unwrap().remove(&self.address);
+    }
+}
+
 #[derive(Debug)]
 struct DriveTransport {
     stream: async_io::Async<TcpStream>,
+    failed: bool,
     buffers: LazyBuffers,
 }
 impl Transport for DriveTransport {
@@ -662,7 +714,7 @@ impl Transport for DriveTransport {
         amount: usize,
         timeout: NextTimeout,
     ) -> std::result::Result<(), ureq::Error> {
-        wait_io(
+        let result = wait_io(
             async {
                 let mut sent = 0;
                 while sent < amount {
@@ -675,10 +727,12 @@ impl Transport for DriveTransport {
                 Ok(())
             },
             timeout.for_write(),
-        )
+        );
+        self.failed |= result.is_err();
+        result
     }
     fn await_input(&mut self, timeout: NextTimeout) -> std::result::Result<bool, ureq::Error> {
-        let count = wait_io(
+        let result = wait_io(
             async {
                 let result = self.stream.read(self.buffers.input_append_buf()).await;
                 if matches!(&result, Ok(0))
@@ -697,7 +751,9 @@ impl Transport for DriveTransport {
                 result
             },
             timeout.for_read(),
-        )?;
+        );
+        self.failed |= result.is_err();
+        let count = result?;
         self.buffers.input_appended(count);
         Ok(count > 0)
     }
@@ -952,6 +1008,7 @@ fn request_using_agents(
         connect_deadline: started + Duration::from_secs(10),
         attempt: &attempt,
         wake: &wake,
+        cancelled: &cancelled,
         poll_interval,
         deadline,
     };

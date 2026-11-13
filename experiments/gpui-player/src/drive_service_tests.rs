@@ -180,8 +180,10 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.base);
     }
 }
+#[track_caller]
 fn wait(service: &Service, predicate: impl Fn(&Snapshot) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(12);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(12);
     loop {
         let s = service.snapshot();
         assert_eq!(
@@ -190,6 +192,11 @@ fn wait(service: &Service, predicate: impl Fn(&Snapshot) -> bool) {
             "Drive published a partial run transition: {s:?}"
         );
         if predicate(&s) {
+            if drive_http::test_profile_enabled() {
+                eprintln!("DRIVE_SERVICE_WAIT line={} elapsed_us={} revision={} phase={:?}",
+                    std::panic::Location::caller().line(), started.elapsed().as_micros(),
+                    s.revision, s.scheduler.phase);
+            }
             break;
         }
         assert!(Instant::now() < deadline, "Drive worker timeout: {s:?}");
@@ -487,6 +494,44 @@ fn empty_publication_continues_automatically_with_zero_or_remaining_dirty_projec
         drop(service);
     }
 }
+#[test]
+fn signout_shuts_down_upload_even_when_socket_close_is_deferred() {
+    let f = Fixture::new();
+    let held = drive_http::TestHeldSockets::new(&f.url);
+    let service = f.service();
+    f.login(&service);
+    f.edit(2);
+    f.control(json!({"gates":{"upload":true}}));
+    service.action(Action::SyncNow).unwrap();
+    wait_gate(&f);
+    assert!(held.len() > 0, "deferred-close hook did not retain a socket");
+    let blocked = f.state();
+    let sequence = blocked["requests"].as_array().unwrap().iter().rev()
+        .find(|row| row["operation"] == "upload").unwrap()["sequence"].clone();
+    service.action(Action::SignOut).unwrap();
+    wait(&service, |s| !s.signed_in && !s.busy
+        && s.progress == "Signed out of Google Drive.");
+    // The held descriptors remain alive through gate release and inspection.
+    // Merely dropping the transport cannot cancel this upload.
+    f.control(json!({"release":["upload"]}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let completed = loop {
+        let state = f.state();
+        let upload = state["requests"].as_array().unwrap().iter().rev()
+            .find(|row| row["sequence"] == sequence).unwrap();
+        if !upload["status"].is_null() {
+            break upload.clone();
+        }
+        assert!(Instant::now() < deadline, "cancelled upload did not finish");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(f.remote_doc()["foreign"], 1);
+    assert_eq!(completed["cancelled"], true);
+    assert_eq!(completed["mutationApplied"], false);
+    assert!(crate::sync_dirty::Store::new(f.config.clone()).snapshot().unwrap().is_dirty());
+    assert!(!TokenStore::new(&f.config).unwrap().signed_in());
+}
+
 #[test]
 fn signout_cancels_native_upload_and_cannot_clear_pending_save_marks() {
     let f = Fixture::new();
