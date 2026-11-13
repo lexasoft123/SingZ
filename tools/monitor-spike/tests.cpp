@@ -1,7 +1,11 @@
 #include "core.h"
 #include "analysis.h"
 #include "signals.h"
+#include "diagnostics_io.h"
+#include <sstream>
+#include <iostream>
 #include "allocation_trap.h"
+#include <zcore/routing/audio_resampler.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -49,6 +53,102 @@ bool clockTest() {
   ms::Anchor shortGap; shortGap.observe(origin,32,48000,false);
   shortGap.observe(origin+ms::frameNs(64,48000),32,48000,true);
   REQUIRE(shortGap.jumps==1 && shortGap.inferredMissing==32);
+  return true;
+}
+bool diagnosticsTest() {
+  std::array<ms::DiagnosticRow,16> rows{};
+  ms::Diagnostics d{{rows.data(),rows.size()}};
+  auto row=d.interval(origin,0,64,48000); d.record(row);
+  row=d.interval(origin+ms::frameNs(64,48000),64,64,48000); d.record(row);
+  REQUIRE(d.used==1 && d.deltaHistogram[64]==1);
+  // A two-sample phase step is below Anchor's two-frame threshold but
+  // invalidates this closed 64-frame interval at the 0.5% admission bound.
+  row=d.interval(origin+ms::frameNs(128,48000)+ms::frameNs(2,48000),128,64,48000);
+  REQUIRE((row.flags & ms::IntervalRejected)!=0);
+  REQUIRE((row.flags & ms::AnchorJump)==0);
+  d.record(row,true); REQUIRE(d.used==2);
+  REQUIRE(row.expectedFrames==64 && row.gotFrames==64 && row.expectedNs==ms::frameNs(64,48000));
+  row=d.interval(origin,192,64,48000);
+  REQUIRE((row.flags & ms::AnchorJump)!=0 && d.deltaHistogram[257]==1 && row.deltaNs<0);
+  d.record(row,true);
+  d.arrival(row,origin,1);
+  d.arrival(row,origin+row.expectedNs+3000000,1);
+  REQUIRE((row.flags & ms::ArrivalJump)!=0 && row.callbackDeltaNs==static_cast<int64_t>(row.expectedNs)+3000000 && row.timestampQuality==1);
+  ms::Diagnostics full{{rows.data(),1}};
+  full.record(row,true); full.record(row,true); REQUIRE(full.used==1 && full.dropped==1);
+  std::ostringstream csv,json,histogram;
+  ms::writeDiagnostics(csv,d,origin,false); ms::writeDiagnostics(json,d,origin,true); ms::writeHistogram(histogram,d);
+  REQUIRE(csv.str().find("expected_frames,got_frames")!=std::string::npos);
+  REQUIRE(json.str().find("\"delta_histogram\":[")!=std::string::npos);
+  REQUIRE(histogram.str().find("nonmonotonic,nonmonotonic,1")!=std::string::npos);
+  // Exact fake timestamps stay quantized to at most one ns over ten minutes.
+  for (uint64_t frame=0;frame<48000ULL*600;frame+=64) {
+    const auto ns=ms::syntheticTimestamp(origin,frame,48000);
+    REQUIRE(ns==origin+ms::frameNs(frame,48000));
+  }
+  return true;
+}
+bool clockHoleTest() {
+  // Exercise the actual zCore mapper with one timestamp step, not a mock
+  // verdict. Opt-in tolerance repairs the interval; default policy preserves
+  // the exact old 33/65/129-hole negative control at the same queue size.
+  for (bool enabled:{false,true}) for (uint32_t period:{32u,64u,128u}) {
+    zcore::routing::AudioHistory history(1,ms::capacity,zcore::routing::ResamplingFilter::LinearPhase,true,
+        enabled?ms::monitorPhaseConfig:zcore::routing::SampleClockPhaseConfig{});
+    ms::Capture capture; capture.history=&history; capture.rate=48000;
+    std::array<ms::DiagnosticRow,256> captureRows{},renderRows{};
+    ms::Diagnostics captureD{{captureRows.data(),captureRows.size()}},renderD{{renderRows.data(),renderRows.size()}};
+    capture.diagnostics=&captureD;
+    ms::Renderer renderer; renderer.history=&history; renderer.diagnostics=&renderD;
+    renderer.measureBegin=origin; renderer.measureEnd=origin+1000000000;
+    renderer.queueNs=ms::frameNs(1024,48000);
+    std::array<float,128> samples{},output{}; samples.fill(.2f); float* planes[]{output.data()};
+    singz::AudioHostRenderBlock b; b.output=planes; b.outputChannels=1; b.sampleRate=48000;
+    b.frames=b.maximumFrames=period; b.outputTimestampValid=b.outputTimestampHardware=true;
+    for (uint64_t frame=0;frame<8192;frame+=period) {
+      const auto ns=ms::syntheticTimestamp(origin,frame,48000)+(frame>=4096?ms::frameNs(1,48000):0);
+      zdsp::test::resetAllocationTrap(); zdsp::test::setAllocationTrapEnabled(true);
+      const bool appended=ms::Capture::push(&capture,samples.data(),period,ns,ns, singz::AudioInputTimestampQuality::Hardware);
+      b.outputFrame=frame; b.outputHostTimeNs=origin+ms::frameNs(frame,48000); b.callbackHostTimeNs=b.outputHostTimeNs;
+      const bool rendered=ms::Renderer::render(&renderer,b);
+      zdsp::test::setAllocationTrapEnabled(false);
+      REQUIRE(appended && rendered && zdsp::test::trappedAllocationCount()==0);
+    }
+    uint64_t rejected=0,clockMissing=0,supportMissing=0;
+    for (size_t i=0;i<captureD.used;++i) rejected+=(captureD.rows[i].flags & ms::IntervalRejected)!=0;
+    for (size_t i=0;i<renderD.used;++i) if (renderD.rows[i].frame>2048) {
+      clockMissing+=renderD.rows[i].clockMissing; supportMissing+=renderD.rows[i].supportMissing;
+      if (renderD.rows[i].clockMissing) REQUIRE((renderD.rows[i].flags & ms::MissingRead)!=0 && renderD.rows[i].gotFrames<period);
+    }
+    // Raw timestamp diagnostics still identify the phase anomaly; the clock
+    // decides whether it is correctable and reports the actual read coverage.
+    REQUIRE(rejected==1 && supportMissing==0);
+    REQUIRE(clockMissing==(enabled?0:period+1));
+    REQUIRE(history.status().phaseCorrections==(enabled?1:0));
+    REQUIRE(history.status().rejectedIntervals==(enabled?0:1));
+    REQUIRE(history.status().discontinuities==0);
+    // The synthetic direct control uses the same output callback with no input
+    // channels and no history, and must copy its generated sample block.
+    ms::Renderer direct; direct.direct=direct.syntheticDirect=true; direct.mute=false; direct.gain=.5f;
+    direct.measureBegin=origin; direct.measureEnd=origin+1000000000;
+    b.outputHostTimeNs=origin; b.outputFrame=0;
+    REQUIRE(ms::Renderer::render(&direct,b)); REQUIRE(direct.missing==0);
+    for (uint32_t i=0;i<period;++i) REQUIRE(output[i]==.5f*ms::testSignal(i,48000));
+  }
+  return true;
+}
+bool positionPushTest() {
+  zcore::routing::AudioHistory history(1,4096,zcore::routing::ResamplingFilter::LinearPhase,true,ms::monitorPhaseConfig);
+  ms::Capture capture; capture.history=&history; capture.rate=48000;
+  std::array<float,64> samples{}; samples.fill(.25f);
+  REQUIRE(ms::Capture::pushWithPosition(&capture,samples.data(),64,origin,origin,
+      singz::AudioInputTimestampQuality::Hardware,{-64,true}));
+  REQUIRE(ms::Capture::pushWithPosition(&capture,samples.data(),64,origin+ms::frameNs(65,48000),origin,
+      singz::AudioInputTimestampQuality::Hardware,{0,true}));
+  REQUIRE(history.status().discontinuities==0 && history.status().rejectedIntervals==0);
+  REQUIRE(ms::Capture::pushWithPosition(&capture,samples.data(),64,origin+ms::frameNs(130,48000),origin,
+      singz::AudioInputTimestampQuality::Hardware,{65,true}));
+  REQUIRE(history.status().discontinuities==1);
   return true;
 }
 bool historyTest() {
@@ -134,26 +234,35 @@ bool driftHistoryTest() {
   return true;
 }
 bool concurrencyTest() {
-  zcore::routing::AudioHistory h(1,4096);
+  zcore::routing::AudioHistory h(1,4096,zcore::routing::ResamplingFilter::LinearPhase,true);
+  std::array<ms::DiagnosticRow,2048> captureRows{},outputRows{};
+  std::atomic<uint64_t> target{0};
+  ms::Diagnostics captureD{{captureRows.data(),captureRows.size()}},outputD{{outputRows.data(),outputRows.size()}};
+  captureD.outputTargetNs=outputD.outputTargetNs=&target;
+  ms::Capture capture; capture.history=&h; capture.rate=48000; capture.diagnostics=&captureD;
+  ms::Renderer renderer; renderer.history=&h; renderer.diagnostics=&outputD; renderer.mute=false; renderer.gain=1;
   std::atomic<bool> done{false}; std::atomic<uint64_t> end{0};
   std::thread writer([&] {
-    std::array<float,128> samples{}; samples.fill(.2f); const float* input[]{samples.data()};
+    std::array<float,128> samples{}; samples.fill(.2f);
     for (uint64_t f=0;f<128000;f+=128) {
-      h.append({input,128},128,origin+ms::frameNs(f,48000),48000);
+      const auto ns=origin+ms::frameNs(f,48000);
+      ms::Capture::push(&capture,samples.data(),128,ns,ns,singz::AudioInputTimestampQuality::Hardware);
       end.store(f+128,std::memory_order_release);
     }
     done.store(true,std::memory_order_release);
   });
-  zcore::routing::AudioReadCursor cursor;
   std::array<float,64> out{}; float* planes[]{out.data()}; bool finite=true; uint64_t reads=0;
+  singz::AudioHostRenderBlock b; b.output=planes; b.outputChannels=1;
+  b.frames=b.maximumFrames=64; b.sampleRate=48000; b.outputTimestampValid=b.outputTimestampHardware=true;
   do {
     const auto f=end.load(std::memory_order_acquire);
     if (f>1024) {
-      h.read(origin+ms::frameNs(f-1024,48000),48000,{planes,64},64,cursor); ++reads;
+      b.outputFrame=reads*64; b.outputHostTimeNs=origin+ms::frameNs(f-1024,48000); b.callbackHostTimeNs=b.outputHostTimeNs;
+      ms::Renderer::render(&renderer,b); ++reads;
       for (auto v:out) if (!std::isfinite(v) || std::abs(v)>.21f) finite=false;
     }
   } while (!done.load(std::memory_order_acquire));
-  writer.join(); REQUIRE(finite && reads); h.stop(); return true;
+  writer.join(); REQUIRE(finite && reads && captureD.used && outputD.used && target.load()>0); h.stop(); return true;
 }
 bool waveformTest() {
   constexpr double rate=48000; constexpr size_t frames=12*48000; constexpr size_t delay=240;
@@ -253,7 +362,15 @@ int main(int argc,char** argv) {
   else if (which=="clock") okay=clockTest();
   else if (which=="missing") okay=historyTest();
   else if (which=="gate") okay=gatesTest();
-  else if (which=="all") okay=floorTest() && clockTest() && historyTest() && directTest() && driftHistoryTest() &&
+  else if (which=="diagnostics") okay=diagnosticsTest();
+  else if (which=="synthetic") okay=diagnosticsTest();
+  else if (which=="diagnostic-json" || which=="diagnostic-csv") {
+    std::array<ms::DiagnosticRow,2> rows{}; ms::Diagnostics d{{rows.data(),rows.size()}};
+    auto row=d.interval(origin,0,64,48000); d.record(row,true);
+    row=d.interval(origin+ms::frameNs(64,48000)+50000,64,64,48000); d.record(row,true);
+    ms::writeDiagnostics(std::cout,d,origin,which=="diagnostic-json"); return 0;
+  }
+  else if (which=="all") okay=diagnosticsTest() && clockHoleTest() && positionPushTest() && floorTest() && clockTest() && historyTest() && directTest() && driftHistoryTest() &&
                              concurrencyTest() && waveformTest() && waveformDriftTest() && gatesTest() && virtualComparisonTest() && terminationTest();
   if (okay) std::puts("monitor spike portable checks passed");
   return okay?0:1;

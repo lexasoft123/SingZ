@@ -4,10 +4,14 @@
 #include <zcore/audio/capture_block.h>
 #include <array>
 #include <span>
+#include "diagnostics.h"
 
 namespace monitor_spike {
+// Monitoring opts in; all other zCore consumers retain legacy clock policy.
+inline constexpr zcore::routing::SampleClockPhaseConfig monitorPhaseConfig{2, 8};
 constexpr uint32_t capacity = 32768, maximum = singz::kAudioHostMaxFrames;
 uint64_t frameNs(uint64_t frames, double rate) noexcept;
+uint64_t syntheticTimestamp(uint64_t origin, uint64_t frame, double rate) noexcept;
 // LoopZ monitor_outputs.cpp: max(lookback, ceil(2*period*source/output)+256).
 uint32_t queueFloor(double sourceRate, double outputRate, uint32_t period,
                     uint32_t lookback, uint32_t quantum = 256) noexcept;
@@ -48,23 +52,28 @@ struct Capture {
   double rate{};
   uint64_t measureBegin{}, measureEnd{}, frame{}, unknown{}, estimated{}, callbacks{}, appendFailures{}, invalid{};
   bool virtualSource{};
+  Diagnostics* diagnostics{};
   Anchor anchor;
   std::array<float, maximum> scratch{};
   static bool push(void*, const float*, uint32_t, uint64_t, uint64_t,
                    singz::AudioInputTimestampQuality) noexcept;
+  static bool pushWithPosition(void*, const float*, uint32_t, uint64_t, uint64_t,
+                   singz::AudioInputTimestampQuality, singz::AudioInputSourcePosition) noexcept;
 };
 struct Renderer {
   zcore::routing::AudioHistory* history{};
   Recording* reference{};
   uint64_t measureBegin{}, measureEnd{}, queueNs{}, unmuteBegin{};
-  bool direct{}, virtualSource{}, mute{true}, bed{}, calibrationHardware{true};
+  bool direct{}, virtualSource{}, syntheticDirect{}, mute{true}, bed{}, calibrationHardware{true};
   float gain{0.05f};
   // Measurement-only OS thread CPU clock. Null means unavailable.
   uint64_t (*cpuTime)() noexcept{};
+  Diagnostics* diagnostics{};
   OutputClock clock;
   Anchor anchor;
   zcore::routing::AudioReadCursor cursor;
   std::array<float, 256> scratch{};
+  std::array<float, maximum> syntheticInput{};
   uint64_t callbacks{}, missing{}, invalid{}, discontinuities{}, timestampEstimates{}, cpuFailures{};
   uint64_t virtualFrame{}, previousCallbackNs{}, measuredFrames{}, firstMeasuredNs{}, lastMeasuredEndNs{};
   uint32_t smallestPeriod{UINT32_MAX}, largestPeriod{};

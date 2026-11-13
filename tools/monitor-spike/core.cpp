@@ -8,6 +8,44 @@ namespace monitor_spike {
 uint64_t frameNs(uint64_t frames, double rate) noexcept {
   return static_cast<uint64_t>(static_cast<long double>(frames) * 1e9L / rate);
 }
+uint64_t syntheticTimestamp(uint64_t origin, uint64_t frame, double rate) noexcept {
+  return origin + frameNs(frame, rate);
+}
+void Diagnostics::record(DiagnosticRow row, bool force) noexcept {
+  if (!force && row.ns < nextSampleNs) return;
+  if (row.ns >= nextSampleNs) nextSampleNs = row.ns + 100000000;
+  if (used < rows.size()) rows[used++] = row;
+  else ++dropped;
+}
+void Diagnostics::arrival(DiagnosticRow& row, uint64_t callbackNs, uint32_t quality) noexcept {
+  row.callbackNs=callbackNs; row.timestampQuality=quality;
+  if (previousCallbackNs && callbackNs) {
+    row.callbackDeltaNs=static_cast<int64_t>(callbackNs)-static_cast<int64_t>(previousCallbackNs);
+    if (callbackNs<=previousCallbackNs || std::abs(static_cast<long double>(row.callbackDeltaNs)-row.expectedNs)>2000000)
+      row.flags|=ArrivalJump;
+  }
+  previousCallbackNs=callbackNs;
+}
+DiagnosticRow Diagnostics::interval(uint64_t ns, uint64_t frame, uint32_t frames, double rate) noexcept {
+  DiagnosticRow row; row.ns=ns; row.frame=frame; row.nominalHz=rate; row.flags=Sample;
+  row.expectedFrames=previousFrames; row.gotFrames=frames;
+  if (previousNs) {
+    row.expectedNs=frameNs(previousFrames,rate);
+    row.deltaNs=static_cast<int64_t>(ns)-static_cast<int64_t>(previousNs);
+    const auto bucket=ns<=previousNs?257u:static_cast<uint32_t>(std::min(256.0,
+      static_cast<double>(row.deltaNs)*64/std::max(uint64_t{1},row.expectedNs)));
+    ++deltaHistogram[bucket];
+    const auto residual=static_cast<long double>(ns)-previousNs-row.expectedNs;
+    if (ns<=previousNs || std::abs(residual)>std::max(2e9L/rate,row.expectedNs*.005L+1000)) row.flags|=AnchorJump;
+    // Same admission bound as SampleClockHistory::intervalRate, including
+    // integer-nanosecond quantization. This is an observation, not a repair.
+    row.estimatedHz=row.deltaNs>0?static_cast<double>(previousFrames)*1e9/row.deltaNs:0;
+    if (ns<=previousNs || (std::abs(residual)>2 &&
+        (row.estimatedHz<rate*.995 || row.estimatedHz>rate*1.005))) row.flags|=IntervalRejected;
+  }
+  previousNs=ns; previousFrame=frame; previousFrames=frames;
+  return row;
+}
 uint32_t queueFloor(double src, double dst, uint32_t period, uint32_t lookback, uint32_t quantum) noexcept {
   if (!std::isfinite(src) || !std::isfinite(dst) || src < 8000 || src > 192000 ||
       dst < 8000 || dst > 192000 || !period || period > maximum || quantum > capacity / 2)
@@ -80,7 +118,12 @@ float testSignal(uint64_t frame, double rate) noexcept {
                             std::sin(2 * pi * (300 * phase + 5000 * phase * phase)));
 }
 bool Capture::push(void* context, const float* input, uint32_t count, uint64_t ns,
-                   uint64_t, singz::AudioInputTimestampQuality quality) noexcept {
+                   uint64_t callbackNs, singz::AudioInputTimestampQuality quality) noexcept {
+  return pushWithPosition(context, input, count, ns, callbackNs, quality, {});
+}
+bool Capture::pushWithPosition(void* context, const float* input, uint32_t count, uint64_t ns,
+                   uint64_t callbackNs, singz::AudioInputTimestampQuality quality,
+                   singz::AudioInputSourcePosition sourcePosition) noexcept {
   auto& s = *static_cast<Capture*>(context);
   const bool active = ns >= s.measureBegin && ns < s.measureEnd;
   if (!input || !count || count > maximum || !ns || s.rate < 8000) {
@@ -97,10 +140,30 @@ bool Capture::push(void* context, const float* input, uint32_t count, uint64_t n
     for (uint32_t i = 0; i < count; ++i) s.scratch[i] = testSignal(s.frame + i, s.rate);
     input = s.scratch.data();
   }
-  // The mono backend has no authoritative hardware frame counter. Do not invent
-  // one from callback counts: that would hide dropped hardware frames in history.
+  // Only provider sample positions prove continuity. A legacy push leaves
+  // validity false; callback/transport counts must never stand in for hardware.
   const float* planes[]{input};
-  if (s.history && !s.history->append({planes, count}, count, ns, s.rate) && active) ++s.appendFailures;
+  const auto before=s.diagnostics && s.history?s.history->status():zcore::routing::AudioHistoryStatus{};
+  const auto target=s.diagnostics && s.diagnostics->outputTargetNs?s.diagnostics->outputTargetNs->load(std::memory_order_relaxed):0;
+  const auto endBefore=s.diagnostics && s.history?s.history->publishedBlockEndHostNs():0;
+  const bool appended=!s.history || s.history->append({planes, count}, count, ns, s.rate,
+      sourcePosition.sampleFrame, sourcePosition.valid);
+  if (!appended && active) ++s.appendFailures;
+  if (s.diagnostics) {
+    auto row=s.diagnostics->interval(ns,s.frame,count,s.rate);
+    s.diagnostics->arrival(row,callbackNs,static_cast<uint32_t>(quality));
+    const auto after=s.history?s.history->status():zcore::routing::AudioHistoryStatus{};
+    row.historyDiscontinuities=after.discontinuities;
+    const auto endAfter=s.history?s.history->publishedBlockEndHostNs():0;
+    if (target && endBefore) row.queueBeforeMs=static_cast<double>(static_cast<long double>(endBefore)-target)/1e6;
+    if (target && endAfter) row.queueAfterMs=static_cast<double>(static_cast<long double>(endAfter)-target)/1e6;
+    row.estimatedHz=after.measuredRate;
+    row.correctionNs=after.lastHostNs?static_cast<int64_t>(after.lastHostNs)-static_cast<int64_t>(ns):0;
+    if (after.discontinuities!=before.discontinuities) row.flags|=HistoryReset;
+    if (row.correctionNs) row.flags|=AnchorCorrection;
+    if (!appended) { row.flags|=AppendFailure; row.gotFrames=0; }
+    s.diagnostics->record(row,row.flags!=Sample);
+  }
   if (s.recording) {
     if (ns >= s.recording->begin && ns < s.recording->end &&
         quality != singz::AudioInputTimestampQuality::Hardware) s.recording->hardwareTimestamps = false;
@@ -125,6 +188,21 @@ bool Renderer::render(void* context, const singz::AudioHostRenderBlock& b) noexc
                                     b.discontinuity != 0);
   if (!rate) { if (active) ++s.invalid; return false; }
   s.anchor.observe(b.outputHostTimeNs, b.frames, b.sampleRate, active);
+  DiagnosticRow diagnostic;
+  if (s.diagnostics) {
+    if (s.diagnostics->outputTargetNs) s.diagnostics->outputTargetNs->store(b.outputHostTimeNs-s.queueNs,std::memory_order_relaxed);
+    diagnostic=s.diagnostics->interval(b.outputHostTimeNs,b.outputFrame,b.frames,b.sampleRate);
+    s.diagnostics->arrival(diagnostic,b.callbackHostTimeNs,b.outputTimestampHardware?1:2);
+    diagnostic.estimatedHz=rate;
+    diagnostic.correctionNs=static_cast<int64_t>(frameNs(b.frames,rate))-static_cast<int64_t>(frameNs(b.frames,b.sampleRate));
+    if (b.discontinuity) diagnostic.flags|=OutputDiscontinuity;
+    if (s.history) {
+      const auto end=s.history->publishedBlockEndHostNs();
+      diagnostic.queueBeforeMs=end?static_cast<double>(static_cast<long double>(end)-(b.outputHostTimeNs-s.queueNs))/1e6:0;
+      diagnostic.historyDiscontinuities=s.history->status().discontinuities;
+    }
+    diagnostic.expectedFrames=b.frames; diagnostic.gotFrames=b.frames;
+  }
   if (active) {
     ++s.callbacks;
     s.outputRateHz.add(rate);
@@ -146,14 +224,16 @@ bool Renderer::render(void* context, const singz::AudioHostRenderBlock& b) noexc
   }
   s.previousCallbackNs = b.callbackHostTimeNs;
   bool timestampSupported = true;
+  if (s.syntheticDirect)
+    for (uint32_t i=0;i<b.frames;++i) s.syntheticInput[i]=testSignal(s.virtualFrame+i,b.sampleRate);
   for (uint32_t offset = 0; offset < b.frames; offset += 256) {
     const auto count = std::min(256u, b.frames - offset);
     const auto target = b.outputHostTimeNs - s.queueNs + frameNs(offset, rate);
     float* plane[]{s.scratch.data()};
     if (s.direct) {
-      const bool ready = b.input && b.inputChannels && b.input[0] && b.inputTimestampValid;
+      const bool ready = s.syntheticDirect || (b.input && b.inputChannels && b.input[0] && b.inputTimestampValid);
       for (uint32_t i = 0; i < count; ++i)
-        s.scratch[i] = s.virtualSource ? testSignal(s.virtualFrame + offset + i, b.sampleRate) :
+        s.scratch[i] = s.syntheticDirect ? s.syntheticInput[offset+i] : s.virtualSource ? testSignal(s.virtualFrame + offset + i, b.sampleRate) :
                          ready ? b.input[0][offset + i] : 0;
       if (!ready) { timestampSupported = false; if (active) s.missing += count; }
       if (s.reference && ready) {
@@ -162,7 +242,19 @@ bool Renderer::render(void* context, const singz::AudioHostRenderBlock& b) noexc
           b.inputSampleHostTimeNs + frameNs(offset, rate), rate);
       }
     } else {
+      const auto before=s.diagnostics?s.history->readDiagnostics():zcore::routing::AudioHistoryReadSnapshot{};
       const auto result = s.history->read(target, rate, {plane, 256}, count, s.cursor);
+      if (s.diagnostics) {
+        const auto after=s.history->readDiagnostics();
+        using Reason=zcore::routing::AudioHistoryMissingReason;
+        diagnostic.clockMissing+=after.missingFrames[static_cast<size_t>(Reason::ClockMapping)]-before.missingFrames[static_cast<size_t>(Reason::ClockMapping)];
+        diagnostic.supportMissing+=after.missingFrames[static_cast<size_t>(Reason::ResamplingSupport)]-before.missingFrames[static_cast<size_t>(Reason::ResamplingSupport)];
+        diagnostic.unpublished+=after.unpublishedSampleReads-before.unpublishedSampleReads;
+        diagnostic.expired+=after.expiredSampleReads-before.expiredSampleReads;
+        diagnostic.racing+=after.racingSampleReads-before.racingSampleReads;
+        diagnostic.gotFrames-=result.online?std::min(count,result.missingFrames):count;
+        if (!result.online || result.missingFrames) diagnostic.flags|=MissingRead;
+      }
       if (!result.online || result.missingFrames) timestampSupported = false;
       if (active) s.missing += result.online ? std::min(count, result.missingFrames) : count;
     }
@@ -188,6 +280,13 @@ bool Renderer::render(void* context, const singz::AudioHostRenderBlock& b) noexc
     if (cpuBegin && end >= cpuBegin)
       s.cpuPercent.add(static_cast<double>(end - cpuBegin) / (1e9 * b.frames / b.sampleRate) * 100);
     else ++s.cpuFailures;
+  }
+  if (s.diagnostics) {
+    if (s.history) {
+      const auto end=s.history->publishedBlockEndHostNs();
+      diagnostic.queueAfterMs=end?static_cast<double>(static_cast<long double>(end)-(b.outputHostTimeNs-s.queueNs))/1e6:0;
+    }
+    s.diagnostics->record(diagnostic,diagnostic.flags!=Sample);
   }
   s.virtualFrame += b.frames;
   return true;

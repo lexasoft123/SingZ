@@ -4,7 +4,7 @@ import re
 import sys
 
 root = pathlib.Path(__file__).parent
-text = (root / 'core.cpp').read_text()
+text = (root / 'core.cpp').read_text() + (root / 'core.h').read_text() + (root / 'diagnostics.h').read_text()
 forbidden = r'\b(mutex|lock_guard|unique_lock|shared_ptr|make_unique|vector|string|printf|fprintf|iostream|fstream|sleep|malloc|calloc|realloc|free|new|delete|throw|catch)\b'
 # Comments describe contracts and are not executable code.
 def check(source):
