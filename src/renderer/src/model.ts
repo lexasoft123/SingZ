@@ -139,15 +139,15 @@ export function sanitizePitchHeight(raw: unknown): number {
 /** Chosen audio devices; absent = system default. Chromium and the native
  * AudioInput core use unrelated id namespaces, so both identities are kept. */
 export interface AudioPrefs {
+  /** Legacy Chromium sink ID, retained only until migration. */
   outputId?: string
+  nativeOutputUid?: string
   /** Chromium id, used only by Web Audio playback/preview and legacy fallback. */
   inputId?: string
   /** Stable native AudioInput uid, used by vocal training. */
   nativeInputUid?: string
   /** Zero-based hardware input channel. Absent and 0 both mean channel 1. */
   inputChannel?: number
-  /** Experimental portable zcore/zdsp song-output backend. */
-  nativePlayback?: boolean
   /** Explicit native song-output provider. Only Windows persists a choice;
    * other platforms keep their single platform provider. */
   nativeAudioProvider?: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
@@ -188,17 +188,18 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
       ? r.inputChannel
       : undefined
   const outputId = id(r.outputId)
+  const nativeOutputUid = id(r.nativeOutputUid)
   const inputId = id(r.inputId)
   const savedInputUid = id(r.nativeInputUid)
   const nativeInputUid = savedInputUid ? normalizeAudioInputUid(savedInputUid) : undefined
   const nativeAudioProvider = r.nativeAudioProvider === 'asio' ? 'asio'
     : r.nativeAudioProvider === 'wasapi' ? 'wasapi' : undefined
   return {
-    ...(outputId ? { outputId } : {}),
+    ...(outputId && !nativeOutputUid ? { outputId } : {}),
+    ...(nativeOutputUid ? { nativeOutputUid } : {}),
     ...(inputId ? { inputId } : {}),
     ...(nativeInputUid ? { nativeInputUid } : {}),
     ...(inputChannel === undefined ? {} : { inputChannel }),
-    ...(r.nativePlayback === true ? { nativePlayback: true } : {}),
     ...(nativeAudioProvider ? { nativeAudioProvider } : {}),
     ...(master === undefined ? {} : { master }),
     ...(referenceVolume === undefined ? {} : { referenceVolume }),

@@ -98,7 +98,7 @@ export interface DesktopNativePlaybackFeatures {
 export type DesktopNativePlaybackFailureCode =
   | 'addon-unavailable' | 'provider-unavailable' | 'no-device' | 'device-lost'
   | 'route-rejected' | 'graph-rejected' | 'recovery-required'
-  /** A preference, not a failure: native playback is switched off in Settings (the toggle goes away with native-only playback). */
+  /** An explicit internal policy disabled native playback. */
   | 'disabled-by-preference'
 
 export interface DesktopNativePlaybackFailure {
@@ -128,7 +128,7 @@ function decline(
     // Not a graph problem: noted once per session, not on every Play / prepare-ahead.
     if (!loggedPreferenceOff) {
       loggedPreferenceOff = true
-      console.info('Native playback is off in Settings; using the legacy backend.')
+      console.info('Native playback is disabled by policy; using the legacy backend.')
     }
   } else console.warn('Native playback declined:', failure)
   return { backend: 'legacy', reason: detail, failure }
@@ -174,7 +174,7 @@ export function selectDesktopPlaybackBackend(
   platform: string,
   features: DesktopNativePlaybackFeatures
 ): DesktopPlaybackBackendDecision {
-  if (!features.enabled) return decline('disabled-by-preference', 'native playback is off in Settings')
+  if (!features.enabled) return decline('disabled-by-preference', 'native playback is disabled by policy')
   const provider = platform === 'darwin'
     ? (features.requestedProvider && features.requestedProvider !== 'coreaudio' ? null : 'coreaudio')
     : platform === 'win32'
@@ -1334,13 +1334,13 @@ export class DesktopNativePlaybackClient {
       throw new DesktopNativePlaybackError('provider-unavailable', 'Native output inventory belongs to a different provider.')
     }
     let output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
-    if (request.provider === 'alsa') {
+    if (request.provider === 'alsa' || request.browserOutputId?.startsWith('native:')) {
       const uid = request.browserOutputId?.startsWith('native:')
         ? request.browserOutputId.slice(7) : request.preferredOutputUid
       output = uid
         ? inventory.devices.find(device => device.uid === uid && device.outputChannels > 0) ?? null
         : inventory.devices.find(device => device.uid === inventory.defaultOutputUid && device.outputChannels > 0) ?? null
-      if (!output) throw new DesktopNativePlaybackError(request.preferredOutputUid || request.browserOutputId?.startsWith('native:') ? 'device-lost' : 'no-device', 'Select an available ALSA output in Settings.')
+      if (!output) throw new DesktopNativePlaybackError(request.preferredOutputUid || request.browserOutputId?.startsWith('native:') ? 'device-lost' : 'no-device', 'Select an available output in Settings.')
     } else if (request.browserOutputId && request.browserOutputId !== 'default') {
       const browserOutputs = await navigator.mediaDevices.enumerateDevices()
       const selected = browserOutputs.find(device => device.kind === 'audiooutput' && device.deviceId === request.browserOutputId)

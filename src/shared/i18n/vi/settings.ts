@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'Đường âm thanh',
+  'settings.route.retryNextStart': 'Thiết bị đã lưu sẽ được thử lại khi mở SingZ lần sau.',
+  'settings.route.inventoryUnavailable': 'Không thể lấy danh sách thiết bị âm thanh.',
+  'settings.route.notOpen': 'Chưa mở đường âm thanh',
+  'settings.route.buffer': 'bộ đệm {frames}',
   "settings.action.close": "Đóng",
   "settings.common.systemDefault": "Hệ thống mặc định",
   "settings.common.savedDeviceMissing": "Thiết bị lưu (không kết nối)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "Đường chơi không thể xác nhận  chọn đầu ra hoặc thử lại",
   "settings.output.stillUnconfirmed": "Con đường vẫn chưa xác nhận, bạn có thể thử lại.",
   "settings.output.retryBlocked": "Chuyến đi phát lại không thể bắt đầu cho đến khi thanh lọc âm thanh được xác nhận.",
-  "settings.playback.useNativeLabel": "Sử dụng phát lại DSP gốc",
-  "settings.playback.hint": "Sử dụng nhà cung cấp bản địa được chọn khi các tính năng của bài hát phù hợp chính xác với biểu đồ bản địa.",
   "settings.windows.providerLabel": "Windows Nhà cung cấp âm thanh",
   "settings.windows.wasapiOption": "Âm thanh hệ thống (WASAPI)",
   "settings.windows.asioUnavailable": "ASIO không có sẵn: {detail}",

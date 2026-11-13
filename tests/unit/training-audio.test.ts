@@ -773,7 +773,7 @@ describe('engine-owned training audio', () => {
   })
 
   it.each([
-    'none', 'capability-null', 'toggle-off', 'ineligible-graph'
+    'none', 'capability-null', 'legacy-toggle-off', 'ineligible-graph'
   ] as const)('retries exact ASIO without WebAudio fallthrough when recovery blocker is %s', async (blocker) => {
     vi.useFakeTimers()
     try {
@@ -904,11 +904,12 @@ describe('engine-owned training audio', () => {
       expect(context.bufferSources).toHaveLength(0)
       expect(context.resumeCount).toBe(0)
       if (blocker === 'capability-null') capabilityAvailable = false
-      if (blocker === 'toggle-off') toggleEnabled = false
+      if (blocker === 'legacy-toggle-off') toggleEnabled = false
       if (blocker === 'ineligible-graph') {
         (engine as unknown as { tracks: Array<{ path?: string }> }).tracks[0].path = undefined
       }
-      if (blocker !== 'none') {
+      // The retired stored toggle no longer blocks recovery; it must retry ASIO.
+      if (blocker !== 'none' && blocker !== 'legacy-toggle-off') {
         await expect(engine.play({ countIn: false })).rejects.toMatchObject({
           name: 'DesktopNativeRecoveryError',
           code: 'provider-recovery-unavailable',

@@ -746,7 +746,7 @@ export class MultitrackEngine {
     if (this.nativePlayback?.active || this.trainingConfiguredOutputId === routeKey) return
     const requested = this.desiredOutputId
     let uid = ''
-    if (provider === 'alsa' && requested.startsWith('native:')) {
+    if (requested.startsWith('native:')) {
       uid = requested.slice(7)
     } else if (requested && requested !== 'default') {
       const inventory = await window.singz.audioHostDevices(provider)
@@ -768,6 +768,7 @@ export class MultitrackEngine {
     const devices = await navigator.mediaDevices.enumerateDevices()
     const uidFor = (id: string): string => {
       if (!id || id === 'default') return inventory.defaultOutputUid
+      if (id.startsWith('native:')) return id.slice(7)
       const device = devices.find(row => row.kind === 'audiooutput' && row.deviceId === id)
       return device ? nativeOutputForBrowserLabel(device.label, inventory.devices).uid : ''
     }
@@ -813,6 +814,22 @@ export class MultitrackEngine {
     if (this._playing && this.ctx.state !== 'running') await this.ctx.resume()
   }
 
+  private async chromiumSinkForNative(uid: string): Promise<string | null> {
+    const platform = detectedDesktopPlatform()
+    if (platform === 'linux') return null
+    const provider = platform === 'win32' ? this.nativeAudioProvider : 'coreaudio'
+    const inventory = await window.singz.audioHostDevices(provider)
+    if (!inventory.ok) throw new Error(inventory.error)
+    const native = inventory.devices.filter(row => row.uid === uid && row.outputChannels > 0)
+    if (native.length !== 1) throw new Error('The selected output is no longer connected.')
+    const label = native[0].label.trim().toLocaleLowerCase()
+    const nativeMatches = inventory.devices.filter(row => row.outputChannels > 0 && row.label.trim().toLocaleLowerCase() === label)
+    const browser = (await navigator.mediaDevices.enumerateDevices()).filter(row => row.kind === 'audiooutput' && row.deviceId !== 'default' && row.deviceId !== 'communications' && row.label.trim().toLocaleLowerCase() === label)
+    if (!label) return null
+    if (nativeMatches.length !== 1 || browser.length !== 1) throw new Error('The selected output cannot be uniquely matched to a browser device.')
+    return browser[0].deviceId
+  }
+
   /** Applies the newest desired Chromium route. A slower stale setSinkId can
    * never finish after a newer request and silently become the physical sink. */
   private async applyDesiredOutputRoute(): Promise<void> {
@@ -823,7 +840,9 @@ export class MultitrackEngine {
         const target = this.desiredOutputId
         try {
           if (target.startsWith('native:')) {
-            await (this.ctx.setSinkId as unknown as (sink: { type: 'none' }) => Promise<void>)({ type: 'none' })
+            const sink = await this.chromiumSinkForNative(target.slice(7))
+            if (version !== this.outputRouteVersion) continue
+            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(sink ?? { type: 'none' })
           } else if (this.ctx.sinkId !== target) await this.ctx.setSinkId(target)
         } catch (error) {
           if (version !== this.outputRouteVersion) continue
@@ -831,9 +850,10 @@ export class MultitrackEngine {
           this.outputRouteVersion++
           const fallbackVersion = this.outputRouteVersion
           if (this.ctx.sinkId !== this.confirmedOutputId) {
-            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(
-              this.confirmedOutputId.startsWith('native:') ? { type: 'none' } : this.confirmedOutputId
-            )
+            const rollback = this.confirmedOutputId.startsWith('native:')
+              ? await this.chromiumSinkForNative(this.confirmedOutputId.slice(7)) ?? { type: 'none' as const }
+              : this.confirmedOutputId
+            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(rollback)
           }
           if (fallbackVersion !== this.outputRouteVersion) continue
           throw error
@@ -1924,8 +1944,8 @@ export class MultitrackEngine {
     if (this.nativePlaybackPolicy.requireNative) {
       throw new Error(t('box.nativeRequired'))
     }
-    if (this.desiredOutputId.startsWith('native:')) {
-      throw new Error('This ALSA output needs native playback. Enable it in Settings and use a supported audio format.')
+    if (this.desiredOutputId.startsWith('native:') && !(await this.chromiumSinkForNative(this.desiredOutputId.slice(7)))) {
+      throw new Error('The selected output is unavailable for fallback playback.')
     }
 
     if (detectedDesktopPlatform() === 'darwin')

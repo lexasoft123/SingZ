@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  nativeOutputUidForBrowser,
+  remapNativeOutputUid,
+  switchPlaybackProvider,
   PlaybackOutputArbiter,
   PlaybackOutputRouteSafety,
   PlaybackOutputSelectionError
@@ -379,3 +382,65 @@ describe('playback output latest-intent arbitration', () => {
     expect(appSource).toContain('new PlaybackOutputRouteSafety(\n    setOutputRouteUnconfirmed\n  )')
   })
 })
+
+
+describe('legacy output migration', () => {
+  const browser = [{ id: 'sink', label: 'Interface' }]
+  const native = [{ uid: 'uid', label: 'Interface', outputChannels: 2 }]
+  it('maps a unique label and a legacy native ID, rejecting ambiguity', () => {
+    expect(nativeOutputUidForBrowser('sink', browser, native)).toBe('uid')
+    expect(nativeOutputUidForBrowser('native:uid', browser, native)).toBe('uid')
+    expect(nativeOutputUidForBrowser('missing', browser, native)).toBeUndefined()
+    expect(nativeOutputUidForBrowser('sink', browser, [...native, { uid: 'other', label: 'Interface', outputChannels: 2 }])).toBeUndefined()
+    expect(nativeOutputUidForBrowser('sink', [...browser, { id: 'other', label: 'Interface' }], native)).toBeUndefined()
+  })
+  it.each([['sink', 'uid', 'migrated', 'native:uid'], ['sink', undefined, 'missing', ''], ['native:uid', 'uid', 'migrated', 'native:uid']] as const)(
+    'commits the migration for %s', async (legacy, uid, expected, route) => {
+      const commit = vi.fn()
+      const setOutput = vi.fn(async () => {})
+      const arbiter = new PlaybackOutputArbiter(legacy, { setOutput, enumerateOutputs: vi.fn(async () => []), commit })
+      expect(await arbiter.migrateLegacy(async () => uid)).toBe(expected)
+      expect(setOutput).toHaveBeenCalledWith(route)
+      if (expected === 'missing') expect(commit).not.toHaveBeenCalled()
+      else expect(commit).toHaveBeenCalledWith(route || undefined)
+    }
+  )
+  it('does not override a newer direct choice while migration waits', async () => {
+    let finish!: (uid: string | undefined) => void
+    const pending = new Promise<string | undefined>(resolve => { finish = resolve })
+    const commit = vi.fn()
+    const arbiter = new PlaybackOutputArbiter('sink', { setOutput: vi.fn(async () => {}), enumerateOutputs: vi.fn(async () => []), commit })
+    const migration = arbiter.migrateLegacy(() => pending)
+    await arbiter.select('native:new')
+    finish('uid')
+    expect(await migration).toBe('stale')
+    expect(commit).toHaveBeenCalledOnce()
+    expect(commit).toHaveBeenCalledWith('native:new')
+  })
+})
+
+
+describe('provider UID remapping', () => {
+  const from = [{ uid: 'wasapi', label: 'Interface', outputChannels: 2 }]
+  it('matches unique names and rejects missing or ambiguous devices', () => {
+    expect(remapNativeOutputUid('wasapi', from, [{ uid: 'asio', label: 'Interface', outputChannels: 2 }])).toBe('asio')
+    expect(remapNativeOutputUid('wasapi', from, [])).toBeUndefined()
+    expect(remapNativeOutputUid('wasapi', from, [{ uid: 'a', label: 'Interface', outputChannels: 2 }, { uid: 'b', label: 'Interface', outputChannels: 2 }])).toBeUndefined()
+  })
+})
+
+
+it.each([['Interface', 'mapped', ['default', 'provider:asio', 'native:asio']], ['Other', 'missing', ['default', 'provider:asio']]] as const)(
+  'switches provider safely when destination label is %s', async (label, expected, calls) => {
+    const events: string[] = []
+    const result = await switchPlaybackProvider('wasapi', 'asio', 'old', {
+      inventory: async provider => provider === 'wasapi'
+        ? [{ uid: 'old', label: 'Interface', outputChannels: 2 }]
+        : [{ uid: 'asio', label, outputChannels: 2 }],
+      select: async id => { events.push(id ?? 'default'); return true },
+      setProvider: provider => { events.push(`provider:${provider}`) }
+    })
+    expect(result).toBe(expected)
+    expect(events).toEqual(calls)
+  }
+)

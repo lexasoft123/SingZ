@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': '音訊路由',
+  'settings.route.retryNextStart': '下次啟動 SingZ 時將重試儲存的裝置。',
+  'settings.route.inventoryUnavailable': '無法取得音訊裝置清單。',
+  'settings.route.notOpen': '音訊路由未開啟',
+  'settings.route.buffer': '緩衝區 {frames}',
   "settings.action.close": "關閉",
   "settings.common.systemDefault": "系統預設",
   "settings.common.savedDeviceMissing": "已儲存的裝置（未連線）",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "無法確認播放路由——請選擇輸出裝置或重試",
   "settings.output.stillUnconfirmed": "路徑仍未確認。你可以再次重試。",
   "settings.output.retryBlocked": "在確認音訊清理之前，無法重試播放路徑。",
-  "settings.playback.useNativeLabel": "使用原生 DSP 播放",
-  "settings.playback.hint": "僅當歌曲的特性與原生圖完全匹配時，才會使用所選的原生提供方。",
   "settings.windows.providerLabel": "Windows 音訊提供方",
   "settings.windows.wasapiOption": "系統音訊（WASAPI）",
   "settings.windows.asioUnavailable": "ASIO 不可用：{detail}",

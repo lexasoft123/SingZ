@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'Laluan audio',
+  'settings.route.retryNextStart': 'Peranti tersimpan akan dicuba semula apabila SingZ dimulakan lagi.',
+  'settings.route.inventoryUnavailable': 'Senarai peranti audio tidak tersedia.',
+  'settings.route.notOpen': 'Tiada laluan audio terbuka',
+  'settings.route.buffer': 'penimbal {frames}',
   "settings.action.close": "Tutup",
   "settings.common.systemDefault": "Sistem lalai",
   "settings.common.savedDeviceMissing": "Peranti yang disimpan (tidak disambungkan)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "Laluan puter tidak dapat disahkan  pilih output atau cuba semula",
   "settings.output.stillUnconfirmed": "Jalan masih belum disahkan.",
   "settings.output.retryBlocked": "Percubaan semula laluan main tidak boleh bermula sehingga pembersihan audio disahkan.",
-  "settings.playback.useNativeLabel": "Gunakan pemutaran DSP asli",
-  "settings.playback.hint": "Menggunakan penyedia asli yang dipilih apabila ciri lagu sama persis dengan grafik asli.",
   "settings.windows.providerLabel": "Windows Penyedia audio",
   "settings.windows.wasapiOption": "Audio sistem (WASAPI)",
   "settings.windows.asioUnavailable": "ASIO tidak tersedia: {detail}",

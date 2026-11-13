@@ -1,5 +1,10 @@
 /* English strings for the `settings` namespace — see ../index.ts. */
 export const settings = {
+  'settings.route.title': 'Audio route',
+  'settings.route.retryNextStart': 'The saved device will be tried again next time SingZ starts.',
+  'settings.route.inventoryUnavailable': 'Audio device inventory is unavailable.',
+  'settings.route.notOpen': 'No audio route open',
+  'settings.route.buffer': 'buffer {frames}',
   // ── shared actions/labels, reused across dialogs in this namespace ──
   'settings.action.close': 'Close',
   'settings.common.systemDefault': 'System default',
@@ -24,8 +29,6 @@ export const settings = {
   'settings.output.retryBlocked': 'Playback route retry could not start until audio cleanup is confirmed.',
 
   // ── SettingsModal: native DSP playback checkbox ──
-  'settings.playback.useNativeLabel': 'Use native DSP playback',
-  'settings.playback.hint': "Uses the selected native provider when the song's features exactly match the native graph.",
 
   // ── SettingsModal: Windows audio provider ──
   'settings.windows.providerLabel': 'Windows audio provider',

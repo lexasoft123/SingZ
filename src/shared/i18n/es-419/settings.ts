@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'Ruta de audio',
+  'settings.route.retryNextStart': 'Se volverá a buscar el dispositivo guardado al iniciar SingZ.',
+  'settings.route.inventoryUnavailable': 'No se puede obtener la lista de dispositivos de audio.',
+  'settings.route.notOpen': 'No hay ninguna ruta de audio abierta',
+  'settings.route.buffer': 'búfer {frames}',
   "settings.action.close": "Cerrar",
   "settings.common.systemDefault": "Sistema predeterminado",
   "settings.common.savedDeviceMissing": "Dispositivo guardado (no conectado)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "La ruta de reproducción no pudo ser confirmada — elige una salida o intenta de nuevo.",
   "settings.output.stillUnconfirmed": "La ruta aún no está confirmada. Puede volver a intentarlo.",
   "settings.output.retryBlocked": "No se puede reintentar la salida de audio hasta confirmar la liberación del audio.",
-  "settings.playback.useNativeLabel": "Usar reproducción DSP nativa",
-  "settings.playback.hint": "Utiliza el proveedor nativo cuando las características de la canción coinciden exactamente con el gráfico nativo.",
   "settings.windows.providerLabel": "Proveedor de audio de Windows",
   "settings.windows.wasapiOption": "Audio del sistema (WASAPI)",
   "settings.windows.asioUnavailable": "ASIO no disponible: {detail}",

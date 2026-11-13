@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'オーディオ経路',
+  'settings.route.retryNextStart': '保存したデバイスは次回 SingZ 起動時に再試行します。',
+  'settings.route.inventoryUnavailable': 'オーディオデバイスの一覧を取得できません。',
+  'settings.route.notOpen': 'オーディオ経路は開いていません',
+  'settings.route.buffer': 'バッファ {frames}',
   "settings.action.close": "閉じる",
   "settings.common.systemDefault": "システムデフォルト",
   "settings.common.savedDeviceMissing": "保存された装置 (接続されていない)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "再生経路を確認できませんでした 输出または再試を選択",
   "settings.output.stillUnconfirmed": "路線は確認されていないので また試す",
   "settings.output.retryBlocked": "音声清掃が確認されるまで 再再生ルートが開始できない.",
-  "settings.playback.useNativeLabel": "ネイティブ DSP再生を使用",
-  "settings.playback.hint": "曲の特徴がネイティブグラフに正確に一致するときに選択されたネイティブプロバイダーを使用します.",
   "settings.windows.providerLabel": "Windows オーディオプロバイダー",
   "settings.windows.wasapiOption": "システムオーディオ (WASAPI)",
   "settings.windows.asioUnavailable": "ASIOは利用できない: {detail}",

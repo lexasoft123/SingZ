@@ -1,6 +1,6 @@
 # ADR 0015: Native-only song playback on desktop and Box
 
-Status: accepted; implementation sequenced below, not started<br>
+Status: accepted; implementation in progress<br>
 Date: 2026-11-13<br>
 Supersedes: the dual-path parts of [ADR 0008](0008-legacy-native-session-handoff.md)
 on desktop and Box (the `LegacyActive` / `LegacyRestoring` states and "failure
@@ -18,11 +18,14 @@ plays through Chromium (`engine.ts` ~1890-1930). Only Box on Linux refuses this
 
 Facts checked in this checkout:
 
-- Native is the default on macOS and Windows since September; Linux desktop is
-  opt-in (`audio/native-playback-preference.ts`).
-- The preference lives in two places: `localStorage['singz.desktop.native-playback']`
+- Native is preferred on macOS, Windows, and Linux. The physical Pi ALSA
+  session harness passed 24 runs with zero xruns after widening the native
+  ranges on this branch; packaged Box/Electron validation remains the Linux
+  release gate.
+- Before WP2 the preference lived in two places: `localStorage['singz.desktop.native-playback']`
   ('1'/'0') and `AudioPrefs.nativePlayback` inside `singz.audio`
   (`model.ts` `sanitizeAudioPrefs`, written back by an effect in `App.tsx`).
+  Both stored values are now ignored and no longer written.
 - Reasons the selector declines today: toggle off, no provider, runtime
   capability missing, tempo outside 0.5-1.5, transpose not an integer in ±12,
   lane count outside 1-16, a lane whose extension the runtime does not list,
@@ -146,8 +149,9 @@ codes in place of `box.nativeRequired`.
    non-integer transpose, more than 16 lanes, unlisted lane formats and the node
    bound play today through Web Audio. Each needs a UI clamp, a conversion or a
    native extension before WP3. We have no field count of how often they occur.
-2. **Linux desktop.** ALSA is opt-in and has never passed the session harness on
-   physical hardware. WP3 makes it the only path.
+2. **Linux desktop.** ALSA is now the default, with 24 physical Pi session
+   harness runs and zero xruns. A packaged Box/Electron run remains required
+   before Linux release.
 3. **Count-in and metronome parity.** The click with no beat grid, the count-in
    from a scrubbed position and the idle preview each had field bugs. The idle
    preview needs a device open with no song, which is a new native state.
@@ -207,7 +211,7 @@ snapshot in a unit test.
 Depends on: nothing. Parallel with WP1a (disjoint files except `engine.ts`,
 owned by WP1b).
 
-**WP2. Audio route section.**
+**WP2. Audio route section.** Implementation in progress; hardware and live-app validation remain outstanding.
 Convention-bound (i18n, settings tests) / Claude `sonnet` / medium.
 Files: `components/SettingsModal.tsx`, `SettingsRoute.tsx`, `SongOutput.tsx`,
 `VoiceStrip.tsx` and the voice track popup, `audio/output-routing.ts`,
@@ -236,8 +240,9 @@ Evidence: one test per failure code that the panel shows the reason and that no
 preference stores are ignored and never written; `box-native-startup`,
 `box-retained-transport`, `box-retained-recovery.cjs`; `player-session-e2e.cjs`,
 `open-native-e2e.cjs`, `count-in-e2e.cjs`, `stems-after-end-e2e.cjs` on mac and
-windows-field; the Linux session harness on physical ALSA hardware. Linux
-desktop does not release from this package until that last run is green.
+windows-field; the Linux physical ALSA session harness passed on the Pi (24
+runs, zero xruns) after widening the ranges. A packaged Box/Electron run remains
+the Linux release gate.
 Depends on: WP1a, WP1b, WP2.
 
 **WP4. Delete dead Web Audio paths and tests.**

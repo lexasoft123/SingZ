@@ -56,6 +56,8 @@ import {
 import { MultitrackEngine } from './audio/engine'
 import {
   playbackOutputUnconfirmedCopy,
+  nativeOutputUidForBrowser,
+  switchPlaybackProvider,
   PlaybackOutputArbiter,
   PlaybackOutputRouteSafety,
   PlaybackOutputSelectionError
@@ -744,32 +746,16 @@ export default function App(): React.JSX.Element {
     try { localStorage.setItem(QUICK_START_SEEN, 'seen') } catch { /* Session dismissal still works. */ }
   }
   const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
-    // The native toggle is stored explicitly from here on: the effect below
-    // writes it back as '1'/'0', so a first run with no stored choice must
-    // resolve the platform default NOW (native on macOS) rather than let an
-    // undefined field write '0' and quietly choose Web Audio.
-    // Resolved once, outside the try: a storage that throws must still reach
-    // the catch's fallback rather than rethrow from inside it.
-    let preferred = false
-    try {
-      preferred = desktopNativePlaybackPreferred()
-    } catch {
-      preferred = false
-    }
-    const withNative = (prefs: AudioPrefs): AudioPrefs => ({
-      ...prefs,
-      nativePlayback: prefs.nativePlayback ?? preferred
-    })
     try {
       const raw = localStorage.getItem('singz.audio')
       const stored = raw ? sanitizeAudioPrefs(JSON.parse(raw)) : {}
-      if (stored.referenceVolume !== undefined) return withNative(stored)
+      if (stored.referenceVolume !== undefined) return stored
       const legacy = restoreDesktopTrainingPracticeSettings(
         localStorage.getItem('singz.training.practice')
       )
-      return withNative({ ...stored, referenceVolume: legacy.referenceVolume })
+      return { ...stored, referenceVolume: legacy.referenceVolume }
     } catch {
-      return withNative({ referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME })
+      return { referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME }
     }
   })
   const changeTrainingSound = useCallback((trainingSound: TrainingSound) => {
@@ -784,20 +770,26 @@ export default function App(): React.JSX.Element {
   const [outputRouteSafety] = useState(() => new PlaybackOutputRouteSafety(
     setOutputRouteUnconfirmed
   ))
+  const nativeProviderRef = useRef(audioPrefs.nativeAudioProvider)
+  nativeProviderRef.current = audioPrefs.nativeAudioProvider
   const [outputArbiter] = useState(() => new PlaybackOutputArbiter(
-    audioPrefs.outputId,
+    audioPrefs.nativeOutputUid ? `native:${audioPrefs.nativeOutputUid}` : audioPrefs.outputId,
     {
       setOutput: (sinkId) => engine.setOutput(sinkId),
       enumerateOutputs: async () => {
         const browser = await navigator.mediaDevices.enumerateDevices()
-        if (detectedDesktopPlatform() !== 'linux') return browser
-        const inventory = await window.singz.audioHostDevices('alsa')
+        const platform = detectedDesktopPlatform()
+        const provider = platform === 'linux' ? 'alsa' : platform === 'win32' ? (nativeProviderRef.current ?? 'wasapi') : 'coreaudio'
+        const inventory = await window.singz.audioHostDevices(provider)
         if (!inventory.ok) throw new Error(inventory.error)
         return [...browser, ...inventory.devices.filter(device => device.outputChannels > 0).map(device => ({
           kind: 'audiooutput' as const, deviceId: `native:${device.uid}`
         }))]
       },
-      commit: (outputId) => setAudioPrefs((current) => ({ ...current, outputId }))
+      commit: (outputId) => setAudioPrefs((current) => {
+        const { outputId: _legacy, nativeOutputUid: _native, ...rest } = current
+        return outputId?.startsWith('native:') ? { ...rest, nativeOutputUid: outputId.slice(7) } : { ...rest, ...(outputId ? { outputId } : {}) }
+      })
     }
   ))
   /** What the mic is actually listening through, when it's on. */
@@ -1135,12 +1127,7 @@ export default function App(): React.JSX.Element {
   // Device picks follow the machine; output gain belongs to the open song.
   useEffect(() => {
     localStorage.setItem('singz.audio', JSON.stringify(audioPrefs))
-    localStorage.setItem('singz.desktop.native-playback', audioPrefs.nativePlayback ? '1' : '0')
-    if (detectedDesktopPlatform() === 'darwin' && audioPrefs.nativePlayback === false && !engine.nativeActive)
-      void window.singz?.setDesktopPlaybackNativeOutputCurrent?.(false).catch(() => {
-        console.error('Native output state update failed')
-      })
-  }, [audioPrefs, engine])
+  }, [audioPrefs])
 
   // AudioPrefs is the provider source of truth. Inject it before browser
   // events can start playback; the engine never restores a parallel mirror.
@@ -1222,7 +1209,24 @@ export default function App(): React.JSX.Element {
   }, [outputArbiter, outputRouteSafety])
 
   useEffect(() => {
-    void reconcileOutput(null)
+    let disposed = false
+    const boot = async (): Promise<void> => {
+      if (audioPrefs.outputId && !audioPrefs.nativeOutputUid) {
+        try {
+          const result = await outputArbiter.migrateLegacy(async (id) => {
+            const platform = detectedDesktopPlatform()
+            const provider = platform === 'linux' ? 'alsa' : platform === 'win32' ? (nativeProviderRef.current ?? 'wasapi') : 'coreaudio'
+            const [browser, inventory] = await Promise.all([navigator.mediaDevices.enumerateDevices(), window.singz.audioHostDevices(provider)])
+            if (!inventory.ok) throw new Error(inventory.error)
+            return nativeOutputUidForBrowser(id, browser.filter(row => row.kind === 'audiooutput').map(row => ({ id: row.deviceId, label: row.label })), inventory.devices)
+          })
+          if (disposed) return
+          if (result === 'missing') { setOutputStatus(`${t('app.output.missingDefault')} ${t('settings.route.retryNextStart')}`); return }
+        } catch { /* normal reconciliation retains the unconfirmed warning */ }
+      }
+      if (!disposed) void reconcileOutput(null)
+    }
+    void boot()
     const onChange = (): void => void reconcileOutput(null)
     navigator.mediaDevices.addEventListener('devicechange', onChange)
     // A default-device change need not change Chromium's endpoint inventory.
@@ -1234,6 +1238,7 @@ export default function App(): React.JSX.Element {
       void reconcileOutput(null).finally(() => { probing = false })
     }, 2000)
     return () => {
+      disposed = true
       clearInterval(timer)
       navigator.mediaDevices.removeEventListener('devicechange', onChange)
     }
@@ -1277,6 +1282,38 @@ export default function App(): React.JSX.Element {
     },
     [outputArbiter, outputRouteSafety, reconcileOutput]
   )
+
+  const changeNativeAudioProvider = useCallback(async (provider: 'wasapi' | 'asio') => {
+    const previous = nativeProviderRef.current ?? 'wasapi'
+    if (provider === previous) return
+    try {
+      const result = await switchPlaybackProvider(previous, provider, audioPrefs.nativeOutputUid, {
+        inventory: async (current) => {
+          const inventory = await window.singz.audioHostDevices(current)
+          if (!inventory.ok) throw new Error(inventory.error)
+          return inventory.devices
+        },
+        select: (id) => outputArbiter.select(id, id !== undefined || !!audioPrefs.nativeOutputUid || !audioPrefs.outputId),
+        setProvider: (next) => {
+          nativeProviderRef.current = next
+          engine.setNativeAudioProvider(next)
+          setAudioPrefs(current => sanitizeAudioPrefs({ ...current, nativeAudioProvider: next }))
+        }
+      })
+      if (result === 'stale') return
+      outputRouteSafety.confirmCurrentRoute()
+      setOutputStatus(result === 'missing' ? t('app.output.missingDefault') : null)
+    } catch (error) {
+      if (error instanceof PlaybackOutputSelectionError && !error.current) return
+      if (error instanceof PlaybackOutputSelectionError && error.repairRequired) {
+        outputRouteSafety.retainUnconfirmed()
+        setOutputStatus(playbackOutputUnconfirmedCopy())
+        await reconcileOutput(error)
+      } else {
+        setOutputStatus(t('app.output.switchFailed'))
+      }
+    }
+  }, [audioPrefs.nativeOutputUid, audioPrefs.outputId, engine, outputArbiter, outputRouteSafety, reconcileOutput])
 
   const changeInput = useCallback((nativeInputUid: string | undefined, inputId: string | undefined) => {
     // stored right away; PitchStrip restarts a running mic and validation
@@ -4277,10 +4314,7 @@ export default function App(): React.JSX.Element {
           onChangeInput={changeInput}
           onMigrateNativeInput={migrateNativeInput}
           onChangeInputChannel={changeInputChannel}
-          onChangeNativePlayback={(enabled) =>
-            setAudioPrefs((prefs) => ({ ...prefs, nativePlayback: enabled }))}
-          onChangeNativeAudioProvider={(provider) =>
-            setAudioPrefs((prefs) => sanitizeAudioPrefs({ ...prefs, nativeAudioProvider: provider }))}
+          onChangeNativeAudioProvider={changeNativeAudioProvider}
           nativePlaybackLeaseBlocked={nativePlaybackLeaseBlocked}
           externalAudioLeaseBlocked={trainingCleanupPhase !== 'idle'}
           externalAudioLeaseCopy={trainingCleanupSettingsBlockedCopy()}

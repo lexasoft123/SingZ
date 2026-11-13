@@ -2181,28 +2181,6 @@ body.win:not(.glass) .drop-overlay {
   color: var(--danger) !important;
 }
 
-.native-playback-check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-  color: var(--dim);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.native-playback-check input {
-  width: 15px;
-  height: 15px;
-  accent-color: var(--accent);
-}
-
-.native-playback-check:has(input:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-  border-radius: 3px;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .persistent-monitor.active .persistent-monitor-dot {
     animation: none;

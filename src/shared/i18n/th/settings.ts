@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'เส้นทางเสียง',
+  'settings.route.retryNextStart': 'จะลองใช้อุปกรณ์ที่บันทึกไว้อีกครั้งเมื่อเปิด SingZ ครั้งถัดไป',
+  'settings.route.inventoryUnavailable': 'ไม่สามารถแสดงรายการอุปกรณ์เสียงได้',
+  'settings.route.notOpen': 'ไม่มีเส้นทางเสียงที่เปิดอยู่',
+  'settings.route.buffer': 'บัฟเฟอร์ {frames}',
   "settings.action.close": "ปิด",
   "settings.common.systemDefault": "ระบบโดยปกติ",
   "settings.common.savedDeviceMissing": "อุปกรณ์ที่เก็บไว้ (ไม่เชื่อมต่อ)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "เส้นทางการเล่นไม่ได้ยืนยัน  เลือกออกหรือลองใหม่",
   "settings.output.stillUnconfirmed": "ทางยังไม่ได้ยืนยัน คุณสามารถพยายามอีกครั้ง",
   "settings.output.retryBlocked": "การทดลองทางการเล่นใหม่ไม่ได้เริ่มจนกว่าการทําความสะอาดเสียงจะยืนยัน",
-  "settings.playback.useNativeLabel": "ใช้การเล่น DSP ของพื้นที่",
-  "settings.playback.hint": "ใช้ตัวแทนที่เลือกเมื่อคุณภาพของเพลงตรงกับกราฟที่กําเนิด",
   "settings.windows.providerLabel": "Windows ผู้ให้บริการเสียง",
   "settings.windows.wasapiOption": "เสียงระบบ (WASAPI)",
   "settings.windows.asioUnavailable": "ASIO ไม่สามารถใช้ได้: {detail}",

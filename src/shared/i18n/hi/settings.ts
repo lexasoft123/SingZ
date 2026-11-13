@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'ऑडियो मार्ग',
+  'settings.route.retryNextStart': 'सहेजे गए डिवाइस को SingZ के अगले प्रारंभ पर फिर आज़माया जाएगा।',
+  'settings.route.inventoryUnavailable': 'ऑडियो डिवाइस सूची उपलब्ध नहीं है।',
+  'settings.route.notOpen': 'कोई ऑडियो मार्ग खुला नहीं है',
+  'settings.route.buffer': 'बफ़र {frames}',
   "settings.action.close": "बंद करें",
   "settings.common.systemDefault": "सिस्टम डिफ़ॉल्ट",
   "settings.common.savedDeviceMissing": "सहेजे गए उपकरण (संलग्न नहीं)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "प्लेबैक मार्ग की पुष्टि नहीं की जा सकी  आउटपुट चुनें या पुनः प्रयास करें",
   "settings.output.stillUnconfirmed": "मार्ग अभी भी पुष्टि नहीं है. आप फिर से कोशिश कर सकते हैं.",
   "settings.output.retryBlocked": "ऑडियो सफाई की पुष्टि होने तक प्लेबैक मार्ग पुनः प्रयास शुरू नहीं किया जा सका।",
-  "settings.playback.useNativeLabel": "मूल डीएसपी प्लेबैक का उपयोग करें",
-  "settings.playback.hint": "चयनित मूल प्रदाता का उपयोग करता है जब गीत की विशेषताएं मूल ग्राफ से बिल्कुल मेल खाती हैं।",
   "settings.windows.providerLabel": "Windows ऑडियो प्रदाता",
   "settings.windows.wasapiOption": "सिस्टम ऑडियो (WASAPI)",
   "settings.windows.asioUnavailable": "ASIO अनुपलब्ध: {detail}",

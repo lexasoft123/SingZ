@@ -14,6 +14,7 @@ import {
   nativeInputUidForChromium,
   type AudioDevices
 } from '../audio/devices'
+import { detectedDesktopPlatform } from '../audio/native-playback-preference'
 import { MicrophonePreview, micPreviewErrorCopy, micPreviewErrorKind } from '../audio/mic-preview'
 import {
   settingsInputChannelRoute,
@@ -42,10 +43,9 @@ export interface SettingsModalProps {
   onChangeInput: (nativeUid: string | undefined, chromiumId: string | undefined) => void
   onMigrateNativeInput: (nativeUid: string) => void
   onChangeInputChannel: (channelIndex: number) => void
-  onChangeNativePlayback: (enabled: boolean) => void
   onChangeNativeAudioProvider?: (
     provider: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
-  ) => void
+  ) => void | Promise<void>
   /** Renderer recovery may still own Chromium's released-output lease even
    * when the main process truthfully reports no native generation. */
   nativePlaybackLeaseBlocked?: boolean
@@ -80,8 +80,27 @@ export function playbackProviderCanChange(
   return !rendererLeaseBlocked && status?.state === 'unloaded'
 }
 
+export function audioRouteStatus(status: DesktopPlaybackStatus | null): string {
+  if (!status) return ''
+  if (status.state === 'unloaded') return t('settings.route.notOpen')
+  const parts: string[] = []
+  if (status.format?.sampleRate > 0) parts.push(`${status.format.sampleRate / 1000} kHz`)
+  if (status.format?.nominalBufferFrames > 0) parts.push(t('settings.route.buffer', { frames: status.format.nominalBufferFrames }))
+  return parts.join(' · ')
+}
+
+export function showPlaybackProviderChoice(providers: DesktopPlaybackProviderInfo[]): boolean {
+  return providers.filter(row => row.available && (row.id === 'wasapi' || row.id === 'asio')).length > 1
+}
+
+export function SavedOutputOption({ uid, options }: { uid?: string; options: readonly { id: string }[] }): React.JSX.Element | null {
+  return uid && !options.some(device => device.id === uid)
+    ? <option value={uid}>{t('settings.common.savedDeviceMissing')}</option>
+    : null
+}
+
 const INITIAL_PREVIEW: PreviewState = { status: 'starting', device: null, dbfs: -72, peak: -72 }
-/** The microphone backend is independent of the native playback checkbox. */
+/** Capture backend and fallback status for the microphone. */
 export function MicrophoneBackendStatus({ device, inventoryError, paused = false }: {
   device: MicDevice | null
   inventoryError: string | null
@@ -363,7 +382,6 @@ export default function SettingsModal({
   onChangeInput,
   onMigrateNativeInput,
   onChangeInputChannel,
-  onChangeNativePlayback,
   onChangeNativeAudioProvider,
   nativePlaybackLeaseBlocked = false,
   externalAudioLeaseBlocked = false,
@@ -491,7 +509,7 @@ export default function SettingsModal({
         setNativeInputs(null)
         setNativeInputError(error instanceof Error ? error.message : String(error))
       })
-    void window.singz.audioHostDevices()
+    void window.singz.audioHostDevices(detectedDesktopPlatform() === 'win32' ? (audio.nativeAudioProvider ?? 'wasapi') : detectedDesktopPlatform() === 'linux' ? 'alsa' : 'coreaudio')
       .then((result) => { if (mounted.current) setHostInventory(result) })
       .catch((error) => { if (mounted.current) setHostInventory({
         ok: false,
@@ -505,7 +523,7 @@ export default function SettingsModal({
     void window.singz.desktopPlaybackProviders()
       .then((providers) => { if (mounted.current) setPlaybackProviders(providers) })
       .catch(() => { if (mounted.current) setPlaybackProviders([]) })
-  }, [])
+  }, [audio.nativeAudioProvider])
 
   const stopPreviewForRouteEdit = useCallback(async (): Promise<RouteStopOutcome> => {
     try {
@@ -717,10 +735,10 @@ export default function SettingsModal({
     return () => window.removeEventListener('keydown', onKey, { capture: true })
   }, [closeSettings])
 
-  const linuxOutputs = hostInventory?.provider === 'alsa' && hostInventory.ok
-    ? hostInventory.devices.filter(device => device.outputChannels > 0).map(device => ({ id: `native:${device.uid}`, label: `${device.label} (ALSA)` }))
+  const outputOptions = hostInventory?.ok
+    ? hostInventory.devices.filter(device => device.outputChannels > 0).map(device => ({ id: device.uid, label: device.label }))
     : []
-  const outputOptions = [...(devices?.outputs ?? []), ...linuxOutputs]
+  const routeStatus = audioRouteStatus(playbackStatus)
 
   const savedGone = (id: string | undefined, rows: { id: string }[] | undefined): boolean =>
     Boolean(id && rows && !rows.some((device) => device.id === id))
@@ -763,8 +781,7 @@ export default function SettingsModal({
   const windowsProvider = audio.nativeAudioProvider ?? 'wasapi'
   const windowsProviderInfo = playbackProviders.find((row) => row.id === windowsProvider)
   const asioProviderInfo = playbackProviders.find((row) => row.id === 'asio')
-  const isWindows = playbackProviders.some((row) =>
-    row.id === 'wasapi' && row.errorCode !== 'wrong-platform')
+  const isWindows = showPlaybackProviderChoice(playbackProviders)
 
   const afterRouteStops = (
     apply: () => void | Promise<void>,
@@ -860,17 +877,20 @@ export default function SettingsModal({
       <div className="settings-body">
         <nav className="settings-nav"><button type="button" className="settings-tab active">{t('settings.tab.audio')}</button></nav>
         <div className="settings-page">
+          <h3>{t('settings.route.title')}</h3>
           <label className="settings-label" htmlFor="settings-output">{t('settings.output.label')}</label>
-          <select id="settings-output" className="settings-select" value={audio.outputId ?? ''} onChange={(event) => {
+          <select id="settings-output" className="settings-select" value={audio.nativeOutputUid ?? ''} onChange={(event) => {
             // Snapshot before the controlled select renders its saved value
             // again; the physical route apply intentionally runs later.
-            const outputId = event.target.value || undefined
+            const outputId = event.target.value ? `native:${event.target.value}` : undefined
             afterRouteStops(() => onChangeOutput(outputId))
           }}>
             <option value="">{t('settings.common.systemDefault')}</option>
             {outputOptions.map((device) => <option key={device.id} value={device.id}>{device.label}</option>)}
-            {savedGone(audio.outputId, outputOptions) && <option value={audio.outputId}>{t('settings.common.savedDeviceMissing')}</option>}
+            <SavedOutputOption uid={audio.nativeOutputUid} options={outputOptions} />
           </select>
+          {routeStatus && <p className="settings-hint" role="status">{routeStatus}</p>}
+          {hostInventory && !hostInventory.ok && <p className="settings-hint warn" role="status">{t('settings.route.inventoryUnavailable')}</p>}
           <OutputRouteRecovery
             unconfirmed={outputRouteUnconfirmed}
             busy={routeApplicationBusy}
@@ -881,20 +901,6 @@ export default function SettingsModal({
           {!outputRouteUnconfirmed && outputStatus && (
             <p className="settings-hint warn">{outputStatus}</p>
           )}
-          <label className="native-playback-check">
-            <input
-              type="checkbox"
-              checked={audio.nativePlayback === true}
-              onChange={(event) => {
-                if (!nativePlaybackLeaseBlocked) onChangeNativePlayback(event.target.checked)
-              }}
-              disabled={nativePlaybackLeaseBlocked}
-            />
-            {t('settings.playback.useNativeLabel')}
-          </label>
-          <p className="settings-hint">
-            {t('settings.playback.hint')}
-          </p>
           {isWindows && <>
             <label className="settings-label" htmlFor="settings-native-provider">{t('settings.windows.providerLabel')}</label>
             <select
@@ -903,9 +909,8 @@ export default function SettingsModal({
               value={windowsProvider}
               onChange={(event) => {
                 if (!playbackProviderCanChange(playbackStatus, nativePlaybackLeaseBlocked)) return
-                onChangeNativeAudioProvider?.(
-                  event.target.value === 'asio' ? 'asio' : 'wasapi'
-                )
+                const provider = event.target.value === 'asio' ? 'asio' : 'wasapi'
+                void afterRouteStops(() => onChangeNativeAudioProvider?.(provider))
               }}
               disabled={!playbackProviderCanChange(playbackStatus, nativePlaybackLeaseBlocked)}
             >
@@ -981,7 +986,7 @@ export default function SettingsModal({
 
           {!devices && <p className="settings-hint">{t('settings.devicesLoading')}</p>}
           {devices?.inputLabelsHidden && <p className="settings-hint">{t('settings.inputLabelsHiddenHint')}</p>}
-          {audio.outputId && <p className="settings-hint">{t('settings.nonDefaultSpeakerTip')}</p>}
+          {audio.nativeOutputUid && <p className="settings-hint">{t('settings.nonDefaultSpeakerTip')}</p>}
         </div>
       </div>
       <div className="modal-actions">

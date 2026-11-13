@@ -6,6 +6,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { SettingsRouteApplicationQueue } from '../../src/renderer/src/audio/settings-route-queue'
 import SettingsModal, {
   MicrophoneBackendStatus,
+  SavedOutputOption,
+  audioRouteStatus,
+  showPlaybackProviderChoice,
   inputChannelRoutePendingCopy,
   OutputRouteRecovery,
   SettingsPreviewStartOwner,
@@ -45,6 +48,11 @@ const micDevice = (id: string, channelCount: number): MicDevice => ({
 })
 
 describe('settings microphone input strip', () => {
+  it('retains the selected output option when inventory is unavailable', () => {
+    expect(renderToStaticMarkup(createElement(SavedOutputOption, { uid: 'saved', options: [] }))).toContain('value="saved"')
+    expect(renderToStaticMarkup(createElement(SavedOutputOption, { uid: 'saved', options: [{ id: 'saved' }] }))).toBe('')
+  })
+
   it('keeps physical channel numbers while exposing provider channel names', () => {
     expect(audioChannelLabel(['Mic', 'Talkback'], 1, 'input')).toBe('IN 2 · Talkback')
     expect(audioChannelLabel(['Output 1'], 0, 'output')).toBe('OUT 1')
@@ -464,7 +472,7 @@ describe('settings microphone input strip', () => {
       /routeApplicationQueue\.schedule\(\s*stopPreviewForRouteEdit,\s*apply,/
     )
     expect(source).toMatch(
-      /const outputId = event\.target\.value \|\| undefined[\s\S]*afterRouteStops\(\(\) => onChangeOutput\(outputId\)\)/
+      /const outputId = event\.target\.value \? `native:\$\{event\.target\.value\}` : undefined[\s\S]*afterRouteStops\(\(\) => onChangeOutput\(outputId\)\)/
     )
   })
 
@@ -612,4 +620,14 @@ describe('microphone backend disclosure', () => {
     expect(html).not.toContain('Old error')
     expect(html).not.toContain('warn')
   })
+})
+
+
+it('shows only known native route telemetry and available provider choices', () => {
+  expect(audioRouteStatus(null)).toBe('')
+  expect(audioRouteStatus({ state: 'unloaded' } as never)).toBe('No audio route open')
+  expect(audioRouteStatus({ state: 'open', format: { sampleRate: 48000, nominalBufferFrames: 32 } } as never)).toBe('48 kHz · buffer 32')
+  expect(audioRouteStatus({ state: 'open', format: { sampleRate: 0, nominalBufferFrames: 0 } } as never)).toBe('')
+  expect(showPlaybackProviderChoice([{ id: 'wasapi', available: true }, { id: 'asio', available: false }] as never)).toBe(false)
+  expect(showPlaybackProviderChoice([{ id: 'wasapi', available: true }, { id: 'asio', available: true }] as never)).toBe(true)
 })

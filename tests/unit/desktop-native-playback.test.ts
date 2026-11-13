@@ -83,7 +83,6 @@ describe('desktop native playback selection', () => {
     expect(source).toContain(
       'disabled={!playbackProviderCanChange(playbackStatus, nativePlaybackLeaseBlocked)}'
     )
-    expect(source).toContain('disabled={nativePlaybackLeaseBlocked}')
   })
 
   it('uses canonical AudioPrefs injection instead of a second provider mirror', () => {
@@ -117,7 +116,7 @@ describe('desktop native playback selection', () => {
   })
 
   it.each([
-    [{ ...eligible, enabled: false }, 'native playback is off in Settings'],
+    [{ ...eligible, enabled: false }, 'native playback is disabled by policy'],
     [{ ...eligible, runtime: null }, 'native playback runtime capability is unavailable'],
     [{ ...eligible, playbackRate: 0.249 }, 'tempo 0.249 is outside the native range 0.25..4'],
     [{ ...eligible, transpose: 24.1 }, 'transpose 24.1 is outside the native range -24..24 semitones'],
@@ -932,6 +931,20 @@ describe('desktop native playback facade', () => {
       vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => [{ kind: 'audiooutput', deviceId: 'origin-scoped-id', label: 'New output' }] } })
       await h.client.reconfigure({ browserOutputId: 'origin-scoped-id' }, { refreshRoute: true })
       expect(h.prepared.at(-1)).toMatchObject({ outputDeviceUid: 'new-output' })
+      await h.client.unload()
+    })
+    it('routes a native UID without Chromium enumeration and rejects a missing UID', async () => {
+      const h = seamHarness(generation => playing(generation))
+      const change = routes(h)
+      ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
+      await h.start({ provider })
+      change()
+      const enumerateDevices = vi.fn(async () => [])
+      vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices } })
+      await h.client.reconfigure({ browserOutputId: 'native:new-output' }, { refreshRoute: true })
+      expect(h.prepared.at(-1)).toMatchObject({ outputDeviceUid: 'new-output' })
+      await expect(h.client.reconfigure({ browserOutputId: 'native:missing' }, { refreshRoute: true })).rejects.toThrow()
+      expect(enumerateDevices).not.toHaveBeenCalled()
       await h.client.unload()
     })
     it('keeps the old native graph when an explicit output cannot be identified', async () => {
@@ -4239,23 +4252,10 @@ describe('Linux ALSA output ownership', () => {
 })
 
 
-it('clears disabled CoreAudio intent only after native playback releases its output', () => {
+it('does not persist the retired native playback toggle', () => {
   const source = readFileSync('src/renderer/src/App.tsx', 'utf8')
-  const start = source.indexOf("    localStorage.setItem('singz.audio'")
-  const end = source.indexOf('\n  }, [audioPrefs, engine])', start)
-  expect(start).toBeGreaterThan(0)
-  expect(end).toBeGreaterThan(start)
-  // Execute the actual preference-effect body with injected platform/API.
-  const apply = new Function('localStorage', 'audioPrefs', 'detectedDesktopPlatform', 'window', 'engine', source.slice(start, end))
-  for (const platform of ['darwin', 'win32', 'linux']) {
-    for (const enabled of [true, false]) for (const nativeActive of [true, false]) {
-      const notify = vi.fn(async () => ({ ok: true }))
-      apply({ setItem: vi.fn() }, { nativePlayback: enabled }, () => platform,
-        { singz: { setDesktopPlaybackNativeOutputCurrent: notify } }, { nativeActive })
-      if (platform === 'darwin' && !enabled && !nativeActive) expect(notify).toHaveBeenCalledExactlyOnceWith(false)
-      else expect(notify).not.toHaveBeenCalled()
-    }
-  }
+  expect(source).not.toContain('singz.desktop.native-playback')
+  expect(source).not.toContain('onChangeNativePlayback')
 })
 
 describe('ADR 0015 native prepare and route failure details', () => {
@@ -4353,7 +4353,7 @@ describe('ADR 0015 native prepare and route failure details', () => {
   })
 })
 
-describe('native playback switched off in Settings', () => {
+describe('native playback disabled by policy', () => {
   it('declines with a preference code, not a graph failure, and logs once per session', async () => {
     const mod = await import('../../src/renderer/src/audio/desktop-native-playback')
     mod.resetDesktopPreferenceLogForTests()

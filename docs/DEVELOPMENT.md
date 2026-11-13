@@ -7,6 +7,14 @@ product/platform invariants. Load the runbooks below when the task needs them.
 `CLAUDE.md` is only an `@AGENTS.md` entry point; the instructions below explain
 the tooling.
 
+Settings > Audio groups the native output device and microphone controls under
+Audio route. Output choices persist a native UID; legacy browser sink IDs migrate
+by an unambiguous device match; if no match is available, the saved browser ID
+is retained for the next launch and the system default is used for this session
+with a notice. The route status shows only telemetry reported by playback. The old
+native-playback switch is ignored and no longer written; Web Audio fallback is
+retained until ADR 0015 WP3.
+
 ## Setup
 
 ```bash

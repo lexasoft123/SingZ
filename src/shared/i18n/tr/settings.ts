@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'Ses yolu',
+  'settings.route.retryNextStart': 'Kaydedilen aygıt SingZ yeniden başladığında tekrar denenecek.',
+  'settings.route.inventoryUnavailable': 'Ses aygıtları listesi alınamıyor.',
+  'settings.route.notOpen': 'Açık ses yolu yok',
+  'settings.route.buffer': 'arabellek {frames}',
   "settings.action.close": "Kapat",
   "settings.common.systemDefault": "Sistem varsayılanı",
   "settings.common.savedDeviceMissing": "Kaydedilmiş cihaz (bağlantıda değil)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "Ses çalma yolu doğrulanmadı — bir çıktı seçin veya tekrar deneyin.",
   "settings.output.stillUnconfirmed": "Rota henüz doğrulanmadı. Tekrar deneyebilirsiniz.",
   "settings.output.retryBlocked": "Çalma yolu yeniden başlatılamadı, ses temizleme tamamlandığında.",
-  "settings.playback.useNativeLabel": "Yerel DSP ile çal",
-  "settings.playback.hint": "Şarkının özellikleri yerel ses grafiğiyle tam eşleştiğinde seçili yerel ses altyapısını kullanır.",
   "settings.windows.providerLabel": "Windows ses sürücüsü",
   "settings.windows.wasapiOption": "Sistem sesleri (WASAPI)",
   "settings.windows.asioUnavailable": "ASIO mevcut değil: {detail}",

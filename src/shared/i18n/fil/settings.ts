@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'Ruta ng audio',
+  'settings.route.retryNextStart': 'Susubukang muli ang naka-save na device sa susunod na pagbukas ng SingZ.',
+  'settings.route.inventoryUnavailable': 'Hindi makuha ang listahan ng mga audio device.',
+  'settings.route.notOpen': 'Walang bukas na ruta ng audio',
+  'settings.route.buffer': 'buffer {frames}',
   "settings.action.close": "Isara",
   "settings.common.systemDefault": "Default ng sistema",
   "settings.common.savedDeviceMissing": "Pag-iimbak ng mga aparato (hindi nakonekta)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "Hindi nakumpirma ang ruta ng pag-play  pumili ng output o muling subukan",
   "settings.output.stillUnconfirmed": "Hindi pa rin nakumpirma ang ruta.",
   "settings.output.retryBlocked": "Hindi maaaring magsimula ng muling pagsisikap sa pag-playback ng ruta hanggang sa kumpirma ang paglilinis ng audio.",
-  "settings.playback.useNativeLabel": "Gamitin ang native DSP playback",
-  "settings.playback.hint": "Gumagamit ng pinili na native provider kapag ang mga tampok ng kanta ay eksaktong tumutugma sa native graph.",
   "settings.windows.providerLabel": "Windows tagapagbigay ng audio",
   "settings.windows.wasapiOption": "Audio ng sistema (WASAPI)",
   "settings.windows.asioUnavailable": "Hindi magagamit ang ASIO: {detail}",

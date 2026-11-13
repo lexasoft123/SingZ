@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': '오디오 경로',
+  'settings.route.retryNextStart': '저장된 장치는 다음 SingZ 시작 시 다시 시도합니다.',
+  'settings.route.inventoryUnavailable': '오디오 장치 목록을 가져올 수 없습니다.',
+  'settings.route.notOpen': '열린 오디오 경로 없음',
+  'settings.route.buffer': '버퍼 {frames}',
   "settings.action.close": "닫기",
   "settings.common.systemDefault": "시스템 기본",
   "settings.common.savedDeviceMissing": "저장된 장치 (접속되지 않은)",
@@ -19,8 +24,6 @@ export const settings: Translation<typeof en> = {
   "settings.output.unconfirmedStatus": "재생 경로를 확인하지 못했습니다. 출력 또는 재시작을 선택합니다.",
   "settings.output.stillUnconfirmed": "아직 확인되지 않은 경로로 다시 시도해 볼 수 있습니다.",
   "settings.output.retryBlocked": "음원 청소가 확인되기 전까지 재생 경로를 다시 시도할 수 없었습니다.",
-  "settings.playback.useNativeLabel": "네이티브 DSP 재생을 사용",
-  "settings.playback.hint": "노래의 특징이 네이티브 그래프와 정확히 일치할 때 선택한 네이티브 제공자를 사용합니다.",
   "settings.windows.providerLabel": "Windows 오디오 제공자",
   "settings.windows.wasapiOption": "시스템 오디오 (WASAPI)",
   "settings.windows.asioUnavailable": "ASIO가 사용되지 않습니다: {detail}",

@@ -111,6 +111,38 @@ describe('startup output ownership', () => {
     vi.resetModules()
   })
 
+  it.each(['MacIntel', 'Win32'])('maps native output to the browser sink on %s for fallback', async (platform) => {
+    vi.stubGlobal('AudioContext', StartupAudioContext)
+    const enumerateDevices = vi.fn(async () => [{ kind: 'audiooutput', deviceId: 'browser-id', label: 'Interface' }])
+    vi.stubGlobal('navigator', { platform, mediaDevices: { enumerateDevices } })
+    vi.stubGlobal('window', { singz: {
+      audioHostDevices: vi.fn(async () => ({ ok: true, devices: [{ uid: 'native-id', label: 'Interface', outputChannels: 2 }] })),
+      configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true }))
+    } })
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    await engine.setOutput('native:native-id')
+    expect(StartupAudioContext.last?.sinkId).toBe('browser-id')
+    expect(engine.outputDeviceId).toBe('native:native-id')
+    expect(enumerateDevices).toHaveBeenCalled()
+  })
+
+  it.each([[[]], [[{ kind: 'audiooutput', deviceId: 'a', label: 'Interface' }, { kind: 'audiooutput', deviceId: 'b', label: 'Interface' }]]])(
+    'rejects an unmatchable native label and restores the previous sink', async (outputs) => {
+      vi.stubGlobal('AudioContext', StartupAudioContext)
+      vi.stubGlobal('navigator', { platform: 'Win32', mediaDevices: { enumerateDevices: async () => outputs } })
+      vi.stubGlobal('window', { singz: {
+        audioHostDevices: vi.fn(async () => ({ ok: true, devices: [{ uid: 'native-id', label: 'Interface', outputChannels: 2 }] })),
+        configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true }))
+      } })
+      const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+      const engine = new MultitrackEngine()
+      await expect(engine.setOutput('native:native-id')).rejects.toThrow('uniquely')
+      expect(engine.outputDeviceId).toBe('')
+      expect(StartupAudioContext.last?.sinkId).toBe('')
+    }
+  )
+
   it('does not make the initial default sink hide a saved native endpoint from inventory', async () => {
     const outputId = 'native:alsa:sysfs:/sys/devices/platform/usb/5-1:pcm:0'
 

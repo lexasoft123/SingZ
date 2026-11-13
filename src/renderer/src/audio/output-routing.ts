@@ -91,7 +91,7 @@ export class PlaybackOutputArbiter {
 
   /** Apply-then-commit. false means a newer direct selection superseded this
    * one; it is not an error and must not overwrite that selection's status. */
-  select(outputId: PlaybackOutputId): Promise<boolean> {
+  select(outputId: PlaybackOutputId, persist = true): Promise<boolean> {
     const version = ++this.intentVersion
     // Direct intent invalidates all older boot/device inventory immediately.
     this.reconcileRequest += 1
@@ -132,9 +132,20 @@ export class PlaybackOutputArbiter {
       }
       if (!this.current(version)) return false
       this.committedOutputId = outputId
-      this.dependencies.commit(outputId)
+      if (persist) this.dependencies.commit(outputId)
       return true
     })
+  }
+
+  /** Migrate only if no direct choice arrived while inventory was loading. */
+  async migrateLegacy(resolve: (id: string) => Promise<string | undefined>): Promise<'migrated' | 'missing' | 'stale'> {
+    const id = this.desiredOutputId
+    if (!id) return 'stale'
+    const version = this.intentVersion
+    const uid = await resolve(id)
+    if (!this.current(version)) return 'stale'
+    if (!(await this.select(uid ? `native:${uid}` : undefined, !!uid))) return 'stale'
+    return uid ? 'migrated' : 'missing'
   }
 
   /** Boot and device-change repair. The desired output is deliberately read
@@ -278,4 +289,62 @@ export async function applyPlaybackOutputSelection(
 ): Promise<void> {
   await setOutput(id ?? '')
   commit(id)
+}
+
+/** Map legacy Chromium output IDs only when both device names are unambiguous. */
+export function nativeOutputUidForBrowser(
+  id: string,
+  browser: readonly { id: string; label: string }[],
+  native: readonly { uid: string; label: string; outputChannels: number }[]
+): string | undefined {
+  if (id.startsWith('native:')) {
+    const uid = id.slice(7)
+    return native.some(row => row.uid === uid && row.outputChannels > 0) ? uid : undefined
+  }
+  const direct = native.filter(row => row.uid === id && row.outputChannels > 0)
+  if (direct.length === 1) return direct[0].uid
+  const selected = browser.find(row => row.id === id)
+  const label = selected?.label.trim().toLocaleLowerCase()
+  if (!label || browser.filter(row => row.label.trim().toLocaleLowerCase() === label).length !== 1) return undefined
+  const matches = native.filter(row => row.outputChannels > 0 && row.label.trim().toLocaleLowerCase() === label)
+  return matches.length === 1 ? matches[0].uid : undefined
+}
+
+
+/** Provider device UIDs occupy separate namespaces; match only unique labels. */
+export function remapNativeOutputUid(
+  uid: string,
+  from: readonly { uid: string; label: string; outputChannels: number }[],
+  to: readonly { uid: string; label: string; outputChannels: number }[]
+): string | undefined {
+  const source = from.filter(row => row.uid === uid && row.outputChannels > 0)
+  if (source.length !== 1) return undefined
+  const label = source[0].label.trim().toLocaleLowerCase()
+  if (!label || from.filter(row => row.outputChannels > 0 && row.label.trim().toLocaleLowerCase() === label).length !== 1) return undefined
+  const matches = to.filter(row => row.outputChannels > 0 && row.label.trim().toLocaleLowerCase() === label)
+  return matches.length === 1 ? matches[0].uid : undefined
+}
+
+
+type OutputInventoryDevice = { uid: string; label: string; outputChannels: number }
+/** Clear the old namespace before applying a mapped UID in the new one. */
+export async function switchPlaybackProvider(
+  previous: 'wasapi' | 'asio', next: 'wasapi' | 'asio', uid: string | undefined,
+  deps: {
+    inventory: (provider: 'wasapi' | 'asio') => Promise<readonly OutputInventoryDevice[]>
+    select: (id: PlaybackOutputId) => Promise<boolean>
+    setProvider: (provider: 'wasapi' | 'asio') => void
+  }
+): Promise<'mapped' | 'missing' | 'stale'> {
+  let mapped: string | undefined
+  if (uid) {
+    try {
+      const [from, to] = await Promise.all([deps.inventory(previous), deps.inventory(next)])
+      mapped = remapNativeOutputUid(uid, from, to)
+    } catch { /* The device cannot be mapped reliably. */ }
+  }
+  if (!(await deps.select(undefined))) return 'stale'
+  deps.setProvider(next)
+  if (mapped && !(await deps.select(`native:${mapped}`))) return 'stale'
+  return uid && !mapped ? 'missing' : 'mapped'
 }

@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': '音频路由',
+  'settings.route.retryNextStart': '下次启动 SingZ 时将重试已保存的设备。',
+  'settings.route.inventoryUnavailable': '无法获取音频设备列表。',
+  'settings.route.notOpen': '音频路由未打开',
+  'settings.route.buffer': '缓冲区 {frames}',
   // ── shared actions/labels, reused across dialogs in this namespace ──
   'settings.action.close': '关闭',
   'settings.common.systemDefault': '系统默认',
@@ -27,8 +32,6 @@ export const settings: Translation<typeof en> = {
   'settings.output.retryBlocked': '在确认音频清理之前，无法重试播放路径。',
 
   // ── SettingsModal: native DSP playback checkbox ──
-  'settings.playback.useNativeLabel': '使用原生 DSP 播放',
-  'settings.playback.hint': '仅当歌曲的特性与原生图完全匹配时，才会使用所选的原生提供方。',
 
   // ── SettingsModal: Windows audio provider ──
   'settings.windows.providerLabel': 'Windows 音频提供方',

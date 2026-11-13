@@ -3,6 +3,11 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  'settings.route.title': 'Аудиомаршрут',
+  'settings.route.retryNextStart': 'Сохранённое устройство будет проверено при следующем запуске SingZ.',
+  'settings.route.inventoryUnavailable': 'Не удалось получить список аудиоустройств.',
+  'settings.route.notOpen': 'Аудиомаршрут не открыт',
+  'settings.route.buffer': 'буфер {frames}',
   // ── shared actions/labels, reused across dialogs in this namespace ──
   'settings.action.close': 'Закрыть',
   'settings.common.systemDefault': 'По умолчанию',
@@ -27,8 +32,6 @@ export const settings: Translation<typeof en> = {
   'settings.output.retryBlocked': 'Повтор маршрута вывода недоступен, пока не подтверждена очистка звука.',
 
   // ── SettingsModal: native DSP playback checkbox ──
-  'settings.playback.useNativeLabel': 'Нативное воспроизведение DSP',
-  'settings.playback.hint': 'Использует нативный провайдер, когда песня точно совпадает с нативным графом.',
 
   // ── SettingsModal: Windows audio provider ──
   'settings.windows.providerLabel': 'Аудиопровайдер Windows',
