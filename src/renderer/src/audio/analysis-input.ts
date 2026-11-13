@@ -65,7 +65,11 @@ export async function decodeStemAtFileRate(
       const sr = stemSampleRate(bytes)
       if (sr === null) return null
       const buf = await host.decode(bytes, sr)
-      recordRendererDecode(buf, p)
+      try {
+        recordRendererDecode(buf, p)
+      } catch {
+        // a tripwire must never turn a good decode into "unreadable"
+      }
       return buf
     } catch {
       return null

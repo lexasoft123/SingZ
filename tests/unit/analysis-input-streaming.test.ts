@@ -233,6 +233,18 @@ describe('the runtime guard', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^renderer decoded 20 MB of PCM during song open/))
   })
 
+  it('a throwing guard cannot turn a successful decode into null', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {
+      throw new Error('log sink blew up')
+    })
+    setNativeSongHealthy(true)
+    const fake = fakeHost()
+    const { decodeStemAtFileRate } = await import('../../src/renderer/src/audio/analysis-input')
+    const buf = await decodeStemAtFileRate(PATHS.drums, fake.host)
+    expect(buf).not.toBeNull()
+    expect(fake.reads).toEqual([PATHS.drums]) // no sibling retry either
+  })
+
   it('stays silent when the song is not on the native path (a legitimate decode)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     setNativeSongHealthy(false)
