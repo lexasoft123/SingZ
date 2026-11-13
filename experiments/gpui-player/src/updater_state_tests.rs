@@ -352,11 +352,32 @@ fn f2_a_windows_directory_without_a_protected_private_dacl_is_refused() {
     secure_coordination_dir(&install).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
+/// A user profile whose temp parent carries an inheritable entry for another principal (a CI runner's TEMP grants one
+/// to the local Administrator): a directory created the ordinary way inherits it and is not private, while the one
+/// the updater creates carries an explicit protected DACL, so nothing is inherited and it reopens.
+#[test]
+#[cfg(windows)]
+fn f2_an_inheritable_entry_on_the_parent_does_not_reach_the_fresh_directory() {
+    let root = scratch("f2-inherit");
+    for principal in ["*S-1-5-32-545:(OI)(CI)F", "*S-1-1-0:(OI)(CI)F"] {
+        let status = std::process::Command::new("icacls").arg(&root).args(["/grant", principal]).output().unwrap().status;
+        assert!(status.success(), "icacls /grant {principal} failed");
+    }
+    let plain = root.join("plain");
+    fs::create_dir(&plain).unwrap();
+    assert!(crate::updater_winsec::verify_private_dir(&plain).is_err(), "the premise: an ordinary child inherits the extra entries");
+    let install = root.join("SingZ Native");
+    fs::create_dir_all(&install).unwrap();
+    let dir = secure_coordination_dir(&install).unwrap();
+    crate::updater_winsec::verify_private_dir(&dir).unwrap();
+    secure_coordination_dir(&install).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
 #[test]
 fn f2_the_private_dacl_rule() {
     let me = "S-1-5-21-1-2-3-1001";
-    check_private_dacl(&format!("D:P(A;OICI;FA;;;{me})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"), me).unwrap();
-    check_private_dacl(&format!("D:PAI(A;OICI;FA;;;{me})"), me).unwrap();
+    check_private_dacl(&format!("D:P(A;OICI;FA;;;{me})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"), me, &no_alias).unwrap();
+    check_private_dacl(&format!("D:PAI(A;OICI;FA;;;{me})"), me, &no_alias).unwrap();
     for bad in [
         format!("D:(A;OICI;FA;;;{me})"),                       // not protected: inherits
         format!("D:AI(A;OICIID;FA;;;{me})"),                   // inherited entries
@@ -365,9 +386,65 @@ fn f2_the_private_dacl_rule() {
         format!("D:P(A;OICI;FA;;;S-1-5-21-1-2-3-1002)"),       // another user
         format!("D:P(OA;;CC;;;{me})"),                         // not a plain allow
         "O:BA".to_string(),                                    // no DACL at all
+        "D:P(A;;FA;;;WD".to_string(),                          // malformed: no closing parenthesis
+        "D:P(A;;FA;;;WD)G:BA".to_string(),                     // malformed: trailing descriptor field
+        format!("D:P(A;;FA;;;{me})x"),                         // malformed: trailing junk
+        format!("D:P(A;;FA;;;{me}))(A;;FA;;;WD)"),             // malformed: unbalanced entries
     ] {
-        assert!(check_private_dacl(&bad, me).is_err(), "{bad}");
+        assert!(check_private_dacl(&bad, me, &no_alias).is_err(), "{bad}");
     }
+}
+/// No alias resolves (the abbreviations every non-user trustee in these cases uses are not the user).
+fn no_alias(_: &str) -> Option<String> { None }
+#[test]
+fn f2_an_sddl_alias_is_accepted_only_when_it_resolves_to_exactly_the_user() {
+    let user = "S-1-5-21-1-2-3-1001";
+    let allowed = "D:P(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+    // LA resolving to the user's own SID is the user's entry: accepted (a runner user is the built-in Administrator).
+    check_private_dacl(allowed, user, &|alias| (alias == "LA").then(|| user.to_string())).unwrap();
+    check_private_dacl("D:PAI(A;OICI;FA;;;LA)", user, &|alias| (alias == "LA").then(|| user.to_string())).unwrap();
+    // The domain-administrator case: the user is S-1-5-21-<domain>-500, but LA is the LOCAL machine's Administrator
+    // (a different SID, also ending in -500). A lexical "-500 means LA" rule accepts this; resolving refuses it.
+    let domain_admin = "S-1-5-21-9-9-9-500";
+    let local_admin = "S-1-5-21-1-2-3-500";
+    let err = check_private_dacl(allowed, domain_admin, &|alias| (alias == "LA").then(|| local_admin.to_string())).unwrap_err();
+    assert!(format!("{err:#}").contains("someone else (LA)"), "{err:#}");
+    // The same for the Guest account.
+    assert!(check_private_dacl("D:P(A;OICI;FA;;;LG)", "S-1-5-21-9-9-9-501", &|alias| (alias == "LG").then(|| "S-1-5-21-1-2-3-501".to_string())).is_err());
+    // An alias that does not resolve at all, or an unknown one, is refused, whoever the user is.
+    assert!(check_private_dacl("D:P(A;OICI;FA;;;ZZ)", user, &no_alias).is_err(), "an unknown alias");
+    assert!(check_private_dacl("D:P(A;OICI;FA;;;LA)", user, &no_alias).is_err(), "an alias that does not resolve");
+    // An alias that resolves to the user is still only a plain, non-inherited allow, and nothing else is let in.
+    let to_user = |alias: &str| (alias == "LA").then(|| user.to_string());
+    assert!(check_private_dacl("D:P(A;OICI;FA;;;LA)(A;OICI;FA;;;WD)", user, &to_user).is_err());
+    assert!(check_private_dacl("D:AI(A;OICIID;FA;;;LA)", user, &to_user).is_err(), "an inherited entry is refused whoever it names");
+    assert!(check_private_dacl("D:P(A;OICI;FA;;;LA)", user, &|_| Some("S-1-1-0".to_string())).is_err(), "an alias that resolves to Everyone");
+    // A numeric trustee is never resolved: it must be the user's SID, SYSTEM or Administrators.
+    assert!(check_private_dacl("D:P(A;OICI;FA;;;S-1-5-21-1-2-3-500)", user, &|_| Some(user.to_string())).is_err());
+}
+/// On Windows: the real directory is accepted, and an entry for ANOTHER local account (the machine's built-in
+/// Administrator, printed as `LA`) is refused unless that account is the user.
+#[test]
+#[cfg(windows)]
+fn f2_an_entry_for_another_local_account_is_refused_on_a_real_directory() {
+    let me = crate::updater_winsec::user_sid_string().unwrap();
+    let Some((prefix, rid)) = me.rsplit_once('-') else { panic!("{me}") };
+    if !me.starts_with("S-1-5-21-") || rid == "500" {
+        eprintln!("SKIPPED: the user is the built-in Administrator or not an account SID ({me})");
+        return;
+    }
+    let root = scratch("f2-other-account");
+    let install = root.join("SingZ Native");
+    fs::create_dir_all(&install).unwrap();
+    let dir = secure_coordination_dir(&install).unwrap();
+    crate::updater_winsec::verify_private_dir(&dir).unwrap();
+    // `*S-1-5-21-<same domain>-500`: LA when the user is a local account of this machine; either way another account.
+    let other = format!("*{prefix}-500:(OI)(CI)F");
+    let status = std::process::Command::new("icacls").arg(&dir).args(["/grant", &other]).output().unwrap().status;
+    assert!(status.success(), "icacls /grant {other} failed");
+    let error = crate::updater_winsec::verify_private_dir(&dir).unwrap_err();
+    assert!(format!("{error:#}").contains("not private"), "{error:#}");
+    fs::remove_dir_all(root).unwrap();
 }
 #[test]
 fn trusted_owners_are_the_user_system_and_administrators_only_when_elevated() {

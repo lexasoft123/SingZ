@@ -153,6 +153,21 @@ pub fn create_private_dir(path: &Path) -> Result<()> {
     );
     Ok(())
 }
+/// The canonical `S-1-...` string an SDDL abbreviation (`LA`, `LG`, ...) means on this machine, or None.
+fn resolve_alias(abbreviation: &str) -> Option<String> {
+    let mut sid = null_mut();
+    // SAFETY: a NUL-terminated SID string and a valid out-pointer; freed by the guard.
+    let ok = unsafe { ConvertStringSidToSidW(wide_str(abbreviation).as_ptr(), &mut sid) };
+    let sid = Local(sid);
+    if ok == 0 || sid.0.is_null() {
+        return None;
+    }
+    sid_string(sid.0).ok()
+}
+/// The current user's SID as an `S-1-...` string (for tests and diagnostics).
+pub fn user_sid_string() -> Result<String> {
+    sid_string(current_user()?.sid)
+}
 /// The directory must be owned by the current user (a valid owner SID) and
 /// carry a protected DACL that only lets the user, SYSTEM and Administrators in.
 pub fn verify_private_dir(path: &Path) -> Result<()> {
@@ -188,5 +203,5 @@ pub fn verify_private_dir(path: &Path) -> Result<()> {
     ensure!(ok != 0 && !text.is_null(), "format the DACL of {}", path.display());
     // SAFETY: the API returns a NUL-terminated string.
     let sddl = unsafe { from_wide(text) };
-    crate::updater_state::check_private_dacl(&sddl, &me).with_context(|| format!("{} is not private", path.display()))
+    crate::updater_state::check_private_dacl(&sddl, &me, &resolve_alias).with_context(|| format!("{} is not private", path.display()))
 }

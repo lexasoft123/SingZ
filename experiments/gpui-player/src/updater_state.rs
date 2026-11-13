@@ -333,19 +333,39 @@ pub fn owner_trusted(is_user: bool, is_admins: bool, admin_member: bool, is_syst
 /// The DACL rule for the Windows coordination directory, over its SDDL form:
 /// protected (no inheritance), and only allow entries for the current user,
 /// SYSTEM and Administrators. Pure, so it is tested on every platform.
-pub fn check_private_dacl(sddl: &str, user_sid: &str) -> Result<()> {
+///
+/// SDDL prints some well-known account SIDs as abbreviations (`LA` is the LOCAL machine's built-in Administrator,
+/// `LG` its Guest): a trustee that is not a numeric SID is resolved by `resolve` (on Windows
+/// `ConvertStringSidToSidW`, which gives the SID the abbreviation really means on this machine) and accepted only
+/// if that is exactly the user's SID. An alias that does not resolve, or resolves to anyone else (a domain
+/// Administrator is not the local `LA`), is refused. The explicit allowed set (SYSTEM, Administrators) is unchanged.
+pub fn check_private_dacl(sddl: &str, user_sid: &str, resolve: &dyn Fn(&str) -> Option<String>) -> Result<()> {
     let dacl = sddl.strip_prefix("D:").context("no DACL")?;
     let (flags, aces) = dacl.split_at(dacl.find('(').unwrap_or(dacl.len()));
     ensure!(flags.contains('P'), "the DACL inherits from its parent");
-    let aces = aces.strip_prefix('(').and_then(|a| a.strip_suffix(')'));
-    for ace in aces.map(|a| a.split(")(").collect::<Vec<_>>()).unwrap_or_default() {
+    // Fail closed on anything but an empty DACL or a well-formed `(ace)(ace)…`
+    // run: a missing parenthesis or trailing descriptor fields must not read as
+    // "no access entries".
+    let entries: Vec<&str> = if aces.is_empty() {
+        Vec::new()
+    } else {
+        let inner = aces
+            .strip_prefix('(')
+            .and_then(|a| a.strip_suffix(')'))
+            .with_context(|| format!("unreadable access entries ({aces})"))?;
+        inner.split(")(").collect()
+    };
+    for ace in entries {
+        ensure!(!ace.contains(['(', ')']), "unreadable access entry ({ace})");
         let fields: Vec<&str> = ace.split(';').collect();
         ensure!(fields.len() == 6, "unreadable access entry ({ace})");
         ensure!(fields[0] == "A", "an access entry that is not a plain allow ({ace})");
         ensure!(!fields[1].contains("ID"), "an inherited access entry ({ace})");
         let trustee = fields[5];
         ensure!(
-            trustee == user_sid || matches!(trustee, "SY" | "BA" | "S-1-5-18" | "S-1-5-32-544"),
+            trustee == user_sid
+                || matches!(trustee, "SY" | "BA" | "S-1-5-18" | "S-1-5-32-544")
+                || (!trustee.starts_with("S-1-") && resolve(trustee).as_deref() == Some(user_sid)),
             "access granted to someone else ({trustee})"
         );
     }

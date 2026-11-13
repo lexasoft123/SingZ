@@ -141,6 +141,20 @@ fn install(fake: &Fake, name: &str, id: &str) -> (RemoteEntry, Vec<u8>) {
     drop(state);
     (published(name, id), doc)
 }
+/// The temp directory in the spelling the filesystem uses: long names, no `\\?\` prefix. A machine's TEMP can be
+/// spelled with 8.3 short names (a CI runner's `RUNNER~1`); `is_canonical` refuses such a spelling on purpose, so a
+/// fixture that must be accepted never starts from the raw TEMP.
+fn long_temp_dir() -> PathBuf {
+    let canonical = std::env::temp_dir().canonicalize().expect("the temp directory exists");
+    let text = canonical.to_string_lossy().into_owned();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(plain) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(plain)
+    } else {
+        canonical
+    }
+}
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -860,7 +874,7 @@ fn duplicated_marker_identity_is_kept_for_review_without_duplicate_adoption() {
 fn an_unlinked_folder_is_accepted_in_the_spelling_the_user_gave() {
     // Windows hands the app `C:\...` (and the app joins `gdrive/downloads` with a forward slash) while
     // canonicalize returns `\\?\C:\...`; refusing those spellings refused every Drive download into an ordinary folder.
-    let base = std::env::temp_dir().join(format!("singz-canonical-{}", std::process::id()));
+    let base = long_temp_dir().join(format!("singz-canonical-{}", std::process::id()));
     fs::create_dir_all(base.join("gdrive").join("downloads")).unwrap();
     let spelled = if cfg!(windows) {
         let mixed = PathBuf::from(format!("{}/gdrive/downloads", base.display()));
@@ -879,8 +893,8 @@ fn an_unlinked_folder_is_accepted_in_the_spelling_the_user_gave() {
 #[test]
 fn a_symlinked_parent_is_refused_even_though_its_leaf_is_ordinary() {
     use std::os::unix::fs::symlink;
-    let base = std::env::temp_dir().join(format!("singz-linked-parent-{}", std::process::id())).canonicalize().unwrap_or_else(|_| {
-        let base = std::env::temp_dir().join(format!("singz-linked-parent-{}", std::process::id()));
+    let base = long_temp_dir().join(format!("singz-linked-parent-{}", std::process::id())).canonicalize().unwrap_or_else(|_| {
+        let base = long_temp_dir().join(format!("singz-linked-parent-{}", std::process::id()));
         fs::create_dir_all(&base).unwrap();
         base.canonicalize().unwrap()
     });
@@ -906,10 +920,45 @@ mod windows_links {
         assert!(status.success(), "mklink /J {link:?} {target:?} failed");
     }
     fn scratch(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("singz-{name}-{}", std::process::id()));
+        let base = long_temp_dir().join(format!("singz-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         base
+    }
+
+
+    unsafe extern "system" {
+        fn GetShortPathNameW(long: *const u16, short: *mut u16, len: u32) -> u32;
+    }
+    /// The 8.3 spelling of an existing path, if the volume makes one that differs from the long spelling.
+    fn short_spelling(path: &Path) -> Option<PathBuf> {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut buffer = vec![0u16; 1024];
+        let n = unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        if n == 0 || n >= buffer.len() { return None; }
+        let short = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..n]));
+        (short != path).then_some(short)
+    }
+
+    /// Fail closed: a folder reached through the 8.3 spelling of its parent (a TEMP of `RUNNER~1`, say) is not the
+    /// spelling the filesystem gives, so it is refused, while the long spelling of the same folder is accepted. A
+    /// library root normally comes from a folder picker in long form. Skipped where the volume has no 8.3 names.
+    #[test]
+    fn a_short_name_spelling_of_an_existing_folder_is_refused() {
+        let base = scratch("short-name-spelling-fixture");
+        let long = base.join("a long folder name").join("downloads");
+        fs::create_dir_all(&long).unwrap();
+        let Some(short) = short_spelling(&long) else {
+            eprintln!("SKIPPED: 8.3 short names are not available for {long:?}");
+            fs::remove_dir_all(&base).unwrap();
+            return;
+        };
+        let refused = !is_canonical(&short).unwrap() && Directory::capture(short.clone()).is_err();
+        let accepted = is_canonical(&long).unwrap() && Directory::capture(long.clone()).is_ok();
+        fs::remove_dir_all(&base).unwrap();
+        assert!(refused, "the 8.3 spelling {short:?} of an existing folder must be refused");
+        assert!(accepted, "the long spelling {long:?} of the same folder must be accepted");
     }
 
     #[test]
