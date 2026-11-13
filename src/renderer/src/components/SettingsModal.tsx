@@ -15,6 +15,7 @@ import {
   type AudioDevices
 } from '../audio/devices'
 import { detectedDesktopPlatform } from '../audio/native-playback-preference'
+import { micOwnership } from '../audio/mic-ownership'
 import { MicrophonePreview, micPreviewErrorCopy, micPreviewErrorKind } from '../audio/mic-preview'
 import {
   settingsInputChannelRoute,
@@ -390,7 +391,7 @@ export default function SettingsModal({
   onChangeInputChannel,
   onChangeNativeAudioProvider,
   nativePlaybackLeaseBlocked = false,
-  externalAudioLeaseBlocked = false,
+  externalAudioLeaseBlocked: externalLeaseProp = false,
   externalAudioLeaseCopy,
   routeApplicationQueue,
   outputRouteUnconfirmed,
@@ -400,6 +401,38 @@ export default function SettingsModal({
   onClose
 }: SettingsModalProps): React.JSX.Element {
   const mounted = useRef(true)
+  // One native microphone owner: while the Voice strip holds the input the preview stays dormant and shows
+  // the strip's own level (it never fights it for the device); when the strip lets go, the preview restarts.
+  const voiceHolds = useSyncExternalStore(micOwnership.subscribe, micOwnership.voiceHolds, micOwnership.voiceHolds)
+  const externalAudioLeaseBlocked = externalLeaseProp || voiceHolds
+  const [voiceLevel, setVoiceLevel] = useState<{ dbfs: number; peak: number } | null>(null)
+  const sharedWithVoice = voiceHolds && !externalLeaseProp
+  useEffect(() => {
+    if (!sharedWithVoice) {
+      setVoiceLevel(null)
+      return
+    }
+    let peak = -72
+    let peakAt = performance.now()
+    let frame = 0
+    let last = 0
+    // The preview policy is no timers: the shared level rides the animation frame like the preview's own.
+    const tick = (now: number): void => {
+      frame = requestAnimationFrame(tick)
+      if (now - last < 80 || document.hidden) return
+      last = now
+      const read = micOwnership.readVoiceLevel()
+      if (!read) return
+      const dbfs = Math.max(-72, Math.round(read.dbfs))
+      if (dbfs >= peak) {
+        peak = dbfs
+        peakAt = now
+      } else if (now - peakAt > 700) peak = Math.max(dbfs, peak - 2)
+      setVoiceLevel((cur) => (cur && cur.dbfs === dbfs && cur.peak === peak ? cur : { dbfs, peak }))
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [sharedWithVoice])
   const [devices, setDevices] = useState<AudioDevices | null>(null)
   /** null means the native core is unavailable and the UI is in Web Audio fallback mode. */
   const [nativeInputs, setNativeInputs] = useState<DesktopAudioInputDevice[] | null>(null)
@@ -633,6 +666,11 @@ export default function SettingsModal({
     }
     const startOwner = new SettingsPreviewStartOwner(start, canStart, stop)
     previewStartOwner.current = startOwner
+    // The Voice strip asks the preview to release the native microphone (and waits) before it opens the input.
+    micOwnership.setPreviewYield(async () => {
+      startOwner.invalidate()
+      await capture.stopAndWait()
+    })
     const visibility = (): void => {
       if (document.hidden) {
         startOwner.invalidate()
@@ -647,6 +685,7 @@ export default function SettingsModal({
       document.removeEventListener('visibilitychange', visibility)
       if (frame !== null) cancelAnimationFrame(frame)
       frame = null
+      micOwnership.setPreviewYield(null)
       if (previewStartOwner.current === startOwner) previewStartOwner.current = null
       if (previewCapture.current === capture) previewCapture.current = null
       void capture.stopAndWait().catch(() => undefined)
@@ -764,9 +803,12 @@ export default function SettingsModal({
   const channelIndex = Math.min(requestedChannel, Math.max(0, channelCount - 1))
   const previewChannelIndex = preview.device?.channelIndex ?? 0
   const previewChannelCount = preview.device?.channelCount ?? 1
-  const levelPct = Math.max(0, Math.min(100, ((preview.dbfs + 72) / 72) * 100))
-  const peakPct = Math.max(0, Math.min(100, ((preview.peak + 72) / 72) * 100))
-  const statusCopy = externalAudioLeaseBlocked
+  const shown = sharedWithVoice && voiceLevel ? voiceLevel : preview
+  const levelPct = Math.max(0, Math.min(100, ((shown.dbfs + 72) / 72) * 100))
+  const peakPct = Math.max(0, Math.min(100, ((shown.peak + 72) / 72) * 100))
+  const statusCopy = sharedWithVoice
+    ? t('settings.mic.sharedWithVoice', { dbfs: Math.round(shown.dbfs) })
+    : externalAudioLeaseBlocked
     ? t('settings.mic.unavailableTrainingCleanup')
     : preview.status === 'starting'
     ? t('settings.mic.startingPreview')
@@ -775,7 +817,9 @@ export default function SettingsModal({
       : preview.status === 'no-signal'
         ? t('settings.mic.noSignal', { channel: previewChannelIndex + 1 })
         : t('settings.mic.dbfsOnChannel', { dbfs: preview.dbfs, channel: previewChannelIndex + 1 })
-  const routeCopy = externalAudioLeaseBlocked
+  const routeCopy = sharedWithVoice
+    ? t('settings.mic.sharedWithVoiceRoute')
+    : externalAudioLeaseBlocked
     ? (externalAudioLeaseCopy ?? t('settings.mic.pausedByOtherOwner'))
     : preview.status === 'error'
     ? preview.message
@@ -978,7 +1022,7 @@ export default function SettingsModal({
             </div>
 
             <div className="mic-meter-head"><span>{t('settings.mic.levelLabel')}</span><output>{statusCopy}</output></div>
-            <div className={`mic-meter${preview.status === 'error' ? ' error' : ''}`} role="meter" aria-label={t('settings.mic.channelLevelAriaLabel')} aria-valuemin={-72} aria-valuemax={0} aria-valuenow={preview.dbfs} aria-valuetext={statusCopy}>
+            <div className={`mic-meter${preview.status === 'error' && !sharedWithVoice ? ' error' : ''}`} role="meter" aria-label={t('settings.mic.channelLevelAriaLabel')} aria-valuemin={-72} aria-valuemax={0} aria-valuenow={shown.dbfs} aria-valuetext={statusCopy}>
               <span className="mic-meter-fill" style={{ width: `${levelPct}%` }} />
               <span className="mic-meter-peak" style={{ left: `${peakPct}%` }} />
               <span className="mic-meter-tick tick-48">−48</span><span className="mic-meter-tick tick-24">−24</span><span className="mic-meter-tick tick-12">−12</span><span className="mic-meter-tick tick-0">0</span>

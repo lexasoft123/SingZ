@@ -54,6 +54,9 @@ export const settings: Translation<typeof en> = {
   // {dbfs} is a signal level in dBFS (a negative number), {channel} a 1-based channel number
   'settings.mic.dbfsOnChannel': '{dbfs} дБFS на канале {channel}',
   'settings.mic.pausedByOtherOwner': 'Предпросмотр приостановлен другим владельцем звука.',
+  'settings.mic.sharedWithVoice': 'Общий доступ с дорожкой «Голос» · {dbfs} дБFS',
+  'settings.mic.sharedWithVoiceRoute': 'Дорожка «Голос» использует этот микрофон. Здесь показан её уровень.',
+  'settings.micPreview.owner': 'Другая часть SingZ (дорожка «Голос» или тренировка) использует микрофон. Остановите её и выберите вход снова.',
   // {device} is the microphone's label, {channel}/{count} are 1-based channel numbers
   'settings.mic.listeningThrough': 'Слушаем через {device} · канал {channel} из {count}',
   // fallback device name when the microphone has no label

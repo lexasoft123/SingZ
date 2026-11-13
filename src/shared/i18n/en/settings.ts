@@ -52,6 +52,9 @@ export const settings = {
   // {dbfs} is a signal level in dBFS (a negative number), {channel} a 1-based channel number
   'settings.mic.dbfsOnChannel': '{dbfs} dBFS on channel {channel}',
   'settings.mic.pausedByOtherOwner': 'Microphone preview is paused by another app audio owner.',
+  'settings.mic.sharedWithVoice': 'Shared with the Voice strip · {dbfs} dBFS',
+  'settings.mic.sharedWithVoiceRoute': 'The Voice strip is using this microphone. Its level is shown here.',
+  'settings.micPreview.owner': 'Another part of SingZ (the Voice strip or training) is using the microphone. Stop it, then choose the input again.',
   // {device} is the microphone's label, {channel}/{count} are 1-based channel numbers
   'settings.mic.listeningThrough': 'Listening through {device} · channel {channel} of {count}',
   // fallback device name when the microphone has no label

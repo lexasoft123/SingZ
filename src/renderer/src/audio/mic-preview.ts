@@ -2,7 +2,7 @@ import { MicPitch, type MicDevice, type MicLevel } from './mic'
 import { NativeTrainingMicSource } from './training-mic'
 import { t } from '../i18n'
 
-export type MicPreviewErrorKind = 'permission' | 'busy' | 'unavailable' | 'unknown'
+export type MicPreviewErrorKind = 'permission' | 'busy' | 'owner' | 'unavailable' | 'unknown'
 
 /** Settings-owned capture with no timer and no destination connection. */
 export class MicrophonePreview {
@@ -161,6 +161,9 @@ export class MicPreviewError extends Error {
 
 export function micPreviewErrorKind(error: unknown): MicPreviewErrorKind {
   if (error instanceof MicPreviewError) return error.kind
+  // Another SingZ owner (the Voice strip, training) holds the one native microphone: its own message, not 'unknown'.
+  const message = error instanceof Error ? error.message : ''
+  if (/another (?:native |training )?microphone (?:owner )?is (?:already )?active/i.test(message)) return 'owner'
   const name = error instanceof DOMException ? error.name : ''
   if (name === 'NotAllowedError' || name === 'SecurityError') return 'permission'
   if (name === 'NotReadableError' || name === 'AbortError') return 'busy'
@@ -171,6 +174,7 @@ export function micPreviewErrorKind(error: unknown): MicPreviewErrorKind {
 export function micPreviewErrorCopy(kind: MicPreviewErrorKind): string {
   if (kind === 'permission') return t('settings.micPreview.accessBlocked')
   if (kind === 'busy') return t('settings.micPreview.busy')
+  if (kind === 'owner') return t('settings.micPreview.owner')
   if (kind === 'unavailable') return t('settings.micPreview.unavailable')
   return t('settings.micPreview.unknown')
 }

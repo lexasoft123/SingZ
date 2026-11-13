@@ -19,6 +19,32 @@ export interface AudioDevices {
   inputLabelsHidden: boolean
 }
 
+/** Chromium and CoreAudio name the same interface differently ("Zen Quadro SC (0a12:34bc)", "Default - ...",
+ * different case/spacing): compare on the interface name alone. */
+export function inputLabelKey(label: string): string {
+  return label
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/^(?:default|communications)\s*-\s*/, '')
+    .replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/, '')
+    .replace(/\s+/g, ' ')
+}
+
+/** The one native/Chromium candidate whose label matches: exact on the normalized name, else a unique one whose
+ * name extends the other ("zen quadro sc" vs "zen quadro sc playback"). Ambiguous or empty: undefined. */
+function uniqueLabelMatch<T extends { label: string }>(label: string, candidates: readonly T[]): T | undefined {
+  const key = inputLabelKey(label)
+  if (!key) return undefined
+  const exact = candidates.filter((c) => inputLabelKey(c.label) === key)
+  if (exact.length === 1) return exact[0]
+  if (exact.length > 1) return undefined
+  const loose = candidates.filter((c) => {
+    const other = inputLabelKey(c.label)
+    return other.length > 0 && (other.startsWith(key) || key.startsWith(other))
+  })
+  return loose.length === 1 ? loose[0] : undefined
+}
+
 /** A native uid is always the training identity. This label match is only a
  * best-effort bridge for Chromium's live preview; ambiguous labels deliberately
  * fall back to Chromium's system default instead of selecting the wrong mic. */
@@ -26,12 +52,7 @@ export function chromiumInputIdForNative(
   nativeDevice: DesktopAudioInputDevice,
   chromiumInputs: readonly AudioDeviceInfo[]
 ): string | undefined {
-  const label = nativeDevice.label.trim().toLocaleLowerCase()
-  if (!label) return undefined
-  const matches = chromiumInputs.filter(
-    (candidate) => candidate.label.trim().toLocaleLowerCase() === label
-  )
-  return matches.length === 1 ? matches[0].id : undefined
+  return uniqueLabelMatch(nativeDevice.label, chromiumInputs)?.id
 }
 
 /** Upgrade bridge for prefs written before native AudioInput UIDs existed.
@@ -43,12 +64,7 @@ export function nativeInputUidForChromium(
   nativeInputs: readonly DesktopAudioInputDevice[]
 ): string | undefined {
   const chromium = chromiumInputs.find((candidate) => candidate.id === chromiumId)
-  const label = chromium?.label.trim().toLocaleLowerCase()
-  if (!label) return undefined
-  const matches = nativeInputs.filter(
-    (candidate) => candidate.label.trim().toLocaleLowerCase() === label
-  )
-  return matches.length === 1 ? matches[0].uid : undefined
+  return chromium ? uniqueLabelMatch(chromium.label, nativeInputs)?.uid : undefined
 }
 
 /**

@@ -149,3 +149,19 @@ describe('sanitizeAudioPrefs', () => {
     })).toEqual({ outputId: 'speakers', nativeInputUid: 'coreaudio:usb', inputChannel: 1 })
   })
 })
+
+describe('native and Chromium names of one interface', () => {
+  const native = (label: string, uid = 'uid-zen') => ({ uid, label, channels: 24, isDefault: false }) as never
+  it('matches a Zen Quadro across the ways the two sides write its name', () => {
+    const chromium = [{ id: 'c-zen', label: 'Zen Quadro SC (0a12:34bc)' }, { id: 'c-mic', label: 'MacBook Pro Microphone' }]
+    expect(chromiumInputIdForNative(native('Zen Quadro SC'), chromium)).toBe('c-zen')
+    expect(nativeInputUidForChromium('c-zen', chromium, [native('zen quadro sc'), native('MacBook Pro Microphone', 'uid-mic')])).toBe('uid-zen')
+    // a longer native name extends the Chromium one: still one unambiguous device
+    expect(nativeInputUidForChromium('c-zen', chromium, [native('Zen Quadro SC Playback')])).toBe('uid-zen')
+  })
+  it('refuses an ambiguous match instead of picking the wrong interface', () => {
+    const chromium = [{ id: 'c-zen', label: 'Zen Quadro SC' }]
+    expect(nativeInputUidForChromium('c-zen', chromium, [native('Zen Quadro SC A', 'a'), native('Zen Quadro SC B', 'b')])).toBeUndefined()
+    expect(nativeInputUidForChromium('c-zen', chromium, [native('Other interface', 'o')])).toBeUndefined()
+  })
+})

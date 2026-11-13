@@ -33,6 +33,8 @@ import {
 import VoiceStrip from '../../src/renderer/src/components/VoiceStrip'
 import { MonitorChipView } from '../../src/renderer/src/components/VoiceMonitorChip'
 import Tooltip, { placeTip, TipController, TIP_DELAY_MS } from '../../src/renderer/src/components/Tooltip'
+import { micOwnership } from '../../src/renderer/src/audio/mic-ownership'
+import { micPreviewErrorCopy, micPreviewErrorKind } from '../../src/renderer/src/audio/mic-preview'
 import { takeIsSilent } from '../../src/renderer/src/components/voice-format'
 import VoiceTrackSettings from '../../src/renderer/src/components/VoiceTrackSettings'
 import { VoiceRecordButton } from '../../src/renderer/src/components/voice-record-button'
@@ -2675,5 +2677,95 @@ describe('playhead over the voice clip', () => {
     const tsx = read('components/TrackStack.tsx')
     expect(tsx).toContain('className="playhead-over-voice"')
     expect(tsx).toMatch(/voiceHeadRef\.current\?\.style\.setProperty\('--p', w\.line\)/)
+  })
+})
+
+describe('one native microphone owner: the Voice strip and the Settings preview', () => {
+  afterEach(() => {
+    micOwnership.setPreviewYield(null)
+    micOwnership.setVoiceHold(false)
+  })
+  it('(e) preview running, then arm: the preview releases the native mic BEFORE the strip opens it, and arm succeeds', async () => {
+    let previewHoldsNative = true
+    micOwnership.setPreviewYield(async () => {
+      await new Promise((r) => setTimeout(r, 5))
+      previewHoldsNative = false
+    })
+    const seenAtArm: boolean[] = []
+    const { c, api } = await setup({
+      arm: vi.fn(async () => {
+        seenAtArm.push(previewHoldsNative)
+        return previewHoldsNative ? ({ ok: false as const, reason: 'busy' as const }) : ({ ok: true as const })
+      }) as never
+    })
+    const arming = c.arm()
+    await vi.advanceTimersByTimeAsync(10)
+    await arming
+    expect(seenAtArm).toEqual([false]) // negative control: without the yield the native mic is still held and arm answers busy
+    expect(c.getSnapshot().armed).toBe(true)
+    expect(c.getSnapshot().error).toBeNull()
+    expect(api.arm).toHaveBeenCalledTimes(1)
+    c.dispose()
+  })
+  it('without the yield the same arm would fail (control for the test above)', async () => {
+    const { c } = await setup({ arm: vi.fn(async () => ({ ok: false as const, reason: 'busy' as const })) as never })
+    await c.arm()
+    expect(c.getSnapshot().armed).toBe(false)
+    expect(c.getSnapshot().error).toBe('busy')
+    c.dispose()
+  })
+  it('(c) strip armed or monitoring, then Settings: the strip holds the mic and exposes its live level for the preview', async () => {
+    const { c } = await setup()
+    expect(micOwnership.voiceHolds()).toBe(false) // negative control: nothing held at rest
+    expect(micOwnership.readVoiceLevel()).toBeNull()
+    await c.arm()
+    expect(micOwnership.voiceHolds()).toBe(true)
+    expect(micOwnership.readVoiceLevel()).toEqual({ dbfs: expect.any(Number), peak: expect.any(Number) })
+    await c.toggleMonitor()
+    await c.arm() // disarm: the monitor still holds it
+    expect(micOwnership.voiceHolds()).toBe(true)
+    await c.toggleMonitor()
+    expect(micOwnership.voiceHolds()).toBe(false) // the last holder out: the preview may restart
+    c.dispose()
+  })
+  it('a take holds it too, and a record start asks a running preview to let go first', async () => {
+    let yielded = 0
+    micOwnership.setPreviewYield(async () => { yielded++ })
+    const { c } = await setup()
+    await c.toggleRecord()
+    expect(yielded).toBe(1)
+    expect(micOwnership.voiceHolds()).toBe(true)
+    await c.toggleRecord()
+    await vi.waitFor(() => expect(micOwnership.voiceHolds()).toBe(false))
+    c.dispose()
+  })
+  it('"another microphone owner is already active" gets its own message, not the unknown one', () => {
+    const owner = new Error('Another native microphone owner is already active')
+    expect(micPreviewErrorKind(owner)).toBe('owner')
+    expect(micPreviewErrorCopy('owner')).not.toBe(micPreviewErrorCopy('unknown'))
+    expect(micPreviewErrorKind(new Error('boom'))).toBe('unknown') // negative control
+  })
+})
+
+describe('the strip input and Settings microphone are one setting', () => {
+  const zen = [
+    { id: 'zen#0', label: 'Zen Quadro SC', deviceName: 'zen', channelIndex: 0, channels: 2 },
+    { id: 'zen#1', label: 'Zen Quadro SC', deviceName: 'zen', channelIndex: 1, channels: 2 },
+    { id: 'mic#0', label: 'Built-in', deviceName: 'mic', channelIndex: 0, channels: 1 }
+  ]
+  it('Settings picks follow into the strip; the strip pick is reported back; unset follows nothing', async () => {
+    const { c } = await setup({}, undefined, zen)
+    const chosen: Array<[string, number]> = []
+    c.onInputChosen((uid, ch) => chosen.push([uid, ch]))
+    c.setPreferredInput(undefined, undefined)
+    expect(c.getSnapshot().input).toBe('zen#0') // negative control: no preference, the strip keeps its own default
+    c.setPreferredInput('zen', 1)
+    expect(c.getSnapshot().input).toBe('zen#1')
+    expect(chosen).toEqual([]) // following Settings never echoes back
+    c.selectInput('mic#0')
+    expect(chosen).toEqual([['mic', 0]])
+    c.setPreferredInput('gone', 0) // an unplugged device: nothing to follow
+    expect(c.getSnapshot().input).toBe('mic#0')
+    c.dispose()
   })
 })

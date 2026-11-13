@@ -21,13 +21,19 @@ export default function VoiceHost({
   e: engine,
   s: song,
   p: projectDir,
-  v: view
+  v: view,
+  i: input,
+  c: onChooseInput
 }: {
   e: MultitrackEngine
   s: LoadedSongIdentity | null
   p: string | null
   /** The stems' shared time view: the Voice lane draws on the same axis. */
   v: TimeView | null
+  /** Settings' microphone (native uid + channel): the strip's select is the same setting. */
+  i?: { uid?: string; channel?: number }
+  /** The singer picked a channel in the strip: Settings' microphone follows. */
+  c?: (nativeUid: string, channel: number) => void
 }): React.JSX.Element | null {
   const [controller] = useState(() => createVoiceController(engine))
   // Captured when the song loads (its load token changes): later re-anchoring of
@@ -40,6 +46,11 @@ export default function VoiceHost({
     () => (fixed ? controller.bindSong({ ...fixed, title, artist: '' }) : undefined),
     [controller, fixed, title]
   )
+  useEffect(() => {
+    controller.onInputChosen(onChooseInput ?? null)
+    return () => controller.onInputChosen(null)
+  }, [controller, onChooseInput])
+  useEffect(() => controller.setPreferredInput(input?.uid, input?.channel), [controller, input?.uid, input?.channel])
   const model = useVoiceModel(controller)
   const root = useRef<HTMLSpanElement>(null)
   // The Record button sits right after Play, in a node this host adds there.

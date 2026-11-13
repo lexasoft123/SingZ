@@ -1327,6 +1327,15 @@ export default function App(): React.JSX.Element {
     setAudioPrefs((p) => ({ ...p, nativeInputUid, inputId, inputChannel: 0 }))
   }, [])
 
+  // The Voice strip's input select and Settings' microphone are one setting (ADR 0015).
+  const voiceInputPref = useMemo(
+    () => ({ uid: audioPrefs.nativeInputUid, channel: audioPrefs.inputChannel }),
+    [audioPrefs.nativeInputUid, audioPrefs.inputChannel]
+  )
+  const chooseVoiceInput = useCallback((nativeInputUid: string, inputChannel: number) => {
+    setAudioPrefs((p) => (p.nativeInputUid === nativeInputUid && (p.inputChannel ?? 0) === inputChannel ? p : { ...p, nativeInputUid, inputChannel, inputId: undefined }))
+  }, [])
+
   const migrateNativeInput = useCallback((nativeInputUid: string) => {
     setAudioPrefs((p) => ({ ...p, nativeInputUid }))
   }, [])
@@ -4138,7 +4147,7 @@ export default function App(): React.JSX.Element {
                 extra={
                   <VoiceBoundary>
                     <Suspense fallback={null}>
-                      <VH e={engine} s={song} p={projectDir} v={view} />
+                      <VH e={engine} s={song} p={projectDir} v={view} i={voiceInputPref} c={chooseVoiceInput} />
                     </Suspense>
                   </VoiceBoundary>
                 }

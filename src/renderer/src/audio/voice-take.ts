@@ -35,6 +35,7 @@ import type {
   VoiceTakeSummary
 } from '../../../shared/voice-take'
 import { stableVoiceSongId } from './voice-song-id'
+import { micOwnership } from './mic-ownership'
 
 export { stableVoiceSongId }
 
@@ -400,6 +401,15 @@ export class VoiceController {
     this.saved = this.readStored()
     this.savedOutput = this.readMonitorOutput()
     this.model = { ...this.model, monitorGainDb: this.readMonitorGain(), monitorOutput: this.savedOutput }
+    micOwnership.setVoiceLevelReader(() => ({ dbfs: this.levelDb, peak: this.peakDb }))
+  }
+
+  /** Tell the Settings preview whether this controller holds the native microphone (one owner at a time). */
+  private publishHold(): void {
+    const m = this.model
+    micOwnership.setVoiceHold(
+      this.armOpen || this.opening !== null || this.armPending > 0 || m.recording || m.starting || this.monitorPending
+    )
   }
 
   /** The remembered output, whether or not it is currently among the candidates. */
@@ -456,6 +466,7 @@ export class VoiceController {
   private set(patch: Partial<VoiceModel>): void {
     this.model = { ...this.model, ...patch }
     this.syncTimers()
+    this.publishHold()
     for (const fn of [...this.listeners]) fn()
   }
   private say(key: AnnounceKey): Partial<VoiceModel> {
@@ -521,7 +532,7 @@ export class VoiceController {
   dispose(): void {
     this.cancelAvailabilityRetries()
     this.clearTimers()
-    void this.abortActivity(true)
+    void this.abortActivity(true).finally(() => this.publishHold())
   }
 
   /** A song was opened (id) or closed (null): live capture and playback end,
@@ -597,6 +608,7 @@ export class VoiceController {
         inputMissing: inputs.length === 0 && !labelsHidden,
         perm: labelsHidden && this.model.perm === 'unknown' ? 'unknown' : this.model.perm
       })
+      this.applyPreferred()
     } catch {
       this.set({ inputs: [], inputMissing: true })
     }
@@ -619,7 +631,26 @@ export class VoiceController {
     return (mine.find((o) => (o.channelIndex ?? 0) === want) ?? mine.find((o) => (o.channelIndex ?? 0) === 0) ?? mine[0])?.id ?? null
   }
 
-  selectInput(id: string): void {
+  /** Told when the singer picks a native device channel in the strip, so Settings' microphone follows (one setting). */
+  private inputChosen: ((nativeUid: string, channel: number) => void) | null = null
+  onInputChosen(fn: ((nativeUid: string, channel: number) => void) | null): void {
+    this.inputChosen = fn
+  }
+  /** Settings' microphone (native uid + channel; undefined uid = system default, nothing to follow). */
+  private preferred: { uid: string; channel: number } | null = null
+  setPreferredInput(uid: string | undefined, channel: number | undefined): void {
+    this.preferred = uid ? { uid, channel: channel ?? 0 } : null
+    this.applyPreferred()
+  }
+  private applyPreferred(): void {
+    const p = this.preferred
+    if (!p || this.model.recording || this.model.starting) return
+    const mine = this.model.inputs.filter((o) => o.deviceName === p.uid)
+    const opt = mine.find((o) => (o.channelIndex ?? 0) === p.channel) ?? mine.find((o) => (o.channelIndex ?? 0) === 0) ?? mine[0]
+    if (opt && opt.id !== this.model.input) this.selectInput(opt.id, false)
+  }
+
+  selectInput(id: string, notify = true): void {
     // The select is disabled while a take records; a stray call must not move the input under it.
     if (this.model.recording || this.model.starting) return
     const changed = id !== this.model.input
@@ -633,6 +664,11 @@ export class VoiceController {
       } catch {
         /* private mode */
       }
+    }
+    if (opt && notify && changed && opt.channels !== undefined && opt.deviceName !== undefined) {
+      const req = inputRequest(opt)
+      this.preferred = { uid: req.deviceName, channel: req.channelIndex }
+      this.inputChosen?.(req.deviceName, req.channelIndex)
     }
     if (changed) void this.switchInput()
   }
@@ -703,7 +739,7 @@ export class VoiceController {
    */
   private inputHeld(): boolean {
     const m = this.model
-    return m.armed || this.armPending || m.monitor.on || this.monitorPending || m.recording || m.starting
+    return m.armed || this.armPending > 0 || m.monitor.on || this.monitorPending || m.recording || m.starting
   }
 
   /** Close the input in main if no reason holds it any more (idempotent). */
@@ -757,6 +793,7 @@ export class VoiceController {
     if (!this.opening) {
       this.opening = this.runOpen().finally(() => {
         this.opening = null
+        this.publishHold()
       })
     }
     return this.opening
@@ -766,6 +803,9 @@ export class VoiceController {
   private async runOpen(): Promise<boolean> {
     const token = ++this.armToken
     const input = this.model.inputs.find((i) => i.id === this.model.input)
+    // One native owner: a running Settings preview lets go (and waits for the native release) before we open.
+    await micOwnership.acquireForVoice()
+    if (token !== this.armToken) return false
     let res: VoiceArmResult
     try {
       res = await this.deps.api.arm({ input: inputRequest(input) })
@@ -794,6 +834,7 @@ export class VoiceController {
   private releaseArm(): void {
     if (!this.armOpen) return
     this.armOpen = false
+    this.publishHold()
     void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
   }
 
@@ -849,6 +890,11 @@ export class VoiceController {
         return
       }
     }
+    if (!this.armOpen) {
+      // Nothing of ours has the input open yet: a running Settings preview releases the native microphone first.
+      await micOwnership.acquireForVoice()
+      if (stale()) return
+    }
     const songIdAtStart = this.model.songId ?? ''
     let res: VoiceRecordStartResult
     try {
@@ -883,7 +929,7 @@ export class VoiceController {
     const startPos = engine.position
     this.recordingId = res.takeId
     this.takeInput = inputRequest(input)
-    this.armOpen = false // main reuses the open input for the take
+    this.armOpen = false // main reuses the open input for the take (the take still holds it: starting/recording)
     this.startedAtMs = this.now()
     this.lastTickMs = this.startedAtMs
     this.lastPos = engine.position
@@ -929,7 +975,9 @@ export class VoiceController {
   private async forceDisarm(): Promise<void> {
     this.armToken++
     this.armOpen = false
+    this.publishHold()
     await Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
+    this.publishHold()
   }
 
   private failStart(reason: 'permission' | 'no-input' | 'busy' | 'error'): void {

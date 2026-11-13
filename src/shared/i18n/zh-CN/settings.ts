@@ -54,6 +54,9 @@ export const settings: Translation<typeof en> = {
   // {dbfs} is a signal level in dBFS (a negative number), {channel} a 1-based channel number
   'settings.mic.dbfsOnChannel': '通道 {channel} 上为 {dbfs} dBFS',
   'settings.mic.pausedByOtherOwner': '麦克风预览已被另一个音频占用方暂停。',
+  'settings.mic.sharedWithVoice': '与人声轨共用 · {dbfs} dBFS',
+  'settings.mic.sharedWithVoiceRoute': '人声轨正在使用此麦克风，这里显示它的电平。',
+  'settings.micPreview.owner': 'SingZ 的其他部分（人声轨或训练）正在使用麦克风。请先停止它，然后重新选择输入。',
   // {device} is the microphone's label, {channel}/{count} are 1-based channel numbers
   'settings.mic.listeningThrough': '正在通过 {device} 拾音 · 通道 {channel}/{count}',
   // fallback device name when the microphone has no label
