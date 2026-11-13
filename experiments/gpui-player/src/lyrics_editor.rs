@@ -251,10 +251,12 @@ impl Editor {
             if refresh {input.update(cx,|s,cx|s.set_placeholder(if self.rows.len()==1 {copy("row.placeholder")} else {String::new()},w,cx));}
             if input.read(cx).value().as_str()!=row.text {input.update(cx,|s,cx|s.set_value(row.text.clone(),w,cx));}
         }
+        if crate::overlay_gate::may_focus(crate::overlay_gate::Layer::LyricsEditor) {
         if let Some(value)=self.pending_replacement.take(){self.replacement.update(cx,|s,cx|{s.set_value(value,w,cx);s.focus(w,cx);});}
         if let Some(focus)=self.pending_focus.take(){self.scroll_row(focus.id,false);if let Some(input)=self.input(focus.id){input.update(cx,|s,cx|{
             s.focus(w,cx);if let Some(pos)=focus.caret_utf16 {let byte=edit::byte_at_utf16(&s.value(),pos);s.set_selected_range(byte..byte,cx);}
         });}}
+        }
     }
     fn probe(&self,id:&str,d:Stateful<Div>)->Stateful<Div>{
         self.probe_positioned(id,d.relative())
@@ -548,4 +550,12 @@ mod display_clock_tests {
         assert_eq!(c.position_at(now+Duration::from_millis(20)),10.);
         assert!(!c.advancing(now+Duration::from_millis(20)));
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for Editor {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        if let Some(first) = self.rows.first() { self.pending_focus = Some(edit::FocusTarget { id: first.id, caret_utf16: None }); }
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
 }

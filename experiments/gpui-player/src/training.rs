@@ -1738,7 +1738,7 @@ impl TrainingScreen {
 impl Render for TrainingScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.keyboard_order.borrow_mut().clear();self.selector_options.borrow_mut().clear();
-        if self.keyboard_focus_pending {self.keyboard_focus_pending=false;self.keyboard_scope.focus(window,cx);}
+        if self.keyboard_focus_pending&&crate::overlay_gate::may_focus_player() {self.keyboard_focus_pending=false;self.keyboard_scope.focus(window,cx);}
         if self.run.is_some() {
             let banner = self.history_banner(cx);
             let running = self.running(window, cx);

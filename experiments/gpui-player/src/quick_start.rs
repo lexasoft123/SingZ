@@ -111,6 +111,10 @@ impl QuickStart {
             bounds: Default::default(),
         }
     }
+    #[cfg(feature = "ui-tests")]
+    pub fn heading_focused(&self, w: &Window) -> bool { self.heading.is_focused(w) }
+    #[cfg(feature = "ui-tests")]
+    pub fn close_for_test(&mut self, cx: &mut Context<Self>) { self.close(cx); }
     pub fn is_open(&self) -> bool {
         self.open
     }
@@ -272,9 +276,10 @@ impl QuickStart {
 }
 impl Render for QuickStart {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.focus_heading {
+        // Only the mounted, topmost owner takes focus: hidden behind a notice, a load or a page, the request waits.
+        if self.focus_heading && crate::overlay_gate::may_focus(crate::overlay_gate::Layer::QuickStart) {
             let heading = self.heading.clone();
-            w.on_next_frame(move |w, cx| heading.focus(w, cx));
+            w.on_next_frame(move |w, cx| { if crate::overlay_gate::may_focus(crate::overlay_gate::Layer::QuickStart) { heading.focus(w, cx); } });
             self.focus_heading = false;
         }
         let width = f32::from(w.viewport_size().width);
@@ -506,4 +511,11 @@ impl Render for QuickStart {
                     ),
             )
     }
+}
+impl crate::overlay_gate::DefaultFocus for QuickStart {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.focus_heading = true;
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, _cx: &App) -> bool { self.heading.is_focused(window) }
 }

@@ -157,6 +157,7 @@ mod model_catalog;
 mod model_install;
 mod model_service;
 mod models;
+mod overlay_gate;
 mod pitch_strip;
 mod project_analysis;
 mod project_lyrics;
@@ -777,7 +778,8 @@ struct Player {
     previous_focus: Option<FocusHandle>,
     modal_was_open: bool,
     notice_was_open: bool,
-    notice_previous_focus: Option<(u64,FocusHandle)>,
+    /// The control that held focus when a notice or scrim took it, restored once nothing owns input again.
+    overlay_restore: Option<(u64,FocusHandle)>,
     quick_start: Entity<quick_start::QuickStart>,
     whats_new: Entity<whats_new::WhatsNew>,
     release_service: Option<release_highlights::Service>,
@@ -856,6 +858,10 @@ impl Player {
             cx.notify();
         });
         a11y::bind_keys(cx);
+        cx.bind_keys([
+            KeyBinding::new("tab", HoldTab, Some("SingZTabHeld")),
+            KeyBinding::new("shift-tab", HoldTab, Some("SingZTabHeld")),
+        ]);
         let success_toast=cx.new(singz_uikit::Toast::new);
         let engine_setup=cx.new(|cx|engine_setup::EngineSetup::new(window,cx));
         let engine_setup_subscription=cx.subscribe(&engine_setup,|this,_,event,cx|{
@@ -1263,7 +1269,7 @@ impl Player {
         });
         let transport_subscription = cx.subscribe_in(&transport, window, |this, _, event, window, cx| {
             use transport::TransportEvent::*;
-            if matches!(*event,BpmClosed){this.focus_handle.focus(window,cx);this.focus_player=false;cx.notify();return;}
+            if matches!(*event,BpmClosed){if overlay_gate::may_focus_player(){this.focus_handle.focus(window,cx);this.focus_player=false;}else{this.focus_player=true;}cx.notify();return;}
             if matches!(*event,CarryLine){this.toggle_carry_popover(cx);return;}
             if matches!(*event, Metronome) {
                 if this.loaded_song && this.audio_available()
@@ -1693,7 +1699,7 @@ impl Player {
             previous_focus: None,
             modal_was_open: false,
             notice_was_open: false,
-            notice_previous_focus: None,
+            overlay_restore: None,
             quick_start,
             whats_new,release_service,release_startup_ready,release_pending:None,update_snapshot:None,
             #[cfg(feature="ui-tests")]
@@ -2356,12 +2362,16 @@ impl Player {
         }
     }
     fn rename_title(&mut self, name: String, cx: &mut Context<Self>) {
-        if let Err(error) = source_jobs::checked_name(&name) {
-            self.notice = Some(error.to_string());
-            cx.notify();
-            return;
-        }
-        let name = name.trim().to_owned();
+        // Validate the name the user means, as Electron does (`raw.trim()` before `safeName`): a
+        // typed title keeps its surrounding spaces until here, and a trailing one is not part of it.
+        let name = match source_jobs::typed_title(&name) {
+            Ok(trimmed) => trimmed,
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
         if name.is_empty()
             || name == self.song_title.as_str()
             || (self.tracks_flight.tracks_pending.is_some()||self.carry_flight.carry.is_some()||self.rate_busy())
@@ -2732,17 +2742,100 @@ impl Player {
         } else { source_jobs::OpenAttempt::Failed }
     }
     /// A modal or full-screen overlay covers the player; the output meter freezes.
+    /// The quick start is on screen: open, and not hidden behind a page, a notice or a load.
+    fn quick_start_mounted(&self, cx: &App) -> bool {
+        self.quick_start.read(cx).is_open()
+            && !matches!(self.screen, Screen::Settings | Screen::Models | Screen::Log)
+            && self.notice.is_none()
+            && !self.loading
+    }
+    /// Remember the control a notice or scrim is taking focus from (once: a second overlay keeps the first's).
+    fn save_overlay_restore(&mut self, window: &Window, cx: &App) {
+        if self.overlay_restore.is_none() {
+            if let Some(held) = window.focused(cx) {
+                if held != self.focus_handle && held != self.notice_focus {
+                    self.overlay_restore = Some((self.native_epoch, held));
+                }
+            }
+        }
+    }
+    /// Every layer `render` paints right now, with the same predicates the render uses (see `overlay_gate`).
+    fn active_layers(&self, cx: &App) -> overlay_gate::Active {
+        use overlay_gate::{Active, Layer};
+        Active::default()
+            .with(Layer::WhatsNew, self.whats_new.read(cx).is_open() && self.release_surface_available(cx))
+            .with(Layer::EngineSetup, self.engine_setup.read(cx).is_open())
+            .with(Layer::StemExport, self.stem_export_open)
+            .with(Layer::LibraryImport, self.library_import_open)
+            .with(Layer::ProjectPicker, self.project_picker_open)
+            .with(Layer::DriveProjects, self.drive_projects_open)
+            .with(Layer::ProjectDelete, self.project_delete.read(cx).is_open())
+            .with(Layer::LyricsEditor, self.lyrics_editor_open)
+            .with(Layer::Page, matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models))
+            .with(Layer::LoadingScrim, self.loading && !self.source_split_loading())
+            .with(Layer::SourceScrim, self.source_job.is_some() && self.source_split.is_none())
+            .with(Layer::QuickStart, self.quick_start_mounted(cx))
+            .with(Layer::LanguageMenu, self.language_menu.read(cx).is_open())
+            .with(Layer::Notice, self.notice.is_some())
+    }
+    /// Focus is mounted inside the topmost owner's own focus scope (the root for no owner, or a scrim): not unset, not
+    /// the notice's handle, and not a live control of something behind the owner.
+    fn focus_is_live(&self, topmost: Option<overlay_gate::Layer>, window: &Window, cx: &App) -> bool {
+        use overlay_gate::{DefaultFocus, Layer};
+        let Some(held) = window.focused(cx) else { return false; };
+        if held == self.notice_focus { return false; }
+        match topmost {
+            None => self.focus_handle.contains(&held, window),
+            Some(layer) if layer.is_scrim() => held == self.focus_handle,
+            Some(Layer::WhatsNew) => self.whats_new.read(cx).focus_inside(window, cx),
+            Some(Layer::EngineSetup) => self.engine_setup.read(cx).focus_inside(window, cx),
+            Some(Layer::StemExport) => self.stem_export_dialog.read(cx).focus_inside(window, cx),
+            Some(Layer::LibraryImport) => self.library_import.read(cx).focus_inside(window, cx),
+            Some(Layer::ProjectPicker) => self.project_picker.read(cx).focus_inside(window, cx),
+            Some(Layer::DriveProjects) => self.drive_projects.read(cx).focus_inside(window, cx),
+            Some(Layer::ProjectDelete) => self.project_delete.read(cx).focus_inside(window, cx),
+            Some(Layer::LyricsEditor) => self.lyrics_editor.read(cx).focus_inside(window, cx),
+            Some(Layer::QuickStart) => self.quick_start.read(cx).focus_inside(window, cx),
+            Some(Layer::Page) => match self.screen {
+                Screen::Settings => self.settings.read(cx).focus_inside(window, cx),
+                Screen::Models => self.models.read(cx).focus_inside(window, cx),
+                Screen::Log => self.log_panel.read(cx).focus_inside(window, cx),
+                _ => self.focus_handle.contains(&held, window),
+            },
+            Some(Layer::LanguageMenu) => self.language_menu.read(cx).focus_scope_inside(window, cx),
+            Some(Layer::LoadingScrim | Layer::SourceScrim | Layer::Notice) => false,
+        }
+    }
+    /// Ask the topmost owner, a layer that manages its own focus, to focus its default control (see
+    /// `overlay_gate::DefaultFocus`). False when the layer has none (a page, a menu, a scrim, a notice).
+    fn request_layer_default_focus(&mut self, layer: overlay_gate::Layer, cx: &mut Context<Self>) -> bool {
+        use overlay_gate::{DefaultFocus, Layer};
+        if overlay_gate::default_focus_disabled(layer) { return false; }
+        match layer {
+            Layer::WhatsNew => self.whats_new.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::EngineSetup => self.engine_setup.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::StemExport => self.stem_export_dialog.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::LibraryImport => self.library_import.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::ProjectPicker => self.project_picker.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::DriveProjects => self.drive_projects.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::ProjectDelete => self.project_delete.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::LyricsEditor => self.lyrics_editor.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::QuickStart => self.quick_start.update(cx, |d, cx| d.request_default_focus(cx)),
+            Layer::Page => match self.screen {
+                Screen::Settings => self.settings.update(cx, |d, cx| d.request_default_focus(cx)),
+                Screen::Models => self.models.update(cx, |d, cx| d.request_default_focus(cx)),
+                Screen::Log => self.log_panel.update(cx, |d, cx| d.request_default_focus(cx)),
+                _ => return false,
+            },
+            Layer::LoadingScrim | Layer::SourceScrim | Layer::LanguageMenu | Layer::Notice => return false,
+        }
+        true
+    }
+    fn overlay_owns_input_without_menu(&self, cx: &App) -> bool {
+        overlay_gate::topmost_of(self.active_layers(cx).without(overlay_gate::Layer::LanguageMenu)).is_some_and(|layer| layer > overlay_gate::Layer::Page)
+    }
     fn output_covered(&self, cx: &App) -> bool {
-        (self.loading && !self.source_split_loading()) || (self.source_job.is_some() && self.source_split.is_none())
-            || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
-            || self.project_delete.read(cx).is_open()
-            || self.lyrics_editor_open
-            || self.project_picker_open || self.drive_projects_open
-            || self.library_import_open || self.stem_export_open
-            || self.notice.is_some()
-            || self.engine_setup.read(cx).is_open()
-            || self.whats_new.read(cx).is_open()
-            || self.quick_start.read(cx).is_open()
+        !self.active_layers(cx).without(overlay_gate::Layer::LanguageMenu).is_empty() || self.quick_start.read(cx).is_open()
     }
     /// Output meter telemetry runs off the poll loop, not root render, so a
     /// paused player still lets the held level decay and clip counts land. It
@@ -5549,15 +5642,17 @@ impl Render for Player {
         if !save_enabled && self.header.read(cx).save_control_focused(window) {
             self.focus_player=true;
         }
-        let explicit_player_focus=self.focus_player && !self.language_menu.read(cx).is_open();
+        // The paint-order owner for this frame (see `overlay_gate`). A request to focus the player waits while
+        // anything is painted above it, and is served the first frame nothing is.
+        let active = self.active_layers(cx);
+        let topmost = overlay_gate::topmost_of(active);
+        overlay_gate::set(active);
+        let explicit_player_focus=self.focus_player && topmost.is_none();
         if explicit_player_focus {
             self.focus_handle.focus(window, cx);
             self.focus_player = false;
         }
         let notice_open=self.notice.is_some();
-        // Capture before the outer modal transition moves focus to the root.
-        // A notice can also appear above an already-open editor or Settings.
-        let notice_focus=if notice_open&&!self.notice_was_open {window.focused(cx)}else{None};
         let modal_open = self.output_covered(cx);
         let backdrop_open = self.blurred_modal_open(cx);
         if backdrop_open && !self.backdrop_clock.is_open() {
@@ -5582,30 +5677,69 @@ impl Render for Player {
                 {
                     self.focus_handle.focus(window, cx);
                 }
-            } else if let Some(previous) = self.previous_focus.take() {
+            } else {
                 // Navigation/import may remove the control that opened this
                 // modal. Its explicit focus handoff wins over restoring that
                 // stale handle, or subsequent shortcuts have no mounted route.
+                // When nothing held focus as the modal opened (a mouse click on a card that then
+                // failed to open), there is nothing to restore, and a keyboard user would be left
+                // with no focus and a Tab that goes nowhere: the player root takes it.
+                let previous = self.previous_focus.take();
                 if !explicit_player_focus {
-                    if self.focus_handle.contains(&previous,window) { previous.focus(window,cx); }
-                    else { self.focus_handle.focus(window,cx); }
+                    match previous {
+                        Some(previous) if self.focus_handle.contains(&previous,window) => previous.focus(window,cx),
+                        _ => self.focus_handle.focus(window,cx),
+                    }
                 }
             }
             self.modal_was_open = modal_open;
         }
         if notice_open!=self.notice_was_open {
-            if notice_open {
-                self.notice_previous_focus=notice_focus.map(|focus|(self.native_epoch,focus));
-                self.notice_focus.focus(window,cx);
-            } else if let Some((epoch,previous))=self.notice_previous_focus.take() {
-                // Do not restore a superseded/unmounted control after navigation.
-                // The outer modal owns restoration when the notice was alone.
-                if modal_open && !explicit_player_focus && epoch==self.native_epoch
-                    && self.focus_handle.contains(&previous,window) {
-                    previous.focus(window,cx);
+            if notice_open { self.save_overlay_restore(window,cx); self.notice_focus.focus(window,cx); }
+            self.notice_was_open=notice_open;
+        }
+        // Level-triggered: while an overlay owns input, focus must not rest on the page behind it, whatever order
+        // the overlay, the page and any focus restoration arrived in. A notice owns its Close button; a project
+        // loading or a source job has no focusable owner, so the player root owns its keys; the dialogs and the
+        // mounted quick start keep the focus they manage. Acted on only when violated, so there is no refocus
+        // loop and no redraw while idle. The control that held focus is saved once and survives stacked overlays
+        // (a notice replaced by a source scrim, say); it is restored when neither a notice nor a scrim owns input.
+        match topmost {
+            Some(overlay_gate::Layer::Notice) if !self.notice_focus.is_focused(window) => {
+                self.save_overlay_restore(window, cx);
+                self.notice_focus.focus(window, cx);
+            }
+            Some(layer) if layer.is_scrim() && !self.focus_handle.is_focused(window) => {
+                self.save_overlay_restore(window, cx);
+                self.focus_handle.focus(window, cx);
+            }
+            _ => {}
+        }
+        let notice_or_scrim = topmost.is_some_and(|layer| layer == overlay_gate::Layer::Notice || layer.is_scrim());
+        if self.overlay_restore.is_some() && !notice_or_scrim {
+            if let Some((epoch, previous)) = self.overlay_restore.take() {
+                if !explicit_player_focus {
+                    let restorable = epoch == self.native_epoch && self.focus_handle.contains(&previous, window);
+                    if restorable { previous.focus(window, cx); }
+                    else if !topmost.is_some_and(|layer| self.request_layer_default_focus(layer, cx)) && !(topmost.is_some() && self.focus_is_live(topmost, window, cx)) {
+                        // The saved control was unmounted (a notice took the guide or What's New away, or a status
+                        // replaced it) and the owner has no default of its own: focus goes to the owner's own scope
+                        // (a menu), else the player root, which keeps a dispatch path. A live control of something
+                        // behind the owner does not count as the owner's focus.
+                        if topmost == Some(overlay_gate::Layer::LanguageMenu) {
+                            self.language_menu.update(cx, |menu, cx| menu.focus_scope(window, cx));
+                        } else {
+                            self.focus_handle.focus(window, cx);
+                        }
+                    }
                 }
             }
-            self.notice_was_open=notice_open;
+        }
+        // Restoring the control that was focused before a modal can land on a handle that is no longer
+        // mounted (a card whose open failed), which leaves nothing focused: no shortcut and no Tab reaches
+        // the page. Whenever no modal is open and nothing holds focus, the player root does.
+        if !modal_open && !self.language_menu.read(cx).is_open() && window.focused(cx).is_none() {
+            self.focus_handle.focus(window,cx);
         }
         self.library.update(cx, |library, cx| {
             library.set_suspended(
@@ -5963,8 +6097,16 @@ impl Render for Player {
                         .when(self.backend.is_none()||self.lyrics_sidebar.read(cx).shows_lyrics(),|sidebar|sidebar.child(self.lyrics(cx))))))
                 .child(self.transport.clone()).into_any_element(),
         };
+        // While an overlay that owns input is up (`overlay_owns_input`, the overlay part of the predicate behind
+        // `modal_open`: a project loading, a source job, a dialog, a notice) and focus rests on the player root, gpui-component's `Root`
+        // Tab action would walk the tab stops of the page behind it. This deeper context binds Tab and Shift+Tab to
+        // a no-op for exactly that state. It keys on the overlay, not on the page behind it, so it also holds over
+        // Settings, Log and Models; a page with no overlay owns its own Tab order, and focus inside a dialog is not
+        // the root's, so neither is touched.
+        let tab_held = self.overlay_owns_input_without_menu(cx) && self.focus_handle.is_focused(window);
         let root = div()
             .id("app")
+            .when(tab_held, |root| root.key_context("SingZTabHeld").on_action(cx.listener(|_, _: &HoldTab, _, cx| cx.stop_propagation())))
             .role(gpui_kit::accesskit::Role::Group)
             .accessibility_id("app")
             .aria_label("SingZ")
@@ -6130,7 +6272,6 @@ impl Render for Player {
                         _ => {}
                     }
                 }
-
             }))
             .relative()
             .size_full()
@@ -6281,13 +6422,7 @@ impl Render for Player {
                 )
             },
         );
-        let root = root.when(
-            self.quick_start.read(cx).is_open()
-                && !matches!(self.screen, Screen::Settings | Screen::Models | Screen::Log)
-                && self.notice.is_none()
-                && !self.loading,
-            |root| root.child(self.quick_start.clone()),
-        );
+        let root = root.when(self.quick_start_mounted(cx), |root| root.child(self.quick_start.clone()));
         let root=root.when(self.language_menu.read(cx).is_open(),|root|root.child(self.language_menu.clone()));
         let root = root.when(self.screen == Screen::Log || self.engine_setup.read(cx).is_open(), |root| {
             root.child(gpui_kit::base::TextSelectionLayer)
@@ -6315,6 +6450,8 @@ impl Render for Player {
         root
     }
 }
+
+actions!(singz_player, [HoldTab]);
 
 struct Assets;
 impl AssetSource for Assets {

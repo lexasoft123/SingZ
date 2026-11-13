@@ -367,7 +367,7 @@ fn cached_project(path: &Path) -> Result<crate::integration::Project> {
             let source = path.join(rel);
             let m = fs::symlink_metadata(&source)?;
             ensure!(
-                m.is_file() && !m.file_type().is_symlink() && source.canonicalize()? == source,
+                m.is_file() && !m.file_type().is_symlink() && drive_adopt::is_canonical(&source)?,
                 "Unavailable cached custom source"
             );
         }

@@ -81,7 +81,8 @@ fn play(view: &Entity<Player>, w: &mut Window, cx: &mut App) -> anyhow::Result<(
     Ok(())
 }
 fn songs(view: &Entity<Player>, w: &mut Window, cx: &mut App) -> anyhow::Result<()> {
-    super::ui_training_run::header_control(view, w, cx, "songs")
+    // The Songs tab only pauses a loaded song; the catalog button is what opens the library.
+    super::ui_training_run::header_control(view, w, cx, "catalog")
 }
 fn ensure_library(view: &Entity<Player>, w: &mut Window, cx: &mut App) -> anyhow::Result<()> {
     if view.read(cx).screen != Screen::Library { songs(view, w, cx)?; }
@@ -144,6 +145,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    wait!(p,w,app=>!p.loading&&p.screen==Screen::Player&&p.project.as_ref().is_some_and(|s|s.dir==current)&&p.duration>100.);
    handle.update(cx,|_,w,cx|play(&view,w,cx))??;wait!(p,w,app=>p.playing&&p.playhead.position()>0.1);
    handle.update(cx,|_,w,cx|songs(&view,w,cx))??;wait!(p,w,app=>p.screen==Screen::Library);
+   // Entering the catalog pauses the song (by design); resume it so the check below still proves that opening another project's delete dialog leaves the loaded, playing one alone.
+   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Play,cx)))?;wait!(p,w,app=>p.playing);
    let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
    ask!(&other);
    handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);let state=p.project_delete.read(cx).state(w,cx);anyhow::ensure!(p.native_epoch==epoch&&p.playing&&p.project.as_ref().is_some_and(|s|s.dir==current),"Delete click opened the identically named other project");anyhow::ensure!(state["details"]["opened"]==false&&state["focusedControl"]=="project-delete-keep","Other project mislabeled as loaded or safe focus missing: {state}");Ok(())})??;

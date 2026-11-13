@@ -538,6 +538,426 @@ fn notice_above_progress(view:&Entity<Player>,window:&mut Window,cx:&mut App,out
     draw(window,cx);Ok(())
 }
 
+/// One frame, so a page's focus taken after the player root's invariant ran in that frame is still visible.
+fn draw_once(window: &mut Window, cx: &mut App) {
+    window.refresh();
+    window.draw(cx).clear(cx);
+}
+fn press(window: &mut Window, cx: &mut App, name: &'static str) {
+    draw(window, cx);
+    window.dispatch_event(
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: Keystroke::parse(name).unwrap(), is_held: false, prefer_character_input: false }),
+        cx,
+    );
+}
+/// An overlay that comes up OVER a full page (a source job dropped while Settings is showing, or a load) must take
+/// focus from the page: the page's own key handler would otherwise keep walking and activating its controls
+/// behind it. Settings is up with a control focused; start the overlay; Tab, Shift+Tab and Enter must move and
+/// change nothing in Settings.
+fn overlay_over_settings(view: &Entity<Player>, window: &mut Window, cx: &mut App, overlay: &str) -> anyhow::Result<()> {
+    draw(window, cx);
+    let settings = view.read(cx).settings.clone();
+    settings.update(cx, |s, cx| s.focus_first_control(window, cx));
+    draw(window, cx);
+    anyhow::ensure!(view.read(cx).settings.read(cx).focused_control(window, cx).is_some(), "{overlay}: Settings has no focused control to start from");
+    let before = view.read(cx).settings.read(cx).native_snapshot();
+    let before = (before.1, before.2, before.3);
+    view.update(cx, |p, cx| {
+        if overlay == "source job" { p.source_job = Some(u64::MAX); p.source_saving = true; } else { p.loading = true; }
+        cx.notify();
+    });
+    draw(window, cx);
+    let focus_left = view.read(cx).settings.read(cx).focused_control(window, cx).is_none() && view.read(cx).focus_handle.is_focused(window);
+    for key in ["tab", "shift-tab", "tab", "enter"] { press(window, cx, key); draw(window, cx); }
+    let walked = view.read(cx).settings.read(cx).focused_control(window, cx);
+    let after = view.read(cx).settings.read(cx).native_snapshot();
+    let after = (after.1, after.2, after.3);
+    let intact = view.read(cx).screen == Screen::Settings && view.read(cx).notice.is_none();
+    view.update(cx, |p, cx| { p.source_job = None; p.source_saving = false; p.loading = false; cx.notify(); });
+    draw(window, cx);
+    anyhow::ensure!(focus_left, "{overlay}: the overlay did not take focus from the Settings control");
+    anyhow::ensure!(walked.is_none(), "{overlay}: a Tab walked to the Settings control {walked:?} behind the overlay");
+    anyhow::ensure!(after == before && intact, "{overlay}: a key changed Settings behind the overlay");
+    Ok(())
+}
+
+/// The source overlay is up first and the Models page mounts afterwards (an automatic Models open while a source Open
+/// runs): the page's pending focus must wait, the root keeps focus, and its keys do nothing.
+fn models_mounts_under_overlay(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    view.update(cx, |p, cx| { p.source_job = Some(u64::MAX); p.source_saving = true; cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| p.open_models(models::Origin::Manual, cx));
+    for _ in 0..3 { draw(window, cx); }
+    let root_first = view.read(cx).focus_handle.is_focused(window);
+    for key in ["tab", "shift-tab", "tab", "enter"] { press(window, cx, key); draw(window, cx); }
+    let root_after = view.read(cx).focus_handle.is_focused(window);
+    let on_models = view.read(cx).screen == Screen::Models;
+    view.update(cx, |p, cx| { p.source_job = None; p.source_saving = false; cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    let restored = view.read(cx).models.read(cx).keyboard_snapshot(window, cx)["focusInside"] == true;
+    view.update(cx, |p, cx| { p.screen = Screen::Settings; cx.notify(); });
+    draw(window, cx);
+    anyhow::ensure!(on_models, "models-under-overlay: the fixture did not reach the Models page");
+    anyhow::ensure!(restored, "models-under-overlay: the Models page never took its deferred focus once the overlay cleared");
+    anyhow::ensure!(root_first, "models-under-overlay: the Models page took focus from the root while an overlay owned input");
+    anyhow::ensure!(root_after, "models-under-overlay: a key moved focus into the Models page behind the overlay");
+    Ok(())
+}
+/// A notice over Settings is replaced by a source scrim (a file dropped while the notice was up: the source start
+/// clears the notice and starts the scrim in one step). Closing the notice must not restore the saved Settings control.
+fn notice_replaced_by_source_over_settings(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    draw(window, cx);
+    let settings = view.read(cx).settings.clone();
+    settings.update(cx, |s, cx| s.focus_first_control(window, cx));
+    draw(window, cx);
+    let held = view.read(cx).settings.read(cx).focused_control(window, cx);
+    anyhow::ensure!(held.is_some(), "notice-to-source: Settings has no focused control to start from");
+    view.update(cx, |p, cx| { p.notice = Some("Focus fixture".into()); cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| { p.notice = None; p.source_job = Some(u64::MAX); p.source_saving = true; cx.notify(); });
+    draw(window, cx);
+    let focus_left = view.read(cx).settings.read(cx).focused_control(window, cx).is_none() && view.read(cx).focus_handle.is_focused(window);
+    for key in ["tab", "shift-tab", "enter"] { press(window, cx, key); draw(window, cx); }
+    let walked = view.read(cx).settings.read(cx).focused_control(window, cx);
+    view.update(cx, |p, cx| { p.source_job = None; p.source_saving = false; cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    let back = view.read(cx).settings.read(cx).focused_control(window, cx);
+    anyhow::ensure!(focus_left, "notice-to-source: closing the notice restored focus to the Settings control under the scrim");
+    anyhow::ensure!(walked.is_none(), "notice-to-source: a key reached the Settings control {walked:?} behind the scrim");
+    anyhow::ensure!(back == held, "notice-to-source: once the scrim finished, focus did not return to the Settings control ({back:?}, was {held:?})");
+    Ok(())
+}
+/// The Log page opened while a source scrim is up: it must not take focus (nor act on keys) behind the scrim, and
+/// takes its deferred focus once the scrim clears.
+fn log_opened_under_scrim(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| { p.source_job = Some(u64::MAX); p.source_saving = true; cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| p.open_diagnostics(cx));
+    draw_once(window, cx);
+    let inside_first_frame = view.read(cx).log_panel.read(cx).state(window, cx)["focusInside"] == true;
+    for _ in 0..4 { draw(window, cx); }
+    let root_held = view.read(cx).focus_handle.is_focused(window);
+    let inside = inside_first_frame || view.read(cx).log_panel.read(cx).state(window, cx)["focusInside"] == true;
+    for key in ["tab", "shift-tab", "enter"] { press(window, cx, key); draw(window, cx); }
+    let still_open = view.read(cx).screen == Screen::Log && view.read(cx).log_panel.read(cx).state(window, cx)["open"] == true;
+    let inside_after_keys = view.read(cx).log_panel.read(cx).state(window, cx)["focusInside"] == true;
+    view.update(cx, |p, cx| { p.source_job = None; p.source_saving = false; cx.notify(); });
+    for _ in 0..4 { draw(window, cx); }
+    let took_it = view.read(cx).log_panel.read(cx).state(window, cx)["focusInside"] == true;
+    view.update(cx, |p, cx| { p.close_diagnostics(cx); p.screen = Screen::Settings; cx.notify(); });
+    draw(window, cx);
+    anyhow::ensure!(root_held && !inside, "log-under-scrim: the Log page took focus while a source scrim owned input");
+    anyhow::ensure!(still_open && !inside_after_keys, "log-under-scrim: a key reached the Log page behind the scrim");
+    anyhow::ensure!(took_it, "log-under-scrim: the Log page never took its deferred focus once the scrim cleared");
+    Ok(())
+}
+/// Settings mounting in the same render as an arriving source scrim: the page's pending focus waits for the scrim.
+fn settings_mounts_with_scrim(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| { p.open_desktop_settings(window, cx); p.source_job = Some(u64::MAX); p.source_saving = true; cx.notify(); });
+    draw_once(window, cx);
+    let inside_first_frame = view.read(cx).settings.read(cx).scope_focused(window, cx);
+    for _ in 0..3 { draw(window, cx); }
+    let root_held = view.read(cx).focus_handle.is_focused(window);
+    let inside = inside_first_frame || view.read(cx).settings.read(cx).scope_focused(window, cx);
+    view.update(cx, |p, cx| { p.source_job = None; p.source_saving = false; cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    let took_it = view.read(cx).settings.read(cx).scope_focused(window, cx);
+    anyhow::ensure!(view.read(cx).screen == Screen::Settings, "settings-with-scrim: the fixture did not reach Settings");
+    anyhow::ensure!(root_held && !inside, "settings-with-scrim: Settings took focus in the render the scrim arrived in");
+    anyhow::ensure!(took_it, "settings-with-scrim: Settings never took its deferred focus once the scrim cleared");
+    Ok(())
+}
+/// The quick start is open but hidden behind a notice: the notice keeps focus, and a focus lost while it is up
+/// (the quick start's deferred heading focus, say) comes back to the notice.
+fn quick_start_hidden_under_notice(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| { p.open_quick_start(false, cx); p.notice = Some("Focus fixture".into()); cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    window.blur(cx);
+    for _ in 0..3 { draw(window, cx); }
+    let notice_keeps_focus = view.read(cx).notice_focus.is_focused(window);
+    view.update(cx, |p, cx| { p.notice = None; p.quick_start.update(cx, |q, cx| q.close_for_test(cx)); cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    anyhow::ensure!(notice_keeps_focus, "quick-start-under-notice: focus left the notice while the quick start was hidden behind it");
+    Ok(())
+}
+/// A deletion is busy (the dialog's own scope holds focus) when an asynchronous notice arrives: the notice keeps
+/// focus in every frame, a focus request the dialog makes while the notice is up waits, and the dialog takes it
+/// once the notice is gone. The delete dialog's render runs after the player root's invariant, so any ungated focus
+/// it takes shows in the same frame.
+fn busy_delete_under_notice(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    let dialog = view.read(cx).project_delete.clone();
+    dialog.update(cx, |d, cx| d.open(crate::project_delete_dialog::Details { name: "Fixture".into(), stem_count: 1, has_lyrics: false, bytes: 1, opened: false }, cx));
+    for _ in 0..3 { draw(window, cx); }
+    dialog.update(cx, |d, cx| d.set_busy(true, cx));
+    for _ in 0..3 { draw(window, cx); }
+    anyhow::ensure!(dialog.read(cx).state(window, cx)["focusInside"] == true, "busy-delete: the busy dialog does not hold focus before the notice");
+    view.update(cx, |p, cx| { p.notice = Some("Async notice fixture".into()); cx.notify(); });
+    let mut lost = Vec::new();
+    for frame in 0..5 {
+        draw_once(window, cx);
+        if !view.read(cx).notice_focus.is_focused(window) { lost.push(frame); }
+    }
+    // The deletion finishes with the notice still up: the dialog's refocus request waits.
+    dialog.update(cx, |d, cx| d.set_busy(false, cx));
+    let mut stolen = Vec::new();
+    for frame in 0..5 {
+        draw_once(window, cx);
+        if !view.read(cx).notice_focus.is_focused(window) { stolen.push(frame); }
+    }
+    view.update(cx, |p, cx| { p.notice = None; cx.notify(); });
+    for _ in 0..4 { draw(window, cx); }
+    let served = dialog.read(cx).state(window, cx)["focusInside"] == true;
+    dialog.update(cx, |d, cx| d.close(cx));
+    for _ in 0..3 { draw(window, cx); }
+    anyhow::ensure!(lost.is_empty(), "busy-delete: the notice lost focus to the busy delete dialog in frames {lost:?}");
+    anyhow::ensure!(stolen.is_empty(), "busy-delete: the dialog's deferred focus took it from the notice in frames {stolen:?}");
+    anyhow::ensure!(served, "busy-delete: the dialog never took its deferred focus once the notice was gone");
+    Ok(())
+}
+/// A source file dropped while a dialog is open starts a Preparing scrim painted above the dialog: the scrim owns
+/// input (the player root holds focus, Tab and Enter do nothing in the dialog), and the dialog is served again when
+/// the scrim clears.
+fn dialog_under_dropped_source(view: &Entity<Player>, window: &mut Window, cx: &mut App, dialog: &str) -> anyhow::Result<()> {
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    match dialog {
+        "project picker" => view.update(cx, |p, cx| p.open_project_picker(cx)),
+        _ => view.update(cx, |p, cx| p.open_drive_projects(window, cx)),
+    }
+    for _ in 0..4 { draw(window, cx); }
+    let open = |p: &Player| if dialog == "project picker" { p.project_picker_open } else { p.drive_projects_open };
+    anyhow::ensure!(open(view.read(cx)), "{dialog}-under-drop: the fixture did not open the dialog");
+    let inside = |view: &Entity<Player>, window: &Window, cx: &App| -> bool {
+        if dialog == "project picker" { view.read(cx).project_picker.read(cx).state(window, cx)["focusInside"] == true }
+        else { view.read(cx).drive_projects.read(cx).focus_inside(window, cx) }
+    };
+    let held_before = inside(view, window, cx);
+    view.update(cx, |p, cx| { p.source_job = Some(u64::MAX); p.source_saving = true; cx.notify(); });
+    for _ in 0..4 { draw(window, cx); }
+    let root_held = view.read(cx).focus_handle.is_focused(window);
+    let mut moved = Vec::new();
+    for key in ["tab", "shift-tab", "enter", "down"] {
+        press(window, cx, key); draw(window, cx);
+        if inside(view, window, cx) || !view.read(cx).focus_handle.is_focused(window) { moved.push(key); }
+    }
+    let still_open = open(view.read(cx));
+    view.update(cx, |p, cx| { p.source_job = None; p.source_saving = false; cx.notify(); });
+    for _ in 0..4 { draw(window, cx); }
+    let back = inside(view, window, cx);
+    view.update(cx, |p, cx| if dialog == "project picker" { p.project_picker_open = false; } else { p.drive_projects_open = false; });
+    for _ in 0..3 { draw(window, cx); }
+    anyhow::ensure!(held_before, "{dialog}-under-drop: the dialog did not hold focus before the drop");
+    anyhow::ensure!(root_held, "{dialog}-under-drop: the source scrim did not take focus from the dialog");
+    anyhow::ensure!(moved.is_empty() && still_open, "{dialog}-under-drop: keys {moved:?} reached the dialog behind the scrim");
+    anyhow::ensure!(back, "{dialog}-under-drop: the dialog did not get its focus back once the scrim cleared");
+    Ok(())
+}
+/// Focus on the guide, an asynchronous notice arrives and closes: the guide unmounted while the notice was up, so
+/// the saved control is gone and the guide asks for its heading again.
+fn quick_start_resumes_after_notice(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| { p.open_quick_start(false, cx); cx.notify(); });
+    for _ in 0..4 { draw(window, cx); }
+    let quick_start = view.read(cx).quick_start.clone();
+    anyhow::ensure!(quick_start.read(cx).heading_focused(window), "quick-start-resume: the guide did not take focus when it opened");
+    view.update(cx, |p, cx| { p.notice = Some("Async notice fixture".into()); cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    view.update(cx, |p, cx| { p.notice = None; cx.notify(); });
+    for _ in 0..4 { draw(window, cx); }
+    let resumed = quick_start.read(cx).heading_focused(window);
+    view.update(cx, |p, cx| { p.quick_start.update(cx, |q, cx| q.close_for_test(cx)); cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    anyhow::ensure!(resumed, "quick-start-resume: focus did not return to the guide after the notice closed");
+    Ok(())
+}
+/// What's New is open and settled, an asynchronous notice stays up for several frames (it unmounts What's New) and
+/// closes: the dialog is visible again and focus must be inside it, so Tab stays in the dialog.
+fn whats_new_resumes_after_notice(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    use crate::overlay_gate::DefaultFocus;
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| p.open_release_highlights(cx));
+    for _ in 0..6 { draw(window, cx); }
+    let dialog = view.read(cx).whats_new.clone();
+    anyhow::ensure!(dialog.read(cx).is_open(), "whats-new-resume: the fixture did not open What's New");
+    anyhow::ensure!(dialog.read(cx).focus_inside(window, cx), "whats-new-resume: What's New did not hold focus once settled");
+    view.update(cx, |p, cx| { p.notice = Some("Async notice fixture".into()); cx.notify(); });
+    for _ in 0..6 { draw(window, cx); }
+    view.update(cx, |p, cx| { p.notice = None; cx.notify(); });
+    for _ in 0..4 { draw(window, cx); }
+    let resumed = dialog.read(cx).focus_inside(window, cx);
+    press(window, cx, "tab"); draw(window, cx);
+    let after_tab = dialog.read(cx).focus_inside(window, cx);
+    dialog.update(cx, |d, cx| d.close(cx));
+    for _ in 0..3 { draw(window, cx); }
+    anyhow::ensure!(resumed, "whats-new-resume: focus did not return to What's New after the notice closed");
+    anyhow::ensure!(after_tab, "whats-new-resume: Tab left What's New for the page behind it");
+    Ok(())
+}
+/// A layer of the walk below: a dialog or the guide, or one of the three full pages (the Page layer's default depends
+/// on the screen).
+#[derive(Clone, Copy, PartialEq)]
+enum WalkCase { Layer(crate::overlay_gate::Layer), Page(Screen) }
+impl std::fmt::Debug for WalkCase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WalkCase::Layer(layer) => write!(f, "{layer:?}"),
+            WalkCase::Page(Screen::Settings) => write!(f, "Page(Settings)"),
+            WalkCase::Page(Screen::Models) => write!(f, "Page(Models)"),
+            WalkCase::Page(_) => write!(f, "Page(Log)"),
+        }
+    }
+}
+fn walk_cases() -> Vec<WalkCase> {
+    use crate::overlay_gate::{Layer, PAINT_ORDER};
+    let mut cases: Vec<WalkCase> = PAINT_ORDER.iter().filter(|l| !matches!(l, Layer::Page | Layer::LoadingScrim | Layer::SourceScrim | Layer::LanguageMenu | Layer::Notice)).map(|l| WalkCase::Layer(*l)).collect();
+    cases.extend([Screen::Settings, Screen::Models, Screen::Log].map(WalkCase::Page));
+    cases
+}
+fn walk_inside(view: &Entity<Player>, case: WalkCase, window: &Window, cx: &App) -> bool {
+    use crate::overlay_gate::{DefaultFocus, Layer};
+    let p = view.read(cx);
+    match case {
+        WalkCase::Layer(Layer::WhatsNew) => p.whats_new.read(cx).focus_inside(window, cx),
+        WalkCase::Layer(Layer::EngineSetup) => p.engine_setup.read(cx).focus_inside(window, cx),
+        WalkCase::Layer(Layer::StemExport) => p.stem_export_dialog.read(cx).focus_inside(window, cx),
+        WalkCase::Layer(Layer::LibraryImport) => p.library_import.read(cx).focus_inside(window, cx),
+        WalkCase::Layer(Layer::ProjectPicker) => p.project_picker.read(cx).focus_inside(window, cx),
+        WalkCase::Layer(Layer::DriveProjects) => p.drive_projects.read(cx).focus_inside(window, cx),
+        WalkCase::Layer(Layer::ProjectDelete) => p.project_delete.read(cx).focus_inside(window, cx),
+        WalkCase::Layer(Layer::LyricsEditor) => p.lyrics_editor.read(cx).focus_inside(window, cx),
+        WalkCase::Layer(Layer::QuickStart) => p.quick_start.read(cx).focus_inside(window, cx),
+        WalkCase::Page(Screen::Settings) => p.settings.read(cx).focus_inside(window, cx),
+        WalkCase::Page(Screen::Models) => p.models.read(cx).focus_inside(window, cx),
+        WalkCase::Page(Screen::Log) => p.log_panel.read(cx).focus_inside(window, cx),
+        _ => false,
+    }
+}
+/// One pass of "owner open, a notice over it, the notice closes". With `invalidate`, the control saved when the
+/// notice took focus is replaced by a handle that is in no tree (what an async status leaves behind when it replaces
+/// or unmounts that control while the notice is up), so only the owner's own default can put focus back. Returns
+/// (the owner was open and settled, focus is inside it afterwards, the player root holds focus afterwards).
+fn walk_one(view: &Entity<Player>, window: &mut Window, cx: &mut App, case: WalkCase, invalidate: bool) -> anyhow::Result<(bool, bool, bool)> {
+    use crate::overlay_gate::Layer;
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    match case {
+        WalkCase::Layer(Layer::WhatsNew) => view.update(cx, |p, cx| p.open_release_highlights(cx)),
+        WalkCase::Layer(Layer::EngineSetup) => view.update(cx, |p, cx| p.engine_setup.update(cx, |d, cx| d.open(None, cx))),
+        WalkCase::Layer(Layer::StemExport) => view.update(cx, |p, cx| { p.stem_export_open = true; p.stem_export_dialog.update(cx, |d, cx| d.open(Vec::new(), cx)); }),
+        WalkCase::Layer(Layer::LibraryImport) => view.update(cx, |p, cx| { p.library_import_open = true; let dir = std::env::temp_dir(); p.library_import.update(cx, |d, cx| d.open(dir.clone(), dir, cx)); }),
+        WalkCase::Layer(Layer::ProjectPicker) => view.update(cx, |p, cx| p.open_project_picker(cx)),
+        WalkCase::Layer(Layer::DriveProjects) => view.update(cx, |p, cx| p.open_drive_projects(window, cx)),
+        WalkCase::Layer(Layer::ProjectDelete) => view.update(cx, |p, cx| p.project_delete.update(cx, |d, cx| d.open(crate::project_delete_dialog::Details { name: "Fixture".into(), stem_count: 1, has_lyrics: false, bytes: 1, opened: false }, cx))),
+        WalkCase::Layer(Layer::LyricsEditor) => view.update(cx, |p, cx| { p.lyrics_editor_open = true; p.lyrics_editor.update(cx, |d, cx| d.open("Fixture".into(), Vec::new(), 10.0, false, cx)); }),
+        WalkCase::Layer(Layer::QuickStart) => view.update(cx, |p, cx| p.open_quick_start(false, cx)),
+        WalkCase::Page(Screen::Settings) => view.update(cx, |p, cx| p.open_desktop_settings(window, cx)),
+        WalkCase::Page(Screen::Models) => view.update(cx, |p, cx| p.open_models(models::Origin::Manual, cx)),
+        WalkCase::Page(Screen::Log) => view.update(cx, |p, cx| p.open_diagnostics(cx)),
+        _ => anyhow::bail!("not a walk case: {case:?}"),
+    }
+    for _ in 0..6 { draw(window, cx); }
+    let expected_top = match case { WalkCase::Layer(layer) => layer, WalkCase::Page(_) => Layer::Page };
+    let opened = view.read(cx).active_layers(cx).contains(expected_top) && crate::overlay_gate::topmost() == Some(expected_top);
+    let settled = opened && walk_inside(view, case, window, cx);
+    let (mut inside, mut root) = (false, false);
+    if settled {
+        view.update(cx, |p, cx| { p.notice = Some("Async notice fixture".into()); cx.notify(); });
+        for _ in 0..6 { draw(window, cx); }
+        if invalidate {
+            view.update(cx, |p, cx| { p.overlay_restore = Some((p.native_epoch, cx.focus_handle())); });
+        }
+        view.update(cx, |p, cx| { p.notice = None; cx.notify(); });
+        for _ in 0..5 { draw(window, cx); }
+        inside = walk_inside(view, case, window, cx);
+        root = view.read(cx).focus_handle.is_focused(window);
+    }
+    match case {
+        WalkCase::Layer(Layer::WhatsNew) => view.update(cx, |p, cx| p.whats_new.update(cx, |d, cx| d.close(cx))),
+        WalkCase::Layer(Layer::EngineSetup) => view.update(cx, |p, cx| p.engine_setup.update(cx, |d, cx| d.close(cx))),
+        WalkCase::Layer(Layer::StemExport) => view.update(cx, |p, _| p.stem_export_open = false),
+        WalkCase::Layer(Layer::LibraryImport) => view.update(cx, |p, _| p.library_import_open = false),
+        WalkCase::Layer(Layer::ProjectPicker) => view.update(cx, |p, _| p.project_picker_open = false),
+        WalkCase::Layer(Layer::DriveProjects) => view.update(cx, |p, cx| p.close_drive_projects(window, cx)),
+        WalkCase::Layer(Layer::ProjectDelete) => view.update(cx, |p, cx| p.project_delete.update(cx, |d, cx| d.close(cx))),
+        WalkCase::Layer(Layer::LyricsEditor) => view.update(cx, |p, _| p.lyrics_editor_open = false),
+        WalkCase::Layer(Layer::QuickStart) => view.update(cx, |p, cx| p.quick_start.update(cx, |q, cx| q.close_for_test(cx))),
+        WalkCase::Page(Screen::Log) => view.update(cx, |p, cx| p.close_diagnostics(cx)),
+        WalkCase::Page(Screen::Models) => view.update(cx, |p, cx| p.close_models(cx)),
+        WalkCase::Page(_) => view.update(cx, |p, cx| { let settings = p.settings.clone(); settings.update(cx, |_, cx| cx.emit(settings::SettingsEvent::Close)); }),
+        _ => {}
+    }
+    view.update(cx, |p, cx| { p.notice = None; p.screen = Screen::Player; p.overlay_restore = None; cx.notify(); });
+    for _ in 0..4 { draw(window, cx); }
+    Ok((settled, inside, root))
+}
+/// Every layer that manages its own focus, and the three pages, walked through "owner open, a notice over it, the
+/// notice closes", twice: with the saved control intact, and with it invalidated (so the owner's own default-focus
+/// hook is the only way back). A third pass per owner disables that owner's hook and requires the walk to fail, with
+/// the player root (not the stale notice handle) holding focus: each hook is exercised, and a new dialog without one
+/// fails the second pass.
+fn focusable_layers_resume_after_notice(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    use crate::overlay_gate::{disable_default_focus, Layer};
+    let mut failures = Vec::new();
+    for case in walk_cases() {
+        for invalidate in [false, true] {
+            let (settled, inside, _) = walk_one(view, window, cx, case, invalidate)?;
+            if !settled { failures.push(format!("{case:?}: the fixture did not open the owner as the topmost layer")); }
+            else if !inside { failures.push(format!("{case:?}: focus not inside after the notice closed (saved control {})", if invalidate { "invalidated" } else { "intact" })); }
+        }
+        let layer = match case { WalkCase::Layer(layer) => layer, WalkCase::Page(_) => Layer::Page };
+        disable_default_focus(Some(layer));
+        let control = walk_one(view, window, cx, case, true);
+        disable_default_focus(None);
+        let (settled, inside, root) = control?;
+        if !settled { failures.push(format!("{case:?}: control pass did not open the owner")); }
+        else if inside { failures.push(format!("{case:?}: with its default-focus hook disabled the walk still passed: the hook is not exercised")); }
+        else if !root { failures.push(format!("{case:?}: with no default and a dead saved control focus stayed off the player root (stale notice handle)")); }
+    }
+    anyhow::ensure!(failures.is_empty(), "overlay-notice-walk: {}", failures.join("; "));
+    Ok(())
+}
+/// Settings is mounted beneath the language menu (the topmost owner, which has no default-focus hook), the saved
+/// control is dead and a Settings control (a live control of something BEHIND the owner) holds focus when the notice
+/// clears: focus must move to the owner (the menu), not stay on the page behind it. The old whole-root liveness check
+/// accepted that control and left keys going to the page.
+fn menu_over_settings_notice(view: &Entity<Player>, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    view.update(cx, |p, cx| { p.screen = Screen::Player; p.focus_player = true; cx.notify(); });
+    draw(window, cx);
+    view.update(cx, |p, cx| p.open_desktop_settings(window, cx));
+    for _ in 0..5 { draw(window, cx); }
+    let state = view.read(cx).language_state;
+    anyhow::ensure!(state.is_some() && view.read(cx).screen == Screen::Settings, "menu-over-settings: the fixture has no language state or Settings");
+    let state = state.unwrap();
+    view.update(cx, |p, cx| p.language_menu.update(cx, |m, cx| m.open(state.language, state.locale, state.system_locale, Default::default(), None, window, cx)));
+    for _ in 0..5 { draw(window, cx); }
+    anyhow::ensure!(crate::overlay_gate::topmost() == Some(crate::overlay_gate::Layer::LanguageMenu), "menu-over-settings: the menu is not the topmost owner");
+    view.update(cx, |p, cx| { p.notice = Some("Async notice fixture".into()); cx.notify(); });
+    for _ in 0..6 { draw(window, cx); }
+    view.update(cx, |p, cx| { p.overlay_restore = Some((p.native_epoch, cx.focus_handle())); p.notice = None; cx.notify(); });
+    let settings = view.read(cx).settings.clone();
+    settings.update(cx, |s, cx| s.focus_first_control(window, cx));
+    anyhow::ensure!(view.read(cx).settings.read(cx).scope_focused(window, cx), "menu-over-settings: the fixture could not focus a Settings control");
+    for _ in 0..5 { draw(window, cx); }
+    let behind = view.read(cx).settings.read(cx).scope_focused(window, cx);
+    let owner = view.read(cx).language_menu.read(cx).focus_scope_inside(window, cx);
+    view.update(cx, |p, cx| { p.language_menu.update(cx, |m, cx| m.close(window, cx)); p.notice = None; p.overlay_restore = None; cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    view.update(cx, |p, cx| { let settings = p.settings.clone(); settings.update(cx, |_, cx| cx.emit(settings::SettingsEvent::Close)); p.screen = Screen::Player; cx.notify(); });
+    for _ in 0..3 { draw(window, cx); }
+    anyhow::ensure!(!behind, "menu-over-settings: focus stayed on a Settings control behind the language menu");
+    anyhow::ensure!(owner, "menu-over-settings: focus did not move to the language menu");
+    Ok(())
+}
 fn escape(window: &mut Window, cx: &mut App) {
     draw(window, cx);
     window.dispatch_event(
@@ -843,6 +1263,23 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         && player.settings.read(app).native_snapshot().3.is_none()
                         && player.saved_seq == player.edit_seq);
                     shot!("retained-settings-retried-1280");
+                    for overlay in ["source job", "loading"] {
+                        handle.update(cx, |_, window, cx| overlay_over_settings(&view, window, cx, overlay))??;
+                    }
+                    handle.update(cx, |_, window, cx| notice_replaced_by_source_over_settings(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| models_mounts_under_overlay(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| log_opened_under_scrim(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| settings_mounts_with_scrim(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| quick_start_hidden_under_notice(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| busy_delete_under_notice(&view, window, cx))??;
+                    for dialog in ["project picker", "drive projects"] {
+                        handle.update(cx, |_, window, cx| dialog_under_dropped_source(&view, window, cx, dialog))??;
+                    }
+                    handle.update(cx, |_, window, cx| quick_start_resumes_after_notice(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| whats_new_resumes_after_notice(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| focusable_layers_resume_after_notice(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| menu_over_settings_notice(&view, window, cx))??;
+                    handle.update(cx, |_, window, cx| { view.update(cx, |p, cx| { p.screen = Screen::Settings; cx.notify(); }); draw(window, cx); })?;
                     handle.update(cx, |_, _, cx| { let settings=view.read(cx).settings.clone(); settings.update(cx, |_, cx| cx.emit(settings::SettingsEvent::Close)); })?;
                     wait!(5, player, window, app => player.screen == Screen::Player);
 

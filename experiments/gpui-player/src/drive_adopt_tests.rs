@@ -855,3 +855,112 @@ fn duplicated_marker_identity_is_kept_for_review_without_duplicate_adoption() {
     assert!(fake.0.lock().unwrap().calls.is_empty());
     assert!(drive_plan::is_published(&top[0]));
 }
+
+#[test]
+fn an_unlinked_folder_is_accepted_in_the_spelling_the_user_gave() {
+    // Windows hands the app `C:\...` (and the app joins `gdrive/downloads` with a forward slash) while
+    // canonicalize returns `\\?\C:\...`; refusing those spellings refused every Drive download into an ordinary folder.
+    let base = std::env::temp_dir().join(format!("singz-canonical-{}", std::process::id()));
+    fs::create_dir_all(base.join("gdrive").join("downloads")).unwrap();
+    let spelled = if cfg!(windows) {
+        let mixed = PathBuf::from(format!("{}/gdrive/downloads", base.display()));
+        // The premise: the old `canonicalize()? == path` test compared these two and refused the folder.
+        assert_ne!(mixed.canonicalize().unwrap(), mixed, "a plain, mixed-separator Windows spelling must differ from the canonical one");
+        mixed
+    } else {
+        base.join("gdrive").join("downloads").canonicalize().unwrap()
+    };
+    let accepted = is_canonical(&spelled).unwrap() && Directory::capture(spelled.clone()).is_ok();
+    fs::remove_dir_all(&base).unwrap();
+    assert!(accepted, "an unlinked folder spelled {spelled:?} was refused");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_parent_is_refused_even_though_its_leaf_is_ordinary() {
+    use std::os::unix::fs::symlink;
+    let base = std::env::temp_dir().join(format!("singz-linked-parent-{}", std::process::id())).canonicalize().unwrap_or_else(|_| {
+        let base = std::env::temp_dir().join(format!("singz-linked-parent-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        base.canonicalize().unwrap()
+    });
+    fs::create_dir_all(base.join("real").join("downloads")).unwrap();
+    symlink(base.join("real"), base.join("alias")).unwrap();
+    let through_link = base.join("alias").join("downloads");
+    let direct = base.join("real").join("downloads");
+    let refused = !is_canonical(&through_link).unwrap() && Directory::capture(through_link.clone()).is_err();
+    let accepted = is_canonical(&direct).unwrap() && Directory::capture(direct.clone()).is_ok();
+    fs::remove_dir_all(&base).unwrap();
+    assert!(refused, "a path through a symlinked parent must be refused");
+    assert!(accepted, "the same folder reached directly must be accepted");
+}
+
+#[cfg(windows)]
+mod windows_links {
+    use super::*;
+    use std::process::Command;
+
+    fn junction(link: &Path, target: &Path) {
+        let status = Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target)
+            .output().expect("cmd runs").status;
+        assert!(status.success(), "mklink /J {link:?} {target:?} failed");
+    }
+    fn scratch(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("singz-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn spelling_ignores_only_prefix_drive_case_separators_and_a_trailing_separator() {
+        assert!(same_spelling(Path::new(r"\\?\C:\a\b"), Path::new("c:/a/b/")));
+        assert!(same_spelling(Path::new(r"\\?\UNC\h\s\a"), Path::new(r"\\h\s\a")));
+        assert!(!same_spelling(Path::new(r"\\?\C:\a\b"), Path::new(r"C:\a\c")));
+        assert!(!same_spelling(Path::new(r"\\?\C:\songs\x"), Path::new(r"C:\Songs\x")), "a differing case is a different name, not a spelling");
+        assert!(!same_spelling(Path::new(r"\\?\C:\a\b"), Path::new(r"C:\a\..\a\b")), "a dot component is refused, not resolved");
+    }
+
+    #[test]
+    fn a_junctioned_parent_is_refused_and_the_real_folder_is_accepted() {
+        let base = scratch("junction");
+        fs::create_dir_all(base.join("real").join("downloads")).unwrap();
+        junction(&base.join("alias"), &base.join("real"));
+        assert!(is_link(&fs::symlink_metadata(base.join("alias")).unwrap()), "a junction is a link whatever its spelling");
+        assert!(!is_link(&fs::symlink_metadata(base.join("real")).unwrap()));
+        let through_link = base.join("alias").join("downloads");
+        let direct = base.join("real").join("downloads");
+        let refused = !is_canonical(&through_link).unwrap() && Directory::capture(through_link.clone()).is_err();
+        let accepted = is_canonical(&direct).unwrap() && Directory::capture(direct.clone()).is_ok();
+        let _ = Command::new("cmd").args(["/C", "rmdir"]).arg(base.join("alias")).output();
+        fs::remove_dir_all(&base).unwrap();
+        assert!(refused, "a path through a junctioned parent must be refused");
+        assert!(accepted, "the same folder reached directly must be accepted");
+    }
+
+    /// The case-alias hole: in a case-sensitive directory `songs` is a real folder and `Songs` a junction to it, so
+    /// `Songs\downloads` canonicalizes to `songs\downloads`, a spelling that differs only in case. A comparison that
+    /// ignores case accepts it; the link walk refuses it. Skipped (loudly) where per-directory case sensitivity
+    /// cannot be enabled (it needs the fsutil support and rights of the machine).
+    #[test]
+    fn a_case_alias_junction_in_a_case_sensitive_directory_is_refused() {
+        let base = scratch("casealias");
+        let enabled = Command::new("fsutil").args(["file", "setCaseSensitiveInfo"]).arg(&base).arg("enable")
+            .output().map(|o| o.status.success()).unwrap_or(false);
+        if !enabled {
+            eprintln!("SKIPPED: per-directory case sensitivity could not be enabled on {base:?}");
+            fs::remove_dir_all(&base).unwrap();
+            return;
+        }
+        fs::create_dir_all(base.join("songs").join("downloads")).unwrap();
+        junction(&base.join("Songs"), &base.join("songs"));
+        let alias_leaf = base.join("Songs").join("downloads");
+        let refused = !is_canonical(&alias_leaf).unwrap() && Directory::capture(alias_leaf.clone()).is_err();
+        let real_leaf = base.join("songs").join("downloads");
+        let accepted = Directory::capture(real_leaf.clone()).is_ok();
+        let _ = Command::new("cmd").args(["/C", "rmdir"]).arg(base.join("Songs")).output();
+        let _ = fs::remove_dir_all(&base);
+        assert!(refused, "a junction that aliases an ordinary folder by case must be refused");
+        assert!(accepted, "the real folder in the case-sensitive directory must still be accepted");
+    }
+}

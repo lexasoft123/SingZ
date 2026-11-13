@@ -394,7 +394,7 @@ impl Render for WhatsNew {
                         cx,
                     )),
             );
-        if self.pending_focus {
+        if self.pending_focus && crate::overlay_gate::may_focus(crate::overlay_gate::Layer::WhatsNew) {
             self.pending_focus = false;
             if let Some(f) = self.controls.borrow().get("whats-new-close") {
                 f.focus(w, cx);
@@ -407,7 +407,7 @@ impl Render for WhatsNew {
             let weak = cx.weak_entity();
             w.on_next_frame(move |w, cx| {
                 let _ = weak.update(cx, |s, cx| {
-                    if s.open && s.open_sequence == sequence && !s.scope.contains_focused(w, cx) {
+                    if s.open && s.open_sequence == sequence && crate::overlay_gate::may_focus(crate::overlay_gate::Layer::WhatsNew) && !s.scope.contains_focused(w, cx) {
                         if let Some(f) = s.controls.borrow().get("whats-new-close") {
                             f.focus(w, cx);
                         }
@@ -430,4 +430,12 @@ impl Render for WhatsNew {
             ))
             .into_any_element()
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for WhatsNew {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.pending_focus = true;
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
 }

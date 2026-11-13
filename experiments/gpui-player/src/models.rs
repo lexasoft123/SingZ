@@ -201,7 +201,9 @@ impl ModelsScreen {
 impl Render for ModelsScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.focus_order.borrow_mut().clear();
-        if self.pending_focus { self.pending_focus = false; self.scope.focus(window, cx); }
+        // Taking focus waits while an overlay owns input (a source job started before this page mounted): the root
+        // keeps it, and this runs again once the overlay is gone.
+        if self.pending_focus && !crate::overlay_gate::owns_input() { self.pending_focus = false; self.scope.focus(window, cx); }
         let state = &self.snapshot;
         let busy = state.busy;
         let error = self.error.as_deref().or(state.error.as_deref());
@@ -374,11 +376,12 @@ impl Render for ModelsScreen {
         let lost_control = self.controls.borrow().iter().any(|(id, focus)| {
             focus.is_focused(window) && !self.focus_order.borrow().contains(id)
         });
-        if lost_control { self.scope.focus(window, cx); }
+        if lost_control && !crate::overlay_gate::owns_input() { self.scope.focus(window, cx); }
         modal_scrim().id("models-keyboard-scope").a11y_dialog(t(if self.origin == Origin::Auto { "settings.wizard.settingUpTitle" } else { "settings.wizard.aiModelsTitle" })).key_context("SingZModels").track_focus(&self.scope)
-            .on_action(cx.listener(|s, _: &NextFocus, w, cx| { s.move_focus(false, w, cx); cx.stop_propagation(); }))
-            .on_action(cx.listener(|s, _: &PreviousFocus, w, cx| { s.move_focus(true, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|s, _: &NextFocus, w, cx| { if crate::overlay_gate::owns_input() { return; } s.move_focus(false, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|s, _: &PreviousFocus, w, cx| { if crate::overlay_gate::owns_input() { return; } s.move_focus(true, w, cx); cx.stop_propagation(); }))
             .capture_key_down(cx.listener(|s, event: &KeyDownEvent, w, cx| {
+                if crate::overlay_gate::owns_input() { return; }
                 if event.keystroke.key == "tab" {
                     s.move_focus(event.keystroke.modifiers.shift, w, cx);
                     w.prevent_default(); cx.stop_propagation();
@@ -430,4 +433,12 @@ pub(super) fn model_description(entry: &crate::model_catalog::Entry, windows: bo
         "aligner" => t("main.model.aligner.description"),
         _ => entry.description.clone(),
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for ModelsScreen {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.pending_focus = true;
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
 }

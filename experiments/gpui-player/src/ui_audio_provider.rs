@@ -14,15 +14,21 @@ fn key(w: &mut Window, cx: &mut App, name: &'static str) {
     w.dispatch_event(PlatformInput::KeyUp(KeyUpEvent { keystroke }), cx);
 }
 fn header(view: &Entity<Player>, w: &mut Window, cx: &mut App, id: &str) -> anyhow::Result<()> {
+    let mut visited: Vec<String> = Vec::new();
     for _ in 0..192 {
         draw(w, cx);
-        if view.read(cx).header.read(cx).focused_control(w).as_deref() == Some(id) {
+        let focused = view.read(cx).header.read(cx).focused_control(w);
+        if focused.as_deref() == Some(id) {
             key(w, cx, "enter");
             return Ok(());
         }
+        if let Some(name) = focused {
+            if visited.last() != Some(&name) { visited.push(name); }
+        }
         key(w, cx, "tab");
     }
-    anyhow::bail!("Actual Header Tab cannot reach {id}")
+    let (root, any) = (view.read(cx).focus_handle.is_focused(w), w.focused(cx).is_some());
+    anyhow::bail!("Actual Header Tab cannot reach {id}; header controls focused in order: {visited:?}; screen {:?}; player root focused {root}; any focus {any}", view.read(cx).screen as u8)
 }
 fn setting(view: &Entity<Player>, w: &mut Window, cx: &mut App, id: &str) -> anyhow::Result<()> {
     for _ in 0..128 {
@@ -199,6 +205,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 wait!(8,p,w,app => w.viewport_size()==size(px(width),px(height)));
                 let dir=root.join(format!("provider-{}",width as u32));
                 if !restart&&width==1280. {
+                    super::ui_training_run::settle_whats_new(handle,&view,cx).await?;
                     wait!(12,p,w,app => p.library.read(app).project_delete_bounds(&dir).is_some());
                     let before=prefs()?;
                     action!(w,app => library(&view,w,app,&dir,false));

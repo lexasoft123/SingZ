@@ -779,6 +779,12 @@ impl SettingsScreen {
             }
         }
     }
+    /// Puts keyboard focus on the first Settings control, as arriving at the page by keyboard would.
+    /// Whether keyboard focus is inside this page's keyboard scope.
+    #[cfg(feature = "ui-tests")]
+    pub fn scope_focused(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
+    #[cfg(feature = "ui-tests")]
+    pub fn focus_first_control(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.move_focus(false, window, cx); }
     fn move_focus(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.open_field = None; self.menu_index = None; self.typeahead.clear();
         let order = self.focus_order.borrow().clone();
@@ -832,6 +838,8 @@ impl SettingsScreen {
         cx.notify();
     }
     fn capture_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // An overlay over this page owns the keys; the page neither walks nor activates its controls behind it.
+        if crate::overlay_gate::owns_input() { return; }
         let key = event.keystroke.key.as_str();
         if key == "tab" { self.move_focus(event.keystroke.modifiers.shift, window, cx); window.prevent_default(); cx.stop_propagation(); return; }
         if key == "escape" {
@@ -1967,7 +1975,8 @@ impl Render for SettingsScreen {
         self.graph_flow_bounds.set(None);
         self.graph_last_node_bounds.set(None);
         self.graph_last_connection_bounds.set(None);
-        if self.pending_focus { self.pending_focus = false; self.scope.focus(window, cx); }
+        // Taking focus waits while an overlay owns input (Settings mounting in the same render as a source job or a notice).
+        if self.pending_focus && !crate::overlay_gate::owns_input() { self.pending_focus = false; self.scope.focus(window, cx); }
         #[cfg(feature = "ui-tests")]
         {
             self.option_bounds.borrow_mut().clear();
@@ -1979,8 +1988,8 @@ impl Render for SettingsScreen {
             .id("settings-keyboard-scope")
             .key_context("SingZSettings")
             .track_focus(&self.scope)
-            .on_action(cx.listener(|s, _: &NextFocus, w, cx| { s.move_focus(false, w, cx); cx.stop_propagation(); }))
-            .on_action(cx.listener(|s, _: &PreviousFocus, w, cx| { s.move_focus(true, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|s, _: &NextFocus, w, cx| { if crate::overlay_gate::owns_input() { return; } s.move_focus(false, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|s, _: &PreviousFocus, w, cx| { if crate::overlay_gate::owns_input() { return; } s.move_focus(true, w, cx); cx.stop_propagation(); }))
             .capture_key_down(cx.listener(|s, e: &KeyDownEvent, w, cx| s.capture_key(e, w, cx)))
             .on_key_down(|_, _, cx| cx.stop_propagation())
             .on_key_up(|_, _, cx| cx.stop_propagation())
@@ -2112,4 +2121,12 @@ mod microphone_equality_tests {
         assert!(!microphone_unchanged(&snapshot, &overlaid));
         assert!(microphone_unchanged(&overlaid, &overlaid.clone()));
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for SettingsScreen {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.pending_focus = true;
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
 }

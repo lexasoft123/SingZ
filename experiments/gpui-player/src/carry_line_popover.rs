@@ -449,7 +449,7 @@ impl Render for Popover {
         card = card
             .child(ui::carry_line_caption(self.caption()))
             .child(lanes);
-        if self.pending_focus {
+        if self.pending_focus && crate::overlay_gate::may_focus_player() {
             self.pending_focus = false;
             if self.pending {
                 // A host busy transition can disable a focused control without

@@ -87,7 +87,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    macro_rules! shot {($name:expr)=>{handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,$name))??;};}
    macro_rules! press {($id:expr)=>{handle.update(cx,|_,w,cx|press(&view,w,cx,$id))??;};}
    macro_rules! open_project {($name:expr)=>{{let path=root.join("external").join($name);handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.notice=None;p.open_project(path.clone(),cx);}))?;wait!(p,w,app=>!p.loading&&p.project.as_ref().is_some_and(|p|p.dir==path));}};}
-   macro_rules! dialog {()=>{{handle.update(cx,|_,w,cx|header(&view,w,cx,"import"))??;wait!(p,w,app=>p.library_import_open);handle.update(cx,|_,_,cx|view.read(cx).library_import.clone().update(cx,|s,cx|s.set_animation_time(Some(0.25),cx)))?;}};}
+   macro_rules! dialog {()=>{{super::ui_training_run::settle_whats_new(handle,&view,cx).await?;handle.update(cx,|_,w,cx|header(&view,w,cx,"import"))??;wait!(p,w,app=>p.library_import_open);handle.update(cx,|_,_,cx|view.read(cx).library_import.clone().update(cx,|s,cx|s.set_animation_time(Some(0.25),cx)))?;}};}
    macro_rules! hold {()=>{{let _=std::fs::remove_file(&ready);std::fs::write(&gate,"hold")?;}};}
    macro_rules! release {()=>{{std::fs::remove_file(&gate)?;}};}
    for (width,height) in [(1280.,800.),(1060.,640.)]{

@@ -364,10 +364,11 @@ impl Render for DeleteDialog {
                         cx,
                     )),
             );
-        if self.busy {
+        let may_focus = crate::overlay_gate::may_focus(crate::overlay_gate::Layer::ProjectDelete);
+        if self.busy && may_focus {
             self.scope.focus(w, cx);
         }
-        if self.pending_focus {
+        if self.pending_focus && may_focus {
             self.pending_focus = false;
             if let Some(f) = self.controls.borrow().get("project-delete-keep") {
                 f.focus(w, cx);
@@ -376,7 +377,7 @@ impl Render for DeleteDialog {
             let weak = cx.weak_entity();
             w.on_next_frame(move |w, cx| {
                 let _ = weak.update(cx, |s, cx| {
-                    if s.open && s.open_sequence == sequence && !s.scope.contains_focused(w, cx) {
+                    if s.open && s.open_sequence == sequence && crate::overlay_gate::may_focus(crate::overlay_gate::Layer::ProjectDelete) && !s.scope.contains_focused(w, cx) {
                         if s.busy {
                             s.scope.focus(w, cx);
                         } else if let Some(f) = s.controls.borrow().get("project-delete-keep") {
@@ -401,4 +402,12 @@ impl Render for DeleteDialog {
             ))
             .into_any_element()
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for DeleteDialog {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.pending_focus = !self.busy;
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
 }

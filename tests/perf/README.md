@@ -221,3 +221,12 @@ silently plays through Web Audio. `electron_driver.cjs` refuses to play unless `
   GPU and DWM share. The native visible scenario cannot open or play a song, so N1-N3 and N8 are judged only on the empty window.
 - `baseline_aggregate.py --platform windows --identity-json <file>` writes the Windows sections as sibling files
   (`Q-01-electron-baseline-windows.*`, `Q-02-native-baseline-windows.*`); N8 is judged when both apps have `playing` runs.
+
+Visible Windows runs measure the idle budget (N5) only on a quiet desktop. `frames_visible_windows.py` waits until the
+native app has finished its launch work (the Library showing, no Models wizard, notice or locale load; the quick start
+overlay, which a fresh profile leaves open for good, does not count) instead of a fixed delay, because the first-launch
+Models wizard closes a variable 11 to 30 s after launch on the field laptop and presents while it does. It also samples
+the foreground window during the capture and rejects the run when the app lost it: anything that takes the foreground
+(a console window, a toast, a remote shell started to poll the machine) deactivates the window, and the deactivation and
+reactivation each repaint it, 2 or 3 presents per event. Do not poll a Dell run over a remote shell while it captures;
+wait locally and read the result once.

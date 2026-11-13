@@ -423,7 +423,7 @@ impl Render for EngineSetup {
                 f.focus(w, cx);
             }
         }
-        if self.pending_focus {
+        if self.pending_focus && crate::overlay_gate::may_focus(crate::overlay_gate::Layer::EngineSetup) {
             self.pending_focus = false;
             if let Some(f) = self.controls.borrow().get("engine-setup-copy") {
                 f.focus(w, cx);
@@ -432,7 +432,7 @@ impl Render for EngineSetup {
             let weak = cx.weak_entity();
             w.on_next_frame(move |w, cx| {
                 let _ = weak.update(cx, |s, cx| {
-                    if s.open && s.open_sequence == sequence && !s.scope.contains_focused(w, cx) {
+                    if s.open && s.open_sequence == sequence && crate::overlay_gate::may_focus(crate::overlay_gate::Layer::EngineSetup) && !s.scope.contains_focused(w, cx) {
                         if let Some(f) = s.controls.borrow().get("engine-setup-copy") {
                             f.focus(w, cx);
                         }
@@ -455,4 +455,12 @@ impl Render for EngineSetup {
             ))
             .into_any_element()
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for EngineSetup {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.pending_focus = true;
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
 }

@@ -813,9 +813,9 @@ impl Render for Transport {
             cx.notify();
         }
         self.footer_order.borrow_mut().clear();self.split_order.borrow_mut().clear();self.control_bounds.borrow_mut().clear();
-        let focus_split=self.split_focus_pending&&self.split_open;
+        let focus_split=self.split_focus_pending&&self.split_open&&crate::overlay_gate::may_focus_player();
         if focus_split{self.split_focus_pending=false;self.split_scope.focus(window,cx);}
-        if self.output_open&&self.output_focus_pending {self.output_focus_pending=false;self.output_focus.focus(window,cx);}
+        if self.output_open&&self.output_focus_pending&&crate::overlay_gate::may_focus_player() {self.output_focus_pending=false;self.output_focus.focus(window,cx);}
         if self.bpm_refresh_input {
             self.bpm_refresh_input = false;
             if self.bpm_draft.is_none() {

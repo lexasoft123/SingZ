@@ -26,6 +26,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 
@@ -55,6 +56,85 @@ def judge(scenario: str, seconds: float, hz: float, document: dict[str, Any]) ->
     failures = visible.evaluate(scenario, seconds, hz, frames)
     verdict = visible.gate(scenario, failures, frames, busy=False)
     return {"frames": frames, "failures": failures, "gate": verdict, "passed": verdict == "pass"}
+
+
+SETTLE_QUIET_PROBES = 5  # consecutive one-second probes that must all read settled
+
+
+class Disturbed(RuntimeError):
+    """The run was disturbed (the window lost the foreground): rejected, never averaged or judged."""
+
+
+def settled(probe: dict[str, Any]) -> bool:
+    """The native app has finished its launch work: the Library is showing, in the foreground, with no wizard,
+    dialog or notice that is still changing and no locale load pending. (A fresh profile opens the Models wizard and
+    leaves it a variable time after launch, 11 to 30 s measured on the field laptop, presenting while it does.)
+    The quick start overlay is not launch work: a fresh profile leaves it open indefinitely, with its animations
+    suspended, and that is the launch screen the idle budget is about, so it does not count against settling."""
+    return (probe.get("screenName") == "Library" and bool(probe.get("visible")) and bool(probe.get("active"))
+            and not any(probe.get(key) for key in ("whatsNewOpen", "engineSetupOpen", "noticeOpen", "localePending")))
+
+
+def wait_settled(control: Path, minimum: float, timeout: float = 120) -> dict[str, Any]:
+    """Wait at least `minimum` s, then until SETTLE_QUIET_PROBES consecutive probes read settled."""
+    started = time.monotonic()
+    time.sleep(minimum)
+    quiet, last = 0, {}
+    while quiet < SETTLE_QUIET_PROBES:
+        if time.monotonic() - started > timeout:
+            raise TimeoutError(f"the app did not settle within {timeout:g}s; last probe: {last}")
+        last = perf.request_action(control, "probe", 30)["detail"]
+        quiet = quiet + 1 if settled(last) else 0
+        time.sleep(1)
+    return {"waitedS": round(time.monotonic() - started, 1), "probe": last}
+
+
+def foreground_pid() -> int | None:
+    """Process id that owns the foreground window (Windows)."""
+    import ctypes
+    from ctypes import wintypes
+    user = ctypes.WinDLL("user32")
+    user.GetForegroundWindow.restype = wintypes.HWND
+    window = user.GetForegroundWindow()
+    if not window:
+        return None
+    pid = wintypes.DWORD()
+    user.GetWindowThreadProcessId(window, ctypes.byref(pid))
+    return pid.value
+
+
+class ForegroundGuard:
+    """Samples who owns the foreground while a capture runs. A visible run needs the app's window in front: anything
+    that takes the foreground (a console window, a toast, a remote shell) deactivates the window, and the deactivation
+    and reactivation each repaint it. Those presents are the disturbance's, not the app's, so the run is rejected."""
+
+    def __init__(self, pid: int, reader=foreground_pid, interval: float = 0.1) -> None:
+        self.pid, self.reader, self.interval = pid, reader, interval
+        self.ticks, self.lost, self.owners = 0, 0, set()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.sample()
+            self._stop.wait(self.interval)
+
+    def sample(self) -> None:
+        owner = self.reader()
+        self.ticks += 1
+        if owner != self.pid:
+            self.lost += 1
+            self.owners.add(owner)
+
+    def start(self) -> "ForegroundGuard":
+        self.sample()
+        self._thread.start()
+        return self
+
+    def stop(self) -> dict[str, Any]:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        return {"ticks": self.ticks, "lostTicks": self.lost, "otherForegroundPids": sorted(o for o in self.owners if o is not None)}
 
 
 def launch(args: argparse.Namespace, control: Path, config: Path) -> tuple[subprocess.Popen, int | None, dict[str, Any]]:
@@ -87,7 +167,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     proc = None
     try:
         proc, root, receipts = launch(args, control, config)
-        time.sleep(args.settle)
+        # The native scenario can say when its launch work is over; Electron has no probe, so it keeps the fixed wait.
+        receipts["settle"] = wait_settled(control, args.settle) if args.app == "native" else time.sleep(args.settle)
+        guard = ForegroundGuard(root).start()
         name = "singz-gpui-player" if args.app == "native" else "electron"
         command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SAMPLER),
                    "-ProcessName", name, "-RootPid", str(root), "-Seconds", str(args.seconds),
@@ -95,6 +177,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if args.scenario == "idle":
             command.append("-NoDemand")
         done = subprocess.run(command, capture_output=True, text=True, timeout=args.seconds + 120)
+        foreground = guard.stop()
+        if foreground["lostTicks"]:
+            raise Disturbed(f"the app window lost the foreground for {foreground['lostTicks']} of {foreground['ticks']} samples "
+                            f"(foreground owners seen: {foreground['otherForegroundPids']}): rerun with nothing else on the desktop "
+                            f"and no remote session polling the machine")
         if done.returncode != 0 or not capture.is_file():
             raise RuntimeError(f"sampler failed ({done.returncode}): {(done.stderr or done.stdout).strip()[-600:]}")
         document = json.loads(capture.read_text(encoding="utf-8-sig"))
@@ -110,7 +197,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "panelHz": args.hz, **result, "inconclusive": False,
             "deferred": {"120Hz": "deferred until a 120 Hz panel exists; not failed"},
             "coverage": f"starts {args.settle:g}s after launch; the first {args.settle:g}s are not covered by this gate",
-            "sampler": document, "receipts": receipts}
+            "foreground": foreground, "sampler": document, "receipts": receipts}
 
 
 def main(argv: list[str] | None = None) -> int:

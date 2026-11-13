@@ -403,6 +403,7 @@ fallback *(inferred; D-04 decides)*, and the Electron tree stays for Box.
 | Merge with main is harder than forecast (zCore move, 88 commits) | medium | Wave 1 slips; everything waits | R-07 first; C-02 on the escalated model; nothing else edits native code meanwhile |
 | Worker split destabilises transport | medium | Timing regressions late | C-17 before Q-03; Mac and Windows together; port the count-in rules as tests first |
 | Two desktops fight over one Drive library | medium | Data loss in the field | C-43 before any beta build has sync enabled; Q-12 on a copy of the library first |
+| A local process swaps a Drive staging folder for a link mid-download (open follow-up) | low | Digest, replace or stage removal follows the link and writes or deletes outside the library | Found by the cross-family review of the Windows path fix; predates it. Adoption folders are checked for links and exact spelling at capture and transfer boundaries, which narrows but does not close the window after a long download. Close it with handle-relative file operations (held directory handles) for digest, replace and removal. Such a process already runs as the same user, so it gains no access it lacks |
 | Test gates or debug paths ship | medium | Field behaviour steered by environment | C-23, and the packager refusal in C-03 |
 | Windows-only failures found late | high | Qualification loops | Laptop runs from wave 1, not wave 5 |
 | PR #145 does not merge in time | medium | C-80 cannot start | D-07 defaults to "after default" |

@@ -427,29 +427,29 @@
       "id": "N5",
       "area": "Idle redraw",
       "budget": "no presented frames when nothing changes",
-      "status": "fail",
+      "status": "pass",
       "native": [
-        4,
-        5,
-        8
+        0,
+        0,
+        0
       ],
       "electron": null,
-      "note": "Presented samples while idle, window on its launch screen 25 s after launch (presence count, clock-independent). A paused song and an open modal are not covered. Electron not measured."
+      "note": "Presented samples in a 60 s idle window once the app has settled (presence count, clock-independent), at the tip (85d6284a plus uncommitted changes). History, kept: 4, 5, 8 at 492fb67d and 1, 3, 0 at the tip's first pass, both contaminated by ssh polling taking the foreground and by the first-launch Models wizard still closing (see tipRemeasure). A paused song and an open modal are not covered. Electron not measured."
     },
     {
       "id": "N6",
       "area": "Idle CPU",
       "budget": "app + helpers < 1% of one core, paused and idle, 60 s",
-      "status": "fail",
+      "status": "pass",
       "native": {
         "unit": "percent of one core",
         "runs": [
-          1.1428571428571428,
-          1.5571428571428572,
-          1.55
+          0.3857142857142857,
+          0.25,
+          0.45
         ],
-        "median": 1.55,
-        "worst": 1.5571428571428572
+        "median": 0.3857142857142857,
+        "worst": 0.45
       },
       "electron": {
         "unit": "percent of one core",
@@ -461,7 +461,7 @@
         "median": 2.914285714285714,
         "worst": 3.5
       },
-      "note": "Mean CPU over the 60 s pause phase, whole process tree; the song is paused, not unloaded."
+      "note": "Mean CPU over the 60 s pause phase, whole process tree; the song is paused, not unloaded. Tip figure; at 492fb67d it was 1.55 (worst 1.56), a fail, before 1706b685."
     },
     {
       "id": "N7",
@@ -672,5 +672,120 @@
     "tag": "v0.26.7",
     "commit": "2f0dd909",
     "machine": "Dell XPS 15 9530 (Intel Core i7-4712HQ 4C/8T, 16 GiB, Intel HD 4600 + NVIDIA GT 750M, Windows 10 22H2 build 19045)"
+  },
+  "tipRemeasure": {
+    "date": "2026-11-12 (N6) and 2026-11-13 (N5)",
+    "commit": "85d6284a",
+    "note": "N6: release ui-tests build of 85d6284a plus the worktree's uncommitted driver and Drive-path fixes. N5: fresh release ui-tests build of 85d6284a plus the worktree's uncommitted changes at that time (adds the level-triggered focus invariant and overlay gate; neither touches idle painting). Same laptop, method and reference library as the table, except for the N5 method change below.",
+    "idleCpuPercent": {
+      "runs": [
+        0.3857142857142857,
+        0.25,
+        0.45
+      ],
+      "median": 0.3857142857142857,
+      "worst": 0.45,
+      "unit": "percent of one core"
+    },
+    "playingCpuPercent": {
+      "runs": [
+        2.1882352941176473,
+        1.75,
+        1.68125
+      ],
+      "median": 1.75,
+      "worst": 2.1882352941176473,
+      "unit": "percent of one core"
+    },
+    "steadyFootprintBytes": {
+      "runs": [
+        163577856,
+        154140672,
+        140509184
+      ],
+      "median": 154140672,
+      "worst": 163577856,
+      "unit": "bytes"
+    },
+    "startupMs": {
+      "runs": [
+        12094.000000040978,
+        11686.999999918044,
+        11750.0
+      ],
+      "median": 11750.0,
+      "worst": 12094.000000040978,
+      "unit": "ms"
+    },
+    "songOpenMs": {
+      "runs": [
+        969.0000000409782,
+        1094.0000000409782,
+        1063.0000000819564
+      ],
+      "median": 1063.0000000819564,
+      "worst": 1094.0000000409782,
+      "unit": "ms"
+    },
+    "idlePresentedSamples60s": [
+      0,
+      0,
+      0
+    ],
+    "N5": "pass",
+    "N6": "pass",
+    "starvedBlocks": {
+      "lanes": {
+        "vocals": 0,
+        "drums": 0,
+        "bass": 0,
+        "guitar": 0,
+        "piano": 0,
+        "other": 0
+      },
+      "total": 0,
+      "reason": null,
+      "burstS": 60.438000000081956
+    },
+    "idlePresentedSamplesHistory": [
+      {
+        "commit": "492fb67d",
+        "presents": [
+          4,
+          5,
+          8
+        ],
+        "status": "contaminated",
+        "reason": "old harness: fixed 25 s settle, and the harness's own ssh polling took the foreground"
+      },
+      {
+        "commit": "85d6284a (first pass)",
+        "presents": [
+          1,
+          3,
+          0
+        ],
+        "status": "contaminated",
+        "reason": "same as above"
+      },
+      {
+        "commit": "85d6284a (unpolled diagnostic runs, old method)",
+        "presents": [
+          0,
+          0,
+          0,
+          0,
+          2,
+          0
+        ],
+        "status": "diagnostic",
+        "reason": "the 2 is the one run that was polled over ssh: a PowerShell console took the foreground and the app repainted on deactivation and reactivation"
+      }
+    ],
+    "n5Method": {
+      "change": "wait for the app's settled state (Library showing, foreground, no Models wizard, notice or locale load; five consecutive one-second probes, after the minimum 25 s) instead of a fixed 25 s; reject a run whose window lost the foreground at any capture sample",
+      "control": "Notepad opened and closed in the interactive session during a capture: run rejected, window lost the foreground for 32 of 565 samples",
+      "file": "tests/perf/frames_visible_windows.py"
+    }
   }
 }

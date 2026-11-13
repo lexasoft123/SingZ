@@ -2015,6 +2015,14 @@ pub(crate) fn validate_component(name: &std::ffi::OsStr) -> Result<()> {
     ensure!(!name.chars().any(|c| "/\\:*?\"<>|".contains(c)), "{}", portable_name_error(name));
     Ok(())
 }
+/// The name a typed title means: its surrounding spaces are not part of it, so they are dropped
+/// before the portable-name rules run (a trailing space would otherwise be refused as an invalid
+/// folder name). Electron does the same: `raw.trim()` in the renderer, then `safeName` in main.
+pub(crate) fn typed_title(typed: &str) -> Result<String> {
+    let trimmed = typed.trim();
+    checked_name(trimmed)?;
+    Ok(trimmed.to_owned())
+}
 pub(crate) fn checked_name(name: &str) -> Result<String> {
     validate_name(name)?;
     let name = safe_name(name);
@@ -3118,5 +3126,17 @@ mod tests {
         assert!(saved["settings"].get("selection").is_none());
         assert!(!target.0.join("stems/custom-removed.mp3").exists());
         assert_eq!(fs::read(target.0.join("lyrics.json")).unwrap(), lyrics);
+    }
+    #[test]
+    fn a_typed_title_is_trimmed_before_it_is_validated() {
+        // The old order (validate the raw text, then trim) refused every title typed with a trailing space,
+        // while Electron (`raw.trim()` then `safeName`) renames it.
+        let typed = "  \u{17b} renamed / song.wav  ";
+        assert!(checked_name(typed).is_err(), "premise: the raw text ends with a space and fails the portable-name rules");
+        let title = typed_title(typed).expect("a trailing space is not part of the title");
+        assert_eq!(title, "\u{17b} renamed / song.wav");
+        assert_eq!(checked_name(&title).unwrap(), "\u{17b} renamed song");
+        // trimming does not launder an invalid name: a trailing dot is still refused
+        assert!(typed_title("  song.  ").is_err());
     }
 }

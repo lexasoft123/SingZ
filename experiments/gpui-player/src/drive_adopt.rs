@@ -143,6 +143,68 @@ fn identity(path: &Path, meta: &Metadata) -> Result<Identity> {
         })
     }
 }
+/// True when `path` is an ordinary, unlinked location: no existing component of it, from the root down, is a symlink
+/// or a reparse point (a junction, a mount point), and it is spelled the way the filesystem canonicalizes it.
+/// Fail closed: anything that cannot be shown to be both is refused.
+///
+/// The link walk is what decides "unlinked"; a comparison of spellings alone cannot, because a case-sensitive
+/// directory can hold `songs` and a junction `Songs` pointing at it, and `...\Songs\x` then canonicalizes to a
+/// name that differs from the path only in case. The spelling check is exact and case-sensitive on `OsStr`
+/// components (never a lossy string), and on Windows it ignores only what carries no identity: the verbatim prefix,
+/// the drive letter's case, the kind of separator and a trailing separator.
+pub(crate) fn is_canonical(path: &Path) -> std::io::Result<bool> {
+    let mut walked = PathBuf::new();
+    for component in path.components() {
+        walked.push(component.as_os_str());
+        if matches!(component, std::path::Component::Prefix(_) | std::path::Component::RootDir) {
+            continue;
+        }
+        if is_link(&fs::symlink_metadata(&walked)?) {
+            return Ok(false);
+        }
+    }
+    let canonical = path.canonicalize()?;
+    Ok(canonical == path || (cfg!(windows) && same_spelling(&canonical, path)))
+}
+fn is_link(meta: &Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+/// Equal component by component, exactly and case-sensitively, once the verbatim prefix is read as the plain one.
+fn same_spelling(a: &Path, b: &Path) -> bool {
+    use std::ffi::OsString;
+    use std::path::{Component, Prefix};
+    let parts = |p: &Path| -> Vec<OsString> {
+        p.components()
+            .map(|c| match c {
+                Component::Prefix(prefix) => match prefix.kind() {
+                    Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                        OsString::from(format!("{}:", (letter as char).to_ascii_uppercase()))
+                    }
+                    Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                        let mut name = OsString::from(r"\\");
+                        name.push(server);
+                        name.push("\\");
+                        name.push(share);
+                        name
+                    }
+                    _ => c.as_os_str().to_owned(),
+                },
+                other => other.as_os_str().to_owned(),
+            })
+            .collect()
+    };
+    parts(a) == parts(b)
+}
 pub(crate) struct Directory {
     path: PathBuf,
     id: Identity,
@@ -151,7 +213,7 @@ impl Directory {
     pub(crate) fn capture(path: PathBuf) -> Result<Self> {
         let m = fs::symlink_metadata(&path)?;
         ensure!(
-            m.file_type().is_dir() && path.canonicalize()? == path,
+            m.file_type().is_dir() && is_canonical(&path)?,
             "Linked or non-directory adoption folder refused"
         );
         let id = identity(&path, &m)?;
@@ -162,7 +224,7 @@ impl Directory {
         ensure!(
             m.file_type().is_dir()
                 && identity(&self.path, &m)? == self.id
-                && self.path.canonicalize()? == self.path,
+                && is_canonical(&self.path)?,
             "Adoption directory changed during sync"
         );
         Ok(())

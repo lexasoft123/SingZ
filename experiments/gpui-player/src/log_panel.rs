@@ -1007,22 +1007,27 @@ impl LogPanel {
             .key_context("SingZLogPanel")
             .track_focus(&scope)
             .on_action(cx.listener(|s, _: &NextFocus, w, cx| {
+                if crate::overlay_gate::owns_input() { return; }
                 s.move_focus(false, w, cx);
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|s, _: &PreviousFocus, w, cx| {
+                if crate::overlay_gate::owns_input() { return; }
                 s.move_focus(true, w, cx);
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|s, _: &Activate, w, cx| {
+                if crate::overlay_gate::owns_input() { return; }
                 s.activate_focused(w, cx);
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|s, _: &Dismiss, _, cx| {
+                if crate::overlay_gate::owns_input() { return; }
                 s.dismiss(cx);
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|s, _: &NextOption, w, cx| {
+                if crate::overlay_gate::owns_input() { return; }
                 if s.popup {
                     s.move_focus(false, w, cx);
                 } else if s
@@ -1036,6 +1041,7 @@ impl LogPanel {
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|s, _: &PreviousOption, w, cx| {
+                if crate::overlay_gate::owns_input() { return; }
                 if s.popup {
                     s.move_focus(true, w, cx);
                 } else if s
@@ -1073,7 +1079,10 @@ impl LogPanel {
                 &[("path", path.clone())],
             )));
         }
-        if let Some(id) = self.pending_focus.take() {
+        // Taking focus waits while an overlay owns input (a source job or a load in front of this page, a notice): the
+        // request stays pending and runs when the player root renders without an owner.
+        if self.pending_focus.is_some() && !crate::overlay_gate::owns_input() {
+          if let Some(id) = self.pending_focus.take() {
             if let Some(f) = self.controls.borrow().get(&id) {
                 f.focus(w, cx);
             }
@@ -1083,6 +1092,7 @@ impl LogPanel {
                 let _ = weak.update(cx, |s, cx| {
                     if s.open
                         && s.open_sequence == sequence
+                        && !crate::overlay_gate::owns_input()
                         && s.scope.as_ref().is_some_and(|f| !f.contains_focused(w, cx))
                     {
                         if let Some(f) = s.controls.borrow().get(&id) {
@@ -1093,6 +1103,7 @@ impl LogPanel {
                 });
             });
             w.request_animation_frame();
+          }
         }
         ui::modal_scrim()
             .id("log-scrim")
@@ -1119,4 +1130,12 @@ impl Render for LogPanel {
             self.render_fixture(w, cx)
         }
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for LogPanel {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.pending_focus = Some(if self.past.is_empty() { "log-copy" } else { "log-session" }.into());
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.as_ref().is_some_and(|f| f.contains_focused(window, cx)) }
 }

@@ -167,7 +167,10 @@ try {
   foreach($item in (Processes)){
    $process=Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
    if(!$process -or $process.HasExited){continue}
-   $key="$($process.Id):$($process.StartTime.ToUniversalTime().Ticks)";$owned[$key]=[pscustomobject]@{pid=$process.Id;started=$process.StartTime.ToUniversalTime().ToString('o');path=$item.ExecutablePath}
+   # A short-lived process can exit between the enumeration and these reads; its identity is then unreadable. Skip it.
+   $startUtc=$null;try{$startUtc=$process.StartTime.ToUniversalTime()}catch{}
+   if($null-eq$startUtc){continue}
+   $key="$($process.Id):$($startUtc.Ticks)";$owned[$key]=[pscustomobject]@{pid=$process.Id;started=$startUtc.ToString('o');path=$item.ExecutablePath}
    foreach($window in [NativeGpuiProbe]::Windows($process.Id)){
     if([NativeGpuiProbe]::IsWindowVisible($window)){throw "Owned native process created a visible window: $($process.Id)"}
     if($item.ExecutablePath-eq$App){
@@ -201,7 +204,7 @@ try {
    $foreground=[NativeGpuiProbe]::GetForegroundWindow();[uint32]$foregroundPid=0
    [NativeGpuiProbe]::GetWindowThreadProcessId($foreground,[ref]$foregroundPid)|Out-Null
    if($foregroundPid-eq$process.Id){throw 'Owned native process took foreground focus'}
-   $cpu=$process.TotalProcessorTime.TotalSeconds;$now=$clock.Elapsed.TotalSeconds
+   $cpu=$null;try{$cpu=$process.TotalProcessorTime.TotalSeconds}catch{};if($null-eq$cpu){continue};$now=$clock.Elapsed.TotalSeconds
     if($previous.ContainsKey($key)){$samples+=[pscustomobject]@{pid=$process.Id;started=$owned[$key].started;role=$(if($item.ExecutablePath-eq$App){'ui'}else{'helper'});seconds=$now;cpuPercentOneCore=100*($cpu-$previous[$key].cpu)/($now-$previous[$key].seconds);rssBytes=$process.WorkingSet64}}
     $previous[$key]=@{cpu=$cpu;seconds=$now}
   }
@@ -224,7 +227,8 @@ try {
  # copy. Snapshot their identities before retiring them; never kill by name.
  foreach($item in (Processes)){
   $process=Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
-  if($process -and !$process.HasExited){$owned["$($process.Id):$($process.StartTime.ToUniversalTime().Ticks)"]=[pscustomobject]@{pid=$process.Id;started=$process.StartTime.ToUniversalTime().ToString('o');path=$item.ExecutablePath}}
+  $startUtc=$null;if($process -and !$process.HasExited){try{$startUtc=$process.StartTime.ToUniversalTime()}catch{}}
+  if($null-ne$startUtc){$owned["$($process.Id):$($startUtc.Ticks)"]=[pscustomobject]@{pid=$process.Id;started=$startUtc.ToString('o');path=$item.ExecutablePath}}
  }
  foreach($identity in ($owned.Values|Sort-Object { $_.path-eq$App } -Descending)){$process=Get-Process -Id $identity.pid -ErrorAction SilentlyContinue;if($process -and !$process.HasExited -and $process.StartTime.ToUniversalTime().Ticks-eq([DateTime]::Parse($identity.started)).ToUniversalTime().Ticks){Stop-Process -Id $identity.pid -Force}}
 } finally {

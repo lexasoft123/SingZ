@@ -41,6 +41,43 @@ class WindowsFrameTests(unittest.TestCase):
             win.judge("static", 60, 60, {"schema": "other"})
 
 
+class WindowsSettleAndForegroundTests(unittest.TestCase):
+    SETTLED = {"screenName": "Library", "visible": True, "active": True, "quickStartOpen": False, "whatsNewOpen": False,
+               "engineSetupOpen": False, "noticeOpen": False, "localePending": False}
+
+    def test_the_app_is_settled_only_on_the_quiet_library(self):
+        self.assertTrue(win.settled(self.SETTLED))
+        # the first-launch Models wizard is still up (screen 5), which is what a fixed 25 s wait raced against
+        self.assertFalse(win.settled({**self.SETTLED, "screenName": "Models"}))
+        for key in ("whatsNewOpen", "engineSetupOpen", "noticeOpen", "localePending"):
+            self.assertFalse(win.settled({**self.SETTLED, key: True}), key)
+        # a fresh profile leaves the quick start open for good (measured on the field laptop): that is the launch screen
+        self.assertTrue(win.settled({**self.SETTLED, "quickStartOpen": True}))
+        self.assertFalse(win.settled({**self.SETTLED, "active": False}))
+
+    def test_wait_settled_needs_consecutive_quiet_probes(self):
+        reads = iter([{**self.SETTLED, "screenName": "Models"}] * 2 + [self.SETTLED] * 3 + [{**self.SETTLED, "noticeOpen": True}]
+                     + [self.SETTLED] * win.SETTLE_QUIET_PROBES)
+        calls = []
+        original = (win.perf.request_action, win.time.sleep)
+        win.perf.request_action = lambda *a, **k: calls.append(1) or {"detail": next(reads)}
+        win.time.sleep = lambda s: None
+        try:
+            result = win.wait_settled(Path("."), 0)
+        finally:
+            win.perf.request_action, win.time.sleep = original
+        self.assertEqual(len(calls), 2 + 3 + 1 + win.SETTLE_QUIET_PROBES)  # the streak restarts after the interruption
+        self.assertEqual(result["probe"], self.SETTLED)
+
+    def test_the_guard_counts_every_sample_where_another_process_owns_the_foreground(self):
+        owners = iter([7, 7, 99, 7, None, 7])
+        guard = win.ForegroundGuard(7, reader=lambda: next(owners))
+        for _ in range(6):
+            guard.sample()
+        report = {"ticks": guard.ticks, "lost": guard.lost, "owners": sorted(o for o in guard.owners if o is not None)}
+        self.assertEqual(report, {"ticks": 6, "lost": 2, "owners": [99]})
+
+
 class WindowsAggregateTests(unittest.TestCase):
     def frames_file(self, directory, scenario, i, app_gpu, dwm_gpu, samples=3600):
         document = win.judge(scenario, 60, 60, sampler(samples=samples, app_gpu=app_gpu, dwm_gpu=dwm_gpu))

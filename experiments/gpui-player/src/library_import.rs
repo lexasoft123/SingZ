@@ -283,7 +283,7 @@ impl Render for ImportDialog {
             } else {
                 "library.libraryImport.copyMoveHint"
             })));
-        if self.pending_focus {
+        if self.pending_focus && crate::overlay_gate::may_focus(crate::overlay_gate::Layer::LibraryImport) {
             self.pending_focus = false;
             if self.busy {
                 self.scope.focus(w, cx);
@@ -305,4 +305,12 @@ impl Render for ImportDialog {
                 elapsed / 0.25,
             ))
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for ImportDialog {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.pending_focus = true;
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
 }

@@ -55,6 +55,10 @@ impl LanguageMenu {
         self.keyboard.set(window.last_input_was_keyboard());self.opened_at=Instant::now();self.scroll.set_offset(point(px(0.),px(0.)));
         self.scope.focus(window,cx);cx.notify();
     }
+    /// Focus is mounted inside the menu (its scope or one of its rows).
+    pub fn focus_scope_inside(&self,window:&Window,cx:&App)->bool {self.open&&self.scope.contains_focused(window,cx)}
+    /// Put focus on the menu's own scope (a layer with no default control).
+    pub fn focus_scope(&self,window:&mut Window,cx:&mut Context<Self>) {self.scope.focus(window,cx);}
     /// Host applies the shared i18n locale atomically before calling this.
     pub fn set_locale(&mut self,language:Language,locale:Locale,system_locale:Locale,cx:&mut Context<Self>) {
         if (self.language,self.locale,self.system_locale)!=(language,locale,system_locale) {
@@ -173,7 +177,7 @@ impl Render for LanguageMenu {
             .on_click(|_,_,cx|cx.stop_propagation())
             .child(self.probe("language-rows".into(),list));
         if natural>height {menu=menu.child(ui::production_scrollbar(&self.scroll));}
-        if self.pending_focus {self.pending_focus=false;self.focus(self.selected(),window,cx);}
+        if self.pending_focus&&crate::overlay_gate::may_focus(crate::overlay_gate::Layer::LanguageMenu) {self.pending_focus=false;self.focus(self.selected(),window,cx);}
         let elapsed=self.animation_time.unwrap_or_else(||self.opened_at.elapsed().as_secs_f32());
         if self.animation_time.is_none()&&elapsed<0.18&&!self.frame_pending {
             self.frame_pending=true;let weak=cx.weak_entity();

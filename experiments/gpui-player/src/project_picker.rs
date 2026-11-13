@@ -628,10 +628,11 @@ impl Render for Picker {
             }
         }
         card = card.child(storage);
-        if self.pending_focus {
+        let may_focus = crate::overlay_gate::may_focus(crate::overlay_gate::Layer::ProjectPicker);
+        if self.pending_focus && may_focus {
             self.pending_focus = false;
             self.focus("picker-browse", w, cx);
-        } else if transfer_signout_focus {
+        } else if transfer_signout_focus && may_focus {
             if self
                 .order
                 .borrow()
@@ -669,4 +670,12 @@ impl Render for Picker {
                 elapsed / 0.25,
             ))
     }
+}
+
+impl crate::overlay_gate::DefaultFocus for Picker {
+    fn request_default_focus(&mut self, cx: &mut Context<Self>) {
+        self.pending_focus = true;
+        cx.notify();
+    }
+    fn focus_inside(&self, window: &Window, cx: &App) -> bool { self.scope.contains_focused(window, cx) }
 }

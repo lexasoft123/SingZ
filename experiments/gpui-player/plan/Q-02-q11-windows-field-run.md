@@ -48,3 +48,24 @@ What does serve as an Electron control on this machine is the Q-01 Windows file:
 - `test_native_drive_retirement.py`: `journals()` now skips a journal that disappears or is locked between the listing and the read (`FileNotFoundError`, `PermissionError`), the same race the existing `ValueError` clause already tolerates. No assertion, deadline or timeout changed; a missing journal is simply not a candidate, and the test still requires its candidates. Evidence: 2 of 2 failing runs before (`FileNotFoundError` in `sidecar-failure.txt`), a pass after.
 - `windows_gpu_sampler.ps1`: reads PresentMon 2.3.1's CSV layout; an idle capture with no CSV after a clean exit is zero presents.
 - `tests/perf`: see `tests/perf/README.md`, "Windows legs".
+
+## Re-run at the tip, 2026-11-12 (commit `85d6284a` plus this worktree's fixes)
+
+**All 20 `run_windows_ui.ps1` cases pass, in two complete consecutive loops** (first loop 20 of 20, second loop 20 of 20, each case with a new `-Out`), on a release `ui-tests` build of the tip. The six cases that failed above, with the cause of each:
+
+| Case | Cause | Where fixed |
+|---|---|---|
+| drive | Fixed upstream by `d2bc946c` (the driver now expects the published empty project). One later attempt stopped on the runner's foreground-window guard (environment). | none needed |
+| drive-empty | **App defect, Windows only.** `drive_adopt::Directory::capture` accepted a folder only when `path.canonicalize()? == path`. Windows canonicalizes to `\\?\C:\...`, and the app builds the downloads folder as `...\prefs\gdrive/downloads` (a forward slash), so every Drive "Download and open" into an ordinary folder was refused with "Linked or non-directory adoption folder refused". Found by logging the path: `C:\...\gdrive/downloads` against `\\?\C:\...\gdrive\downloads`. | `src/drive_adopt.rs` (`is_canonical`, `same_windows_path`), `src/drive_restore.rs` |
+| provider | **Driver defect.** After the unavailable-ASIO notice was dismissed nothing held focus, so the driver's Tab keystrokes had no focus path to start from and never reached the Settings button (192 tabs, no control ever focused). The first attempt also failed because a click on the library card was swallowed by the What's New backdrop; the driver now settles What's New first. The runner's null-`StartTime` race (below) failed another attempt. | `src/ui_audio_provider.rs` |
+| title | **Stale driver, not Windows-specific** (it failed identically on the Mac). `8cfcc94d` made `rename_title` reject a name that ends with a space before trimming (the header comment says trailing spaces are kept until validated); the driver typed `"  \u017b renamed / song.wav  "`. The driver now types the leading-space form only. | `src/ui_title.rs` |
+| import | **Driver defect.** What's New (fresh profile, isolated config) opened after the project loaded and its backdrop swallowed the click on "Add to library"; the Mac keeps the "seen" mark in a machine-wide place and never shows it. The driver now settles What's New before opening the import dialog, as the other drivers already do. | `src/ui_library_import.rs` |
+| delete | **Stale driver, not Windows-specific** (fails on the Mac as well). The driver's `songs` control is the Songs/Training tab, which only pauses a loaded song; the control that opens the library is the catalog button. Entering the catalog also pauses by design, so the driver resumes playback there before checking that another project's delete dialog leaves the playing song alone. | `src/ui_project_delete.rs` |
+
+The brief said these drivers pass on the Mac at this tip; on a debug `ui-tests` build with basic-only helpers, `title` and `delete` failed on the Mac the same way before the corrections and pass after them, `import` passes before and after.
+
+Also fixed: `run_windows_ui.ps1` no longer dereferences a null `StartTime` when a process exits between enumeration and the read (the same guard on the CPU sample and on the cleanup copy of the loop); such a process is skipped.
+
+`cargo test --locked -- --test-threads=4` on the Dell at the tip: **1409 passed, 0 failed, 6 ignored.** With the default 8 test threads one latency bound failed once (`integration::actor_tests::held_job_transport_round_trip_bound`: held-job p99 7.95 ms against a 2.4 ms baseline plus 5 ms), the other 1408 passed; it passes at 4 threads. On the Mac, `cargo test --offline --locked` for `drive_adopt` passes (20 tests, including the two new ones); the Windows-only spelling test ran on the Dell.
+
+The N5 and N6 idle cells were re-measured at the tip after this run (2026-11-12 and 2026-11-13): N5 0, 0, 0 presents in three clean 60 s runs (pass; the earlier 4, 5, 8 and 1, 3, 0 were contaminated by the harness's ssh polling and by the first-launch Models wizard, and are kept as history), N6 0.39 % median (pass). Details and the method change are in `Q-02-native-baseline-windows.md`.

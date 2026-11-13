@@ -88,6 +88,31 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   wait!(|p:&Player|!p.loading&&p.rename_pending.is_none()&&p.notice.is_some());
   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.project.as_ref().unwrap().dir==renamed&&p.notice.as_ref().unwrap().contains("already exists"),"Collision changed project: {:?}",p.notice);Ok(())})??;
   capture!("collision-1280.png");handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.notice=None;cx.notify();}))?;
+  // A notice that opens while nothing holds focus (a mouse click on a card that fails to open) must not leave the
+  // window without focus when it closes: a real Tab then goes nowhere. The player root takes focus back.
+  handle.update(cx,|_,w,cx|{draw(w,cx);w.blur(cx);anyhow::ensure!(w.focused(cx).is_none(),"Fixture could not clear focus");view.update(cx,|p,cx|{p.notice=Some("Focus fixture".into());cx.notify();});draw(w,cx);Ok::<_,anyhow::Error>(())})??;
+  handle.update(cx,|_,w,cx|{view.update(cx,|p,cx|{p.notice=None;cx.notify();});draw(w,cx);Ok::<_,anyhow::Error>(())})??;
+  handle.update(cx,|_,w,cx|->anyhow::Result<()>{anyhow::ensure!(w.focused(cx).is_some(),"Focus was lost when the notice closed");key(w,cx,"tab");draw(w,cx);anyhow::ensure!(view.read(cx).header.read(cx).focused_control(w).is_some(),"A real Tab with nothing focused did not reach the first header control");Ok(())})??;
+  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.focus_player=true;cx.notify();}))?;
+  // While a project is loading (or a source job runs) the root owns focus and a Tab must not walk the page behind
+  // the modal: the root Tab handler stands behind the same predicate that makes the app treat the state as modal.
+  handle.update(cx,|_,w,cx|{draw(w,cx);Ok::<_,anyhow::Error>(())})??;
+  handle.update(cx,|_,w,cx|->anyhow::Result<()>{
+    view.update(cx,|p,cx|{p.loading=true;p.focus_player=true;cx.notify();});draw(w,cx);
+    let held=view.read(cx).focus_handle.is_focused(w);
+    let covered_before=view.read(cx).output_covered(cx);
+    let header_before=view.read(cx).header.read(cx).focused_control(w);
+    key(w,cx,"tab");draw(w,cx);
+    let tab_moved=view.read(cx).header.read(cx).focused_control(w).is_some()||!view.read(cx).focus_handle.is_focused(w);
+    key(w,cx,"shift-tab");draw(w,cx);
+    let (loading_after,covered_after)=(view.read(cx).loading,view.read(cx).output_covered(cx));
+    let header_focus=view.read(cx).header.read(cx).focused_control(w);
+    let root_focus=view.read(cx).focus_handle.is_focused(w);
+    let moved=tab_moved||header_focus.is_some()||!root_focus;
+    view.update(cx,|p,cx|{p.loading=false;cx.notify();});draw(w,cx);
+    anyhow::ensure!(held,"The root should hold focus under a loading modal");
+    anyhow::ensure!(!moved,"A root Tab walked the header behind a loading project's modal: header {header_focus:?}, root focused {root_focus}, covered before the Tab {covered_before}, header focus before the Tab {header_before:?}, loading after {loading_after}, covered after {covered_after}");Ok(())})??;
+  handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.focus_player=true;cx.notify();}))?;
   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{p.native_transport(transport::TransportEvent::Loop,cx);p.native_transport(transport::TransportEvent::Play,cx);}))?;wait!(|p:&Player|p.playing);
   handle.update(cx,|_,w,cx|{edit(&view,w,cx,"Playing rename")?;key(w,cx,"enter");Ok::<_,anyhow::Error>(())})??;
   wait!(|p:&Player|!p.loading&&p.rename_pending.is_none()&&p.song_title.as_str()=="Playing rename"&&p.playing);

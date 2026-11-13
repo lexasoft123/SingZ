@@ -38,18 +38,8 @@ pub(super) fn capture(
     if p.backend.is_none() || p.screen != Screen::Player || p.source_blocks_except_rate() {
         return;
     }
-    let dialog = p.loading
-        || (p.source_job.is_some() && p.source_split.is_none())
-        || p.notice.is_some()
-        || p.language_menu.read(cx).is_open()
-        || p.project_delete.read(cx).is_open()
-        || p.lyrics_editor_open
-        || p.project_picker_open
-        || p.drive_projects_open
-        || p.library_import_open
-        || p.stem_export_open
-        || p.engine_setup.read(cx).is_open()
-        || p.whats_new.read(cx).is_open()
+    // The owner list is `Player::active_layers` (paint order, `overlay_gate`); a page keeps its own keys.
+    let dialog = !p.active_layers(cx).without(crate::overlay_gate::Layer::Page).is_empty()
         || p.quick_start.read(cx).is_open()
         || p.carry_open
         || p.transport.read(cx).has_popover();

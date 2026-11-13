@@ -165,7 +165,7 @@ impl Header {
         }
         self.editing = false;
         cx.emit(HeaderEvent::TitleClosed);
-        // Preserve trailing spaces until rename_title validates the typed name.
+        // The typed value goes to rename_title as typed; it trims before it validates.
         let value = self.title_input.read(cx).value().to_string();
         if !value.trim().is_empty() && value != self.title.as_str() {
             cx.emit(HeaderEvent::Rename(value));
