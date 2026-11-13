@@ -68,7 +68,9 @@ fn embed_analyzer_source_hash(root: &std::path::Path) {
     ] {
         println!("cargo:rerun-if-changed={}", root.join(input).display());
     }
-    let mut command = std::process::Command::new("bash");
+    // A bare "bash" makes Windows search System32 before PATH, where hosted
+    // runners keep the WSL launcher; it fails silently with no distro.
+    let mut command = std::process::Command::new(posix_bash());
     if cfg!(windows) {
         command.args(["-c", "export PATH=\"/usr/bin:$PATH\"; root=$(cygpath -u \"$1\") || exit; exec bash \"$root/scripts/analyze-source-hash.sh\" \"$root\"", "gpui-analyze-hash"])
             .arg(root);
@@ -133,4 +135,28 @@ fn generate_detector_versions(root: &std::path::Path) {
         )
         .expect("Could not write generated detector version");
     }
+}
+
+/// The first bash on PATH that is not the Windows System32 WSL launcher.
+fn posix_bash() -> PathBuf {
+    if !cfg!(windows) {
+        return PathBuf::from("bash");
+    }
+    let system32 = env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("System32");
+    let system32 = fs::canonicalize(&system32).unwrap_or(system32);
+    env::var_os("PATH")
+        .iter()
+        .flat_map(env::split_paths)
+        .map(|dir| dir.join("bash.exe"))
+        .find(|candidate| {
+            candidate.is_file()
+                && candidate
+                    .parent()
+                    .map(|dir| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()))
+                    .is_none_or(|dir| dir != system32)
+        })
+        .unwrap_or_else(|| PathBuf::from("bash"))
 }

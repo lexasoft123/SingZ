@@ -24,12 +24,28 @@ HELPERS = ('singz-gpui-audio', 'singz-analyze', 'singz-gpui-input')
 RECEIPT = 'codec-runtime-manifest.json'
 
 
+def posix_bash() -> str:
+    """The first bash on PATH that is not the System32 WSL launcher."""
+    system32 = Path(os.environ.get('SystemRoot', r'C:\Windows'), 'System32').resolve()
+    for entry in os.environ.get('PATH', '').split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry, 'bash.exe')
+        if candidate.is_file() and candidate.resolve().parent != system32:
+            return str(candidate)
+    raise RuntimeError('Canonical analyzer source hash needs Git Bash on PATH; '
+                       'only the WSL launcher was found')
+
+
 def analyze_source_hash(root: Path = ROOT) -> str:
     """Use the established analyzer fingerprint, including in source archives."""
     if os.name == 'nt':
+        # A bare 'bash' makes Windows search System32 before PATH, where hosted
+        # runners keep the WSL launcher; it fails silently with no distro.
+        bash = posix_bash()
         # Only this child sees POSIX tools first. MSVC's link.exe must retain
         # priority in the parent environment used for CMake compilation.
-        command = ['bash', '-c',
+        command = [bash, '-c',
                    'export PATH="/usr/bin:$PATH"; '
                    'root=$(cygpath -u "$1") || exit; '
                    'exec bash "$root/scripts/analyze-source-hash.sh" "$root"',
