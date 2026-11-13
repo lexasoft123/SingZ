@@ -203,6 +203,30 @@ ready.then(async () => {
     assert.equal(addon.voiceMonitorAvailability(voiceInput).reason, 'no-input')
   }
   assert.equal(addon.voiceMonitorAvailability(idleContext).available, true)
+  for (const outputDeviceId of ['', 7, {}, 'bad\0uid', 'x'.repeat(4097)]) {
+    assert.equal(addon.voiceMonitorAvailability({ ...voiceInput, outputDeviceId }).reason, 'error')
+    assert.equal(addon.beginVoiceMonitor({ ...voiceInput, outputDeviceId, gainDb: 0, targetFrames: 32, maxFrames: 256 }, 10n).reason, 'error')
+  }
+  const outputChoices = addon.voiceMonitorAvailability({ ...voiceInput, outputDeviceId: null })
+  assert.ok(Array.isArray(outputChoices.outputCandidates))
+  for (const candidate of outputChoices.outputCandidates) {
+    assert.equal(typeof candidate.id, 'string')
+    assert.equal(typeof candidate.name, 'string')
+    assert.equal(typeof candidate.usable, 'boolean')
+    assert.equal(candidate.usable, false) // synthetic input UID is never available
+  }
+  const selectableOutput = hostDevices.devices.find(device => device.outputChannels > 0)
+  if (selectableOutput) {
+    const selected = addon.voiceMonitorAvailability({ ...voiceInput, outputDeviceId: selectableOutput.uid })
+    assert.deepEqual(selected.outputDevice, { id: selectableOutput.uid, name: selectableOutput.label })
+  }
+  if (process.platform === 'darwin') {
+    addon.voiceMonitorAvailability({ ...idleContext, webAudioPlaying: true,
+      browserOutputUid: 'smoke:browser-output', selectedOutputUid: 'smoke:app-output' })
+    assert.equal(addon.voiceMonitorAvailability({ ...voiceInput, outputDeviceId: null }).reason, 'output-not-native')
+    assert.equal(addon.voiceMonitorAvailability({ ...voiceInput, outputDeviceId: 'smoke:explicit-output' }).reason, 'no-input')
+    addon.voiceMonitorAvailability(idleContext)
+  }
   for (const inputChannel of [-1, 0.5, 64, Infinity, NaN]) {
     const invalid = addon.voiceMonitorAvailability({ ...voiceInput, inputChannel })
     assert.equal(invalid.available, false)

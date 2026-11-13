@@ -157,6 +157,17 @@ monitor reopen/stop calls; this does not measure HAL callback gaps. Real-device
 song start/stop, audible glitches, capture continuity and loopback remain hardware
 acceptance checks; the historical ~2.8 ms toggle residual above remains unqualified.
 
+The monitoring settings popup may send an explicit native `outputDeviceId`;
+null/omitted follows the app output, then the system default. Replies expose
+`outputDevice` and `outputCandidates` with display-only names and typed eligibility
+reasons. Explicit monitoring can use another device than the song (its input
+must still share that monitor device); it retains its physical output pair and
+never negotiates the other song device.
+Applying a changed selection stops the old monitor first, restoring its last hold,
+then starts the validated new route or stays off with the typed refusal. Capture
+and take ownership are not changed. Explicit selection overrides the former
+cross-device Web Audio refusal; auto-follow keeps that existing guard.
+
 ### Removed
 
 The ADR 0010 exclusive "Headphone monitoring preview": the Settings section, its

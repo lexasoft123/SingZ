@@ -2,25 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
 import type { TimeView } from '../model'
 import { meterFraction, monitorDbToFader, primaryState, recordBlock, type VoiceController, type VoiceInputOption, type VoiceModel } from '../audio/voice-take'
-import type { VoiceMonitorReason } from '../../../shared/voice-take'
 import { t, type Key } from '../i18n'
-import { blockText, clock, dbText, sgn } from './voice-format'
+import { blockText, clock, dbText, REASON_KEY, sgn } from './voice-format'
+import VoiceTrackSettings from './VoiceTrackSettings'
 import { useVoiceModel } from './voice-host'
 import { useVoiceStrings } from './voice-strings'
 import './voice-strip.css'
 
-const REASON_KEY: Record<VoiceMonitorReason, Key> = {
-  'route-separate-devices': 'player.voice.monReasonSeparateDevices',
-  'route-latency': 'player.voice.monReasonLatency',
-  'route-bluetooth': 'player.voice.monReasonBluetooth',
-  'route-wireless': 'player.voice.monReasonWireless',
-  'no-input': 'player.voice.monReasonNoInput',
-  permission: 'player.voice.monReasonPermission',
-  'output-not-native': 'player.voice.monReasonOutputNotNative',
-  platform: 'player.voice.monReasonPlatform',
-  'device-lost': 'player.voice.monReasonDeviceLost',
-  error: 'player.voice.monReasonError'
-}
 const monitorReasonText = (m: VoiceModel): string => (m.monitor.avail === 'ok' || !m.monitor.reason ? '' : t(REASON_KEY[m.monitor.reason]))
 
 /** Inputs grouped per device, in order; a device with several channels becomes an optgroup. */
@@ -58,6 +46,12 @@ const ICON = {
     <>
       <path d="M2 6h2.6L8 3v10L4.6 10H2z" fill="currentColor" />
       <path {...STROKE} d="M10.4 5.8a3.2 3.2 0 0 1 0 4.4M12.2 4a5.6 5.6 0 0 1 0 8" />
+    </>
+  ),
+  gear: (
+    <>
+      <circle cx="8" cy="8" r="2.2" {...STROKE} />
+      <path {...STROKE} d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2" />
     </>
   ),
   check: <path {...STROKE} d="M3 8.5l3.2 3.2L13 4.5" />,
@@ -225,6 +219,12 @@ export default function VoiceStrip({
   const block = recordBlock(m)
   const status = statusLine(m, controller)
   const keepRef = useRef<HTMLButtonElement>(null)
+  const gearRef = useRef<HTMLButtonElement>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const closeSettings = (): void => {
+    setSettingsOpen(false)
+    requestAnimationFrame(() => gearRef.current?.focus()) // focus returns to the gear that opened it
+  }
   const duration = engine.duration || 0
 
   // After a take finishes, put focus on Keep so the next step is one key away.
@@ -280,6 +280,19 @@ export default function VoiceStrip({
       <div className="vs-controls">
         <div className="vs-top">
           <h2 className="vs-name">{t('player.voice.name')}</h2>
+          <button
+            ref={gearRef}
+            type="button"
+            className="vs-ib vs-gear"
+            aria-haspopup="dialog"
+            aria-expanded={settingsOpen}
+            aria-label={t('player.voice.settings')}
+            title={t('player.voice.settings')}
+            onClick={() => setSettingsOpen(true)}
+          >
+            <SvgIcon>{ICON.gear}</SvgIcon>
+          </button>
+          {settingsOpen && <VoiceTrackSettings controller={controller} onClose={closeSettings} />}
           {m.monitor.on && m.monitor.latency && (
             <span
               className="vs-badge"

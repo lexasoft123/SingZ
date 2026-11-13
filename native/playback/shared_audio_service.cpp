@@ -655,15 +655,21 @@ std::shared_ptr<const AudioHostConfig> SharedAudioService::retainVoiceMonitorOut
   impl_->monitorOutput = use;
   return use;
 }
-AudioHostConfig SharedAudioService::voiceMonitorOutputConfig(const std::optional<std::string>& selectedUid) const {
+AudioHostConfig SharedAudioService::voiceMonitorOutputConfig(const std::optional<std::string>& selectedUid, bool independent) const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (impl_->songOutputCurrent) return impl_->route;
+  if (impl_->songOutputCurrent && !independent) return impl_->route;
   if (!impl_->enumerated || impl_->dirty->load(std::memory_order_acquire)) impl_->refreshLocked();
   auto config = impl_->preferredRouteLocked();
   if (selectedUid) {
     const auto uid = selectedUid->empty() ? impl_->cached.defaultOutputUid : *selectedUid;
     if (uid != config.outputDeviceUid) config.outputChannels.clear();
     config.outputDeviceUid = uid;
+  }
+  // Explicit monitoring retains its own physical pair when a song re-routes.
+  // The token is immutable, weakly held, and disappears when monitoring stops.
+  if (independent) {
+    if (const auto monitor = impl_->monitorOutput.lock(); monitor && monitor->outputDeviceUid == config.outputDeviceUid)
+      config.outputChannels = monitor->outputChannels;
   }
   if (config.outputChannels.empty()) {
     const auto device = std::find_if(impl_->cached.devices.begin(),impl_->cached.devices.end(),

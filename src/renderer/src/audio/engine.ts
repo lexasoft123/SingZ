@@ -1,3 +1,4 @@
+import { clampNativeTranspose, clampPlaybackRate } from './native-playback-limits'
 import type { VoiceMonitorPlaybackContext } from '../../../shared/voice-take'
 import { sanitizeSongVolume } from './song-volume'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
@@ -1490,7 +1491,7 @@ export class MultitrackEngine {
   async setTranspose(st: number): Promise<void> {
     this.scheduleNativePrepareAhead()
     if (this.teardownStarted) return
-    const target = Math.max(-12, Math.min(12, Math.round(st)))
+    const target = clampNativeTranspose(st)
     if (target === this.semitones) return
     if (this.nativePlayback?.active) {
       await this.nativePlayback.reconfigure({ transpose: target })
@@ -1512,7 +1513,7 @@ export class MultitrackEngine {
   async setTempo(rate: number): Promise<void> {
     this.scheduleNativePrepareAhead()
     if (this.teardownStarted) return
-    const target = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 10000) / 10000
+    const target = clampPlaybackRate(rate, this.nativeActive)
     if (Math.abs(target - this.rate) < 0.0001) return
     if (this.nativePlayback?.active) {
       await this.nativePlayback.reconfigure({ playbackRate: target })

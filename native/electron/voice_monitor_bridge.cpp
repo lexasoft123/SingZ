@@ -26,7 +26,9 @@ NativeAudioOwnership* ownership=nullptr;
 VoiceMonitorEnvironmentLifetime environments;
 bool browserPlaying=false;
 std::string browserOutput;
-std::optional<std::string> selectedOutput;
+std::optional<std::string> selectedOutput, monitorOutput;
+std::string monitoredInput;
+uint32_t monitoredInputChannel=0;
 bool useAllowed() {
   bool supported=false;
   if (ownership) {
@@ -57,16 +59,16 @@ bool permissionGranted() {
   return false;
 #endif
 }
-VoiceMonitorSongRoute currentRoute() {
+VoiceMonitorSongRoute currentRoute(const std::optional<std::string>& requestedMonitorOutput = monitorOutput) {
   auto& service=sharedAudioService();
   const auto status=service.status();
-  const auto config=service.voiceMonitorOutputConfig(selectedOutput);
+  const auto config=service.voiceMonitorOutputConfig(requestedMonitorOutput ? requestedMonitorOutput : selectedOutput, requestedMonitorOutput.has_value());
   auto route=voiceMonitorSongRoute(config,service.providerId(),status,service.outputRouteGeneration(),service.playbackOutputCurrent());
   // Unsupported providers are a platform refusal, never a browser mismatch.
   if (service.providerId()!="coreaudio") { route.output.clear();route.channels.clear(); }
   // With no song, opening the selected CoreAudio endpoint is sufficient.
   route.native=!route.output.empty() &&
-      (service.playbackOutputCurrent() || voiceMonitorBrowserOutputCompatible(browserPlaying,browserOutput,route.output));
+      (requestedMonitorOutput || service.playbackOutputCurrent() || voiceMonitorBrowserOutputCompatible(browserPlaying,browserOutput,route.output));
   return route;
 }
 napi_value object(napi_env env) {napi_value o;napi_create_object(env,&o);return o;}
@@ -85,19 +87,51 @@ void latency(napi_env env,napi_value o,const VoiceMonitorLatency& l) {
   number(env,v,"outputDeviceFrames",l.outputDeviceFrames);number(env,v,"roundTripFrames",static_cast<double>(l.roundTripFrames));
   number(env,v,"roundTripMs",l.roundTripMs);text(env,v,"source","estimated");napi_set_named_property(env,o,"latency",v);
 }
+void outputs(napi_env env,napi_value o,const std::string& input,uint32_t channel,const std::string& output) {
+  const auto choices=voiceMonitorOutputChoices(sharedAudioService().inventory(),input,channel,output,
+#if defined(__APPLE__) && TARGET_OS_OSX
+      true
+#else
+      false
+#endif
+  );
+  napi_value resolved;
+  if(choices.id.empty()) napi_get_null(env,&resolved);
+  else { resolved=object(env);text(env,resolved,"id",choices.id);text(env,resolved,"name",choices.name); }
+  napi_set_named_property(env,o,"outputDevice",resolved);
+  napi_value list;napi_create_array_with_length(env,choices.candidates.size(),&list);
+  for(size_t i=0;i<choices.candidates.size();++i) {
+    const auto& device=choices.candidates[i];auto entry=object(env);
+    text(env,entry,"id",device.id);text(env,entry,"name",device.name);boolean(env,entry,"usable",device.usable);
+    if(!device.reason.empty())text(env,entry,"reason",device.reason);
+    napi_set_element(env,list,i,entry);
+  }
+  napi_set_named_property(env,o,"outputCandidates",list);
+}
 napi_value error(napi_env env,const char* message) {
   auto o=object(env);boolean(env,o,"ok",false);text(env,o,"reason","error");text(env,o,"error",message);return o;
 }
 bool scalar(napi_env env,napi_value o,const char* key,double& n) {
   napi_value v;return napi_get_named_property(env,o,key,&v)==napi_ok && napi_get_value_double(env,v,&n)==napi_ok && std::isfinite(n);
 }
-bool selection(napi_env env,napi_value o,std::string& uid,uint32_t& channel) {
+bool selection(napi_env env,napi_value o,std::string& uid,uint32_t& channel,bool allowEmpty=false) {
   napi_value v;size_t length=0;double n=0;
   if(napi_get_named_property(env,o,"inputUid",&v)!=napi_ok ||
-      napi_get_value_string_utf8(env,v,nullptr,0,&length)!=napi_ok || !length || length>4096 ||
+      napi_get_value_string_utf8(env,v,nullptr,0,&length)!=napi_ok || (!length && !allowEmpty) || length>4096 ||
       !scalar(env,o,"inputChannel",n) || n<0 || n>=kAudioHostMaxChannels || std::floor(n)!=n)return false;
   uid.resize(length+1);if(napi_get_value_string_utf8(env,v,uid.data(),uid.size(),&length)!=napi_ok)return false;
   uid.resize(length);channel=static_cast<uint32_t>(n);return uid.find('\0')==std::string::npos;
+}
+bool outputSelection(napi_env env,napi_value arg,std::optional<std::string>& choice) {
+  napi_value value;napi_valuetype type;
+  if(napi_get_named_property(env,arg,"outputDeviceId",&value)!=napi_ok || napi_typeof(env,value,&type)!=napi_ok) return false;
+  if(type==napi_undefined || type==napi_null) { choice.reset();return true; }
+  size_t length=0;
+  if(type!=napi_string || napi_get_value_string_utf8(env,value,nullptr,0,&length)!=napi_ok || !length || length>4096) return false;
+  std::string uid(length+1,'\0');
+  if(napi_get_value_string_utf8(env,value,uid.data(),uid.size(),&length)!=napi_ok) return false;
+  uid.resize(length);if(uid.find('\0')!=std::string::npos)return false;
+  choice=std::move(uid);return true;
 }
 bool generation(napi_env env,napi_value v,uint64_t& g){bool exact=false;return napi_get_value_bigint_uint64(env,v,&g,&exact)==napi_ok && exact && g;}
 napi_value result(napi_env env,const VoiceMonitorResult& r) {
@@ -109,12 +143,12 @@ napi_value result(napi_env env,const VoiceMonitorResult& r) {
 }
 napi_value availability(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);
-  std::string uid;uint32_t channel=0;
+  std::string uid;uint32_t channel=0;std::optional<std::string> outputChoice;
   bool contextOnly=false;
   napi_value contextFlag;
   if(argc==1 && napi_get_named_property(env,arg,"contextOnly",&contextFlag)==napi_ok)
     napi_get_value_bool(env,contextFlag,&contextOnly);
-  if(argc!=1 || (!contextOnly && !selection(env,arg,uid,channel))) {
+  if(argc!=1 || (!contextOnly && (!selection(env,arg,uid,channel,true) || !outputSelection(env,arg,outputChoice)))) {
     auto o=object(env);boolean(env,o,"available",false);text(env,o,"reason","error");text(env,o,"detail","Invalid input selection");return o;
   }
   std::lock_guard lock(control);
@@ -139,11 +173,11 @@ napi_value availability(napi_env env,napi_callback_info info) {
     }
     auto o=object(env);boolean(env,o,"available",true);return o;
   }
+  const auto route=currentRoute(outputChoice);
   if(!useAllowed()) {
     auto o=object(env);boolean(env,o,"available",false);text(env,o,"reason","error");
-    text(env,o,"detail","Audio input is busy or unsupported");return o;
+    text(env,o,"detail","Audio input is busy or unsupported");outputs(env,o,uid,channel,outputChoice ? *outputChoice : route.output);return o;
   }
-  const auto route=currentRoute();
   const auto r=host.availability(uid,channel,route.output,route.native,permissionGranted());
   auto o=object(env);boolean(env,o,"available",r.available);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
@@ -151,20 +185,21 @@ napi_value availability(napi_env env,napi_callback_info info) {
   if(!r.deviceUid.empty())text(env,o,"deviceUid",r.deviceUid);
   if(r.minBufferFrames)number(env,o,"minBufferFrames",r.minBufferFrames);
   if(r.maxBufferFrames)number(env,o,"maxBufferFrames",r.maxBufferFrames);
+  outputs(env,o,uid,channel,outputChoice ? *outputChoice : route.output);
   return o;
 }
 napi_value begin(napi_env env,napi_callback_info info) {
   size_t argc=2;napi_value args[2]{};napi_get_cb_info(env,info,&argc,args,nullptr,nullptr);
-  std::string uid;uint32_t channel=0;uint64_t g=0;double gain=0,target=0,maximum=0;
-  if(argc!=2 || !selection(env,args[0],uid,channel) || !generation(env,args[1],g) ||
+  std::string uid;uint32_t channel=0;std::optional<std::string> outputChoice;uint64_t g=0;double gain=0,target=0,maximum=0;
+  if(argc!=2 || !selection(env,args[0],uid,channel) || !outputSelection(env,args[0],outputChoice) || !generation(env,args[1],g) ||
       !scalar(env,args[0],"gainDb",gain) || !scalar(env,args[0],"targetFrames",target) ||
       !scalar(env,args[0],"maxFrames",maximum) || target!=32 || maximum!=256)return error(env,"Invalid monitor configuration or generation");
   std::lock_guard lock(control);
   if(!useAllowed())return error(env,"Audio input is busy or unsupported");
-  const auto route=currentRoute();
+  const auto route=currentRoute(outputChoice);
   auto r=host.begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,-60.0,12.0)),32,256,g,route.channels,&sharedAudioService());
-  if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;}
-  return result(env,r);
+  if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;monitorOutput=outputChoice;monitoredInput=uid;monitoredInputChannel=channel;}
+  auto o=result(env,r);outputs(env,o,uid,channel,outputChoice ? *outputChoice : route.output);return o;
 }
 napi_value outputCurrent(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};bool current=false;
@@ -217,6 +252,7 @@ napi_value status(napi_env env,napi_callback_info) {
 #undef SONG_DIAG
   napi_set_named_property(env,o,"songCallbackDiagnostics",diagnostics);
   boolean(env,o,"songOutputCurrent",sharedAudioService().playbackOutputCurrent());
+  outputs(env,o,monitoredInput,monitoredInputChannel,route.output);
   warnings(env,o,r.warnings);return o;
 }
 napi_value end(napi_env env,napi_callback_info info) {
@@ -265,7 +301,7 @@ bool cleanupVoiceMonitor() noexcept {
   std::lock_guard lock(control);
   if(!environments.detach())return false;
   host.close();monitoredOutput.clear();monitoredChannels.clear();ownership=nullptr;
-  browserPlaying=false;browserOutput.clear();selectedOutput.reset();
+  browserPlaying=false;browserOutput.clear();selectedOutput.reset();monitorOutput.reset();monitoredInput.clear();
   return true;
 }
 }

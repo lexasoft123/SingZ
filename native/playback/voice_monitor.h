@@ -82,6 +82,17 @@ struct VoiceMonitorAvailability {
   std::string reason, detail, deviceUid;
   uint32_t minBufferFrames{0}, maxBufferFrames{0};
 };
+struct VoiceMonitorOutputCandidate {
+  std::string id, name;
+  bool usable{false};
+  std::string reason;
+};
+struct VoiceMonitorOutputChoices {
+  std::string id, name; // Empty id means no resolved output; name is display-only.
+  std::vector<VoiceMonitorOutputCandidate> candidates;
+};
+VoiceMonitorOutputChoices voiceMonitorOutputChoices(const AudioHostInventory&, const std::string& inputUid,
+    uint32_t channel, const std::string& outputUid, bool macOS);
 struct VoiceMonitorLatency {
   double sampleRate{0};
   uint32_t requestedFrames{32}, bufferFrames{0}, inputDeviceFrames{0}, outputDeviceFrames{0};

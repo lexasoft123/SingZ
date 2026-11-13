@@ -48,6 +48,18 @@ VoiceMonitorAvailability classifyVoiceMonitorRoute(const AudioHostInventory& inv
   result.available=true;
   return result;
 }
+VoiceMonitorOutputChoices voiceMonitorOutputChoices(const AudioHostInventory& inventory,
+    const std::string& uid, uint32_t channel, const std::string& output, bool macOS) {
+  VoiceMonitorOutputChoices choices;
+  for (const auto& device : inventory.devices) {
+    if (!device.outputChannels) continue;
+    if (device.uid==output) { choices.id=device.uid;choices.name=device.label; }
+    // Eligibility is a hardware-route decision, independent of permission or labels.
+    const auto eligibility=classifyVoiceMonitorRoute(inventory,uid,channel,device.uid,true,true,macOS);
+    choices.candidates.push_back({device.uid,device.label,eligibility.available,eligibility.reason});
+  }
+  return choices;
+}
 namespace {
 std::vector<std::string> warnings(uint32_t flags) {
   std::vector<std::string> result;
@@ -142,7 +154,7 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
   self.render.current=self.render.destination=self.render.step=0; self.render.remaining=0;
   self.render.target.store(0); self.render.silent.store(1); self.render.outputs=outputs;
   uint32_t frames=device->bufferFrames.preferredFrames;
-  const bool songOpen = songService && songService->playbackOutputCurrent() &&
+  const bool songOpen = songService && songService->activeOutputUid()==uid && songService->playbackOutputCurrent() &&
       (songService->status().state==AudioHostState::Open || songService->status().state==AudioHostState::Running);
   if (songOpen) {
     const auto prepared=songService->prepareVoiceMonitor(target,maximum);

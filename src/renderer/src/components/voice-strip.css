@@ -233,3 +233,12 @@ body.modal-open .vs-rec-t.recording .vs-rec-core { animation-play-state: paused;
 .voice-record-slot { display: contents; }
 .vs-ib.vs-mon.active { color: #12100d; background: var(--voice); }
 .vs-badge { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--voice) 45%, transparent); color: var(--voice); background: color-mix(in srgb, var(--voice) 10%, transparent); white-space: nowrap; }
+
+/* Track settings popup (kit Modal card). */
+.vs-settings { width: min(460px, 92vw); }
+.vs-set-row { display: grid; grid-template-columns: 9.5em 1fr 4.5em; align-items: center; gap: 10px; margin: 10px 0; }
+.vs-set-row select { grid-column: 2 / 4; min-width: 0; }
+.vs-set-row output { font-family: var(--font-mono); font-size: 11px; color: var(--dim); text-align: right; }
+.vs-set-note { min-height: 1.3em; font-size: 12px; color: var(--accent); }
+.vs-set-route { font-family: var(--font-mono); font-size: 11px; color: var(--dim); }
+.vs-set-actions { display: flex; justify-content: flex-end; margin-top: 12px; }

@@ -412,6 +412,53 @@ void channelTests() {
   }
 }
 bool songRender(void* ctx,const AudioHostRenderBlock& b)noexcept{++*static_cast<unsigned*>(ctx);for(uint32_t c=0;c<b.outputChannels;++c)for(uint32_t i=0;i<b.frames;++i)b.output[c][i]=.4f;return true;}
+void outputPickerTests() {
+  auto input=device();auto separate=input;separate.uid="other"; // same label, different identity
+  auto onlyInput=input;onlyInput.uid="input-only";onlyInput.outputChannels=0;
+  AudioHostInventory inventory{{input,separate,onlyInput},"usb","usb"};
+  auto choices=voiceMonitorOutputChoices(inventory,"usb",2,"other",true);
+  CHECK(choices.id=="other" && choices.name==separate.label && choices.candidates.size()==2);
+  CHECK(choices.candidates[0].id=="usb" && choices.candidates[0].usable && choices.candidates[0].reason.empty());
+  CHECK(!choices.candidates[1].usable && choices.candidates[1].reason=="route-separate-devices");
+  CHECK(voiceMonitorOutputChoices(inventory,"usb",2,"missing",true).id.empty());
+  for(const auto transport:{AudioHostTransport::Bluetooth,AudioHostTransport::AirPlay}) {
+    inventory.devices[0].transport=transport;
+    const auto list=voiceMonitorOutputChoices(inventory,"usb",2,"usb",true);
+    CHECK(!list.candidates[0].usable && list.candidates[0].reason==(transport==AudioHostTransport::Bluetooth?"route-bluetooth":"route-wireless"));
+  }
+  inventory.devices[0]=input;inventory.devices[0].bufferFrames.minimumFrames=512;
+  CHECK(voiceMonitorOutputChoices(inventory,"usb",2,"usb",true).candidates[0].reason=="route-latency");
+  CHECK(voiceMonitorOutputChoices(inventory,"missing",0,"usb",true).candidates[0].reason=="no-input");
+  CHECK(voiceMonitorOutputChoices(inventory,"usb",2,"usb",false).candidates[0].reason=="platform");
+  auto song=std::make_shared<Record>();song->ledgerPath=true;song->secondaryRoute=true;
+  SharedAudioService service(std::make_unique<FakeHost>(song),"coreaudio");
+  AudioHostConfig config;config.outputDeviceUid="usb";config.outputChannels={0,1};
+  config.requestedBufferFrames=512;config.maximumFrames=4096;unsigned callbacks=0;
+  auto client=service.playbackBackend(std::make_unique<FakeHost>(song),"coreaudio");
+  CHECK(client->open(config,songRender,&callbacks).ok && client->start().ok);
+  CHECK(service.voiceMonitorOutputConfig(std::string("other"),true).outputDeviceUid=="other");
+  CHECK(service.voiceMonitorOutputConfig().outputDeviceUid=="usb");
+  AudioHostConfig pinned;pinned.outputDeviceUid="other";pinned.outputChannels={2,3};
+  auto pair=service.retainVoiceMonitorOutput(pinned);
+  CHECK(service.voiceMonitorOutputConfig(std::string("other"),true).outputChannels==std::vector<uint32_t>({2,3}));
+  CHECK(service.voiceMonitorOutputConfig().outputChannels==std::vector<uint32_t>({0,1}));
+  pair.reset();
+  auto monitorDevice=std::make_shared<Record>();monitorDevice->ledgerPath=true;monitorDevice->automatic=true;
+  monitorDevice->device.uid="other";monitorDevice->properties.uid="other";
+  monitorDevice->sharedLedger=&song->ledger;
+  detail::MacAudioBufferOwnership capture;
+  CHECK(detail::requestMacAudioBuffer(monitorDevice->properties,0,8192,capture,0,song->ledger).ok());
+  VoiceMonitorHost monitor(std::make_unique<FakeHost>(monitorDevice));
+  CHECK(monitor.begin("other",2,"other",true,true,0,32,256,1,{},&service).ok);
+  CHECK(song->liveRequests.empty() && song->properties.frames==512 && song->properties.writes==0);
+  CHECK(monitorDevice->properties.frames==32 && monitorDevice->properties.writes==1);
+  CHECK(client->status().state==AudioHostState::Running && monitor.status().running);
+  CHECK(monitor.end(1).ok && monitorDevice->properties.frames==512 && monitorDevice->properties.writes==2);
+  CHECK(song->ledger.devices.at("other").owners.contains(capture.token));
+  CHECK(detail::restoreMacAudioBuffer(monitorDevice->properties,capture,song->ledger)==0);
+  client->stop();client.reset();CHECK(service.setPlaybackOutputCurrent(false));
+  CHECK(song->ledger.devices.empty());
+}
 void idleMonitorTests() {
   CHECK(voiceMonitorBrowserOutputCompatible(false,"other","usb"));
   CHECK(voiceMonitorBrowserOutputCompatible(true,"usb","usb"));
@@ -749,4 +796,4 @@ void songTests() {
   globalClient->stop();shared.shutdown();client->stop();
 }
 }
-int main(){renderTests();routeTests();hostTests();channelTests();idleMonitorTests();sharedMonitorLeaseTests();externalLeaseTests();repeatedSharedBufferTests();currentOutputAndGapTests();songTests();std::printf("voice_monitor_tests: %d failures\n",failures);return failures?1:0;}
+int main(){renderTests();routeTests();hostTests();channelTests();outputPickerTests();idleMonitorTests();sharedMonitorLeaseTests();externalLeaseTests();repeatedSharedBufferTests();currentOutputAndGapTests();songTests();std::printf("voice_monitor_tests: %d failures\n",failures);return failures?1:0;}

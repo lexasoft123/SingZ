@@ -78,6 +78,7 @@ const SV = (b) => `<svg viewBox="0 0 16 16" aria-hidden="true">${b}</svg>`;
 const ST = 'fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"';
 const ICON = {
   rec: SV('<circle cx="8" cy="8" r="4.2" fill="currentColor"/>'),
+  gear: SV(`<circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path ${ST} d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2"/>`),
   speaker: SV(`<path d="M2 6h2.6L8 3v10L4.6 10H2z" fill="currentColor"/><path ${ST} d="M10.4 5.8a3.2 3.2 0 0 1 0 4.4M12.2 4a5.6 5.6 0 0 1 0 8"/>`),
   check: SV(`<path ${ST} d="M3 8.5l3.2 3.2L13 4.5"/>`),
   play: SV('<path d="M4.5 3v10l8-5z" fill="currentColor"/>'),
@@ -342,6 +343,25 @@ $('voiceTrack').onclick = (e) => { if (e.target.closest('.clip')) return; seekFr
 $('monBtn').onclick = () => { if (S.avail !== 'ok') return; S.muted = !S.muted; announce(S.muted ? STR.announce.monOff : STR.announce.monOn); render(); };
 $('muteBtn').onclick = () => { S.takeMute = !S.takeMute; render(); };
 $('soloBtn').onclick = () => { S.solo = !S.solo; render(); };
+// Track settings popup: Esc and Done close it and focus returns to the gear.
+const setModal = $('setModal');
+setBtn($('gearBtn'), 'Track settings', 'gear');
+const openSettings = () => { setModal.hidden = false; $('gearBtn').setAttribute('aria-expanded', 'true'); $('setMon').focus(); updateSettings(); };
+const closeSettings = () => { setModal.hidden = true; $('gearBtn').setAttribute('aria-expanded', 'false'); $('gearBtn').focus(); };
+function updateSettings() {
+  $('setMon').value = S.monLevel; $('setMonOut').textContent = `${Math.round(S.monLevel * 0.72 - 60)} dB`;
+  $('setTake').value = S.level; $('setTakeOut').textContent = `${S.level}%`;
+  $('setRoute').textContent = monitoring() ? 'Route: Scarlett 2i2 · buffer 32 frames · estimated delay ≈ 5 ms' : 'Route: shown while monitoring.';
+}
+$('gearBtn').onclick = openSettings; $('setDone').onclick = closeSettings;
+setModal.onclick = (e) => { if (e.target === setModal) closeSettings(); };
+$('setMon').oninput = (e) => { S.monLevel = +e.target.value; render(); updateSettings(); };
+$('setTake').oninput = (e) => { S.level = +e.target.value; render(); updateSettings(); };
+$('setOut').onchange = () => {
+  $('setNote').textContent = monitoring() ? 'Switching the monitor output…' : '';
+  if (monitoring()) setTimeout(() => { $('setNote').textContent = ''; }, 800);
+};
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !setModal.hidden) { e.stopPropagation(); closeSettings(); } }, true);
 $('armBtn').onclick = () => { if (!canRecord()) return; S.phase = S.phase === 'armed' ? 'idle' : 'armed'; if (S.phase === 'armed') setClip(false); announce(S.phase === 'armed' ? STR.announce.armed : STR.announce.disarmed); render(); };
 $('clipLed').onclick = () => { setClip(false); announce('Clip indicator reset'); };
 $('levelRng').oninput = (e) => { if (monitoring()) S.monLevel = +e.target.value; else S.level = +e.target.value; };

@@ -16,6 +16,8 @@ import type {
   VoiceMonitorAvailabilityRequest,
   VoiceMonitorGainRequest,
   VoiceMonitorLatency,
+  VoiceMonitorOutputCandidate,
+  VoiceMonitorOutputDevice,
   VoiceMonitorReason,
   VoiceMonitorSetRequest,
   VoiceMonitorState,
@@ -160,6 +162,16 @@ export interface VoiceModel {
   }
   /** Monitor level in dB (-60..+12). The take level is `level`; the fader edits one or the other. */
   monitorGainDb: number
+  /** The chosen monitor output (native UID); null follows the song output, then the system default. Remembered, never 'on'. */
+  monitorOutput: string | null
+  /** The remembered output is no longer among the candidates: the monitor fell back to the default. */
+  monitorOutputMissing: boolean
+  /** Output candidates from main's last reply, with typed reasons for the unusable ones. */
+  monitorOutputs: VoiceMonitorOutputCandidate[]
+  /** The resolved route's output device (display name), when main reported one. */
+  monitorOutputDevice: VoiceMonitorOutputDevice | null
+  /** A new output was chosen while monitoring: the brief restart, shown as a transient state, not an error. */
+  monitorSwitching: boolean
   /** True during the first monitoring episode of the session: shows the quiet headphones hint. */
   monitorHint: boolean
   /** A quiet, non-error note about monitoring (never an error state). */
@@ -208,6 +220,11 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   // Monitoring is never persisted as on: every controller starts off.
   monitor: { avail: 'ok', reason: null, on: false, latency: null, warnings: [] },
   monitorGainDb: MONITOR_GAIN_DEFAULT_DB,
+  monitorOutput: null,
+  monitorOutputMissing: false,
+  monitorOutputs: [],
+  monitorOutputDevice: null,
+  monitorSwitching: false,
   monitorHint: false,
   monitorNote: null,
   error: null,
@@ -268,6 +285,13 @@ export const PEAK_STEP_SEC = 0.05
 const SEEK_JUMP_SEC = 0.75
 const STORAGE_KEY = 'singz.voice.input'
 const MONITOR_GAIN_KEY = 'singz.voice.monitorGain'
+const MONITOR_OUTPUT_KEY = 'singz.voice.monitorOutput'
+/** Strict: a native output UID is a short printable string; anything else stored is junk. */
+export function parseMonitorOutput(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 256 || raw !== raw.trim()) return null
+  // eslint-disable-next-line no-control-regex
+  return /[\u0000-\u001f\u007f]/.test(raw) || raw === 'on' || raw === 'off' ? null : raw
+}
 const SONG_START_TIMEOUT_MS = 3000
 const AVAILABILITY_RETRY_MS = [500, 1500, 3000]
 const MONITOR_STATE_EVERY = 10 // level polls (~50 ms each) per monitor-state check
@@ -296,6 +320,17 @@ interface ListenSettings {
 interface SavedInput {
   device: string | null
   channels: Record<string, number>
+}
+
+/** Fired by App once its playback-context publish to main has resolved. */
+export const VOICE_CONTEXT_EVENT = 'singz:voice-monitor-context'
+
+const controllers = new WeakMap<object, VoiceController>()
+/** The one controller per engine: the Voice host remounting (song load, library view) gets the same one, so a running monitor keeps its state. */
+export function voiceControllerFor(engine: object, create: () => VoiceController): VoiceController {
+  let c = controllers.get(engine)
+  if (!c) controllers.set(engine, (c = create()))
+  return c
 }
 
 export class VoiceController {
@@ -349,7 +384,26 @@ export class VoiceController {
     this.now = deps.now ?? (() => Date.now())
     this.restoreStems(MUTED_BY_SOLO.get(deps.engine) ?? null)
     this.saved = this.readStored()
-    this.model = { ...this.model, monitorGainDb: this.readMonitorGain() }
+    this.savedOutput = this.readMonitorOutput()
+    this.model = { ...this.model, monitorGainDb: this.readMonitorGain(), monitorOutput: this.savedOutput }
+  }
+
+  /** The remembered output, whether or not it is currently among the candidates. */
+  private savedOutput: string | null = null
+  /** The output id of the last monitorSet(on) sent, to know whether a pick still has to be sent. */
+  private lastSentOutput: string | null | undefined = undefined
+  /** A pick arrived while a call was in flight. */
+  private outputDirty = false
+
+  private readMonitorOutput(): string | null {
+    try {
+      const raw = this.deps.storage?.getItem(MONITOR_OUTPUT_KEY)
+      const id = parseMonitorOutput(raw)
+      if (raw !== null && raw !== undefined && raw !== '' && id === null) this.deps.storage?.setItem(MONITOR_OUTPUT_KEY, '') // junk: forget it
+      return id
+    } catch {
+      return null
+    }
   }
 
   /** Strict: a blank, non-numeric or out-of-range stored value is junk, replaced by the default. */
@@ -400,7 +454,7 @@ export class VoiceController {
     this.songMeta = { title: src?.title ?? '', artist: src?.artist ?? '' }
     const id = src ? stableVoiceSongId(src) : null
     void this.setSong(id)
-    if (id === null) return () => this.dispose()
+    if (id === null) return () => this.detach()
     void this.refreshInputs()
     const md = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
     const onChange = (): void => void this.refreshInputs()
@@ -409,19 +463,41 @@ export class VoiceController {
     // does not depend on song playback, so play/pause alone never re-asks.
     const { engine } = this.deps
     let route = `${engine.outputDeviceId}|${engine.nativeActive}`
+    let playing = engine.playing
     const unsub = engine.subscribe?.(() => {
       const nowRoute = `${engine.outputDeviceId}|${engine.nativeActive}`
-      if (nowRoute === route) return
+      const stopped = playing && !engine.playing // Web Audio playback ending changes the output context
+      playing = engine.playing
+      if (nowRoute === route && !stopped) return
       route = nowRoute
       void this.refreshMonitorAvailability()
       this.scheduleAvailabilityRetries()
     })
+    // App publishes the playback context to main asynchronously after a route change; once that has
+    // landed, ask again so a stale answer (e.g. 'output-not-native') is replaced.
+    const onContext = (): void => {
+      void this.refreshMonitorAvailability()
+      this.scheduleAvailabilityRetries()
+    }
+    if (typeof window !== 'undefined') window.addEventListener?.(VOICE_CONTEXT_EVENT, onContext)
     return () => {
+      if (typeof window !== 'undefined') window.removeEventListener?.(VOICE_CONTEXT_EVENT, onContext)
       md?.removeEventListener?.('devicechange', onChange)
       unsub?.()
-      this.cancelAvailabilityRetries()
-      this.dispose()
+      this.detach()
     }
+  }
+
+  /**
+   * The host unmounts (another song is loading, the library is open, the song screen is left): capture,
+   * playback, arm and take state reset exactly as for a song change, but a running monitor and its poll
+   * stay alive. They end on speaker-off, device or route loss, input change or quit (main disposes the
+   * monitor when the renderer goes away); `dispose()` is the full teardown.
+   */
+  detach(): void {
+    this.cancelAvailabilityRetries()
+    if (this.model.songId !== null) void this.setSong(null)
+    else void this.abortActivity(false)
   }
 
   dispose(): void {
@@ -1097,8 +1173,15 @@ export class VoiceController {
     const avail = available ? 'ok' : reason === 'route-latency' ? 'latency' : 'route'
     const on = available && st.on
     this.monitorOpen = on
+    const cands = st.outputCandidates
+    // A remembered output that is gone, or present but unusable now (e.g. a separate device after an input change), falls back to the default.
+    const found = cands !== undefined && this.savedOutput !== null && cands.some((c) => c.id === this.savedOutput && c.usable)
     this.set({
       ...(on ? {} : { monitorHint: false }),
+      ...(cands !== undefined
+        ? { monitorOutputs: cands, monitorOutput: found ? this.savedOutput : null, monitorOutputMissing: this.savedOutput !== null && !found }
+        : {}),
+      ...(st.outputDevice !== undefined ? { monitorOutputDevice: st.outputDevice } : {}),
       monitor: { avail, reason, on, latency: on ? st.latency : null, warnings: on ? st.warnings : [] },
       ...(wasOn !== on ? this.say(on ? 'announceMonitorOn' : 'announceMonitorOff') : {})
     })
@@ -1129,14 +1212,14 @@ export class VoiceController {
 
   /**
    * After a route change the answer can lag a moment: while availability still reports the transient
-   * 'error' reason, ask again at +0.5 s, +1.5 s and +3 s, then stop. No timer storm.
+   * 'error' or 'output-not-native' reason, ask again at +0.5 s, +1.5 s and +3 s, then stop. No timer storm.
    */
   private scheduleAvailabilityRetries(): void {
     this.cancelAvailabilityRetries()
     for (const delay of AVAILABILITY_RETRY_MS) {
       this.availRetryTimers.push(
         setTimeout(() => {
-          if (this.disposed || this.model.monitor.on || this.model.monitor.reason !== 'error') return
+          if (this.disposed || this.model.monitor.on || (this.model.monitor.reason !== 'error' && this.model.monitor.reason !== 'output-not-native')) return
           void this.refreshMonitorAvailability()
         }, delay)
       )
@@ -1150,7 +1233,7 @@ export class VoiceController {
 
   private async fetchMonitorAvailability(): Promise<VoiceMonitorState | null> {
     try {
-      return await this.deps.api.monitorAvailability({ input: this.monitorRequestInput() })
+      return await this.deps.api.monitorAvailability({ input: this.monitorRequestInput(), outputDeviceId: this.model.monitorOutput })
     } catch {
       return null // advisory; a toggle attempt reports the real failure
     }
@@ -1207,7 +1290,8 @@ export class VoiceController {
         this.armedByMonitor = true
       }
       this.set({ monitorNote: null })
-      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb })
+      this.lastSentOutput = this.model.monitorOutput
+      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb, outputDeviceId: this.model.monitorOutput })
       if (stale()) {
         // Torn down while main was opening it: do not leave it on.
         if (st.on) void Promise.resolve(this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: false })).catch(() => undefined)
@@ -1231,7 +1315,10 @@ export class VoiceController {
       if (err instanceof Error && err.message === BRIDGE_MISSING) this.set({ error: 'no-bridge' })
       else this.raiseMonitorError()
     } finally {
-      if (token === this.monitorToken) this.monitorPending = false
+      if (token === this.monitorToken) {
+        this.monitorPending = false
+        this.flushOutput()
+      }
     }
   }
 
@@ -1271,6 +1358,86 @@ export class VoiceController {
   setFader(v: number): void {
     if (this.faderEditsMonitor) this.setMonitorFader(v)
     else this.setLevel(v)
+  }
+
+  /**
+   * Choose the monitor output (null = same as the song output). An unusable or unknown candidate is refused.
+   * While monitoring the native side restarts on the new device (or stays off with a typed refusal): shown
+   * as `monitorSwitching`, never as an error; a take in progress is not touched.
+   */
+  async setMonitorOutput(id: string | null): Promise<void> {
+    const m = this.model
+    if (id !== null) {
+      const cand = m.monitorOutputs.find((c) => c.id === id)
+      if (!cand || !cand.usable) return
+    }
+    if (id === this.savedOutput && !m.monitorOutputMissing) return
+    this.savedOutput = id
+    try {
+      this.deps.storage?.setItem(MONITOR_OUTPUT_KEY, id ?? '') // '' = follow the song output
+    } catch {
+      /* private mode */
+    }
+    this.set({ monitorOutput: id, monitorOutputMissing: false })
+    // A switch or a toggle-on is already in flight: the wanted id is recorded and sent once it settles.
+    if (this.monitorPending) {
+      this.outputDirty = true
+      return
+    }
+    await this.settleOutput()
+  }
+
+  /** Output chosen by the singer, no call in flight: ask availability (monitor off) or restart on the new device (on). */
+  private async settleOutput(): Promise<void> {
+    if (!this.model.monitor.on) {
+      void this.refreshMonitorAvailability()
+      return
+    }
+    if (this.lastSentOutput === this.model.monitorOutput) return
+    await this.switchOutput()
+  }
+
+  /** After an in-flight monitorSet settles: send a pick that arrived meanwhile (once, only if it still differs). */
+  private flushOutput(): void {
+    if (this.disposed || this.monitorPending) return
+    if (this.model.monitor.on) {
+      if (this.lastSentOutput !== this.model.monitorOutput) void this.switchOutput()
+    } else if (this.outputDirty) {
+      this.outputDirty = false
+      void this.refreshMonitorAvailability()
+    }
+  }
+
+  private async switchOutput(): Promise<void> {
+    this.outputDirty = false
+    this.monitorPending = true
+    const token = ++this.monitorToken
+    const id = this.model.monitorOutput
+    this.lastSentOutput = id
+    this.set({ monitorSwitching: true })
+    try {
+      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb, outputDeviceId: id })
+      if (token !== this.monitorToken || this.disposed) return
+      this.applyMonitorState(st)
+      if (!this.model.monitor.on) {
+        // Refused on the new device: the monitor is off, so the input arm it made is released like releaseMonitor does.
+        const ownArm = this.armedByMonitor
+        this.armedByMonitor = false
+        if (ownArm && !this.model.recording) {
+          if (this.model.armed) this.set({ armed: false })
+          void this.forceDisarm()
+        }
+      }
+    } catch {
+      if (token === this.monitorToken) {
+        await this.releaseMonitor() // a failed switch leaves nothing running: release the monitor and its arm
+        this.raiseMonitorError()
+      }
+    } finally {
+      if (token === this.monitorToken) this.monitorPending = false
+      this.set({ monitorSwitching: false })
+      if (token === this.monitorToken) this.flushOutput()
+    }
   }
 
   /** Monitor gain in dB: remembered, sent live (coalesced) while monitoring. */
@@ -1313,7 +1480,7 @@ export class VoiceController {
         this.applyMonitorState(st)
         if (lost) this.raiseMonitorError()
       } else {
-        this.set({ monitor: { ...this.model.monitor, latency: st.latency, warnings: st.warnings } })
+        this.set({ monitor: { ...this.model.monitor, latency: st.latency, warnings: st.warnings }, ...(st.outputDevice !== undefined ? { monitorOutputDevice: st.outputDevice } : {}) })
       }
     } catch {
       /* the next poll retries */

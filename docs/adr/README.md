@@ -11,6 +11,13 @@ playback remains on Web Audio and `react-native-audio-api`:
 6. [Plug-in execution modes](0006-plugin-execution-modes.md)
 7. [Graph persistence and versioning](0007-graph-persistence-and-versioning.md)
 8. [Legacy/native session handoff](0008-legacy-native-session-handoff.md)
+   (dual-path parts superseded on desktop and Box by 0015)
+
+Later decisions:
+
+- [0015: Native-only song playback on desktop and Box](0015-native-only-desktop-playback.md).
+  Desktop and Box no longer play songs through Web Audio; the opening sentence
+  above still describes iOS and Android (`react-native-audio-api`).
 
 Any incompatible interface or persistence change supersedes the relevant ADR rather
 than silently changing version 1.

@@ -1,3 +1,4 @@
+import { clampNativeTranspose, clampPlaybackRate } from './audio/native-playback-limits'
 import { QUICK_START_SEEN, quickStartTitle } from '../../shared/quick-start/meta'
 import { sanitizeSongVolume } from './audio/song-volume'
 import type { TrainingSound } from '../../shared/training-sound'
@@ -1385,7 +1386,7 @@ export default function App(): React.JSX.Element {
         last = key
         return window.singz.voiceTakes.monitorAvailability({
           input: { deviceName: '', channelIndex: 0 }, contextOnly: true, playbackContext
-        })
+        }).then(() => { if (token === revision) window.dispatchEvent(new Event('singz:voice-monitor-context')) })
       }).catch(() => { if (token === revision) { last = ''; source = '' } })
     }
     const refresh = (): void => publish(true)
@@ -3245,7 +3246,7 @@ export default function App(): React.JSX.Element {
 
   const handleTranspose = useCallback(
     (st: number) => {
-      const clamped = Math.max(-12, Math.min(12, st))
+      const clamped = clampNativeTranspose(st)
       const mutation = ++pitchTempoMutationSeq.current
       const songVersion = loadSeq.current
       const songEpoch = engine.songEpoch
@@ -3514,7 +3515,7 @@ export default function App(): React.JSX.Element {
 
   const handleTempo = useCallback(
     (rate: number) => {
-      const clamped = Math.round(Math.max(0.5, Math.min(1.5, rate)) * 10000) / 10000
+      const clamped = clampPlaybackRate(rate, engine.nativeActive)
       const mutation = ++pitchTempoMutationSeq.current
       const songVersion = loadSeq.current
       const songEpoch = engine.songEpoch

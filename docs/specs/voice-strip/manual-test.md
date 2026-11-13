@@ -27,6 +27,13 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
    take playback level). Turn the Speaker on: the fader now reads "Monitor
    level" and sits at the remembered monitor gain (-12 dB by default). Move it
    if you like.
+3b. Open the gear (Track settings) on the Voice track: Esc closes it and focus returns to
+   the gear. Check the monitor level, the take level and the Monitor output picker
+   ("Same as song output (<device>)" first; a Bluetooth or separate device is greyed with
+   its reason). With the Speaker on, pick another usable output: expect a brief
+   "Switching the monitor output…" and the route line to name the new device; a refused
+   device leaves monitoring off with the reason, and a running take is not interrupted.
+   Unplug the remembered device and reopen: it falls back to the default and says so.
 4. Play the song. Turn the Speaker button on (it works with or without the song
    playing). Expect: a quiet start at -12 dB, the song keeps playing, no
    confirmation dialog, a one-time hint "Use headphones to avoid feedback", a
@@ -48,7 +55,7 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
    Play the take back with the song. Listen for the take being aligned with
    the song by ear (a clap or a sung start on the beat). Note any early or late
    feel; the mid-take monitor toggle should add at most a ~30 ms silence once.
-10. Switch to another song, then stop playback. Expect the monitor (Speaker on)
+10. Switch to another song (while it loads), open the library and come back, then stop playback. Expect the monitor (Speaker on)
     to keep running across the song change, unload and playback end; it stops
     only when you turn the Speaker off, the device or route is lost, you change
     the input, or the app quits. It is still never persisted as on across restart.

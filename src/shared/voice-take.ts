@@ -159,7 +159,15 @@ export interface VoiceMonitorLatency {
   source: 'estimated' | 'measured'
 }
 
+export interface VoiceMonitorOutputDevice { id: string; name: string }
+export interface VoiceMonitorOutputCandidate extends VoiceMonitorOutputDevice {
+  usable: boolean
+  reason?: VoiceMonitorReason
+}
 export interface VoiceMonitorState {
+  /** Resolved native output UID and display-only name. Present on current main-process replies. */
+  outputDevice?: VoiceMonitorOutputDevice | null
+  outputCandidates?: VoiceMonitorOutputCandidate[]
   available: true | { reason: VoiceMonitorReason; detail?: string }
   on: boolean
   gainDb: number
@@ -175,6 +183,8 @@ export interface VoiceMonitorPlaybackContext {
   selectedOutputUid: string
 }
 export interface VoiceMonitorAvailabilityRequest {
+  /** Native inventory UID (as in playback outputDeviceUid); null/undefined follows app output, then default. */
+  outputDeviceId?: string | null
   /** Publish route context through the existing serialized monitor IPC without selecting/arming input. */
   contextOnly?: boolean
   playbackContext?: VoiceMonitorPlaybackContext
@@ -182,6 +192,8 @@ export interface VoiceMonitorAvailabilityRequest {
 }
 
 export interface VoiceMonitorSetRequest {
+  /** Same native UID selection as monitorAvailability; switching stops the old monitor before beginning the new route. */
+  outputDeviceId?: string | null
   input: { deviceName: string; channelIndex: number }
   on: boolean
   /** Monitor gain in dB, clamped main-side to [-60, +12]. */

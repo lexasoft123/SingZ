@@ -30,6 +30,7 @@
       <div class="voice-controls">
         <div class="vc-top">
           <h2 class="lane-name">Voice</h2>
+          <button class="ib gear" id="gearBtn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Track settings" title="Track settings"></button>
           <span class="badge" id="latBadge" hidden></span>
         </div>
         <label class="sr-only" for="inputSel" id="inputLbl">Input</label>
@@ -106,6 +107,23 @@
 </aside>
 
 <div class="sr-only" id="live" aria-live="polite"></div>
+<div class="modal-scrim" id="setModal" role="presentation" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Voice track settings">
+    <h2>Voice track settings</h2>
+    <div class="set-row"><label for="setMon">Monitor level</label><input id="setMon" type="range" min="0" max="100" value="50"><output id="setMonOut">-12 dB</output></div>
+    <div class="set-row"><label for="setTake">Take playback level</label><input id="setTake" type="range" min="0" max="100" value="80"><output id="setTakeOut">80%</output></div>
+    <div class="set-row"><label for="setOut">Monitor output</label>
+      <select id="setOut">
+        <option value="">Same as song output (Scarlett 2i2)</option>
+        <option value="scar">Scarlett 2i2</option>
+        <option value="bt" disabled>Headphones BT (unavailable: Bluetooth adds too much delay to monitor. Recording still works.)</option>
+        <option value="spk" disabled>MacBook Speakers (unavailable: Monitoring needs the input and output on one device, like an audio interface.)</option>
+      </select></div>
+    <p class="set-note" id="setNote" role="status"></p>
+    <p class="set-route" id="setRoute">Route: shown while monitoring.</p>
+    <div class="set-actions"><button type="button" id="setDone" class="btn">Done</button></div>
+  </div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>

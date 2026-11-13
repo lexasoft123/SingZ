@@ -1,5 +1,6 @@
 import { t, type Key } from '../i18n'
 import type { RecordBlock } from '../audio/voice-take'
+import type { VoiceMonitorReason } from '../../../shared/voice-take'
 
 export const sgn = (n: number): string => (n > 0 ? `+${n}` : n < 0 ? `\u2212${-n}` : '0')
 export const clock = (s: number): string => {
@@ -8,6 +9,19 @@ export const clock = (s: number): string => {
   return `${m}:${(v % 60).toFixed(1).padStart(4, '0')}`
 }
 export const dbText = (db: number): string => (db <= -59 ? '\u2212\u221e' : db >= 0 ? String(Math.round(db)) : `\u2212${Math.round(-db)}`)
+
+export const REASON_KEY: Record<VoiceMonitorReason, Key> = {
+  'route-separate-devices': 'player.voice.monReasonSeparateDevices',
+  'route-latency': 'player.voice.monReasonLatency',
+  'route-bluetooth': 'player.voice.monReasonBluetooth',
+  'route-wireless': 'player.voice.monReasonWireless',
+  'no-input': 'player.voice.monReasonNoInput',
+  permission: 'player.voice.monReasonPermission',
+  'output-not-native': 'player.voice.monReasonOutputNotNative',
+  platform: 'player.voice.monReasonPlatform',
+  'device-lost': 'player.voice.monReasonDeviceLost',
+  error: 'player.voice.monReasonError'
+}
 
 const BLOCK_KEY: Record<Exclude<RecordBlock, null | 'no-song'>, Key> = {
   starting: 'player.voice.recordWhyStarting',

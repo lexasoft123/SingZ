@@ -48,7 +48,7 @@ class SharedAudioService final {
   // UID and physical output channel map copied together under the route lock.
   AudioHostConfig activeOutputConfig() const;
   // Selected output (or current system default), without opening a song host.
-  AudioHostConfig voiceMonitorOutputConfig(const std::optional<std::string>& selectedUid = {}) const;
+  AudioHostConfig voiceMonitorOutputConfig(const std::optional<std::string>& selectedUid = {}, bool independent = false) const;
   // Weakly tracked activity: a joining song adopts the monitor period without writing.
   std::shared_ptr<const AudioHostConfig> retainVoiceMonitorOutput(const AudioHostConfig& config);
   // Current song output intent, independent of transient client/host stop.
