@@ -1,6 +1,6 @@
 # ADR 0010: Guarded desktop monitoring preview
 
-Status: Superseded by ADR 0014: live voice monitoring
+Status: Superseded by ADR 0014 (live voice monitoring)
 Date: 2026-08-29
 
 ## Decision

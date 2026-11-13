@@ -1,6 +1,7 @@
 # SingZ Voice strip: journey map and specification
 
-Method: specification-driven development (SDD). Status: proposed, not implemented.
+Method: specification-driven development (SDD). Status: M2 (macOS monitoring)
+implemented on `codex/voice-monitor`, see section 10; the rest is proposed.
 Authority: [ADR 0014](../../adr/0014-voice-strip.md) owns the product rules and
 milestones; this document derives journeys, UI states and testable requirements
 from it. If they disagree, the ADR wins and this file is corrected. Origin: issue
@@ -26,7 +27,7 @@ monitoring off, the default), solo, level, record, and the take clip.
 
 | Rule | Statement |
 | --- | --- |
-| R1 | Latency target 32 frames; maximum accepted 256 frames. A route that cannot stay within 256 frames disables the monitor control and shows why. Recording and playback still work on that route. |
+| R1 | Latency target 32 frames; maximum accepted 256 frames. "Frames" is the IO buffer at the device rate (32, 64, 128, 256); a device minimum above 256 is refused as `route-latency`. A route that cannot stay within 256 frames disables the monitor control and shows why. Recording and playback still work on that route. |
 | R2 | No headphone confirmation. Monitoring is the user's choice. Supersedes the ADR 0010 wired-headphone gate and Settings checkbox. |
 | R3 | Recording is allowed at any tempo and transpose. The take is recorded against the song as heard and plays back as sung, with its recorded settings. Following later changes is out of scope. |
 | R4 | Takes are local only. Mono only in v1. |
@@ -46,9 +47,13 @@ monitoring off, the default), solo, level, record, and the take clip.
   message (`pitchMicrophoneUnavailableCopy`). The Voice strip and the pitch strip
   can both want the mic; sharing one capture is an open question (OQ-6).
 - ADR 0010 gave Settings a monitoring preview with an app-shell coordinator and a
-  top-bar Stop. The Voice strip replaces it (M2 deletes the Settings preview;
-  desktop monitor exclusivity is removed; `parkOutput` remains for mobile). The song
-  player no longer releases output to a silent sink to monitor.
+  top-bar Stop. The Voice strip replaces it (M2 deleted the Settings preview, its
+  coordinator, native session and ownership kind; old preference fields are
+  ignored on read; `parkOutput` remains for mobile). ADR 0010 is superseded. The
+  song player no longer releases output to a silent sink to monitor.
+- As built (M2, macOS): the monitor is a second small duplex host on the same
+  device as the song output, opened on toggle-on and closed on toggle-off; the song
+  host is never reopened. See ADR 0014 for the design and evidence.
 
 ## 2 Personas and jobs-to-be-done
 
@@ -153,9 +158,9 @@ monitor availability is also a flag shown on the monitor control in every state.
 | `recording` | Capturing a take against the playing song. | enabled; toggling changes monitoring only, not capture | enabled | enabled; level does not change captured audio **[inferred]** | shows stop | growing clip with elapsed time |
 | `take-review` | Take finished, not playing. | enabled | enabled | enabled | enabled (new take) | take selected; play, keep, discard, rename (M3 add as track) |
 | `playing-take` | Take joined at output mix, rate 1. | enabled | enabled | enabled; take level separate from live level **[inferred]** | enabled; recording while a take plays is allowed **[inferred]** | playing, with position |
-| `monitoring-on` | Mute off, route within 256 frames, voice audible. | unmuted | enabled | live gain | enabled | as before |
-| `monitoring-unavailable-latency` | Route cannot stay within 256 frames. | disabled, reason visible | enabled | enabled for take level | enabled | as before |
-| `monitoring-unavailable-route` | Route type cannot monitor (for example Bluetooth, or input and output not both usable) **[inferred wording]**. | disabled, reason visible | enabled | enabled for take level | enabled | as before |
+| `monitoring-on` | Mute off, route within 256 frames, voice audible; input armed (meter live). | unmuted | enabled | the fader edits the monitor level (default -12 dB, remembered) | enabled | as before |
+| `monitoring-unavailable-latency` | Route cannot stay within 256 frames (device minimum above 256: reason `route-latency`). | disabled, reason visible | enabled | enabled for take level | enabled | as before |
+| `monitoring-unavailable-route` | Typed reason from the device inventory (direction and transport): separate input and output devices, Bluetooth or wireless, no native song output, or `platform` (non-macOS in v1). | disabled, reason visible | enabled | enabled for take level | enabled | as before |
 | `error-recoverable` | Capture, device or storage fault that the user can recover from. | per cause | per cause | per cause | retry or choose another input | salvaged take if any |
 
 Reasons for `monitoring-unavailable-latency` versus `-route`: latency means a
@@ -174,10 +179,11 @@ into one state (OQ-4).
 | `idle`, `armed` | OS denies or has not granted | `permission-needed` | Recovery: OS prompt, or system-settings guidance. |
 | `permission-needed` | Granted | `armed` | |
 | `input-missing` | Device appears or user picks another | `armed` | |
-| `armed` | Mute off, route ok (M2) | `monitoring-on` | Song keeps playing (R5). Buffer-size change is a route change and may cause a short dropout (ADR open item). |
+| `armed`, `idle` | Mute off, route ok (M2) | `monitoring-on` | Song keeps playing (R5). Arms the input. The first monitor-on of a song session changes the device buffer once and causes one ~512-frame gap in the song (measured); later toggles leave ~2.8 ms. |
+| `recording` | Mute off or on | `recording` | Monitor host opens or closes; the take holds the input, nothing is armed or released (VS-MON-021). |
 | `armed` | Mute off, route over 256 | `monitoring-unavailable-latency` | Control disabled. |
 | `armed` | Mute off, route class unsupported | `monitoring-unavailable-route` | Control disabled. |
-| `monitoring-on` | Mute on | `armed` | Gain ramped, no click. |
+| `monitoring-on` | Mute on | `armed` | Gain ramped, no click; the buffer stays small until the song session ends (VS-MON-016). |
 | `monitoring-on` | Route changes to over 256 or unsupported | matching `monitoring-unavailable-*` | Monitoring stops with ramp; song continues. |
 | `armed`, `monitoring-on`, `idle` | Record pressed | `recording` | Starts song transport if stopped **[inferred]**; captures from now. |
 | `recording` | Stop pressed, or song reaches end | `take-review` | Take finalized and persisted before the state changes. |
@@ -252,19 +258,28 @@ M1, M2, M3. Every requirement is intended to be testable; the test column in sec
 | ID | Requirement | Pri | M |
 | --- | --- | --- | --- |
 | VS-MON-001 | The Voice strip SHALL start with monitoring off (mute on) on every song open and every app launch; the enable decision SHALL NOT persist across restart (carried from ADR 0010). | MUST | M1 |
-| VS-MON-002 | WHEN the user turns mute off and the route's measured latency is within 256 frames, THE SYSTEM SHALL enter `monitoring-on` and route the input into the output mix without pausing the song. | MUST | M2 |
-| VS-MON-003 | THE SYSTEM SHALL target 32 frames of monitoring latency and SHALL accept at most 256 frames. | MUST | M2 |
+| VS-MON-002 | **Changed (M2).** WHEN the user turns mute off and the route can monitor within 256 frames, THE SYSTEM SHALL open a second small duplex host on the song's output device (selected mic channel in, mono voice, song output pair L/R only), enter `monitoring-on` and arm the input, without pausing the song. The song host is never reopened or drained; toggle-off closes the monitor host. | MUST | M2 |
+| VS-MON-003 | **Changed.** THE SYSTEM SHALL target an IO buffer of 32 frames, step 32, 64, 128, 256 on refusal, and SHALL refuse as `route-latency` when the device minimum exceeds 256. The badge shows an estimated round trip (2 x buffer + input and output latency + safety offset; about 5 ms at 32 on the verification interface, an estimate, not measured). | MUST | M2 |
 | VS-MON-004 | IF the route cannot stay within 256 frames, THEN THE SYSTEM SHALL disable the monitor control, enter `monitoring-unavailable-latency` and show a reason; recording and take playback SHALL remain available. | MUST | M2 |
-| VS-MON-005 | IF the route class cannot monitor, THEN THE SYSTEM SHALL enter `monitoring-unavailable-route` with a reason and SHALL NOT guess the route from device labels or UIDs (carried from ADR 0010: typed capability only). | MUST | M2 |
-| VS-MON-006 | THE SYSTEM SHALL NOT require a headphone confirmation or checkbox before monitoring. | MUST | M2 |
-| VS-MON-007 | Monitoring SHALL NOT pause or interrupt the song for any reason, including enabling, disabling, level change and input change. | MUST | M2 |
+| VS-MON-005 | IF the route class cannot monitor, THEN THE SYSTEM SHALL enter `monitoring-unavailable-route` with a typed reason from the device inventory (direction and transport) and SHALL NOT guess the route from device labels or UIDs (carried from ADR 0010). **Changed:** unavailable in v1: separate input and output devices, Bluetooth or wireless, no native song output, non-macOS (`platform`). | MUST | M2 |
+| VS-MON-006 | THE SYSTEM SHALL NOT require a headphone confirmation or checkbox before monitoring. **Changed:** a quiet first-use hint, "Use headphones to avoid feedback", is allowed and is not a gate. | MUST | M2 |
+| VS-MON-007 | **Changed.** Monitoring SHALL NOT pause the song. The one permitted artefact is the buffer change at the first monitor-on of a song session (one ~512-frame gap, measured) and a residual of about 2.8 ms per later toggle (source undetermined); enabling, disabling, level change and input change SHALL otherwise leave the song undisturbed. | MUST | M2 |
 | VS-MON-008 | Gain changes and mute SHALL be ramped; the monitor path SHALL include a safety limiter that the user cannot disable (from ADR 0010: -1 dBFS ceiling, bounded gain; **[inferred]** retained as is). | MUST | M2 |
 | VS-MON-009 | THE SYSTEM SHALL handle the song's tempo and transpose without altering the monitored voice (rate handling per ADR M2). | MUST | M2 |
-| VS-MON-010 | WHEN monitoring starts and the buffer size must change, THE SYSTEM MAY cause a short dropout of the song; the UI SHALL treat it as a route change and SHALL NOT report an error. | SHOULD | M2 |
-| VS-MON-011 | The Settings monitoring preview, the top-bar monitor Stop and desktop monitor exclusivity SHALL be removed (`parkOutput` remains for mobile); song play SHALL NOT be refused while monitoring. | MUST | M2 |
-| VS-MON-012 | Windows monitoring SHALL use the zCore WASAPI host and SHALL report the latency it can achieve; where 32 frames is not legal, the strip SHALL use the smallest legal size at or below 256. | MUST | M2 (Windows) |
+| VS-MON-010 | **Superseded by VS-MON-016.** (Was: a short dropout may occur whenever the buffer changes.) | SHOULD | M2 |
+| VS-MON-011 | The Settings monitoring preview, its coordinator, native session and ownership kind, the top-bar monitor Stop and desktop monitor exclusivity SHALL be removed (`parkOutput` remains for mobile); song play SHALL NOT be refused while monitoring; the old preference fields SHALL be ignored on read. **Done in M2.** | MUST | M2 |
+| VS-MON-012 | Windows monitoring SHALL use the zCore WASAPI host and SHALL report the latency it can achieve; where 32 frames is not legal, the strip SHALL use the smallest legal size at or below 256. **Status:** not built; on the field laptop the shared period is 480 frames, so monitoring is unavailable; ASIO is not shipped. | MUST | M2 (Windows) |
 | VS-MON-013 | WHILE monitoring with built-in microphone and speakers, THE SYSTEM SHOULD warn about feedback. Behavior is undecided (OQ-1). | SHOULD | M2 |
-| VS-MON-014 | The strip SHOULD show measured round-trip latency in the reason or details, not as a constantly visible number. **[inferred]** | SHOULD | M2 |
+| VS-MON-014 | **Changed.** The strip SHOULD show the estimated round-trip latency as a badge (see VS-MON-003); it is an estimate until measured with a loopback cable. | SHOULD | M2 |
+| VS-MON-015 | **New.** Monitoring SHALL be supported on macOS only in v1; other platforms report `platform` and every other strip function works. | MUST | M2 |
+| VS-MON-016 | **New (hold for session).** The song host SHALL change the device buffer once, at the first monitor-on, through the zCore ledger (`setBufferFrames`, opt-in `allowSharedDeviceBufferChange`); the monitor host SHALL open non-writing at the current buffer; monitor off SHALL restore nothing. The ledger SHALL restore the buffer when the song session ends (real song change or switch, route change, unload, app quit). Same-route graph re-prepares (tempo, transpose, seek) SHALL keep the physical host and its lease. | MUST | M2 |
+| VS-MON-017 | **New (channel picker).** The strip SHALL list every input channel of each device and record or monitor exactly the chosen one. | MUST | M2 |
+| VS-MON-018 | **New (gain preset).** Monitor gain SHALL default to -12 dB and be remembered. A "Mon" chip SHALL preset it while monitoring is off. The fader SHALL edit the monitor level while monitoring (or in Mon mode) and the take level otherwise. | MUST | M2 |
+| VS-MON-019 | **New.** Turning monitoring on SHALL arm the input (meter live). | MUST | M2 |
+| VS-MON-020 | **New.** The monitoring decision SHALL never be persisted as on (restates VS-MON-001 for M2). | MUST | M2 |
+| VS-MON-021 | **New (mid-take rules).** Toggling monitoring during a take SHALL NOT arm the input (the take holds it); turning monitor off mid-take SHALL release only the monitor; the take SHALL complete with its true duration. | MUST | M2 |
+| VS-MON-022 | **New (capture-gap contract, input).** WHEN the device buffer grows and one render fails with -10874 (`kAudioUnitErr_TooManyFramesToProcess`), THE capture SHALL replace that block with silence of the same length using the callback's own timestamps and count it (`renderSliceDrops`); IF it persists for more than 64 consecutive callbacks or ~250 ms, THEN it SHALL fail. | MUST | M2 |
+| VS-MON-023 | **New (padding contract, take writer).** THE take writer SHALL pad forward host-time gaps with silence on the writer thread, only for Hardware-quality timestamps (macOS), comparing each block with the previous one (never a cumulative baseline, which drifts with the sample clock). Caps: 2 s per gap, 10 s per take, then `gapOverflow` and status `partial-error`. Stats SHALL include `gapPaddedFrames`, `gapPaddedBlocks`, `gapUntrustedTimestampBlocks`, `gapRegressions`, `gapOverflow`. A healthy take SHALL pad 0 frames. | MUST | M2 |
 
 ### 5.3 Take playback (VS-PLAY)
 
@@ -336,7 +351,9 @@ D = design review. Journey stages from section 3.
 | VS-MON-004, 005, 012 | J3a | I (typed route fixtures), E | M2 |
 | VS-MON-006, 007, 011 | J3 | I | M2 |
 | VS-MON-008 | J3 | C (numerical), M | M2 |
-| VS-MON-010, 013, 014 | J3, J3a | I, D | M2 |
+| VS-MON-010 (superseded), 013, 014 | J3, J3a | I, D | M2 |
+| VS-MON-015 to 021 | J3, J3a | U, I, E (Zen runs), M (docs/specs/voice-strip/manual-test.md) | M2 |
+| VS-MON-022, 023 | J3, J4 | C (fault injection, drift), E (310 s take) | M2 |
 | VS-PLAY-001, 002, 005 | J5 | C, I | M1 |
 | VS-PLAY-003, 004, 006, 007 | J5 | U, I | M1 |
 | VS-PLAY-008, 009 | J6, J7 | I | M3 |
@@ -432,7 +449,7 @@ what the user learns and what they can do. Final copy is not specified.
 | Disk full or write error | `error-recoverable` | Could not save the take; what was recorded is kept. | Free space and retry |
 | Take file missing or unreadable | `take-review` | This take cannot be played. | Delete, or locate **[inferred]** |
 | Unknown sidecar version | list | This take was made by a newer version. | Keep, delete |
-| Buffer-size change on enabling monitor | `armed` | No error. A brief dropout can occur. | none |
+| Buffer-size change on first monitor-on | `armed` | No error. One tiny click can occur at the first monitor-on of a song session. | none |
 | Engine or audio service error | `error-recoverable` | Audio engine problem; song and take are safe. | Retry |
 
 Rules: reasons name the cause in user terms, never a code; recoverable errors never
@@ -455,6 +472,10 @@ block playback of the song; a disabled control always says why.
 
 ## 9 Open questions
 
+Also open from M2: per-device persistent monitoring buffer versus the automatic
+session hold, whether ~2.8 ms residual per toggle is acceptable, and Windows ASIO
+(see section 10 and ADR 0014).
+
 Carried from the ADR (OQ-1, OQ-4 part, OQ-5), and new ones found while writing
 this spec (OQ-2, OQ-3, OQ-6 to OQ-10).
 
@@ -472,3 +493,27 @@ this spec (OQ-2, OQ-3, OQ-6 to OQ-10).
 | OQ-10 | A pause-while-recording take timeline: pad silence or pause the take? Proposed: pause the take. | new | 4.3 |
 | OQ-11 | Where do takes live relative to the future DAW session layout, and is the sidecar a subset of the DAW take record? | new | 6.2 |
 | OQ-12 | Does recording while a take plays (overdub of a second take) need an explicit rule beyond "allowed"? | new | `playing-take` row |
+
+## 10 Implementation status (M1 / M2)
+
+Source: ADR 0014, verified on a MacBook with a Zen Quadro SC USB duplex
+interface, a standalone CoreAudio probe and independent reviews. Branch
+`codex/voice-monitor`, not merged.
+
+| Area | M1 (record, listen back) | M2 (monitoring) |
+| --- | --- | --- |
+| macOS | Per this spec; not re-verified here **[inferred]** | Built: second duplex host, session-held buffer, capture-gap and padding contracts, channel picker, gain preset |
+| Windows | Per this spec | Not built: field laptop shared period 480 frames (above 256), so unavailable; ASIO not shipped |
+| iOS | n/a | Future: one RemoteIO duplex, mix in the callback |
+| Android | n/a | Future: two Oboe streams, bridged by construction |
+| Removed | n/a | ADR 0010 preview (Settings, coordinator, native session, ownership kind); `parkOutput` kept for mobile |
+
+M2 unverified or open: audible behaviour with a real microphone and headphones
+(verification inputs were silent); measured round trip (needs a cable Zen out 1
+to in 1); alignment of a take with the monitor on mid-take, measured
+acoustically; the ~2.8 ms residual per toggle; real `MacAudioInputBackend` glue
+and HAL notifications have no unit tests; mobile native builds not compiled; 12
+non-core locale strings need native review; unpublished zCore commits (346d6a1,
+d64d1a5, 6045214, 0f66fc1 on ca8f131 in the open zCore PR), so SingZ,
+LoopZ and Box must re-pin to the same zCore. Manual checklist:
+[manual-test.md](manual-test.md).
