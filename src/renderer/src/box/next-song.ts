@@ -21,13 +21,13 @@ export function switchNeedsConfirmation(hasLoadedSong: boolean, status: Playback
   return hasLoadedSong && status !== 'ended'
 }
 
-export type NextSlot = 'hidden' | 'next' | 'choose'
+export type NextSlot = 'next' | 'disabled'
 
-/** What the Next slot of the player bar offers: the next song, a way to pick one
- * once the song ended with nothing queued, or nothing. */
-export function nextSlot(status: PlaybackStatus, hasNext: boolean): NextSlot {
-  if (hasNext) return 'next'
-  return status === 'ended' ? 'choose' : 'hidden'
+/** What the Next slot of the player bar offers. The button always exists: enabled
+ * when there is a next song, disabled when there is none, in every playback status
+ * (including after the song ended). */
+export function nextSlot(_status: PlaybackStatus, hasNext: boolean): NextSlot {
+  return hasNext ? 'next' : 'disabled'
 }
 
 /** Which player control takes focus when the song ends: Next when there is one,

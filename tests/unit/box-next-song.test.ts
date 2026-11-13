@@ -34,12 +34,12 @@ describe('confirmation and slot rules', () => {
     expect(switchNeedsConfirmation(true, 'ended')).toBe(false)
     expect(switchNeedsConfirmation(false, 'paused')).toBe(false) // nothing loaded: nothing to lose
   })
-  it('hides Next without a next song, except at the end where it offers a way to choose', () => {
+  it('always keeps Next: enabled with a next song, disabled without one, in every status', () => {
     expect(nextSlot('playing', true)).toBe('next')
     expect(nextSlot('ended', true)).toBe('next')
-    expect(nextSlot('playing', false)).toBe('hidden')
-    expect(nextSlot('paused', false)).toBe('hidden')
-    expect(nextSlot('ended', false)).toBe('choose')
+    expect(nextSlot('playing', false)).toBe('disabled')
+    expect(nextSlot('paused', false)).toBe('disabled')
+    expect(nextSlot('ended', false)).toBe('disabled')
   })
   it('moves focus to Next at the end only when a next song exists, else to Replay', () => {
     expect(endedFocusControl(true)).toBe('next-song')

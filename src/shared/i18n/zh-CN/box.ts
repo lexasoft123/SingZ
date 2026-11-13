@@ -114,7 +114,6 @@ export const box: Record<keyof typeof english, string> = {
   'box.player.nextLabel': '下一首:{title}',
   'box.player.upNext': '接下来:{title}',
   'box.player.replay': '重新演唱',
-  'box.player.chooseSong': '选择歌曲',
   'box.player.hideHint': '控制项将在 5 秒后隐藏',
   'box.player.countdownSeconds': '{seconds}秒',
   'box.player.wake': '显示播放控制项',
