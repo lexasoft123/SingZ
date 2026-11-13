@@ -34,7 +34,7 @@ import type {
   VoiceTakePeaksResult,
   VoiceTakeSummary
 } from '../../../shared/voice-take'
-import { defaultVoiceTakeEffects, isVoiceTakeEffects, isVoiceTakeConformedWaveform, type VoiceTakeEffect, type VoiceTakeConformOptions, type VoiceTakeConformResult, type VoiceTakeInvalidateRequest, type VoiceTakeLaneControl, type VoiceTakeLaneSource, type VoiceTakeLaneState } from '../../../shared/voice-take'
+import { VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS, defaultVoiceTakeEffects, isVoiceTakeEffects, isVoiceTakeConformedWaveform, type VoiceTakeEffect, type VoiceTakeConformOptions, type VoiceTakeConformResult, type VoiceTakeInvalidateRequest, type VoiceTakeLaneControl, type VoiceTakeLaneSource, type VoiceTakeLaneState } from '../../../shared/voice-take'
 import { stableVoiceSongId } from './voice-song-id'
 import { micOwnership } from './mic-ownership'
 
@@ -572,7 +572,7 @@ export class VoiceController {
           expired = true
           void api.cancelConform(requestId).catch(() => {})
           resolve({ ok: false, reason: 'timeout' })
-        }, 100000)
+        }, VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS + 120_000)
       })])
     } catch { result = { ok: false, reason: 'conform-failed' } }
     finally { if (deadline !== undefined) clearTimeout(deadline) }
@@ -1285,7 +1285,7 @@ export class VoiceController {
     const offset = Math.round((clamped - captured) * 1000) / 1000
     if (Math.abs(offset - tk.userOffsetSec) < 1e-4) return
     this.cancelLaneConform()
-    this.set({ take: { ...tk, userOffsetSec: offset, startSec: captured + offset } })
+    this.set({ take: { ...tk, userOffsetSec: offset, startSec: captured + offset, conformedWaveform: undefined } })
     let res: VoiceTakeMoveResult | undefined
     try {
       res = await this.deps.api.move({ songId, takeId: tk.takeId, userOffsetSec: offset })
@@ -1299,7 +1299,7 @@ export class VoiceController {
       this.scheduleLaneConform(150)
     }
     else {
-      this.set({ take: { ...cur, userOffsetSec: tk.userOffsetSec, startSec: tk.startSec } }) // not saved: back where it was
+      this.set({ take: { ...cur, userOffsetSec: tk.userOffsetSec, startSec: tk.startSec, conformedWaveform: tk.conformedWaveform } }) // not saved: back where it was
       if (this.model.lane.status === 'conforming') this.scheduleLaneConform(150)
     }
   }

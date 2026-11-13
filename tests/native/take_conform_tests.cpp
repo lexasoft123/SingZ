@@ -33,14 +33,9 @@ double frequency(const TakeConformPcm &p) {
   check(crossings.size()>10,"Tone missing");
   return p.sampleRate*(crossings.size()-1)/(crossings.back()-crossings.front());
 }
-void tests() {
-  auto p=tone(2); auto r=request(p.samples.size());
-  auto x=conformTakePcm(p,r);
-  check(x.pcm.samples==p.samples,"Identity must be sample equal");
-  r.settings.push_back({p.samples.size(),2});
-  x=conformTakePcm(p,r);
-  check(x.signalsmithPasses==0 && x.pcm.samples==p.samples,"Terminal key stamp must not vocode an identity take");
-  r=request(p.samples.size());
+// Reused by the positive suite and by exactly one targeted mutant run.
+// The latter has no golden-byte check to mask the behaviour discriminator.
+void driftRegression() {
   {
     auto clean=tone(60);auto jitter=request(clean.samples.size());jitter.anchors.clear();
     jitter.anchors.push_back({0,0});
@@ -52,6 +47,9 @@ void tests() {
     check(drifted.pcm.samples.size()==clean.samples.size(),"Jitter must not accumulate duration error");
     check(std::abs(1200*std::log2(frequency(drifted.pcm)/440))<0.5,"Direct drift resampling must keep near-identity pitch");
   }
+}
+void placementRegression() {
+  auto p=tone(2);auto r=request(p.samples.size());TakeConformResult x;
   r.startPositionSec=0.125; r.userOffsetSec=0.125;
   x=conformTakePcm(p,r);
   check(x.pcm.samples.size()==p.samples.size()+12000,"Placement length");
@@ -60,10 +58,41 @@ void tests() {
   r.startPositionSec=-0.25;r.userOffsetSec=0;r.songDurationProjectFrames=rate;
   x=conformTakePcm(p,r);
   check(x.pcm.samples.size()==rate && std::equal(x.pcm.samples.begin(),x.pcm.samples.end(),p.samples.begin()+12000),"Negative head and tail trim");
+}
+void ratioRegression() {
+  auto p=tone(2);TakeConformRequest r;TakeConformResult x;
   r=request(p.samples.size(),0.5);
   x=conformTakePcm(p,r);
   check(x.pcm.samples.size()==p.samples.size()/2,"Half-tempo length");
   check(std::abs(1200*std::log2(frequency(x.pcm)/440))<5,"Stretch must preserve pitch");
+  // Length and steady-tone pitch alone cannot distinguish compression from
+  // truncating a tempo-one render: its transient must follow the anchor map.
+  p={rate,std::vector<int16_t>(rate*2)};p.samples[rate*3/4]=30000;
+  r=request(p.samples.size(),0.5);x=conformTakePcm(p,r);
+  const auto peak=std::max_element(x.pcm.samples.begin(),x.pcm.samples.end(),[](auto a,auto b){return std::abs(a)<std::abs(b);});
+  check(x.signalsmithPasses==1 && std::abs(*peak)>1000 &&
+    std::abs(double(peak-x.pcm.samples.begin())-rate*3.0/8)<=48,"Half-tempo anchor mapping exceeds 1 ms");
+}
+void latencyRegression() {
+  TakeConformPcm p;TakeConformRequest r;TakeConformResult x;
+  p={rate,std::vector<int16_t>(rate*3)};p.samples[rate]=30000;p.samples[rate+1]=15000;
+  r=request(p.samples.size(),1.5);x=conformTakePcm(p,r);
+  const auto measuredPeak=std::max_element(x.pcm.samples.begin(),x.pcm.samples.end(),[](auto a,auto b){return std::abs(a)<std::abs(b);})-x.pcm.samples.begin();
+  const double latencyError=std::abs(double(measuredPeak)-rate*1.5);
+  check(latencyError<=48,"Measured DSP latency alignment exceeds 1 ms");
+  std::cout<<"measured DSP alignment "<<latencyError<<" frames ("<<latencyError/rate*1000<<" ms)\n";
+}
+void tests() {
+  auto p=tone(2); auto r=request(p.samples.size());
+  auto x=conformTakePcm(p,r);
+  check(x.pcm.samples==p.samples,"Identity must be sample equal");
+  r.settings.push_back({p.samples.size(),2});
+  x=conformTakePcm(p,r);
+  check(x.signalsmithPasses==0 && x.pcm.samples==p.samples,"Terminal key stamp must not vocode an identity take");
+  r=request(p.samples.size());
+  driftRegression();
+  placementRegression();
+  ratioRegression();
   auto pitched=tone(3,440*std::pow(2,2.0/12));r=request(pitched.samples.size(),0.5);r.settings[0].transposeSemitones=2;
   x=conformTakePcm(pitched,r);
   const double cents=1200*std::log2(frequency(x.pcm)/440);
@@ -100,12 +129,7 @@ void tests() {
   auto gate=std::find_if(x.pcm.samples.begin(),x.pcm.samples.end(),[](auto v){return std::abs(v)>3000;})-x.pcm.samples.begin();
   check(std::abs(double(gate)-rate*1.5)<rate*0.04,"Algorithmic latency compensation");
   // This pulse, and the three-segment click train below, use the real DSP path.
-  p={rate,std::vector<int16_t>(rate*3)};p.samples[rate]=30000;p.samples[rate+1]=15000;
-  r=request(p.samples.size(),1.5);x=conformTakePcm(p,r);
-  const auto measuredPeak=std::max_element(x.pcm.samples.begin(),x.pcm.samples.end(),[](auto a,auto b){return std::abs(a)<std::abs(b);})-x.pcm.samples.begin();
-  const double latencyError=std::abs(double(measuredPeak)-rate*1.5);
-  check(latencyError<=48,"Measured DSP latency alignment exceeds 1 ms");
-  std::cout<<"measured DSP alignment "<<latencyError<<" frames ("<<latencyError/rate*1000<<" ms)\n";
+  latencyRegression();
   p={rate,std::vector<int16_t>(rate*6)};
   for(auto f:{12000,36000,60000,84000,108000,132000,156000,180000,204000,228000,252000,276000})p.samples[f]=30000;
   r=request(p.samples.size());r.anchors={{0,0},{rate*2,rate},{rate*4,rate*4},{rate*6,rate*6}};
@@ -185,6 +209,10 @@ void tests() {
 }
 }
 int main(int argc,char **argv){try{
+  if(argc>1 && std::string(argv[1])=="regression-ratio"){ratioRegression();return 0;}
+  if(argc>1 && std::string(argv[1])=="regression-placement"){placementRegression();return 0;}
+  if(argc>1 && std::string(argv[1])=="regression-latency"){latencyRegression();return 0;}
+  if(argc>1 && std::string(argv[1])=="regression-drift"){driftRegression();return 0;}
   if(argc>1 && std::string(argv[1])=="stream"){stream_tests::benchmark(argc>2?std::stoul(argv[2]):7200,argc>3?std::stoul(argv[3]):48000,argc>4?std::stoul(argv[4]):48000);return 0;}
   if(argc>1 && std::string(argv[1])=="stream-failures"){stream_tests::failures();return 0;}
   if(argc>1 && std::string(argv[1])=="resident-negative"){

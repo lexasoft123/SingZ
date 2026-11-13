@@ -28,6 +28,9 @@ inline TakeConformResult conformTakePcm(const TakeConformPcm &p,const TakeConfor
   result.signalsmithPasses=stats.signalsmithPasses;result.processedBlocks=stats.processedBlocks;
   // Golden comparison uses the committed algorithm under the SAME compiler and
   // FP flags, rather than a platform-specific checksum that hides rounding drift.
+  // Mutants must be caught by their named behaviour assertions, rather than
+  // an earlier comparison against an intentionally unmutated byte oracle.
+#if !defined(SINGZ_CONFORM_NEGATIVE_RATIO) && !defined(SINGZ_CONFORM_NEGATIVE_PLACEMENT) && !defined(SINGZ_CONFORM_NEGATIVE_LATENCY) && !defined(SINGZ_CONFORM_NEGATIVE_DRIFT)
   if (!cancel) {
     singz_v2_reference::TakeConformRequest old;
     old.outputRate=r.outputRate;old.songDurationProjectFrames=r.songDurationProjectFrames;
@@ -44,6 +47,7 @@ inline TakeConformResult conformTakePcm(const TakeConformPcm &p,const TakeConfor
       if(a.gcount()!=b.gcount() || !std::equal(ab.begin(),ab.begin()+a.gcount(),bb.begin()))throw std::runtime_error("Streaming WAV bytes differ from v2 golden");
     }while(a.gcount());
   }
+#endif
   return result;
 }
 } // namespace singz

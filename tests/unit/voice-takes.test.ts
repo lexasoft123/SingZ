@@ -907,14 +907,14 @@ describe('ADR 0016 conform IPC leases and cancellation', () => {
   const req = { songId: 'song', takeId: 'take', requestId: 'job-1', outputRate: 48000, songDurationProjectFrames: 480000 }
   function register() {
     const sender = Object.assign(new EventEmitter(), { id: 7, isDestroyed: () => false })
-    const store = { setEffects: vi.fn(async () => {}) }
+    const store = { setEffects: vi.fn(async () => {}), list: vi.fn(async () => [{ takeId: 'take', startPositionSec: 0.8, userOffsetSec: 0 }]) }
     registerVoiceTakeIpc(store as unknown as VoiceTakeStore)
     const call = (name: string, value: unknown, owner = sender) => voiceIpc.handlers.get(name)!({ sender: owner }, value)
     return { sender, store, call }
   }
   beforeEach(() => {
     voiceIpc.handlers.clear(); voiceIpc.conform.mockReset(); voiceIpc.invalidate.mockClear(); voiceIpc.release.mockClear()
-    voiceIpc.conform.mockResolvedValue({ path: '/private/conformed-voice.wav', key: 'cache', cached: true, durationFrames: 48000 })
+    voiceIpc.conform.mockResolvedValue({ path: '/private/conformed-voice.wav', key: 'cache', cached: true, durationFrames: 48000, placementFrame: 0 })
   })
   it('authorizes only the main-produced WAV and releases a renderer-scoped lease after replacement', async () => {
     const { call } = register()
@@ -927,6 +927,35 @@ describe('ADR 0016 conform IPC leases and cancellation', () => {
     await call('voice:conform-invalidate', { songId: 'song', takeId: 'take', leaseId: 'job-1' })
     expect(voiceIpc.release).toHaveBeenCalledWith(result.path)
     expect(voiceIpc.invalidate).toHaveBeenCalledWith('song', 'take', { cancelActive: false })
+  })
+  it('caches waveform placement from the conform result even if the take has moved', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-race-')); roots.push(root)
+    const path = join(root, 'placed.wav')
+    const audio = wav(48000, 48000)
+    for (let i = 12000; i < 48000; i++) audio.writeInt16LE(16384, 44 + i * 2)
+    writeFileSync(path, audio)
+    const { call, store } = register()
+    voiceIpc.conform.mockResolvedValue({ path, key: 'original-placement', cached: false, durationFrames: 48000, placementFrame: 12000 })
+    const first = await call('voice:conform', req)
+    expect(first.waveform).toMatchObject({ offsetSec: .25, durationSec: .75 })
+    expect(first.waveform.peaks.every((p: number) => p === .5)).toBe(true)
+    expect(store.list).not.toHaveBeenCalled()
+    await call('voice:conform-invalidate', { songId: 'song', takeId: 'take', leaseId: req.requestId })
+    const again = await call('voice:conform', { ...req, requestId: 'job-2' })
+    expect(again.waveform).toEqual(first.waveform)
+  })
+  it('does not abort a two-minute conform', async () => {
+    vi.useFakeTimers()
+    try {
+      const { call } = register()
+      let finish!: (result: unknown) => void
+      voiceIpc.conform.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      const pending = call('voice:conform', req)
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(voiceIpc.conform.mock.calls[0][2].signal.aborted).toBe(false)
+      finish({ path: '/missing.wav', key: 'slow', cached: false, durationFrames: 1, placementFrame: 0 })
+      expect(await pending).toMatchObject({ ok: true })
+    } finally { vi.useRealTimers() }
   })
   it('serializes FX writes and never starts an obsolete request after a newer request', async () => {
     const { call, store } = register()

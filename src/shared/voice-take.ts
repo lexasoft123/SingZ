@@ -2,6 +2,8 @@
 // Shared by main, preload and renderer. No PCM crosses IPC: only ids, paths and numbers.
 
 export const VOICE_TAKE_SIDECAR_VERSION = 1
+/** Native conform work budget; IPC and renderer add time for publication and transport. */
+export const VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS = 8 * 60 * 1000
 
 export type VoiceTakeStatus = 'complete' | 'recovered' | 'partial-device-lost' | 'partial-error'
 export type VoiceTakeLatencySource = 'reported' | 'measured-trim'

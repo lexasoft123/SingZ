@@ -2863,6 +2863,23 @@ describe('ADR 0016 controller lane lifecycle', () => {
     expect(x.c.getSnapshot().take?.conformedWaveform?.offsetSec).toBe(20)
     x.c.dispose()
   })
+  it('clears the old waveform as soon as a move starts, before IPC responds', async () => {
+    let finish!: (value: Awaited<ReturnType<VoiceTakeApi['move']>>) => void
+    const waveform = { offsetSec: 30, durationSec: 5, peaks: [.8] }
+    const x = await laneSetup({
+      conformTake: vi.fn(async () => ({ ok: true as const, path: '/placed.wav', key: 'k', durationFrames: 1, cached: false, leaseId: 'l', waveform })),
+      move: vi.fn(() => new Promise(resolve => { finish = resolve }))
+    })
+    expect(x.c.getSnapshot().take?.conformedWaveform).toEqual(waveform)
+    const moving = x.c.moveTake(40)
+    await Promise.resolve()
+    expect(x.c.getSnapshot().take?.startSec).toBe(40)
+    expect(x.c.getSnapshot().take?.conformedWaveform).toBeUndefined()
+    expect(x.c.getSnapshot().lane.status).toBe('ready')
+    finish({ ok: true, take: summary({ userOffsetSec: 10 }) })
+    await moving
+    x.c.dispose()
+  })
   it('silences before capture starts, never rebuilds until finalized, then replaces once and retires the old lease', async () => {
     let finish!: (value: Awaited<ReturnType<VoiceTakeApi['recordStop']>>) => void
     const x = await laneSetup({ recordStart: vi.fn(async () => ({ ok: true, takeId: 'take-new' })),
@@ -2914,7 +2931,10 @@ describe('ADR 0016 controller lane lifecycle', () => {
   it('times out a stalled bridge, keeps transport usable, and releases a late result', async () => {
     let publish!: (value: VoiceTakeConformResult) => void
     const x = await laneSetup({ conformTake: vi.fn(() => new Promise(resolve => { publish = resolve })) })
-    await vi.advanceTimersByTimeAsync(100000)
+    await vi.advanceTimersByTimeAsync(120000)
+    expect(x.c.getSnapshot().lane).toEqual({ status: 'conforming' })
+    expect(x.api.cancelConform).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(480000)
     expect(x.c.getSnapshot().lane).toEqual({ status: 'error', reason: 'timeout' })
     expect(x.api.cancelConform).toHaveBeenCalled()
     expect(x.lane).toHaveBeenLastCalledWith(null)

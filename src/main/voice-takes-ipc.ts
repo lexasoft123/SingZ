@@ -4,7 +4,7 @@ import { computeWavPeaks } from './voice-takes'
 import { conformTake, invalidateConformedTake, releaseConformedTake, isConformTakeError } from './voice-take-conform'
 import { isVoiceTakeEffects, type VoiceTakeConformRequest, type VoiceTakeConformResult } from '../shared/voice-take'
 import { desktopAudioProcess } from './audio-process'
-import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
+import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
 import { VoiceTakeStore, createUnavailableVoiceNative, type VoiceTakeNative } from './voice-takes'
 
 const normalizeDeviceLabel = (value: string): string => value.trim().replace(/\s+\([^()]*\)\s*$/, '').trim().toLocaleLowerCase()
@@ -164,7 +164,7 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
     latestBySong.get(raw.songId)?.abort()
     latestBySong.set(raw.songId, controller)
     let timedOut = false
-    const timeout = setTimeout(() => { timedOut = true; controller.abort() }, 95000)
+    const timeout = setTimeout(() => { timedOut = true; controller.abort() }, VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS + 60_000)
     try {
       const mutation = (mutations.get(raw.songId) ?? Promise.resolve()).catch(() => {}).then(async () => {
         if (controller.signal.aborted) throw new Error('Take conform cancelled')
@@ -183,14 +183,11 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
       let waveform = waveCache.get(result.key)
       if (!waveform) {
         try {
-          const take = (await store.list(raw.songId)).find(t => t.takeId === raw.takeId)
-          if (take) {
-            const startFrame = Math.max(0, Math.min(result.durationFrames, Math.round((take.startPositionSec + (take.userOffsetSec ?? 0)) * raw.outputRate)))
-            const peaks = await computeWavPeaks(result.path, undefined, startFrame, result.durationFrames)
-            waveform = { offsetSec: startFrame / raw.outputRate, durationSec: peaks.durationSec, peaks: peaks.peaks }
-            waveCache.set(result.key, waveform)
-            while (waveCache.size > 16) waveCache.delete(waveCache.keys().next().value as string)
-          }
+          const startFrame = Math.max(0, Math.min(result.durationFrames, result.placementFrame))
+          const peaks = await computeWavPeaks(result.path, undefined, startFrame, result.durationFrames)
+          waveform = { offsetSec: startFrame / raw.outputRate, durationSec: peaks.durationSec, peaks: peaks.peaks }
+          waveCache.set(result.key, waveform)
+          while (waveCache.size > 16) waveCache.delete(waveCache.keys().next().value as string)
         } catch { /* raw waveform remains available */ }
       }
       if (controller.signal.aborted || event.sender.isDestroyed()) {

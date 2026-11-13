@@ -35,7 +35,7 @@ export interface TakeConformNative {
   }>
   cancelTakeConform(job: string): Promise<void> | void
 }
-export interface ConformedTake { path: string; key: string; durationFrames: number; cached: boolean }
+export interface ConformedTake { path: string; key: string; durationFrames: number; placementFrame: number; cached: boolean }
 export interface ConformTakeOptions {
   songDurationProjectFrames: number
   outputRate: number
@@ -113,6 +113,8 @@ export class VoiceTakeConformer {
         header.readUInt16LE(20) === 1 && header.readUInt16LE(22) === 1 && header.readUInt16LE(34) === 16, 'Invalid take WAV')
       check(frames <= MAX_TAKE_SECONDS * rate, 'Take exceeds four-hour conform limit', 'take-too-long')
       const request = prepareConformRequest(sidecar, frames, options)
+      const placement = (request.startPositionSec + request.userOffsetSec) * request.outputRate
+      const placementFrame = placement < 0 ? -Math.round(-placement) : Math.round(placement)
       const key = createHash('sha256').update(JSON.stringify([TAKE_CONFORM_VERSION, before, request])).digest('hex')
       const cacheDir = join(dir, '.conform')
       try { await mkdir(cacheDir) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e }
@@ -132,7 +134,7 @@ export class VoiceTakeConformer {
             h.readUInt32LE(24) === options.outputRate && h.readUInt16LE(22) === 1 && h.readUInt16LE(34) === 16 &&
             durationFrames * 2 + 44 === cache.size && durationFrames <= options.songDurationProjectFrames && await identity() === before && await readFile(sidecarPath, 'utf8') === sideText) {
             await utimes(path, new Date(), new Date()); assertCurrent()
-            return { path, key, durationFrames, cached: true }
+            return { path, key, durationFrames, placementFrame, cached: true }
           }
         }
       } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
@@ -161,7 +163,7 @@ export class VoiceTakeConformer {
         assertCurrent(); await rename(temp, path)
         await this.prune(dir, takeId, path)
         assertCurrent()
-        return { path, key, durationFrames: result.durationFrames, cached: false }
+        return { path, key, durationFrames: result.durationFrames, placementFrame, cached: false }
       } finally { await rm(temp, { force: true }) }
     })()
     this.active.set(songId, { job, stop, done })
