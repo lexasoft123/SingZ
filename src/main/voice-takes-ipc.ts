@@ -4,6 +4,7 @@ import { computeWavPeaks } from './voice-takes'
 import { conformTake, invalidateConformedTake, releaseConformedTake, isConformTakeError } from './voice-take-conform'
 import { isVoiceTakeEffects, type VoiceTakeConformRequest, type VoiceTakeConformResult } from '../shared/voice-take'
 import { desktopAudioProcess } from './audio-process'
+import { log } from './log'
 import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
 import { VoiceTakeStore, createUnavailableVoiceNative, type VoiceTakeNative } from './voice-takes'
 
@@ -93,20 +94,28 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
     // latency makes this window much longer. Wait BEFORE opening the writer:
     // retrying placement later cannot move a first sample out of old silence.
     let ready = false
+    const readinessStarted = Date.now()
+    let lastProbe: Record<string, unknown> = {}
     for (let attempt = 0; attempt < 80; attempt++) {
       const stats = await desktopAudioProcess.call<Awaited<ReturnType<VoiceTakeNative['captureStats']>>>('binding', 'captureStats', [])
       if (stats.lastSampleHostNs && stats.lastSampleHostNs !== '0' && stats.sampleRate) {
         const probe = { songId: '', firstSampleHostNs: stats.lastSampleHostNs, sampleRate: stats.sampleRate }
         const raw = await presentationQuery(probe)
+        lastProbe = { attempts: attempt + 1, host: stats.lastSampleHostNs, quality: stats.firstSampleQuality,
+          sampleRate: stats.sampleRate, inputBufferFrames: stats.inputBufferFrames,
+          inputLatencyFrames: stats.inputLatencyFrames, inputLatencySource: stats.inputLatencySource,
+          inputLatencyStable: stats.inputLatencyStable, raw }
         if (raw.ok && raw.found && !raw.paused && !raw.seekDuringCallback) {
           const placed = await presentationQuery({ ...probe, outputSampleRate: raw.sampleRate,
             inputLatencyFrames: stats.inputLatencySource === 'reported' && stats.inputLatencyStable !== false ? stats.inputLatencyFrames : 0,
             outputLatencyFrames: raw.outputLatencyFrames, graphLatencyFrames: raw.graphLatencyFrames, trimInputLatency: true })
+          lastProbe.placed = placed
           if (placed.ok && placed.found && !placed.paused && !placed.seekDuringCallback) { ready = true; break }
         }
       }
       await new Promise(resolve => setTimeout(resolve, 25))
     }
+    log('voice-take', 'readiness ' + JSON.stringify({ takeId: args.takeId, ready, waitedMs: Date.now() - readinessStarted, ...lastProbe }), ready ? 'info' : 'warn')
     if (!ready) return { ok: false, generation: started.generation ?? generation, reason: 'error', error: 'The song is not ready to record. Try again after playback starts.' }
     const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'recordTake', [args.dir, args.takeId, started.generation ?? generation])
     return { ...result, generation: started.generation ?? generation, deviceName: started.deviceName }
@@ -202,7 +211,7 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
       const code = isConformTakeError(error) ? error.code : undefined
       if (timedOut) return { ok: false, reason: 'timeout' }
       if (controller.signal.aborted || code === 'cancelled') return { ok: false, reason: 'cancelled' }
-      const conformReason = code === 'take-too-long' || code === 'memory-budget' || code === 'conform-error'
+      const conformReason = code === 'take-too-long' || code === 'memory-budget' || code === 'path-too-long' || code === 'conform-error'
         ? code
         : /too long|exceeds RIFF/i.test(message) ? 'take-too-long' : /memory|cache is full/i.test(message) ? 'memory-budget' : /graph.*budget/i.test(message) ? 'graph-budget' : 'conform-error'
       return { ok: false, reason: 'conform-failed', conformReason }
@@ -267,7 +276,15 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
         : { ok: false as const, error: 'Invalid take move request.' }
     } catch { return { ok: false as const, error: 'The take could not be moved.' } }
   })
-  ipcMain.handle(VOICE_IPC.level, async () => { try { return await store.level() } catch { return { peakDb: -120, rmsDb: -120, takeActive: false } } })
+  let levelFailureLogged = false
+  ipcMain.handle(VOICE_IPC.level, async () => {
+    try { const level = await store.level(); levelFailureLogged = false; return level }
+    catch (error) {
+      if (!levelFailureLogged) log('voice-take', 'level failed ' + JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), 'warn')
+      levelFailureLogged = true
+      return { peakDb: -120, rmsDb: -120, takeActive: false }
+    }
+  })
 }
 
 export function createRegisteredVoiceTakeStore(): VoiceTakeStore {

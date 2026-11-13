@@ -297,6 +297,61 @@ describe('recording', () => {
     c.dispose()
   })
 
+  it.each([.5, .75, 1, 1.25])('native recording survives a cold projected-position correction at tempo %s', async tempo => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { c, engine, api } = await setup({}, e => {
+      Object.defineProperty(e, 'nativeActive', { value: true })
+      e._tempo = tempo
+    })
+    try {
+      await c.toggleRecord()
+      // Windows: a cold status read stalls past the facade's 1 s projection
+      // limit, then a current audible position replaces its stale projection.
+      clock = 2400; engine._pos = 30
+      c.tick()
+      clock = 2500; engine._pos = 29 // one backward correction, no native seek
+      c.tick()
+      clock = 2600; engine._pos = 29 + .1 * tempo
+      c.tick()
+      expect(c.getSnapshot().recording).toBe(true)
+      expect(api.recordStop).not.toHaveBeenCalled()
+      expect(warning).toHaveBeenCalledTimes(1)
+      expect(warning.mock.calls[0][0]).toContain('defer-to-presentation-history')
+      // A real native seek/pause/end is still authoritative in main: its next
+      // level receipt finalizes the take even though the UI heuristic is off.
+      api.level.mockResolvedValue({ peakDb: -20, rmsDb: -30, takeActive: false })
+      await c.pollLevel()
+      await vi.waitFor(() => expect(c.state).toBe('take-review'))
+      expect(api.recordStop).toHaveBeenCalledTimes(1)
+      expect(c.getSnapshot().stoppedBy).toBe('auto')
+    } finally { c.dispose(); warning.mockRestore() }
+  })
+
+  it('the legacy negative control still ends a take on the same cold position sequence', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { c, engine, api } = await setup()
+    try {
+      await c.toggleRecord(); clock = 2400; engine._pos = 30
+      c.tick()
+      await vi.waitFor(() => expect(c.state).toBe('take-review'))
+      expect(api.recordStop).toHaveBeenCalledTimes(1)
+      expect(c.getSnapshot().stoppedBy).toBe('seek')
+    } finally { c.dispose(); warning.mockRestore() }
+  })
+
+  it('a native display reporting parked waits for main rather than inventing a seek', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { c, engine, api } = await setup({}, e => Object.defineProperty(e, 'nativeActive', { value: true }))
+    try {
+      await c.toggleRecord(); clock = 100; engine._playing = false; c.tick()
+      expect(c.getSnapshot().recording).toBe(true)
+      expect(api.recordStop).not.toHaveBeenCalled()
+      api.level.mockResolvedValue({ peakDb: -20, rmsDb: -30, takeActive: false })
+      await c.pollLevel()
+      await vi.waitFor(() => expect(c.state).toBe('take-review'))
+    } finally { c.dispose(); warning.mockRestore() }
+  })
+
   it('pausing the song during a take stops it', async () => {
     const { c, engine } = await setup()
     await c.toggleRecord()

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { fsyncDirectorySync, writeAllSync } from './atomic-file'
+import { log } from './log'
 import type {
   VoiceRecordSettingsChange,
   VoiceRecordStartRequest,
@@ -263,14 +264,21 @@ export class VoiceTakeStore {
       }
       active.actualDeviceName = result.deviceName ?? this.armed?.deviceName ?? request.input.deviceName
       {
+        const firstSampleWaitStarted = Date.now()
         const stamp = await this.waitForFirstSample()
-        if (!stamp || !stamp.firstSampleHostNs || !stamp.sampleRate) { active.placementFault = true }
+        const firstSampleWaitMs = Date.now() - firstSampleWaitStarted
+        if (!stamp || !stamp.firstSampleHostNs || !stamp.sampleRate) {
+          active.placementFault = true
+          log('voice-take', 'first sample unavailable ' + JSON.stringify({ takeId, firstSampleWaitMs, stamp }), 'warn')
+        }
         else {
           active.firstSampleHostNs = stamp.firstSampleHostNs
           active.lastSampleHostNs = stamp.lastSampleHostNs ?? stamp.firstSampleHostNs
           active.firstSampleQuality = stamp.firstSampleQuality
           active.sampleRate = stamp.sampleRate
           const raw = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, trimInputLatency: false })
+          if (!raw.ok || raw.found === false || raw.paused || raw.seekDuringCallback)
+            log('voice-take', 'initial raw placement fault ' + JSON.stringify({ takeId, stamp, placement: raw }), 'warn')
           if (!raw.ok || raw.found === false || raw.paused || raw.seekDuringCallback) active.placementFault = true
           else {
             const reported = stamp.inputLatencySource === 'reported' && stamp.inputLatencyStable !== false
@@ -282,6 +290,10 @@ export class VoiceTakeStore {
             // Hardware gate: tone across 1 -> .5, error before/at/after <=5 ms.
             active.outputSampleRate = raw.sampleRate
             const placed = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, outputSampleRate: raw.sampleRate, inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames, trimInputLatency: true })
+            if (!placed.ok || placed.found === false || placed.paused || placed.seekDuringCallback)
+              log('voice-take', 'initial trimmed placement fault ' + JSON.stringify({ takeId, stamp,
+                inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
+                graphLatencyFrames: active.graphLatencyFrames, placement: placed }), 'warn')
             if (!placed.ok || placed.found === false || placed.paused || placed.seekDuringCallback) active.placementFault = true
             else {
               const startPositionSec = placed.startPositionSec ?? placed.songSeconds
@@ -294,6 +306,11 @@ export class VoiceTakeStore {
               active.lastAnchorHostNs = stamp.firstSampleHostNs
               active.timelineApproximate = stamp.firstSampleQuality !== 'hardware'
               this.appendAnchor(active, { takeFrame: 0, projectFrame: Math.round(active.startPositionSec * stamp.sampleRate) })
+              log('voice-take', 'placed ' + JSON.stringify({ takeId, firstSampleHostNs: stamp.firstSampleHostNs,
+                firstSampleWaitMs, quality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, outputSampleRate: raw.sampleRate,
+                inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
+                graphLatencyFrames: active.graphLatencyFrames, startPositionSec: active.startPositionSec,
+                discontinuitySerial: placed.discontinuitySerial, faultSerial: placed.faultSerial, generation: placed.generation }))
             }
           }
           if (active.placementFault) active.latencySource = 'measured-trim'
@@ -314,7 +331,11 @@ export class VoiceTakeStore {
       this.active = active
       this.finalizedTake = null
       if (active.firstSampleHostNs) {
-        active.monitor = setInterval(() => { void this.checkDiscontinuity(active).catch(() => { this.endTimeline(active); void this.stop(undefined, 'seek') }) }, 250)
+        active.monitor = setInterval(() => { void this.checkDiscontinuity(active).catch(error => {
+          log('voice-take', 'sampling failed ' + JSON.stringify({ takeId: active.takeId, phase: 'poll',
+            error: error instanceof Error ? error.message : String(error) }), 'warn')
+          this.endTimeline(active); void this.stop(undefined, 'seek')
+        }) }, 250)
         active.monitor.unref()
       }
       return { ok: true, takeId }
@@ -358,7 +379,11 @@ export class VoiceTakeStore {
     const host = stats.takeFrameHostNs ?? stats.lastSampleHostNs
     if (!host || !active.sampleRate) return
     if (stats.gapOverflow || Number(stats.gapRegressions ?? 0) > 0 ||
-        stats.sampleRate !== undefined && stats.sampleRate !== active.sampleRate) { active.placementFault = true; return }
+        stats.sampleRate !== undefined && stats.sampleRate !== active.sampleRate) {
+      log('voice-take', 'capture fault ' + JSON.stringify({ takeId: active.takeId, host, takeFrame: stats.takeFrame,
+        gapOverflow: stats.gapOverflow, gapRegressions: stats.gapRegressions, sampleRate: stats.sampleRate, initialSampleRate: active.sampleRate }), 'warn')
+      active.placementFault = true; return
+    }
     const rate = active.sampleRate
     const frame = stats.takeFrame === undefined ?
       Math.round(Number(BigInt(host) - BigInt(active.firstSampleHostNs!)) * rate / 1e9) : Number(stats.takeFrame)
@@ -376,7 +401,13 @@ export class VoiceTakeStore {
       (active.faultSerial !== undefined && p.faultSerial !== active.faultSerial) ||
       (p.discontinuitySerial !== active.discontinuitySerial &&
         (active.faultSerial === undefined || p.faultSerial === undefined))
-    if (faulty(placement)) { this.endTimeline(active); return }
+    if (faulty(placement)) {
+      log('voice-take', 'timeline end ' + JSON.stringify({ takeId: active.takeId, phase: force ? 'final-or-settings' : 'poll',
+        host, takeFrame: frame, quality: stats.firstSampleQuality, inputLatencyFrames: active.inputLatencyFrames,
+        outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames,
+        initialDiscontinuitySerial: active.discontinuitySerial, initialFaultSerial: active.faultSerial, placement }), 'warn')
+      this.endTimeline(active); return
+    }
     // Walk back through every landed mapping epoch, even several fast changes
     // between polls. The boundary coordinates come from the presentation journal.
     const seams: Array<VoiceTakeAnchor & { tempo?: number; transposeSemitones?: number }> = []
@@ -391,7 +422,12 @@ export class VoiceTakeStore {
       seams.push({ takeFrame, projectFrame: Math.round(epoch.mappingStartSongSeconds! * rate), tempo: epoch.rate, transposeSemitones: epoch.transposeSemitones })
       upperHost = edge
       epoch = await queryAt((edge - 1n).toString())
-      if (faulty(epoch)) { this.endTimeline(active); return }
+      if (faulty(epoch)) {
+        log('voice-take', 'timeline end ' + JSON.stringify({ takeId: active.takeId, phase: 'seam-history',
+          host, takeFrame: frame, edge: edge.toString(), initialDiscontinuitySerial: active.discontinuitySerial,
+          initialFaultSerial: active.faultSerial, placement: epoch }), 'warn')
+        this.endTimeline(active); return
+      }
     }
     for (const anchor of seams.reverse()) {
       this.appendAnchor(active, { takeFrame: anchor.takeFrame, projectFrame: anchor.projectFrame })
@@ -449,6 +485,9 @@ export class VoiceTakeStore {
   async stop(reason?: 'device-lost' | 'error', note?: 'seek'): Promise<VoiceRecordStopResult> {
     const active = this.active
     if (!active) return this.finalizedTake ? { ok: true, take: this.finalizedTake } : { ok: false, reason: 'error', message: 'No recording is active.' }
+    log('voice-take', 'stop requested ' + JSON.stringify({ takeId: active.takeId, reason: reason ?? 'normal', note: note ?? null,
+      timelineEnded: active.timelineEnded === true, placementFault: active.placementFault === true,
+      discontinuitySerial: active.discontinuitySerial, faultSerial: active.faultSerial, lastAnchor: active.anchors.at(-1) }))
     if (active.monitor) clearInterval(active.monitor)
     if (active.sampling) await active.sampling.catch(() => this.endTimeline(active))
     if (this.active !== active) return this.stop(reason, note)
@@ -460,7 +499,11 @@ export class VoiceTakeStore {
       // The writer is drained now. Include the last committed block (and any
       // seam after the final timer tick) before extrapolating its short tail.
       if (!active.placementFault) {
-        try { await this.sampleAnchors(active, true) } catch { this.endTimeline(active) }
+        try { await this.sampleAnchors(active, true) } catch (error) {
+          log('voice-take', 'sampling failed ' + JSON.stringify({ takeId: active.takeId, phase: 'final',
+            error: error instanceof Error ? error.message : String(error) }), 'warn')
+          this.endTimeline(active)
+        }
       }
       const wavPath = finished.path ?? active.wavPath
       let file: Awaited<ReturnType<typeof stat>>
@@ -490,9 +533,16 @@ export class VoiceTakeStore {
         name: null, audio: { fileName: basename(wavPath), format: 'wav-pcm16', byteSize: file.size, checksum: null }
       }
       await this.writeSidecar(active.dir, active.takeId, sidecar)
+      log('voice-take', 'finalized ' + JSON.stringify({ takeId: active.takeId, status: sidecar.status,
+        durationSec, sampleRate, frames: finished.frames, droppedBlocks: finished.droppedBlocks,
+        nativeOk: finished.ok, deviceLost: finished.deviceLost, placementFault: active.placementFault === true,
+        timelineEnded: active.timelineEnded === true, anchors: active.anchors.length }))
       this.finalizedTake = summary(sidecar)
       return { ok: true, take: this.finalizedTake }
     } catch (error) {
+      log('voice-take', 'finalize failed ' + JSON.stringify({ takeId: active.takeId,
+        error: error instanceof Error ? error.message : String(error), placementFault: active.placementFault === true,
+        timelineEnded: active.timelineEnded === true }), 'warn')
       return { ok: false, reason: 'error', message: error instanceof Error && !error.message.includes('/') ? error.message : 'The take could not be finalized.' }
     } finally {
       this.finalizing.delete(active.takeId)

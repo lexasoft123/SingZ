@@ -387,6 +387,7 @@ export class VoiceController {
   private startedAtMs = 0
   private lastPos = 0
   private lastTickMs = 0
+  private loggedRecordingPositionObservation = false
   private listenStartedMs = 0
   private listenSawPlaying = false
   private takeCount = 0
@@ -1108,6 +1109,8 @@ export class VoiceController {
     }
     if (!res.ok) {
       if (startedSong && engine.playing) engine.pause()
+      console.warn('[voice-take] start failed ' + JSON.stringify({ reason: res.reason, message: res.message,
+        native: engine.nativeActive === true, playing: engine.playing, positionSec: engine.position, tempo: engine.tempo }))
       this.failStart(res.reason)
       return
     }
@@ -1118,6 +1121,7 @@ export class VoiceController {
     this.startedAtMs = this.now()
     this.lastTickMs = this.startedAtMs
     this.lastPos = engine.position
+    this.loggedRecordingPositionObservation = false
     this.takeCount += 1
     this.livePeaks = []
     this.livePeakStepSec = PEAK_STEP_SEC
@@ -1182,6 +1186,9 @@ export class VoiceController {
   async stopRecording(reason: 'user' | 'seek' | 'auto' = 'user'): Promise<void> {
     const id = this.recordingId
     if (!this.model.recording || !id) return
+    if (reason !== 'user') console.warn('[voice-take] renderer stop ' + JSON.stringify({ takeId: id, reason,
+      ageMs: this.now() - this.startedAtMs, native: this.deps.engine.nativeActive === true,
+      positionSec: this.deps.engine.position, playing: this.deps.engine.playing, tempo: this.deps.engine.tempo }))
     this.recordingId = null
     const cur = this.model.take
     const epoch = this.songEpoch
@@ -1514,10 +1521,26 @@ export class VoiceController {
       const expected = this.lastPos + dt * engine.tempo
       const pos = engine.position
       const jumped = Math.abs(pos - expected) > SEEK_JUMP_SEC
+      const playing = engine.playing
+      const native = engine.nativeActive === true
+      if ((jumped || !playing) && !this.loggedRecordingPositionObservation) {
+        this.loggedRecordingPositionObservation = true
+        // Console warnings feed the existing persisted desktop log. Bounded to
+        // one observation per take; no mic/device names or recording paths.
+        console.warn('[voice-take] renderer transport observation ' + JSON.stringify({
+          takeId: this.recordingId, ageMs: nowMs - this.startedAtMs, dtMs: dt * 1000,
+          previousSec: this.lastPos, positionSec: pos, expectedSec: expected,
+          deltaSec: pos - expected, tempo: engine.tempo, playing, native,
+          action: native ? 'defer-to-presentation-history' : 'stop-seek'
+        }))
+      }
       this.lastTickMs = nowMs
       this.lastPos = pos
-      // M1: a seek or a pause ends the take (spec OQ-2 simplification).
-      if (jumped || !engine.playing) {
+      // Native position is a projected UI clock, bounded to one second between
+      // status reads; a cold/stalled read can catch up or step back without a
+      // seek. Main owns sample-time seek/loop/pause/end detection for native
+      // takes and pollLevel finalizes its receipt. Keep the legacy fallback.
+      if (!native && (jumped || !playing)) {
         void this.stopRecording('seek')
         return
       }

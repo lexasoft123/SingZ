@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events'
 import { isAllowed } from '../../src/main/media'
 import { createVoiceTakeNative, registerVoiceTakeIpc } from '../../src/main/voice-takes-ipc'
 import { ConformTakeError, type ConformTakeErrorCode } from '../../src/main/voice-take-conform'
+import { logEntries } from '../../src/main/log'
 
 const voiceIpc = vi.hoisted(() => ({ handlers: new Map<string, (...args: any[]) => Promise<any>>(),
   conform: vi.fn(), invalidate: vi.fn(async () => {}), release: vi.fn(async () => {}) }))
@@ -208,12 +209,12 @@ describe('voice take storage', () => {
     expect(await s.stop()).toMatchObject({ ok: false, reason: 'error' })
   })
 
-  it.each([.25, .5, 1, 2])('waits for audible placement before writing an armed stopped-song take at %sx', async tempo => {
+  it.each([.25, .5, .75, 1, 1.25, 2])('waits for WASAPI-like audible placement before writing an armed stopped-song take at %sx', async tempo => {
     vi.useFakeTimers()
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
     const origin = 10_000_000_000n
     const graphFrames = tempo === 1 ? 0 : 7200
-    const outputFrames = 480
+    const outputFrames = 1056 // WASAPI device + buffer latency, at 48 kHz / 480-frame callbacks.
     const delay = BigInt((graphFrames + outputFrames) * 1e9 / 48000)
     let elapsed = 0n, first = 0n, generation = 0n, writerStarted = false, probes = 0
     const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
@@ -221,11 +222,13 @@ describe('voice take storage', () => {
       if (method === 'beginCapture') { generation = args[1] as bigint; return { ok: true } as T }
       if (method === 'captureState') return { state: 'running', ownershipGeneration: generation.toString() } as T
       if (method === 'captureStats') return { lastSampleHostNs: (origin + elapsed).toString(), firstSampleCaptured: writerStarted,
-        firstSampleHostNs: first.toString(), firstSampleQuality: 'hardware', sampleRate: 48000 } as T
+        firstSampleHostNs: first.toString(), firstSampleQuality: 'hardware', inputBufferFrames: 480, sampleRate: 48000 } as T
       if (method === 'presentationQuery') {
         probes++
         const at = BigInt(args[0] as string)
-        return { found: at >= origin, paused: at === origin, songSeconds: 12 + Number(at - origin) / 1e9 * tempo,
+        const outputBlock = elapsed / 10_000_000n // 480 frames at 48 kHz, independent input packet phase.
+        return { found: at >= origin && at < origin + (outputBlock + 1n) * 10_000_000n,
+          paused: at === origin, songSeconds: 12 + Number(at - origin) / 1e9 * tempo,
           outputLatencyFrames: outputFrames, graphLatencyFrames: graphFrames, sampleRate: 48000 } as T
       }
       if (method === 'recordTake') {
@@ -265,6 +268,12 @@ describe('voice take storage', () => {
       expect(done.take?.startPositionSec).toBeCloseTo(12 + .01 * tempo, 8)
       // Old immediate writer froze first=origin, and stop returned partial-error/start=0.
       expect(first).toBeGreaterThan(origin + delay)
+      const readiness = logEntries().find(entry => entry.source === 'voice-take' && entry.line.startsWith('readiness ') &&
+        entry.line.includes('"takeId":' + JSON.stringify(done.take!.takeId)))
+      expect(readiness?.line).toContain('"inputBufferFrames":480')
+      expect(readiness?.line).toContain('"outputLatencyFrames":1056')
+      expect(readiness?.line).toContain('"quality":"hardware"')
+      expect(readiness?.line).toContain('"ready":true')
     } finally { await s.cancel(); vi.useRealTimers() }
   })
 
@@ -973,6 +982,7 @@ describe('ADR 0016 conform IPC leases and cancellation', () => {
   it.each([
     ['take-too-long', 'memory budget', { ok: false, reason: 'conform-failed', conformReason: 'take-too-long' }],
     ['memory-budget', 'take too long', { ok: false, reason: 'conform-failed', conformReason: 'memory-budget' }],
+    ['path-too-long', 'opaque diagnostic', { ok: false, reason: 'conform-failed', conformReason: 'path-too-long' }],
     ['conform-error', 'take too long', { ok: false, reason: 'conform-failed', conformReason: 'conform-error' }],
     ['cancelled', 'memory budget', { ok: false, reason: 'cancelled' }]
   ])('prefers typed conform code %s to misleading text', async (code, message, expected) => {
