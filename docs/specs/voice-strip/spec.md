@@ -307,6 +307,16 @@ M1, M2, M3. Every requirement is intended to be testable; the test column in sec
 | VS-PLAY-009 | "Add to song as track" SHALL create a custom track from a copy of the take and leave the take in place; deleting the track SHALL NOT delete the take. | MUST | M3 |
 | VS-PLAY-010 | On phones the takes list and take playback SHALL be available; recording on phones is not committed. **[inferred]** | SHOULD | M3 |
 
+### 5.3a Take clip: waveform, selection, move and delete (VS-TAKE)
+
+| ID | Requirement | Pri | M |
+| --- | --- | --- | --- |
+| VS-TAKE-001 | Every button of the strip, its take actions and the track settings popup SHALL have a non-empty accessible name and the same `title` tooltip as the player's other buttons, with the shortcut where one exists (Record (R), Discard take (Delete)). | MUST | M2 |
+| VS-TAKE-002 | The take clip SHALL draw a real waveform (loudest sample per slice, mirrored), never a vertical grid: live from the input level while recording, then from peaks main computes from the take WAV (pcm16 mono, about one per 10 ms, at most 20000, cached by file identity) for both a just-finished take and one loaded from disk. A silent take SHALL draw a flat centre line. The clip rescales with zoom. | MUST | M2 |
+| VS-TAKE-003 | The clip SHALL be selectable (click, or Tab then Enter/Space; `role=option`, `aria-selected`, visible selected state and focus ring). Click on an empty lane or Esc deselects. Selection is controller state per song and survives zoom and scroll. Only the clip captures the click: the stems' seek-on-click is unchanged. A take that is still recording SHALL NOT be selectable. | MUST | M2 |
+| VS-TAKE-004 | Delete or Backspace on the selected clip, and the discard button, SHALL delete the take (files removed, selection cleared). | MUST | M2 |
+| VS-TAKE-005 | Dragging the clip, or the arrow keys (0.1 s, Shift 1 s), SHALL move it on the song timeline, clamped to [0, song duration - take span], with a live ghost and position readout; Esc cancels a drag. The new start SHALL be stored as `userOffsetSec` in the sidecar (additive, version unchanged) beside the measured `startPositionSec`, which is never overwritten; "Reset position" stores 0. Listen-back (alone or with song) and take playback SHALL start from `startPositionSec + userOffsetSec`, replaying the take's tempo/transpose timeline as before. Main validates the request (finite, within 36000 s, never before the song start). | MUST | M2 |
+
 ### 5.4 Storage and privacy (VS-STORE)
 
 | ID | Requirement | Pri | M |

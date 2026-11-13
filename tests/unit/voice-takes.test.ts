@@ -477,3 +477,142 @@ describe('voice take storage', () => {
 
 })
 
+
+describe('take peaks, moving and deleting (voice lane)', () => {
+  const pcm = (sampleRate: number, samples: Int16Array): Buffer => {
+    const b = wav(sampleRate, samples.length)
+    samples.forEach((v, i) => b.writeInt16LE(v, 44 + i * 2))
+    return b
+  }
+  const withRoot = (): string => { const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root); return root }
+  const recordOne = async (root: string, native = fakeNative()) => {
+    const s = new VoiceTakeStore({ rootDir: root, native, now: () => new Date('2026-01-01T00:00:00.000Z'), placementQuery: native.presentationQuery })
+    const started = await s.start(request)
+    if (!started.ok) throw new Error('start')
+    await s.stop()
+    return { s, takeId: started.takeId }
+  }
+
+  it('peaks: silence is flat zero, a sine peaks near its amplitude, a clipped burst reaches 1', async () => {
+    const root = withRoot(); const dir = join(root, 'song-1'); mkdirSync(dir)
+    const rate = 8000
+    writeFileSync(join(dir, 'silence.wav'), pcm(rate, new Int16Array(rate)))
+    writeFileSync(join(dir, 'sine.wav'), pcm(rate, Int16Array.from({ length: rate }, (_, i) => Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 16384))))
+    writeFileSync(join(dir, 'burst.wav'), pcm(rate, Int16Array.from({ length: rate }, (_, i) => (i >= 4000 && i < 4100 ? (i % 2 ? 32767 : -32768) : 0))))
+    const s = store(root)
+    const silence = await s.peaks({ songId: 'song-1', takeId: 'silence' })
+    const sine = await s.peaks({ songId: 'song-1', takeId: 'sine' })
+    const burst = await s.peaks({ songId: 'song-1', takeId: 'burst' })
+    if (!silence.ok || !sine.ok || !burst.ok) throw new Error('peaks failed')
+    expect(silence.stepSec).toBeCloseTo(0.01, 4)
+    expect(silence.peaks).toHaveLength(100)
+    expect(Math.max(...silence.peaks)).toBe(0)
+    expect(Math.min(...sine.peaks)).toBeGreaterThan(0.45) // a 10 ms slice holds several full cycles of 440 Hz
+    expect(Math.max(...sine.peaks)).toBeCloseTo(0.5, 2)
+    expect(Math.max(...burst.peaks)).toBe(1)
+    expect(burst.peaks.filter(p => p > 0)).toHaveLength(2) // 100 samples at 8 kHz span two 10 ms slices
+    expect(burst.peaks[0]).toBe(0)
+  })
+  it('peaks are coarsened to the cap: a long take never exceeds maxPeaks and its step grows', async () => {
+    const root = withRoot(); mkdirSync(join(root, 'song-1'))
+    const path = join(root, 'song-1', 'long.wav')
+    writeFileSync(path, wav(1000, 100_000)) // 100 s at 1 kHz: 10 ms steps would be 10000 peaks
+    const { computeWavPeaks } = await import('../../src/main/voice-takes')
+    const fine = await computeWavPeaks(path, 20000)
+    expect(fine.peaks).toHaveLength(10000)
+    expect(fine.stepSec).toBeCloseTo(0.01, 6)
+    const coarse = await computeWavPeaks(path, 400)
+    expect(coarse.peaks.length).toBeLessThanOrEqual(400) // a revert of the coarsening would give 10000 here
+    expect(coarse.stepSec).toBeCloseTo(0.25, 6)
+    expect(coarse.stepSec).toBeGreaterThan(fine.stepSec)
+    expect(coarse.durationSec).toBeCloseTo(100, 3)
+  })
+  it('the peak cache keeps only the 16 most recent takes', async () => {
+    const root = withRoot(); const dir = join(root, 'song-1'); mkdirSync(dir)
+    for (let i = 0; i < 20; i++) writeFileSync(join(dir, `t${i}.wav`), wav(8000, 800))
+    const s = store(root)
+    for (let i = 0; i < 20; i++) expect(await s.peaks({ songId: 'song-1', takeId: `t${i}` })).toMatchObject({ ok: true })
+    const cache = (s as unknown as { peakCache: Map<string, unknown> }).peakCache
+    expect(cache.size).toBe(16)
+    expect([...cache.keys()].some(k => k.includes(`${join(dir, 't0.wav')}:`))).toBe(false) // the oldest were dropped
+    expect([...cache.keys()].some(k => k.includes(`${join(dir, 't19.wav')}:`))).toBe(true)
+  })
+  it('peaks and moves are refused while a take is being finalized, and allowed afterwards', async () => {
+    const root = withRoot()
+    const native = fakeNative()
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    const finish = native.finishTake
+    native.finishTake = async args => { await gate; return finish(args) }
+    const s = new VoiceTakeStore({ rootDir: root, native, now: () => new Date('2026-01-01T00:00:00.000Z'), placementQuery: native.presentationQuery })
+    const started = await s.start(request)
+    if (!started.ok) throw new Error('start')
+    const stopping = s.stop() // active is already null here; the sidecar is not written yet
+    expect(await s.move({ songId: 'song-1', takeId: started.takeId, userOffsetSec: 2 })).toMatchObject({ ok: false, error: 'The take is still recording.' })
+    expect(await s.peaks({ songId: 'song-1', takeId: started.takeId })).toMatchObject({ ok: false, error: 'The take is still recording.' })
+    release()
+    await stopping
+    expect(await s.move({ songId: 'song-1', takeId: started.takeId, userOffsetSec: 2 })).toMatchObject({ ok: true })
+    expect(await s.peaks({ songId: 'song-1', takeId: started.takeId })).toMatchObject({ ok: true })
+  })
+  it('peaks stay bounded for a long take and are cached by file identity', async () => {
+    const root = withRoot(); const dir = join(root, 'song-1'); mkdirSync(dir)
+    writeFileSync(join(dir, 'long.wav'), wav(1000, 100_000)) // 100 s of silence at 1 kHz
+    const s = store(root)
+    const first = await s.peaks({ songId: 'song-1', takeId: 'long' })
+    if (!first.ok) throw new Error('peaks')
+    expect(first.peaks.length).toBeLessThanOrEqual(20000)
+    expect(first.durationSec).toBeCloseTo(100, 3)
+    const again = await s.peaks({ songId: 'song-1', takeId: 'long' })
+    expect(again).toEqual(first)
+  })
+  it('peaks refuse bad ids, a missing file and a take that is still recording', async () => {
+    const root = withRoot(); const s = store(root)
+    expect(await s.peaks({ songId: '../x', takeId: 'a' })).toMatchObject({ ok: false })
+    expect(await s.peaks({ songId: 'song-1', takeId: 'nope' })).toMatchObject({ ok: false })
+    const started = await s.start(request)
+    if (!started.ok) throw new Error('start')
+    expect(await s.peaks({ songId: 'song-1', takeId: started.takeId })).toMatchObject({ ok: false, error: 'The take is still recording.' })
+    expect(await s.move({ songId: 'song-1', takeId: started.takeId, userOffsetSec: 1 })).toMatchObject({ ok: false })
+  })
+  it('move persists beside the measured placement, survives a list reload, and 0 resets it', async () => {
+    const root = withRoot(); const { s, takeId } = await recordOne(root)
+    const moved = await s.move({ songId: 'song-1', takeId, userOffsetSec: 2.5 })
+    expect(moved).toMatchObject({ ok: true, take: { startPositionSec: 12, userOffsetSec: 2.5 } })
+    const sidecar = JSON.parse(readFileSync(join(root, 'song-1', `${takeId}.json`), 'utf8'))
+    expect(sidecar.startPositionSec).toBe(12) // never overwritten
+    expect(sidecar.userOffsetSec).toBe(2.5)
+    const reloaded = await store(root).list('song-1')
+    expect(reloaded[0]).toMatchObject({ takeId, startPositionSec: 12, userOffsetSec: 2.5 })
+    await s.move({ songId: 'song-1', takeId, userOffsetSec: 0 })
+    expect(JSON.parse(readFileSync(join(root, 'song-1', `${takeId}.json`), 'utf8')).userOffsetSec).toBeUndefined()
+    expect((await store(root).list('song-1'))[0]?.userOffsetSec).toBe(0)
+  })
+  it('move never lets the take start before the song and rejects junk', async () => {
+    const root = withRoot(); const { s, takeId } = await recordOne(root)
+    expect(await s.move({ songId: 'song-1', takeId, userOffsetSec: -100 })).toMatchObject({ ok: true, take: { userOffsetSec: -12 } }) // clamped to 12 - 12 = 0
+    for (const userOffsetSec of [NaN, Infinity, 36001, -36001]) expect(await s.move({ songId: 'song-1', takeId, userOffsetSec })).toMatchObject({ ok: false })
+    expect(await s.move({ songId: 'song-1', takeId: '../bad', userOffsetSec: 1 })).toMatchObject({ ok: false })
+    expect(await s.move({ songId: 'song-1', takeId: 'missing', userOffsetSec: 1 })).toMatchObject({ ok: false, error: 'Take not found.' })
+  })
+  it('playback starts from the moved position (negative control: the unmoved take starts at the measured one)', async () => {
+    const root = withRoot()
+    const native = fakeNative()
+    const playTake = vi.fn(async () => ({ ok: true }))
+    native.playTake = playTake
+    const { s, takeId } = await recordOne(root, native)
+    await s.play({ takeId, mode: 'take' })
+    expect(playTake).toHaveBeenLastCalledWith(expect.objectContaining({ startPositionSec: 12 }))
+    await s.move({ songId: 'song-1', takeId, userOffsetSec: 3 })
+    await s.play({ takeId, mode: 'with-song' })
+    expect(playTake).toHaveBeenLastCalledWith(expect.objectContaining({ startPositionSec: 15, mode: 'with-song' }))
+  })
+  it('remove deletes the wav and the sidecar and forgets the peaks', async () => {
+    const root = withRoot(); const { s, takeId } = await recordOne(root)
+    expect(await s.peaks({ songId: 'song-1', takeId })).toMatchObject({ ok: true })
+    expect(await s.remove('song-1', takeId)).toEqual({ ok: true })
+    expect(readdirSync(join(root, 'song-1'))).toEqual([])
+    expect(await s.peaks({ songId: 'song-1', takeId })).toMatchObject({ ok: false })
+    expect(await s.list('song-1')).toEqual([])
+  })
+})

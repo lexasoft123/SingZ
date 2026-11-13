@@ -28,6 +28,10 @@ import type {
   VoiceRecordStartRequest,
   VoiceRecordStartResult,
   VoiceRecordStopResult,
+  VoiceTakeMoveRequest,
+  VoiceTakeMoveResult,
+  VoiceTakePeaksRequest,
+  VoiceTakePeaksResult,
   VoiceTakeSummary
 } from '../../../shared/voice-take'
 import { stableVoiceSongId } from './voice-song-id'
@@ -61,6 +65,10 @@ export interface VoiceTakeApi {
   play(req: VoicePlayTakeRequest): Promise<{ ok: boolean } | void>
   stopPlay(): Promise<unknown>
   remove(songId: string, takeId: string): Promise<unknown>
+  /** Waveform peaks of a finished take, computed in main from its WAV. */
+  peaks(req: VoiceTakePeaksRequest): Promise<VoiceTakePeaksResult>
+  /** Persist the singer's shift of the take (the measured placement is kept). */
+  move(req: VoiceTakeMoveRequest): Promise<VoiceTakeMoveResult>
   level(): Promise<VoiceInputLevel | null>
   /** Open the chosen input so the meter is live (armed); disarm releases it. */
   arm(req: VoiceArmRequest): Promise<VoiceArmResult>
@@ -139,7 +147,9 @@ export interface VoiceTake {
   kept: boolean
   partial: boolean
   recovered: boolean
-  /** Linear peak (0..1) per PEAK_STEP_SEC of take time, captured from the live level while recording; absent for a take loaded from disk. */
+  /** The singer's shift of the take on the song timeline (seconds). `startSec` already includes it. */
+  userOffsetSec: number
+  /** Loudest absolute sample (0..1) per slice of the take: live level readings while recording, then main's WAV peaks. */
   peaks?: number[]
 }
 
@@ -162,6 +172,8 @@ export interface VoiceModel {
   }
   /** Monitor level in dB (-60..+12). The take level is `level`; the fader edits one or the other. */
   monitorGainDb: number
+  /** The take clip is selected (one take at a time; never while recording). Reset with the song. */
+  takeSelected: boolean
   /** The chosen monitor output (native UID); null follows the song output, then the system default. Remembered, never 'on'. */
   monitorOutput: string | null
   /** The remembered output is no longer among the candidates: the monitor fell back to the default. */
@@ -220,6 +232,7 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   // Monitoring is never persisted as on: every controller starts off.
   monitor: { avail: 'ok', reason: null, on: false, latency: null, warnings: [] },
   monitorGainDb: MONITOR_GAIN_DEFAULT_DB,
+  takeSelected: false,
   monitorOutput: null,
   monitorOutputMissing: false,
   monitorOutputs: [],
@@ -521,6 +534,7 @@ export class VoiceController {
       stoppedBy: null,
       monitorNote: null,
       take: null,
+      takeSelected: false,
       elapsedSec: 0,
       listen: null,
       recording: false
@@ -533,7 +547,10 @@ export class VoiceController {
       const newest = [...takes]
         .filter((tk) => tk.status !== 'partial-error' || tk.durationSec > 0)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
-      if (newest) this.set({ take: this.fromSummary(newest, true) })
+      if (newest) {
+        this.set({ take: this.fromSummary(newest, true) })
+        this.loadPeaks(newest.takeId)
+      }
     } catch {
       // Listing is a convenience; the strip works without it.
     }
@@ -839,8 +856,10 @@ export class VoiceController {
         changed: false,
         kept: false,
         partial: false,
-        recovered: false
+        recovered: false,
+        userOffsetSec: 0
       },
+      takeSelected: false,
       ...this.say('announceRecording')
     })
   }
@@ -899,6 +918,7 @@ export class VoiceController {
         stoppedBy: reason === 'user' ? null : reason,
         ...this.say('announceReview')
       })
+      this.loadPeaks(res.take.takeId)
       return
     }
     const salvaged = res.take
@@ -916,6 +936,74 @@ export class VoiceController {
   private withTimeline(base: VoiceTake, cur: VoiceTake | null): VoiceTake {
     const withPeaks = cur?.peaks ? { ...base, peaks: cur.peaks } : base
     return cur && cur.timeline.length > 1 ? { ...withPeaks, timeline: [base.timeline[0]!, ...cur.timeline.slice(1)] } : withPeaks
+  }
+
+  /** Replace the live-level waveform with the real peaks computed in main from the take's WAV. */
+  private loadPeaks(takeId: string): void {
+    const songId = this.model.songId
+    if (songId === null) return
+    void Promise.resolve(this.deps.api.peaks?.({ songId, takeId }))
+      .then((r) => {
+        const tk = this.model.take
+        if (this.disposed || !r || !r.ok || !tk || tk.takeId !== takeId || this.model.recording) return
+        this.set({ take: { ...tk, peaks: r.peaks } })
+      })
+      .catch(() => undefined) // the clip keeps its live waveform, or a flat line
+  }
+
+  /** Select or deselect the take clip. A take that is still recording cannot be selected. */
+  selectTake(on: boolean): void {
+    const m = this.model
+    const want = on && m.take !== null && !m.recording
+    if (m.takeSelected === want) return
+    this.set({ takeSelected: want })
+  }
+
+  private moveChain: Promise<unknown> = Promise.resolve()
+
+  /**
+   * Move the take on the song timeline to `startSec`, clamped to [0, song duration - take span]. The measured
+   * placement is untouched: only the user offset is stored (main persists it in the sidecar).
+   */
+  moveTake(startSec: number): Promise<void> {
+    const run = this.moveChain.then(() => this.doMoveTake(startSec))
+    this.moveChain = run.catch(() => undefined)
+    return run
+  }
+
+  private async doMoveTake(startSec: number): Promise<void> {
+    const tk = this.model.take
+    const songId = this.model.songId
+    if (!tk || songId === null || this.model.recording || this.model.listen || this.pendingListen || !Number.isFinite(startSec)) return
+    const duration = this.deps.engine.duration ?? 0
+    const hi = duration > 0 ? Math.max(0, duration - songSpan(tk)) : Number.POSITIVE_INFINITY
+    const clamped = Math.min(hi, Math.max(0, startSec))
+    const captured = tk.startSec - tk.userOffsetSec
+    const offset = Math.round((clamped - captured) * 1000) / 1000
+    if (Math.abs(offset - tk.userOffsetSec) < 1e-4) return
+    this.set({ take: { ...tk, userOffsetSec: offset, startSec: captured + offset } })
+    let res: VoiceTakeMoveResult | undefined
+    try {
+      res = await this.deps.api.move({ songId, takeId: tk.takeId, userOffsetSec: offset })
+    } catch {
+      res = undefined
+    }
+    const cur = this.model.take
+    if (this.disposed || !cur || cur.takeId !== tk.takeId) return
+    if (res && res.ok) this.set({ take: { ...cur, userOffsetSec: res.take.userOffsetSec ?? 0, startSec: res.take.startPositionSec + (res.take.userOffsetSec ?? 0) } })
+    else this.set({ take: { ...cur, userOffsetSec: tk.userOffsetSec, startSec: tk.startSec } }) // not saved: back where it was
+  }
+
+  /** Put the take back where it was captured. */
+  resetTakePosition(): Promise<void> {
+    const tk = this.model.take
+    return tk ? this.moveTake(tk.startSec - tk.userOffsetSec) : Promise.resolve()
+  }
+
+  /** Delete the selected take (the discard flow: files removed, selection cleared). A recording take cannot be selected. */
+  async deleteSelected(): Promise<void> {
+    if (!this.model.takeSelected || this.model.recording) return
+    await this.discard()
   }
 
   keep(): void {
@@ -938,7 +1026,7 @@ export class VoiceController {
       await this.deps.api.stopPlay().catch(() => undefined)
     }
     if (this.model.listen) await this.stopListening()
-    this.set({ take: null, error: null, ...this.say('announceDiscarded') })
+    this.set({ take: null, takeSelected: false, error: null, ...this.say('announceDiscarded') })
     await this.deps.api.remove(this.model.songId ?? '', tk.takeId).catch(() => undefined)
   }
 
@@ -1541,7 +1629,8 @@ export class VoiceController {
     return {
       takeId: s.takeId,
       n,
-      startSec: s.startPositionSec,
+      startSec: s.startPositionSec + (s.userOffsetSec ?? 0),
+      userOffsetSec: s.userOffsetSec ?? 0,
       durationSec: s.durationSec,
       tempo: s.tempo,
       transpose: s.transposeSemitones,
@@ -1657,6 +1746,8 @@ export function createBridgeVoiceApi(
     play: call('play'),
     stopPlay: call('stopPlay'),
     remove: call('remove'),
+    peaks: call('peaks'),
+    move: call('move'),
     level: call('level'),
     arm: call('arm'),
     disarm: call('disarm'),

@@ -12,9 +12,13 @@ import type {
   VoiceTakeSidecar,
   VoiceTakeSummary,
   VoicePlayTakeRequest,
-  VoiceInputLevel
+  VoiceInputLevel,
+  VoiceTakeMoveRequest,
+  VoiceTakeMoveResult,
+  VoiceTakePeaksRequest,
+  VoiceTakePeaksResult
 } from '../shared/voice-take'
-import { VOICE_TAKE_SIDECAR_VERSION } from '../shared/voice-take'
+import { VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_PEAKS_MAX, VOICE_TAKE_SIDECAR_VERSION } from '../shared/voice-take'
 
 export type VoiceTakeNative = {
   armCapture(args: { deviceName: string; channelIndex: number }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; generation?: bigint; deviceName?: string }>
@@ -71,7 +75,7 @@ type ArmedCapture = { generation: bigint; deviceName: string; channelIndex: numb
 
 const summary = (sidecar: VoiceTakeSidecar): VoiceTakeSummary => ({
   takeId: sidecar.takeId, songId: sidecar.songId, createdAt: sidecar.createdAt,
-  startPositionSec: sidecar.startPositionSec, durationSec: sidecar.durationSec,
+  startPositionSec: sidecar.startPositionSec, userOffsetSec: sidecar.userOffsetSec ?? 0, durationSec: sidecar.durationSec,
   status: sidecar.status, name: sidecar.name, tempo: sidecar.settings[0]?.tempo ?? 1,
   transposeSemitones: sidecar.settings[0]?.transposeSemitones ?? 0,
   settingsChanged: sidecar.settings.length > 1
@@ -93,7 +97,42 @@ const readWavInfo = async (path: string): Promise<{ sampleRate: number; dataByte
   return { sampleRate, dataBytes, frames: dataBytes / 2 }
 }
 
+/**
+ * Waveform peaks of a pcm16 mono WAV: the loudest absolute sample (0..1) per slice, one slice per ~10 ms,
+ * coarser only when that would exceed `maxPeaks`. Streamed in chunks; never holds the whole file.
+ */
+export async function computeWavPeaks(path: string, maxPeaks = VOICE_TAKE_PEAKS_MAX): Promise<{ stepSec: number; durationSec: number; peaks: number[] }> {
+  const info = await readWavInfo(path)
+  const frames = info.frames
+  const stepFrames = Math.max(1, Math.round(info.sampleRate * 0.01), Math.ceil(frames / Math.max(1, maxPeaks)))
+  const peaks: number[] = new Array(Math.ceil(frames / stepFrames)).fill(0)
+  const handle = await open(path, 'r')
+  try {
+    const chunk = Buffer.alloc(64 * 1024)
+    let frame = 0
+    let position = 44
+    while (frame < frames) {
+      const want = Math.min(chunk.length, (frames - frame) * 2)
+      const { bytesRead } = await handle.read(chunk, 0, want, position)
+      if (bytesRead < 2) break
+      const samples = bytesRead >> 1
+      for (let i = 0; i < samples; i++, frame++) {
+        const v = Math.abs(chunk.readInt16LE(i * 2)) / 32768
+        const slot = Math.floor(frame / stepFrames)
+        if (v > peaks[slot]!) peaks[slot] = v
+      }
+      position += samples * 2
+    }
+  } finally { await handle.close() }
+  return { stepSec: stepFrames / info.sampleRate, durationSec: frames / info.sampleRate, peaks: peaks.map(p => Math.round(Math.min(1, p) * 1000) / 1000) }
+}
+
+const PEAK_CACHE_MAX = 16
+
 export class VoiceTakeStore {
+  private readonly peakCache = new Map<string, { stepSec: number; durationSec: number; peaks: number[] }>()
+  /** Takes whose WAV and sidecar are still being finalized: peaks and moves wait (stop() clears `active` first). */
+  private readonly finalizing = new Set<string>()
   private active: Active | null = null
   private starting = false
   private arming = false
@@ -268,6 +307,7 @@ export class VoiceTakeStore {
     const active = this.active
     if (!active) return this.finalizedTake ? { ok: true, take: this.finalizedTake } : { ok: false, reason: 'error', message: 'No recording is active.' }
     this.active = null
+    this.finalizing.add(active.takeId)
     if (active.monitor) clearInterval(active.monitor)
     try {
       const finished = await this.options.native.finishTake({ generation: active.generation })
@@ -295,6 +335,7 @@ export class VoiceTakeStore {
     } catch (error) {
       return { ok: false, reason: 'error', message: error instanceof Error && !error.message.includes('/') ? error.message : 'The take could not be finalized.' }
     } finally {
+      this.finalizing.delete(active.takeId)
       if (!this.armed && this.options.native.stopCapture) await this.options.native.stopCapture(active.generation).catch(() => undefined)
     }
   }
@@ -369,7 +410,43 @@ export class VoiceTakeStore {
     let paths: { dir: string; wav: string; sidecar: string }
     try { paths = this.takePaths(songId, takeId) } catch { return { ok: false, error: 'Invalid take id.' } }
     await Promise.all([rm(paths.wav, { force: true }), rm(paths.sidecar, { force: true })])
+    for (const key of [...this.peakCache.keys()]) if (key.startsWith(`${paths.wav}:`)) this.peakCache.delete(key)
     return { ok: true }
+  }
+
+  /** Waveform peaks of a finished take, computed from its WAV and cached by file identity. */
+  async peaks(request: VoiceTakePeaksRequest): Promise<VoiceTakePeaksResult> {
+    let paths: { dir: string; wav: string; sidecar: string }
+    try { paths = this.takePaths(request.songId, request.takeId) } catch { return { ok: false, error: 'Invalid take id.' } }
+    if (this.active?.takeId === request.takeId || this.finalizing.has(request.takeId)) return { ok: false, error: 'The take is still recording.' }
+    try {
+      const file = await stat(paths.wav)
+      const key = `${paths.wav}:${file.size}:${Math.round(file.mtimeMs)}`
+      const cached = this.peakCache.get(key)
+      if (cached) return { ok: true, ...cached, peaks: [...cached.peaks] }
+      const result = await computeWavPeaks(paths.wav)
+      this.peakCache.set(key, result)
+      // Bounded: keep the 16 most recent takes, drop the oldest on insert.
+      while (this.peakCache.size > PEAK_CACHE_MAX) this.peakCache.delete(this.peakCache.keys().next().value as string)
+      return { ok: true, ...result }
+    } catch { return { ok: false, error: 'The take audio could not be read.' } }
+  }
+
+  /** Persist the singer's shift of a take (the measured placement stays untouched; 0 resets). */
+  async move(request: VoiceTakeMoveRequest): Promise<VoiceTakeMoveResult> {
+    let paths: { dir: string; wav: string; sidecar: string }
+    try { paths = this.takePaths(request.songId, request.takeId) } catch { return { ok: false, error: 'Invalid take id.' } }
+    if (!Number.isFinite(request.userOffsetSec) || Math.abs(request.userOffsetSec) > VOICE_TAKE_MAX_OFFSET_SEC) return { ok: false, error: 'Invalid take offset.' }
+    if (this.active?.takeId === request.takeId || this.finalizing.has(request.takeId)) return { ok: false, error: 'The take is still recording.' }
+    let sidecar: VoiceTakeSidecar
+    try { sidecar = JSON.parse(await readFile(paths.sidecar, 'utf8')) as VoiceTakeSidecar } catch { return { ok: false, error: 'Take not found.' } }
+    if (sidecar.version !== VOICE_TAKE_SIDECAR_VERSION) return { ok: false, error: 'This take was made by a newer version.' }
+    // The take can never start before the song does.
+    const offset = Math.max(request.userOffsetSec, -sidecar.startPositionSec)
+    if (offset === 0) delete sidecar.userOffsetSec
+    else sidecar.userOffsetSec = offset
+    await this.writeSidecar(paths.dir, request.takeId, sidecar)
+    return { ok: true, take: summary(sidecar) }
   }
 
   async play(request: VoicePlayTakeRequest): Promise<{ ok: boolean; error?: string }> {
@@ -380,7 +457,7 @@ export class VoiceTakeStore {
     if (matches.sidecar.version !== VOICE_TAKE_SIDECAR_VERSION) return { ok: false, error: 'This take was made by a newer version.' }
     const generation = BigInt(`0x${request.takeId.replace(/-/g, '').slice(0, 15)}`)
     const gain = Math.min(8, Math.max(0, request.gain ?? 1))
-    const result = await this.options.native.playTake({ takeId: request.takeId, path: matches.wav, startPositionSec: matches.sidecar.startPositionSec, mode: request.mode, generation, gain, tempo: matches.sidecar.settings[0]?.tempo ?? 1 })
+    const result = await this.options.native.playTake({ takeId: request.takeId, path: matches.wav, startPositionSec: matches.sidecar.startPositionSec + (matches.sidecar.userOffsetSec ?? 0), mode: request.mode, generation, gain, tempo: matches.sidecar.settings[0]?.tempo ?? 1 })
     if (result.ok) this.playGeneration = generation
     return result
   }

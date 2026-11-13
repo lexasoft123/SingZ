@@ -188,13 +188,18 @@
   top: 20px;
   bottom: 6px;
   min-width: 6px;
+  z-index: 6; /* above the stack's scrub overlay: only the clip itself captures the click */
   border-radius: 8px;
   border: 1px solid color-mix(in srgb, var(--voice) 70%, transparent);
-  background:
-    repeating-linear-gradient(90deg, color-mix(in srgb, var(--voice) 38%, transparent) 0 2px, transparent 2px 5px),
-    color-mix(in srgb, var(--voice) 12%, var(--panel));
+  background: color-mix(in srgb, var(--voice) 12%, var(--panel));
+  touch-action: none;
 }
-.vs-clip.has-wave { background: color-mix(in srgb, var(--voice) 10%, var(--panel)); }
+.vs-clip.selectable { cursor: grab; }
+.vs-clip.dragging { cursor: grabbing; border-style: dashed; }
+.vs-clip.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+.vs-clip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vs-clip-ghost { z-index: 5; pointer-events: none; opacity: 0.35; border-style: dashed; background: none; }
+.vs-wave-mid { stroke: color-mix(in srgb, var(--voice) 55%, transparent); stroke-width: 1; }
 .vs-clip.recording { border-color: var(--danger); background: rgba(255, 122, 92, 0.1); }
 .vs-clip.partial { border-style: dashed; }
 .vs-clip.playing { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--voice) 30%, transparent); }

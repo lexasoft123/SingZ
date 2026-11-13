@@ -23,6 +23,12 @@ export interface VoiceTakeSidecar {
   createdAt: string
   /** Song timeline position (seconds) of the first captured sample, after latency placement. */
   startPositionSec: number
+  /**
+   * Additive (version unchanged): the singer's own shift of the take on the song timeline, seconds.
+   * The capture-derived `startPositionSec` is never overwritten, so the move can be reset; the take
+   * plays from `startPositionSec + userOffsetSec`. Absent = 0.
+   */
+  userOffsetSec?: number
   durationSec: number
   sampleRate: number
   channels: 1
@@ -44,6 +50,8 @@ export interface VoiceTakeSummary {
   songId: string
   createdAt: string
   startPositionSec: number
+  /** The singer's shift of the take on the song timeline (seconds, 0 when never moved). */
+  userOffsetSec?: number
   durationSec: number
   status: VoiceTakeStatus
   name: string | null
@@ -117,6 +125,8 @@ export const VOICE_IPC = {
   stopPlay: 'voice:stop-play',
   remove: 'voice:remove',
   level: 'voice:level',
+  peaks: 'voice:peaks',
+  move: 'voice:move',
   arm: 'voice:arm',
   disarm: 'voice:disarm',
   monitorAvailability: 'voice:monitor-availability',
@@ -124,6 +134,28 @@ export const VOICE_IPC = {
   monitorGain: 'voice:monitor-gain',
   monitorState: 'voice:monitor-state'
 } as const
+
+/** Upper bound of waveform peaks main returns for one take (about 1 per 10 ms up to ~200 s, then coarser). */
+export const VOICE_TAKE_PEAKS_MAX = 20000
+/** A moved take stays within a sane distance of its capture placement (seconds). */
+export const VOICE_TAKE_MAX_OFFSET_SEC = 36000
+
+export interface VoiceTakePeaksRequest {
+  songId: string
+  takeId: string
+}
+/** `peaks[i]` is the loudest absolute sample (0..1) in the i-th slice of `stepSec` seconds. */
+export type VoiceTakePeaksResult =
+  | { ok: true; stepSec: number; durationSec: number; peaks: number[] }
+  | { ok: false; error: string }
+
+export interface VoiceTakeMoveRequest {
+  songId: string
+  takeId: string
+  /** New user offset in seconds, added to the capture-derived start (0 = reset). */
+  userOffsetSec: number
+}
+export type VoiceTakeMoveResult = { ok: true; take: VoiceTakeSummary } | { ok: false; error: string }
 
 // ---- Live monitoring (milestone 2, ADR 0014 + decision record) ----
 // The monitor is a second small duplex host on the SAME physical device as the song output (mic in, mono

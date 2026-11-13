@@ -245,6 +245,7 @@ function render() {
   empty.textContent = S.perm !== 'granted' ? STR.emptyPerm : S.inputMissing ? STR.emptyMissing : armed ? STR.emptyArmed : STR.emptyIdle;
   if (t) {
     clip.classList.toggle('recording', rec); clip.classList.toggle('partial', t.partial); clip.classList.toggle('playing', pl);
+    clip.classList.toggle('selected', !!t.selected && !rec); clip.setAttribute('aria-selected', String(!!t.selected && !rec));
     const tag = $('clipTag'); tag.textContent = STR.tag(t.tempo, sgn(t.trans), t.changed); tag.classList.toggle('changed', t.changed || t.tempo !== 100 || t.trans !== 0);
     tag.title = t.changed ? STR.tagTitleChanged : STR.tagTitle; placeClip(); drawClip();
   }
@@ -339,6 +340,29 @@ $('rewBtn').onclick = () => { if (S.phase === 'recording') return; song.pos = 0;
 $('tpDn').onclick = () => bump('tempo', -5); $('tpUp').onclick = () => bump('tempo', 5);
 $('trDn').onclick = () => bump('trans', -1); $('trUp').onclick = () => bump('trans', 1);
 ruler.onclick = (e) => seekFrom(e, ruler);
+// The take clip: click selects (not while recording), drag or arrows move it within [0, song length - take span],
+// Esc cancels a drag or deselects, Delete removes it. Only the clip captures the click; empty lane still seeks.
+const clipEl = $('clip');
+let dragMove = null;
+function moveTakeTo(start) { const t = S.take; if (!t) return; t.start = Math.max(0, Math.min(LEN - t.span, start)); render(); }
+clipEl.addEventListener('pointerdown', (e) => {
+  const t = S.take; if (!t || S.phase === 'recording') return; e.stopPropagation(); t.selected = true;
+  const w = $('voiceTrack').clientWidth; dragMove = { x0: e.clientX, s0: t.start, pps: w / LEN, moved: false, orig: t.start };
+  clipEl.setPointerCapture(e.pointerId); render();
+});
+clipEl.addEventListener('pointermove', (e) => { const d = dragMove; if (!d) return; if (!d.moved && Math.abs(e.clientX - d.x0) < 3) return; d.moved = true; moveTakeTo(d.s0 + (e.clientX - d.x0) / d.pps); });
+clipEl.addEventListener('pointerup', () => { dragMove = null; });
+clipEl.addEventListener('keydown', (e) => {
+  const t = S.take; if (!t || S.phase === 'recording') return;
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t.selected = !t.selected; render(); }
+  else if (t.selected && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); discard(); }
+  else if (t.selected && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); moveTakeTo(t.start + (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1 : 0.1)); }
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !S.take || !S.take.selected) return;
+  if (dragMove) { moveTakeTo(dragMove.orig); dragMove = null; } else { S.take.selected = false; render(); }
+}, true);
+document.addEventListener('pointerdown', (e) => { if (S.take && S.take.selected && !e.target.closest('.clip, #takebar')) { S.take.selected = false; render(); } }, true);
 $('voiceTrack').onclick = (e) => { if (e.target.closest('.clip')) return; seekFrom(e, $('voiceTrack')); };
 $('monBtn').onclick = () => { if (S.avail !== 'ok') return; S.muted = !S.muted; announce(S.muted ? STR.announce.monOff : STR.announce.monOn); render(); };
 $('muteBtn').onclick = () => { S.takeMute = !S.takeMute; render(); };

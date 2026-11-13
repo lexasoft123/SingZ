@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import { desktopAudioProcess } from './audio-process'
-import { VOICE_IPC, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
+import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
 import { VoiceTakeStore, createUnavailableVoiceNative, type VoiceTakeNative } from './voice-takes'
 
 const normalizeDeviceLabel = (value: string): string => value.trim().replace(/\s+\([^()]*\)\s*$/, '').trim().toLocaleLowerCase()
@@ -147,6 +147,19 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   ipcMain.handle(VOICE_IPC.stopPlay, async () => { try { return await store.stopPlay() } catch { return { ok: false, error: 'Take playback could not stop.' } } })
   ipcMain.handle(VOICE_IPC.remove, (_event, songId: unknown, takeId: unknown) =>
     typeof songId === 'string' && typeof takeId === 'string' ? store.remove(songId, takeId).catch(() => ({ ok: false, error: 'Take could not be deleted.' })) : { ok: false, error: 'Invalid take id.' })
+  const takeRefValid = (value: unknown): value is VoiceTakePeaksRequest => {
+    const ref = value as VoiceTakePeaksRequest
+    return Boolean(ref && typeof ref === 'object' && typeof ref.songId === 'string' && ref.songId.length <= 200 && typeof ref.takeId === 'string' && ref.takeId.length <= 200)
+  }
+  ipcMain.handle(VOICE_IPC.peaks, async (_event, request: unknown) => { try { return takeRefValid(request) ? await store.peaks({ songId: request.songId, takeId: request.takeId }) : { ok: false as const, error: 'Invalid take peaks request.' } } catch { return { ok: false as const, error: 'Take peaks are unavailable.' } } })
+  ipcMain.handle(VOICE_IPC.move, async (_event, request: unknown) => {
+    try {
+      const move = request as VoiceTakeMoveRequest
+      return takeRefValid(request) && typeof move.userOffsetSec === 'number' && Number.isFinite(move.userOffsetSec) && Math.abs(move.userOffsetSec) <= VOICE_TAKE_MAX_OFFSET_SEC
+        ? await store.move({ songId: move.songId, takeId: move.takeId, userOffsetSec: move.userOffsetSec })
+        : { ok: false as const, error: 'Invalid take move request.' }
+    } catch { return { ok: false as const, error: 'The take could not be moved.' } }
+  })
   ipcMain.handle(VOICE_IPC.level, async () => { try { return await store.level() } catch { return { peakDb: -120, rmsDb: -120, takeActive: false } } })
 }
 

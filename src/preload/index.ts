@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'ele
 import { boxAudioPersistentLifetime } from '../shared/box-audio'
 import type { BoxAPI } from '../shared/box-contract'
 import { VOICE_IPC, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorGainRequest, type VoiceMonitorState } from '../shared/voice-take'
-import type { VoiceArmRequest, VoiceArmResult, VoiceRecordSettingsChange, VoiceRecordStartRequest, VoicePlayTakeRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
+import type { VoiceTakeMoveRequest, VoiceTakeMoveResult, VoiceTakePeaksRequest, VoiceTakePeaksResult, VoiceArmRequest, VoiceArmResult, VoiceRecordSettingsChange, VoiceRecordStartRequest, VoicePlayTakeRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
 import type {
   GlassVerdict,
   LogEntry,
@@ -55,6 +55,8 @@ export type VoiceTakeApi = {
   play(request: VoicePlayTakeRequest): Promise<{ ok: boolean; error?: string }>
   stopPlay(): Promise<{ ok: boolean; error?: string }>
   remove(songId: string, takeId: string): Promise<{ ok: boolean; error?: string }>
+  peaks(request: VoiceTakePeaksRequest): Promise<VoiceTakePeaksResult>
+  move(request: VoiceTakeMoveRequest): Promise<VoiceTakeMoveResult>
   level(): Promise<VoiceInputLevel>
   monitorAvailability(request: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState>
   monitorSet(request: VoiceMonitorSetRequest): Promise<VoiceMonitorState>
@@ -72,6 +74,8 @@ const voiceTakes: VoiceTakeApi = {
   play: request => ipcRenderer.invoke('voice:play', request),
   stopPlay: () => ipcRenderer.invoke('voice:stop-play'),
   remove: (songId, takeId) => ipcRenderer.invoke('voice:remove', songId, takeId),
+  peaks: request => ipcRenderer.invoke(VOICE_IPC.peaks, request),
+  move: request => ipcRenderer.invoke(VOICE_IPC.move, request),
   level: () => ipcRenderer.invoke('voice:level'),
   monitorAvailability: request => ipcRenderer.invoke(VOICE_IPC.monitorAvailability, request),
   monitorSet: request => ipcRenderer.invoke(VOICE_IPC.monitorSet, request),

@@ -55,6 +55,14 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
    Play the take back with the song. Listen for the take being aligned with
    the song by ear (a clap or a sung start on the beat). Note any early or late
    feel; the mid-take monitor toggle should add at most a ~30 ms silence once.
+9b. Hover every Voice button (arm, speaker, gear, take actions, Record): each shows a tooltip, Record
+    and Discard with their shortcut. The take clip shows a real waveform (also after quitting and
+    reopening the app); a silent take is a flat line. Click the clip: it is selected (outline, focus
+    ring); click an empty part of the lane or press Esc: deselected, and the click still seeks the stems.
+    Drag the selected clip left/right (ghost and readout, Esc cancels), or use the arrow keys (Shift =
+    larger); Listen with song starts where you moved it, also after restart; Reset position puts it
+    back. Delete (or the trash button) removes it and clears the selection. A take that is still
+    recording cannot be selected.
 10. Switch to another song (while it loads), open the library and come back, then stop playback. Expect the monitor (Speaker on)
     to keep running across the song change, unload and playback end; it stops
     only when you turn the Speaker off, the device or route is lost, you change

@@ -72,7 +72,7 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
       </p>
       <p className="vs-set-route">{routeLine(m)}</p>
       <div className="vs-set-actions">
-        <button type="button" className="vs-btn" onClick={onClose}>
+        <button type="button" className="vs-btn" title={t('player.voice.settingsDone')} onClick={onClose}>
           {t('player.voice.settingsDone')}
         </button>
       </div>

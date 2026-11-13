@@ -88,6 +88,8 @@ function fakeApi(over: Partial<VoiceTakeApi> = {}): VoiceTakeApi & Record<keyof 
     play: vi.fn(async () => ({ ok: true })),
     stopPlay: vi.fn(async () => ({ ok: true })),
     remove: vi.fn(async () => ({ ok: true })),
+    peaks: vi.fn(async () => ({ ok: false as const, error: 'no peaks in this fake' })),
+    move: vi.fn(async (req: { userOffsetSec: number }) => ({ ok: true as const, take: summary({ userOffsetSec: req.userOffsetSec }) })),
     level: vi.fn(async () => ({ peakDb: -20, rmsDb: -30 })),
     arm: vi.fn(async () => ({ ok: true as const })),
     monitorAvailability: vi.fn(async () => monState({ on: false })),
@@ -1924,7 +1926,7 @@ describe('markup', () => {
     expect(html).toContain('aria-label="Listen"')
     expect(html).toContain('aria-label="Listen with song"')
     expect(html).toMatch(/aria-label="Add to song as track \(coming later\)"[^>]*disabled/)
-    expect(html).toContain('aria-label="Discard take"')
+    expect(html).toContain('aria-label="Discard take (Delete)"')
     expect(html).toContain('aria-label="Record (R)"')
     expect(html).not.toContain('Record unavailable')
     expect(html).toContain('recorded at 100% · 0')
@@ -2170,5 +2172,150 @@ describe('monitor output: back-to-back picks, refusals and unusable remembered d
     await vi.waitFor(() => expect(ok.c.getSnapshot().monitorOutputs).toHaveLength(3))
     expect(ok.c.getSnapshot().monitorOutput).toBe('a-uid')
     ok.c.dispose()
+  })
+})
+
+describe('voice lane: tooltips, waveform, selection, move and delete', () => {
+  const recorded = async (apiOver: Partial<VoiceTakeApi> = {}, over: Partial<VoiceTakeSummary> = {}) => {
+    const r = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary(over) })), ...apiOver })
+    await r.c.toggleRecord()
+    await r.c.toggleRecord()
+    return r
+  }
+  const strip = (c: VoiceController, engine: unknown, view: { s: number; e: number } | null = null): string =>
+    renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never, view }))
+
+  it('every button of the strip, the take actions and the popup has an accessible name and the app\'s title tooltip', async () => {
+    const { c, engine } = await recorded()
+    const pages = [
+      strip(c, engine),
+      renderToStaticMarkup(createElement('div', null, createElement(VoiceRecordButton, { controller: c }))),
+      renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: c, onClose: () => undefined }))
+    ]
+    c.selectTake(true)
+    await c.moveTake(60) // a moved take also shows Reset position
+    pages.push(strip(c, engine))
+    let buttons = 0
+    for (const html of pages) {
+      for (const m of html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)) {
+        buttons++
+        const attrs = m[1]!
+        const name = /aria-label="([^"]+)"/.exec(attrs)?.[1] ?? m[2]!.replace(/<[^>]*>/g, '').trim()
+        expect(name, attrs).not.toBe('')
+        expect(/\btitle="([^"]+)"/.exec(attrs)?.[1] ?? '', `tooltip for ${name}`).not.toBe('') // the same title mechanism as the transport buttons
+      }
+    }
+    expect(buttons).toBeGreaterThan(10)
+    expect(pages[3]).toContain('aria-label="Reset position"')
+    // shortcut hints ride in the tooltip text
+    expect(pages[1]).toContain('title="Record (R)"')
+    expect(pages[3]).toContain('title="Discard take (Delete)"')
+    c.dispose()
+  })
+  it('a just-finished take gets real peaks from main and draws a waveform, not a grid', async () => {
+    const peaks = Array.from({ length: 200 }, (_, i) => Math.abs(Math.sin(i / 7)) * 0.8)
+    const { c, engine, api } = await recorded({ peaks: vi.fn(async () => ({ ok: true as const, stepSec: 0.05, durationSec: 10, peaks })) })
+    await vi.waitFor(() => expect(c.getSnapshot().take?.peaks).toEqual(peaks))
+    expect(api.peaks).toHaveBeenCalledWith({ songId: 'song-1', takeId: 'take-1' })
+    const html = strip(c, engine)
+    expect(html).toContain('<polygon')
+    expect(html).toContain('class="vs-wave-mid"')
+    expect(html).not.toContain('repeating-linear-gradient')
+    c.dispose()
+  })
+  it('a take loaded from disk also gets its peaks; a silent take is a flat centre line and no polygon is faked', async () => {
+    const list = vi.fn(async () => [summary({ takeId: 'old-1', userOffsetSec: 0 })])
+    const { c, engine, api } = await setup({ list, peaks: vi.fn(async () => ({ ok: true as const, stepSec: 0.05, durationSec: 10, peaks: [0.5, 0.9, 0.2] })) })
+    await vi.waitFor(() => expect(c.getSnapshot().take?.peaks).toEqual([0.5, 0.9, 0.2]))
+    expect(api.peaks).toHaveBeenCalledWith({ songId: 'song-1', takeId: 'old-1' })
+    expect(strip(c, engine)).toContain('<polygon')
+    c.dispose()
+    const silent = await recorded() // the fake has no peaks for it: nothing to draw but the line
+    const html = strip(silent.c, silent.engine)
+    expect(html).toContain('class="vs-wave-mid"')
+    expect(html).not.toContain('<polygon')
+    silent.c.dispose()
+  })
+  it('the clip is a selectable option; selection is controller state, not allowed while recording, and reset with the song', async () => {
+    const r = await setup()
+    await r.c.toggleRecord()
+    r.c.selectTake(true)
+    expect(r.c.getSnapshot().takeSelected).toBe(false) // a take that is still recording stays unselectable
+    await r.c.toggleRecord()
+    expect(strip(r.c, r.engine)).toMatch(/role="option" aria-selected="false" tabindex="0"/)
+    r.c.selectTake(true)
+    expect(strip(r.c, r.engine)).toMatch(/role="option" aria-selected="true" tabindex="0" class="vs-clip[^"]*\bselected\b/)
+    expect(r.c.getSnapshot().takeSelected).toBe(true)
+    // selection survives zoom and scroll: the view only changes how it is drawn
+    expect(strip(r.c, r.engine, { s: 20, e: 60 })).toContain('aria-selected="true"')
+    r.c.selectTake(false)
+    expect(r.c.getSnapshot().takeSelected).toBe(false)
+    r.c.selectTake(true)
+    await r.c.setSong('song-2')
+    expect(r.c.getSnapshot().takeSelected).toBe(false)
+    r.c.dispose()
+  })
+  it('moving clamps to [0, song duration - take span] and stores only the offset beside the measured start', async () => {
+    const { c, api } = await recorded() // start 30 s, 10 s take, 200 s song
+    await c.moveTake(100)
+    expect(api.move).toHaveBeenLastCalledWith({ songId: 'song-1', takeId: 'take-1', userOffsetSec: 70 })
+    expect(c.getSnapshot().take).toMatchObject({ startSec: 100, userOffsetSec: 70 })
+    await c.moveTake(-5)
+    expect(api.move).toHaveBeenLastCalledWith(expect.objectContaining({ userOffsetSec: -30 })) // clamped to 0
+    expect(c.getSnapshot().take?.startSec).toBe(0)
+    await c.moveTake(1000)
+    expect(api.move).toHaveBeenLastCalledWith(expect.objectContaining({ userOffsetSec: 160 })) // clamped to 200 - 10
+    expect(c.getSnapshot().take?.startSec).toBe(190)
+    for (const call of api.move.mock.calls) expect((call[0] as { userOffsetSec: number }).userOffsetSec).toBeGreaterThanOrEqual(-30) // never an unclamped value
+    c.dispose()
+  })
+  it('a move that is not saved goes back where it was; Reset position restores the measured start', async () => {
+    const { c, api } = await recorded()
+    api.move.mockResolvedValueOnce({ ok: false, error: 'disk' })
+    await c.moveTake(80)
+    expect(c.getSnapshot().take).toMatchObject({ startSec: 30, userOffsetSec: 0 })
+    await c.moveTake(80)
+    expect(c.getSnapshot().take?.startSec).toBe(80)
+    await c.resetTakePosition()
+    expect(api.move).toHaveBeenLastCalledWith(expect.objectContaining({ userOffsetSec: 0 }))
+    expect(c.getSnapshot().take).toMatchObject({ startSec: 30, userOffsetSec: 0 })
+    c.dispose()
+  })
+  it('keyboard nudges are small moves; none while recording or listening', async () => {
+    const r = await setup()
+    await r.c.toggleRecord()
+    await r.c.moveTake(5)
+    expect(r.api.move).not.toHaveBeenCalled()
+    await r.c.toggleRecord()
+    const start = r.c.getSnapshot().take!.startSec
+    await r.c.moveTake(start + 0.1)
+    expect(r.c.getSnapshot().take?.startSec).toBeCloseTo(start + 0.1, 3)
+    await r.c.listen('take')
+    r.api.move.mockClear()
+    await r.c.moveTake(100)
+    expect(r.api.move).not.toHaveBeenCalled() // not while listening
+    r.c.dispose()
+  })
+  it('a take loaded after a restart sits at its moved position, and listen-back seeks there', async () => {
+    const list = vi.fn(async () => [summary({ startPositionSec: 30, userOffsetSec: 12 })])
+    const { c, engine, api } = await setup({ list })
+    await vi.waitFor(() => expect(c.getSnapshot().take).not.toBeNull())
+    expect(c.getSnapshot().take).toMatchObject({ startSec: 42, userOffsetSec: 12 })
+    await c.listen('with-song')
+    expect(engine.seek).toHaveBeenCalledWith(42) // negative control: not the measured 30
+    expect(api.play).toHaveBeenCalled()
+    c.dispose()
+  })
+  it('Delete removes the selected take and clears the selection; with nothing selected it does nothing', async () => {
+    const { c, api } = await recorded()
+    await c.deleteSelected()
+    expect(api.remove).not.toHaveBeenCalled()
+    expect(c.getSnapshot().take).not.toBeNull()
+    c.selectTake(true)
+    await c.deleteSelected()
+    expect(api.remove).toHaveBeenCalledWith('song-1', 'take-1')
+    expect(c.getSnapshot().take).toBeNull()
+    expect(c.getSnapshot().takeSelected).toBe(false)
+    c.dispose()
   })
 })
