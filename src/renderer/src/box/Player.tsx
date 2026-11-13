@@ -107,8 +107,7 @@ export function Player({
             {slot === 'next' && next && <Button className="player-next" aria-label={status === 'ended' ? t('box.player.nextLabel', { title: songLine(next.title, next.artist) }) : t('box.player.nextSong')} data-control="next-song" onClick={onNext}>
               <Icon name="skip" size={23} />{status === 'ended' && <span className="player-next-label">{t('box.player.nextLabel', { title: next.title })}</span>}
             </Button>}
-            {slot === 'hidden' && <Button className="player-next" aria-label={t('box.player.noNext')} title={t('box.player.noNext')} data-control="next-song" disabled><Icon name="skip" size={23} /></Button>}
-            {slot === 'choose' && <Button className="player-next" data-control="next-song" onClick={onLibrary}><span className="player-next-label">{t('box.player.chooseSong')}</span></Button>}
+            {slot === 'disabled' && <Button className="player-next" aria-label={t('box.player.noNext')} title={t('box.player.noNext')} data-control="next-song" disabled><Icon name="skip" size={23} /></Button>}
           </div>
           <div className="player-tools" data-remote-up="[data-control='seek']"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button><Button data-control="queue" onClick={onQueue}>{t('box.navigation.queue')}</Button></div>
           <span className="player-time player-duration">{timeText(snapshot.duration)}</span>

@@ -70,10 +70,11 @@ describe('Player next song', () => {
     expect(html).toContain('aria-label="Replay"')
     expect(html).toContain('Press OK to start the next song')
   })
-  it('at the end with an empty queue offers a way to choose and says the queue is empty', () => {
+  it('at the end with an empty queue keeps a disabled Next with the skip icon, no "Choose a song", and says the queue is empty', () => {
     const html = render(snapshot({ position: 100 }), null)
-    expect(html).toContain('data-control="next-song"')
-    expect(html).toContain('Choose a song')
+    expect(html).toMatch(/<button[^>]*aria-label="No next song in the queue"[^>]*data-control="next-song"[^>]*disabled[^>]*>\s*<svg/)
+    expect(html).not.toContain('Choose a song')
+    expect(html).not.toContain('player-next-label')
     expect(html).toContain('queue is empty')
   })
   describe('From the start', () => {

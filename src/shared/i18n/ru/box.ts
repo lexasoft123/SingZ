@@ -121,7 +121,6 @@ export const box: Translation<typeof english> = {
   'box.player.nextLabel': 'Далее: {title}',
   'box.player.upNext': 'Далее в очереди: {title}',
   'box.player.replay': 'Повтор',
-  'box.player.chooseSong': 'Выбрать песню',
   'box.player.hideHint': 'Элементы управления скроются через 5 секунд',
   'box.player.countdownSeconds': '{seconds}\u202Fс',
   'box.player.wake': 'Показать элементы управления',
