@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BeatInfo } from '../audio/beat'
 import type { MultitrackEngine } from '../audio/engine'
 import { modalCoversApp, type TimeView, type UITrack } from '../model'
@@ -146,6 +146,8 @@ export default function TrackStack({
   const stackRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
+  /** The same line again, above the Voice clip (which sits over the scrub overlay to catch its own clicks). */
+  const voiceHeadRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ mode: 'new' | 'resize'; anchor: number; x0: number; selecting: boolean } | null>(null)
   const [width, setWidth] = useState(0)
   const displayTracks = useMemo(() => {
@@ -170,6 +172,13 @@ export default function TrackStack({
   followShiftRef.current = onFollow
   const settleRef = useRef(settleView)
   settleRef.current = settleView
+
+  // The Voice lane's copy appears after the line has been written (writes are change-gated): catch it up.
+  const hasExtra = Boolean(extra)
+  useLayoutEffect(() => {
+    const v = playheadRef.current?.style.getPropertyValue('--p')
+    if (v) voiceHeadRef.current?.style.setProperty('--p', v)
+  }, [hasExtra])
 
   // One rAF loop drives the playhead + the bright "played" waveform clip for
   // every lane via the --p custom property, and keeps the viewport following
@@ -262,6 +271,7 @@ export default function TrackStack({
         })
         if (w.line !== null) {
           head.style.setProperty('--p', w.line)
+          voiceHeadRef.current?.style.setProperty('--p', w.line)
           edgeLine = w.line
         }
         if (w.reveal !== null) el.style.setProperty('--p', w.reveal)
@@ -477,6 +487,11 @@ export default function TrackStack({
       )}
 
       {extra}
+      {extra && (
+        <div className="playhead-over-voice" aria-hidden="true">
+          <div className="playhead" ref={voiceHeadRef} />
+        </div>
+      )}
 
       <div
         className="scrub-overlay"

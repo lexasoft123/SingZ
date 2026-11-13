@@ -699,6 +699,16 @@ button.chip-status:hover {
   pointer-events: none;
 }
 
+/* The playhead drawn again over the Voice lane's take clip (z 6, above the scrub overlay so the clip keeps
+   its own clicks): above the clip, never a pointer target. */
+.playhead-over-voice {
+  grid-column: 2;
+  grid-row: var(--extra-row);
+  position: relative;
+  z-index: 7;
+  pointer-events: none;
+}
+
 .playhead-cap {
   position: absolute;
   top: 0;

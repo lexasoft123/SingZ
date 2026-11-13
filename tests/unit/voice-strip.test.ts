@@ -2657,3 +2657,23 @@ describe('app-level monitor chip', () => {
     c.dispose()
   })
 })
+
+describe('playhead over the voice clip', () => {
+  const read = (f: string): string => readFileSync(new URL(`../../src/renderer/src/${f}`, import.meta.url), 'utf8')
+  const rule = (css: string, sel: string): string => new RegExp(`${sel.replace(/\./g, '\\.')}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+  const z = (body: string): number => Number(/z-index:\s*(\d+)/.exec(body)?.[1] ?? NaN)
+  it('the playhead layer sits above the clip (z) and never takes pointer events, so the clip keeps its clicks', () => {
+    const stack = read('styles.css')
+    const strip = read('components/voice-strip.css')
+    const layer = rule(stack, '.playhead-over-voice')
+    expect(z(layer)).toBeGreaterThan(z(rule(strip, '.vs-clip'))) // negative control: the overlay's own playhead is z 5, under the clip
+    expect(z(rule(stack, '.scrub-overlay'))).toBeLessThan(z(rule(strip, '.vs-clip')))
+    expect(layer).toMatch(/pointer-events:\s*none/)
+    expect(layer).toMatch(/grid-row:\s*var\(--extra-row\)/)
+    expect(rule(stack, '.playhead')).toMatch(/pointer-events:\s*none/) // the line inside it too
+    // the stack renders it only with the Voice lane and writes the same line value to it
+    const tsx = read('components/TrackStack.tsx')
+    expect(tsx).toContain('className="playhead-over-voice"')
+    expect(tsx).toMatch(/voiceHeadRef\.current\?\.style\.setProperty\('--p', w\.line\)/)
+  })
+})
