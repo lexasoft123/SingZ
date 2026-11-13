@@ -205,4 +205,9 @@ Verdict latency(const Gates& g, double ms, bool measured, bool eligible) noexcep
   if (!measured || !eligible || !std::isfinite(ms) || ms < 0) return Verdict::NotMeasured;
   return ms <= g.maxLatencyMs ? Verdict::Pass : Verdict::Fail;
 }
+Verdict pathComparison(const Gates& g, double ms, bool measured, bool sameDevice,
+                       uint32_t period, bool direct, bool virtualSource) noexcept {
+  return latency(g, ms, measured, sameDevice && (period == 32 || period == 64) &&
+                                  !(direct && virtualSource));
+}
 } // namespace monitor_spike

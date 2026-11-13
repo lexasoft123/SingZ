@@ -1,5 +1,6 @@
 #include "core.h"
 #include "analysis.h"
+#include "signals.h"
 #include "allocation_trap.h"
 #include <algorithm>
 #include <atomic>
@@ -11,11 +12,11 @@
 #include <limits>
 
 namespace ms=monitor_spike;
-#define REQUIRE(x) do { if (!(x)) { std::fprintf(stderr,"FAIL %s:%d %s\n",__FILE__,__LINE__,#x); return false; } } while(false)
+#define REQUIRE(x) do { if (!(x)) { std::fprintf(stderr,"FAIL: %s\n",#x); return false; } } while(false)
 constexpr uint64_t origin=10000000000ULL;
 namespace {
-bool floorTest(bool mutant=false) {
-  const auto q=mutant?64u:ms::queueFloor(48000,48000,32,0);
+bool floorTest() {
+  const auto q=ms::queueFloor(48000,48000,32,0);
   REQUIRE(q==320);
   REQUIRE(ms::queueFloor(48000,44100,64,0)==396);
   REQUIRE(ms::queueFloor(44100,48000,128,1024)==1024);
@@ -24,14 +25,14 @@ bool floorTest(bool mutant=false) {
   REQUIRE(!ms::queueFloor(48000,std::numeric_limits<double>::quiet_NaN(),32,0));
   return true;
 }
-bool clockTest(bool mutant=false) {
+bool clockTest() {
   for (const auto drift:{-.003,.003}) {
     ms::OutputClock clock;
     const double physical=48000*(1+drift);
     double rate=0;
     for (uint64_t f=0;f<48000ULL*600;f+=64) {
       const auto ns=origin+ms::frameNs(f,physical);
-      rate=mutant?48000:clock.observe(f,ns,64,48000);
+      rate=clock.observe(f,ns,64,48000);
     }
     REQUIRE(std::abs(rate-physical)<.1);
     // With nominal-only advancement an independent clock drifts 1.8 seconds
@@ -50,7 +51,7 @@ bool clockTest(bool mutant=false) {
   REQUIRE(shortGap.jumps==1 && shortGap.inferredMissing==32);
   return true;
 }
-bool historyTest(bool mutant=false) {
+bool historyTest() {
   zcore::routing::AudioHistory history(1,ms::capacity);
   ms::Capture source; source.history=&history; source.rate=48000;
   source.measureBegin=origin; source.measureEnd=origin+10000000000ULL;
@@ -74,7 +75,6 @@ bool historyTest(bool mutant=false) {
   // Deliberately read beyond published support: must become counted silence.
   b.outputHostTimeNs=origin+ms::frameNs(48000,48000); b.outputFrame+=512;
   REQUIRE(ms::Renderer::render(&renderer,b));
-  if (mutant) renderer.missing=0; // negative control: drop the missing counter
   REQUIRE(renderer.missing==512);
   for (auto v:output) REQUIRE(v==0);
   history.stop();
@@ -155,7 +155,7 @@ bool concurrencyTest() {
   } while (!done.load(std::memory_order_acquire));
   writer.join(); REQUIRE(finite && reads); h.stop(); return true;
 }
-bool waveformTest(bool mutant=false) {
+bool waveformTest() {
   constexpr double rate=48000; constexpr size_t frames=12*48000; constexpr size_t delay=240;
   std::vector<ms::Point> source(frames),returned(frames);
   for (size_t i=0;i<frames;++i) {
@@ -169,7 +169,7 @@ bool waveformTest(bool mutant=false) {
     .1f*(.63f*ms::testSignal(i-delay,rate)+.37f*ms::testSignal(i-delay-1,rate)):0;
   const auto fractional=ms::correlate(source,returned,origin,rate,20);
   REQUIRE(fractional.measured && std::abs(fractional.delayMs-5.00770833)<.004);
-  if (mutant) returned=source; else for (auto& p:returned) p.value=0;
+  for (auto& p:returned) p.value=0;
   const auto silent=ms::correlate(source,returned,origin,rate,20);
   REQUIRE(!silent.measured);
   // Correlated signal leaking through muted controls must never qualify.
@@ -203,7 +203,31 @@ bool waveformDriftTest() {
   REQUIRE(result.measured && result.windows==6 && std::abs(result.delayMs-5)<.02);
   return true;
 }
-bool gatesTest(bool mutant=false) {
+bool virtualComparisonTest() {
+  ms::Gates g;
+  REQUIRE(ms::pathComparison(g,5,true,true,32,true,true)==ms::Verdict::NotMeasured);
+  REQUIRE(ms::pathComparison(g,20,true,true,64,true,true)==ms::Verdict::NotMeasured);
+  REQUIRE(ms::pathComparison(g,5,true,true,32,false,true)==ms::Verdict::Pass);
+  REQUIRE(ms::pathComparison(g,20,true,true,64,false,true)==ms::Verdict::Fail);
+  REQUIRE(ms::pathComparison(g,5,true,true,64,true,false)==ms::Verdict::Pass);
+  REQUIRE(ms::pathComparison(g,5,true,true,128,false,true)==ms::Verdict::NotMeasured);
+  return true;
+}
+bool terminationTest() {
+  ms::installTerminationHandlers();
+  for (int signal : {SIGINT, SIGTERM
+#ifdef SIGHUP
+      , SIGHUP
+#endif
+      }) {
+    ms::interrupted=0;
+    REQUIRE(std::raise(signal)==0);
+    REQUIRE(ms::interrupted==1);
+  }
+  ms::interrupted=0;
+  return true;
+}
+bool gatesTest() {
   ms::Gates g;
   REQUIRE(ms::continuity(g,600,450000,0,0,0,true,true)==ms::Verdict::Pass);
   REQUIRE(ms::continuity(g,60,45000,0,0,0,true,true)==ms::Verdict::NotMeasured);
@@ -213,7 +237,7 @@ bool gatesTest(bool mutant=false) {
   REQUIRE(ms::continuity(g,600,450000,0,0,1,true,true)==ms::Verdict::Fail);
   REQUIRE(ms::continuity(g,600,450000,0,0,0,false,true)==ms::Verdict::NotMeasured);
   REQUIRE(ms::continuity(g,600,450000,0,0,0,true,false)==ms::Verdict::NotMeasured);
-  const auto unknown=mutant?ms::Verdict::Pass:ms::latency(g,5,false,true);
+  const auto unknown=ms::latency(g,5,false,true);
   REQUIRE(unknown==ms::Verdict::NotMeasured);
   REQUIRE(ms::latency(g,11,true,true)==ms::Verdict::Fail);
   REQUIRE(ms::latency(g,9,true,true)==ms::Verdict::Pass);
@@ -225,12 +249,12 @@ bool gatesTest(bool mutant=false) {
 int main(int argc,char** argv) {
   const std::string which=argc>1?argv[1]:"all";
   bool okay=false;
-  if (which=="negative-floor") okay=floorTest(true);
-  else if (which=="negative-clock") okay=clockTest(true);
-  else if (which=="negative-missing") okay=historyTest(true);
-  else if (which=="negative-gate") okay=gatesTest(true);
+  if (which=="floor") okay=floorTest();
+  else if (which=="clock") okay=clockTest();
+  else if (which=="missing") okay=historyTest();
+  else if (which=="gate") okay=gatesTest();
   else if (which=="all") okay=floorTest() && clockTest() && historyTest() && directTest() && driftHistoryTest() &&
-                             concurrencyTest() && waveformTest() && waveformDriftTest() && gatesTest();
+                             concurrencyTest() && waveformTest() && waveformDriftTest() && gatesTest() && virtualComparisonTest() && terminationTest();
   if (okay) std::puts("monitor spike portable checks passed");
   return okay?0:1;
 }

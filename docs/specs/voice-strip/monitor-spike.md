@@ -31,9 +31,13 @@ The portable suite covers queue floors, ten minutes of fake-clock observations
 at ±0.3%, 48→44.1 kHz history reads with both drift signs, split reads above 256
 frames, counted missing-history silence, simultaneous producer/reader activity,
 direct output clamping/muting, allocation-free reads, waveform integer/fractional
-delay, independently drifting 48→44.1 kHz waveform timestamps, muted and silent negative controls, and incomplete-run verdicts. Four
-expected-failure tests deliberately remove the floor, clock tracking, missing
-counter and unknown-measurement guard. The callback source policy has its own
+delay, independently drifting 48→44.1 kHz waveform timestamps, muted and silent
+negative controls, and incomplete-run verdicts. Four
+compiled mutants of `core.cpp` deliberately remove the floor, clock tracking,
+missing counter and unknown-measurement guard, running the unchanged assertions.
+An exact-stderr wrapper requires exit 1 and the intended assertion; a crash,
+sanitizer diagnostic or unrelated failure cannot pass a negative control. The
+callback source policy has its own
 allocation negative control. Sanitizer failures are failures, never hardware
 results. The fake-clock ten-minute observation is not ten minutes of hardware.
 
@@ -63,8 +67,12 @@ export MONITOR_OUTPUT_UID='replace with selected output UID'
 The period opt-in permits zCore to change a shared device property. Close other
 clients in the reserved window and record the original period. The existing
 zCore lease attempts restoration when the last owner stops and skips restoration
-after an external change; inspect printed buffer warnings and read the period
-back. This harness does not set persistent device rates. Configure rates through
+after an external change. After normal completion, interruption or terminal
+closure, run `monitor_spike_harness --list-devices` again using the full path
+above, compare each affected device's `period=` with the recorded original, and
+inspect the printed buffer warnings. A signal handler requests cleanup; period
+restoration is established by read-back, never by the signal receipt alone.
+This harness does not set persistent device rates. Configure rates through
 the operator's device controls before a run; `--input-rate` asserts the negotiated
 capture rate and `--output-rate` requests and then asserts the output rate.
 
@@ -141,10 +149,18 @@ Analog returns can use an explicitly recorded higher RMS limit and lower
 Silent, leaking, noisy, incomplete, unsupported or uncorrelated captures remain
 `NOT MEASURED`. PCM stays in bounded preallocated memory and is never written.
 
-Virtual waveform latency measures capture-callback generation → history/direct
-render → output/return capture. It excludes the physical microphone input path,
-and prints a separate path comparison gate while physical G2 remains
-`NOT MEASURED`. To measure the captured-input→return scope of the LoopZ reference,
+Virtual waveform numbers **are not comparable across history and direct**.
+HISTORY-virtual stamps its generated chirp at the capture backend's hardware
+first-sample time, so its queue includes input-side buffering. DIRECT-virtual
+stamps at `block.inputSampleHostTimeNs`, the AUHAL render timestamp: it excludes
+about one input period plus input latency and therefore looks faster by that
+amount. Every virtual cell prints this bias and its direction. DIRECT-virtual's
+waveform path comparison gate is always `NOT MEASURED`; its raw waveform number
+remains a render-boundary measurement only. HISTORY-virtual can print its own
+capture-origin path gate, but this is never evidence for a cross-mode comparison
+or physical G2. Both virtual modes exclude the physical microphone converter.
+
+To measure the captured-input→return scope of the LoopZ reference,
 omit `--virtual-source` and supply an external chirp train to the selected physical
 input. Its captured reference must contain six suitable signal windows; the CLI
 does not play a test signal into that input. Correlation uses the actual captured
@@ -188,7 +204,8 @@ failure is printed as a failed G3 cell for a cross-device route.
 Exit 0 means the requested cells completed without a measured failure, **not**
 that all gates passed; inspect `NOT MEASURED`. Exit 1 means a measured gate failed;
 exit 2 means invalid configuration, open/runtime failure or incomplete coverage.
-SIGINT/SIGTERM joins all task-owned streams. Report the exact source revision,
+SIGINT/SIGTERM/SIGHUP request the same control-loop teardown, joining all
+task-owned streams. Report the exact source revision,
 requested/achieved rates and periods, input/output transport, topology, thresholds,
 mode, queue, gain, warmup, run time, controls, counters and compiler/build receipt
 in private evidence. No hardware has been qualified by the portable tests.

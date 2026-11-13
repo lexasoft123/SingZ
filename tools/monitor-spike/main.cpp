@@ -1,5 +1,6 @@
 #include "core.h"
 #include "analysis.h"
+#include "signals.h"
 #include <zcore/device/audio_host.h>
 #include <zcore/device/audio_input_backend.h>
 #include <algorithm>
@@ -20,8 +21,7 @@
 
 namespace ms = monitor_spike;
 namespace {
-volatile std::sig_atomic_t interrupted = 0;
-void signalHandler(int) { interrupted = 1; }
+using ms::interrupted;
 uint64_t hostNow() noexcept {
 #if defined(__APPLE__)
   static const auto scale=[] { mach_timebase_info_data_t v{}; mach_timebase_info(&v); return v; }();
@@ -214,6 +214,11 @@ int runCell(const Options& o,const singz::AudioHostDeviceInfo& in,
             << " requested_queue_frames=" << o.lookback << " quantum=" << o.quantum
             << " G1_required_s=" << o.gates.requiredSeconds << " allowed_missing=" << o.gates.allowedMissing
             << " G2_max_ms=" << o.gates.maxLatencyMs << std::endl;
+  if (o.virtualSource)
+    std::cout << "VIRTUAL TIMING BIAS: HISTORY starts at capture hardware first-sample time and includes input-side buffering in its queue; "
+      "DIRECT starts at the AUHAL render timestamp and excludes about one input period plus input latency. "
+      "DIRECT-virtual therefore looks faster by that amount; virtual numbers across modes are NOT COMPARABLE, "
+      "and DIRECT-virtual is excluded from the waveform path comparison gate." << std::endl;
   auto baseline=host.status(); bool healthy=true;
   uint64_t historyBaseline=history.status().discontinuities;
   uint64_t inputDropsBaseline=0, returnDropsBaseline=0;
@@ -270,7 +275,7 @@ int runCell(const Options& o,const singz::AudioHostDeviceInfo& in,
   if (renderer.timestampLatencyMs.n) std::cout << renderer.timestampLatencyMs.mean; else std::cout << "NOT MEASURED";
   std::cout << " | " << missing << " | " << xruns << " | " << ms::name(g1) << " | " << ms::name(g2)
             << " | " << ((!same && g1==ms::Verdict::Fail)?"FAIL":"NOT MEASURED") << '\n';
-  const auto pathLatency=ms::latency(o.gates,wave.delayMs,wave.measured,same && period<=64);
+  const auto pathLatency=ms::pathComparison(o.gates,wave.delayMs,wave.measured,same,period,direct,o.virtualSource);
   std::cout << "waveform path comparison gate: " << ms::name(pathLatency)
     << "; capture-to-return G2=" << ms::name(g2)
     << "; G3 requires independent-clock equal/different-rate receipts and owner ceiling\n";
@@ -319,7 +324,7 @@ int main(int argc,char** argv) {
     if (o.loopbackChannel!=UINT32_MAX && o.mute)
       throw std::runtime_error("Loopback waveform mode requires --audible");
     if (in.uid!=out.uid && o.mode!="history") throw std::runtime_error("Cross-device runs require --mode history");
-    std::signal(SIGINT,signalHandler); std::signal(SIGTERM,signalHandler);
+    ms::installTerminationHandlers();
     int result=0;
     for (auto period:o.periods) {
       if (o.mode!="direct") result=std::max(result,runCell(o,in,out,period,false));

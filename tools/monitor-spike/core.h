@@ -81,4 +81,8 @@ struct Gates {
 Verdict continuity(const Gates&, double seconds, uint64_t callbacks, uint64_t missing,
                    uint64_t timestampErrors, uint64_t xruns, bool bed, bool complete) noexcept;
 Verdict latency(const Gates&, double milliseconds, bool measured, bool eligible) noexcept;
+// Virtual direct begins at the render callback, unlike history's capture
+// first-sample origin. It cannot enter the cross-mode comparison gate.
+Verdict pathComparison(const Gates&, double milliseconds, bool measured, bool sameDevice,
+                       uint32_t period, bool direct, bool virtualSource) noexcept;
 } // namespace monitor_spike
