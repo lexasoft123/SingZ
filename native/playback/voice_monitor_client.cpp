@@ -1,6 +1,7 @@
 #include "voice_monitor_client.h"
 #include <chrono>
 #include <thread>
+#include <string_view>
 
 namespace singz {
 namespace {
@@ -15,15 +16,18 @@ bool virtualSameDevice(const AudioHostDeviceInfo& input, const AudioHostDeviceIn
 }
 bool knownLoopback(const std::string& label) noexcept {
   // Inventory has a display label, not a driver/manufacturer/topology identity.
-  // Recognize the documented BlackHole family only; renamed/custom drivers are
-  // unclassified, never inferred from channel counts or opaque UID fragments.
-  constexpr char prefix[] = "blackhole";
-  if (label.size() < sizeof(prefix)-1) return false;
-  for (size_t i=0; i<sizeof(prefix)-1; ++i) {
-    const auto c=static_cast<unsigned char>(label[i]);
-    if ((c >= 'A' && c <= 'Z' ? c + ('a'-'A') : c) != prefix[i]) return false;
+  // Recognize BlackHole and Soundflower labels only; renamed/custom drivers
+  // remain unclassified, never inferred from channel counts or UID fragments.
+  for (const std::string_view prefix : {"blackhole", "soundflower"}) {
+    if (label.size() < prefix.size()) continue;
+    bool matches=true;
+    for (size_t i=0; i<prefix.size(); ++i) {
+      const auto c=static_cast<unsigned char>(label[i]);
+      if ((c >= 'A' && c <= 'Z' ? c + ('a'-'A') : c) != prefix[i]) { matches=false; break; }
+    }
+    if (matches && (label.size()==prefix.size() || label[prefix.size()]==' ' || label[prefix.size()]=='(')) return true;
   }
-  return label.size()==sizeof(prefix)-1 || label[sizeof(prefix)-1]==' ';
+  return false;
 }
 bool feedbackRoute(const AudioHostDeviceInfo& input, const AudioHostDeviceInfo& output) noexcept {
   return virtualSameDevice(input, output) && (knownLoopback(input.label) || knownLoopback(output.label));

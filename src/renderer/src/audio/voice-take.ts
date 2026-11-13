@@ -396,6 +396,7 @@ export class VoiceController {
   private monitorPending = false
   private monitorOpen = false
   private monitorPollCount = 0
+  private rememberedMonitorGainDb = MONITOR_GAIN_DEFAULT_DB
   private monitorGainSending = false
   private monitorGainDirty = false
   private armToken = 0
@@ -413,7 +414,8 @@ export class VoiceController {
     this.restoreStems(MUTED_BY_SOLO.get(deps.engine) ?? null)
     this.saved = this.readStored()
     this.dropLegacyMonitorOutput()
-    this.model = { ...this.model, monitorGainDb: this.readMonitorGain() }
+    this.rememberedMonitorGainDb = this.readMonitorGain()
+    this.model = { ...this.model, monitorGainDb: this.rememberedMonitorGainDb }
     micOwnership.setVoiceLevelReader(() => ({ dbfs: this.levelDb, peak: this.peakDb }))
   }
 
@@ -1724,7 +1726,10 @@ export class VoiceController {
         }
       }
       this.set({ monitorNote: null })
-      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb })
+      // The displayed native safety cap is temporary. Every new begin carries
+      // the user's remembered choice; native applies any new route safety cap.
+      this.set({ monitorGainDb: this.rememberedMonitorGainDb })
+      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.rememberedMonitorGainDb })
       if (stale()) {
         // Torn down while main was opening it: do not leave it on.
         if (st.on) void Promise.resolve(this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: false })).catch(() => undefined)
@@ -1787,6 +1792,7 @@ export class VoiceController {
   /** Monitor gain in dB: remembered, sent live (coalesced) while monitoring. */
   setMonitorFader(v: number): void {
     const gainDb = monitorFaderToDb(v)
+    this.rememberedMonitorGainDb = gainDb
     this.set({ monitorGainDb: gainDb })
     try {
       this.deps.storage?.setItem(MONITOR_GAIN_KEY, String(gainDb))

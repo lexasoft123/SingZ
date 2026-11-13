@@ -186,7 +186,7 @@ history mechanism. No CPU or jitter figure is recorded for either path.
     wired, virtual and aggregate devices are allowed; virtual/unclassified
     routes carry an estimated-latency warning, and unknown transport is delayed.
     Aggregate same-device routes remain allowed with that warning. Only a
-    recognized same-UID virtual loopback (BlackHole family label) is refused
+    recognized same-UID virtual loopback (BlackHole/Soundflower family label) is refused
     as `route-feedback`; physical device pairs and remote adapters are not
     blanket-refused. Inventory has labels/transport/channel counts, not driver
     identity, manufacturer, topology or aggregate membership. Unclassified

@@ -17,7 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "Nghe lại giọng cần đầu vào và đầu ra trên cùng một thiết bị, như audio interface.",
   'player.voice.monReasonLatency': "Thiết bị này không đủ nhanh để nghe lại giọng (hơn 256 khung). Vẫn ghi âm được.",
   'player.voice.monReasonBluetooth': "Bluetooth trễ quá nhiều để nghe lại giọng. Vẫn ghi âm được.",
-  'player.voice.monFeedbackRisk': "Tuyến âm thanh ảo này có thể gây hồi tiếp. Giám sát bắt đầu ở −40 dB hoặc thấp hơn; hãy tăng mức âm lượng thận trọng hoặc chọn đầu vào hay đầu ra khác.",
+  'player.voice.monFeedbackRisk': "Tuyến này có thể gây hồi tiếp: giám sát bắt đầu nhỏ ở -40 dB. Hãy tăng mức âm lượng từ từ.",
   'player.voice.monReasonFeedback': "Giám sát tuyến này sẽ gây hồi tiếp âm thanh: hãy chọn đầu vào hoặc đầu ra khác",
   'player.voice.monReasonWireless': "Âm thanh không dây trễ quá nhiều để nghe lại giọng. Vẫn ghi âm được.",
   'player.voice.monReasonNoInput': "Không có đầu vào để nghe lại. Hãy chọn micro trước.",

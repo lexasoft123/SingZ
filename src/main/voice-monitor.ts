@@ -29,6 +29,7 @@ let nextGeneration = BigInt(Date.now()) * 1000n
 
 export class VoiceMonitorStore {
   private current: VoiceMonitorState = { available: true, on: false, gainDb: 0, latency: null, warnings: [], outputDevice: null, outputCandidates: [] }
+  private rememberedGainDb = 0 // User intent, separate from native route safety reductions.
   private activeSelection: string | undefined
   private generation: bigint | undefined
   private pending: Promise<unknown> = Promise.resolve()
@@ -118,7 +119,8 @@ export class VoiceMonitorStore {
       if (this.current.on && this.activeSelection === selection) return this.snapshot()
       if (this.generation !== undefined) await this.close()
       if (!this.permission()) return this.fail('permission')
-      if (request.gainDb !== undefined) this.current.gainDb = clamp(request.gainDb)
+      if (request.gainDb !== undefined) this.rememberedGainDb = clamp(request.gainDb)
+      this.current.gainDb = this.rememberedGainDb
       const generation = ++nextGeneration
       this.generation = generation
       const result = await this.native.beginVoiceMonitor({ inputUid: selected.uid, inputChannel: selected.channel, gainDb: this.current.gainDb, targetFrames: VOICE_MONITOR_TARGET_FRAMES, maxFrames: VOICE_MONITOR_MAX_FRAMES }, generation)
@@ -131,7 +133,7 @@ export class VoiceMonitorStore {
       return this.snapshot()
     } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError) && this.generation !== undefined) await this.close().catch(() => undefined); return this.fail('error') }
   }) }
-  gain(gainDb: number): Promise<VoiceMonitorState> { return this.serial(async () => { try { const value = clamp(gainDb); if (this.current.on && !(await this.native.setVoiceMonitorGain(value)).ok) { await this.close(); return this.fail('error') } this.current.gainDb = value; return this.snapshot() } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
+  gain(gainDb: number): Promise<VoiceMonitorState> { return this.serial(async () => { try { const value = clamp(gainDb); this.rememberedGainDb = value; if (this.current.on && !(await this.native.setVoiceMonitorGain(value)).ok) { await this.close(); return this.fail('error') } this.current.gainDb = value; return this.snapshot() } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
   state(): Promise<VoiceMonitorState> { return this.serial(async () => { try {
     const status = await this.native.voiceMonitorStatus()
     if (!this.current.on) {

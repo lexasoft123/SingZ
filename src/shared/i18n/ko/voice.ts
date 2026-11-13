@@ -17,7 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "모니터링에는 오디오 인터페이스처럼 입력과 출력이 한 장치에 있어야 합니다.",
   'player.voice.monReasonLatency': "이 장치는 모니터링하기에 충분히 빠르지 않습니다(256프레임 초과). 녹음은 계속 사용할 수 있습니다.",
   'player.voice.monReasonBluetooth': "블루투스는 지연이 커서 모니터링할 수 없습니다. 녹음은 계속 사용할 수 있습니다.",
-  'player.voice.monFeedbackRisk': "이 가상 경로에서 피드백이 발생할 수 있습니다. 모니터링은 −40 dB 이하로 시작됩니다. 레벨을 조심스럽게 올리거나 다른 입력 또는 출력을 선택하세요.",
+  'player.voice.monFeedbackRisk': "이 경로에서 피드백이 발생할 수 있습니다. 모니터링은 -40 dB의 낮은 레벨로 시작됩니다. 천천히 올려 주세요.",
   'player.voice.monReasonFeedback': "이 경로를 모니터링하면 소리가 되돌아와 피드백이 발생합니다. 다른 입력 또는 출력을 선택하세요",
   'player.voice.monReasonWireless': "무선 오디오는 지연이 커서 모니터링할 수 없습니다. 녹음은 계속 사용할 수 있습니다.",
   'player.voice.monReasonNoInput': "모니터링할 입력이 없습니다. 먼저 마이크를 선택하세요.",

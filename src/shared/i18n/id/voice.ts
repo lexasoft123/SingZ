@@ -17,7 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "Pemantauan memerlukan input dan output pada satu perangkat, seperti audio interface.",
   'player.voice.monReasonLatency': "Perangkat ini tidak cukup cepat untuk memantau (lebih dari 256 frame). Perekaman tetap berfungsi.",
   'player.voice.monReasonBluetooth': "Bluetooth menambah jeda terlalu besar untuk memantau. Perekaman tetap berfungsi.",
-  'player.voice.monFeedbackRisk': "Rute virtual ini dapat menimbulkan umpan balik. Pemantauan dimulai pada −40 dB atau lebih rendah; naikkan level dengan hati-hati atau pilih input atau output lain.",
+  'player.voice.monFeedbackRisk': "Rute ini dapat menimbulkan umpan balik: pemantauan dimulai pelan pada -40 dB. Naikkan levelnya perlahan.",
   'player.voice.monReasonFeedback': "Memantau rute ini akan menimbulkan umpan balik: pilih input atau output lain",
   'player.voice.monReasonWireless': "Audio nirkabel menambah jeda terlalu besar untuk memantau. Perekaman tetap berfungsi.",
   'player.voice.monReasonNoInput': "Tidak ada input untuk dipantau. Pilih mikrofon dulu.",

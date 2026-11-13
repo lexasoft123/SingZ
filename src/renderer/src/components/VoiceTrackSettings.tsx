@@ -3,7 +3,7 @@ import { Modal } from '@singz/ui'
 import { VOICE_MONITOR_GAIN_HIGH_DB } from '../../../shared/voice-monitor-gain'
 import { MONITOR_UNITY_FADER, monitorDbToFader, type VoiceController, type VoiceModel } from '../audio/voice-take'
 import { t } from '../i18n'
-import { pitchFollowShift, REASON_KEY, sgn } from './voice-format'
+import { monitorWarningText, pitchFollowShift, REASON_KEY, sgn } from './voice-format'
 import { useVoiceModel } from './voice-host'
 import Tooltip from './Tooltip'
 import './voice-strip.css'
@@ -79,6 +79,9 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
         </Tooltip>
       </div>
       <p className="vs-set-route">{routeLine(m)}</p>
+      {m.monitor.on && m.monitor.warnings.map((warning, index) => (
+        <p className="vs-set-warn" role="note" key={index}>{monitorWarningText(warning)}</p>
+      ))}
       <section className="vs-set-field" aria-labelledby="vs-effects-h">
         <h3 id="vs-effects-h">{t('player.voice.effects')}</h3>
         <p className="vs-set-note">{t('player.voice.pitchFollowBypassNote')}</p>

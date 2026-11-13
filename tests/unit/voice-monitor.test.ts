@@ -617,3 +617,18 @@ describe('native virtual-route gain safety', () => {
     await store.dispose()
   })
 })
+
+
+describe('remembered gain after a native safety cap', () => {
+  it.each([false, true])('normal begin restores user intent with explicit gain=%s', async explicit => {
+    const { native, store } = fixture()
+    let risky = true
+    vi.mocked(native.beginVoiceMonitor).mockImplementation(async args => ({ ok: true,
+      gainDb: risky ? -40 : args.gainDb, warnings: risky ? ['route-feedback-risk'] : [] }))
+    expect((await store.set({ input, on: true, gainDb: -6 })).gainDb).toBe(-40)
+    await store.set({ input, on: false }); risky=false
+    expect((await store.set({ input, on: true, ...(explicit ? { gainDb: -6 } : {}) })).gainDb).toBe(-6)
+    expect(native.beginVoiceMonitor).toHaveBeenLastCalledWith(expect.objectContaining({ gainDb: -6 }), expect.any(BigInt))
+    await store.dispose()
+  })
+})

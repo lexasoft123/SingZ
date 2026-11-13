@@ -1170,7 +1170,7 @@ if(SINGZ_CORE_TESTS)
   add_test(NAME voice_monitor_client_negative_cue_handback COMMAND voice_monitor_client_negative_cue_handback)
   set_tests_properties(voice_monitor_client_negative_cue_handback PROPERTIES WILL_FAIL TRUE)
   file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor_client.cpp" _common_monitor_control)
-  foreach(_monitor_mutation IN ITEMS reopen suitability input_latency orphan feedback readmit_ramp aggregate virtual_gain null_owner)
+  foreach(_monitor_mutation IN ITEMS reopen suitability input_latency orphan feedback readmit_ramp aggregate virtual_gain null_owner soundflower)
     set(_mutation_service "${_client_service}")
     set(_mutation_control "${_common_monitor_control}")
     if(_monitor_mutation STREQUAL "reopen")
@@ -1198,6 +1198,9 @@ if(SINGZ_CORE_TESTS)
         _mutation_control "${_mutation_control}")
     elseif(_monitor_mutation STREQUAL "null_owner")
       string(REPLACE "if (!self.owner) return false;" "if (!self.owner) return true;"
+        _mutation_control "${_mutation_control}")
+    elseif(_monitor_mutation STREQUAL "soundflower")
+      string(REPLACE "{\"blackhole\", \"soundflower\"}" "{\"blackhole\"}"
         _mutation_control "${_mutation_control}")
     elseif(_monitor_mutation STREQUAL "orphan")
       string(REPLACE "    while (capture_.users(VoiceCaptureUser::Monitor)) capture_.release(VoiceCaptureUser::Monitor);"

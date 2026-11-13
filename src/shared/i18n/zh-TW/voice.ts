@@ -17,7 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "監聽需要輸入與輸出在同一個裝置上，例如音訊介面。",
   'player.voice.monReasonLatency': "此裝置無法足夠快地監聽（超過 256 影格）。仍可錄音。",
   'player.voice.monReasonBluetooth': "藍牙延遲過大，無法監聽。仍可錄音。",
-  'player.voice.monFeedbackRisk': "此虛擬路由可能產生音訊回授。監聽從 −40 dB 或更低開始；請謹慎提高音量，或選擇其他輸入或輸出。",
+  'player.voice.monFeedbackRisk': "此路由可能產生音訊回授：監聽從較低的 -40 dB 開始。請緩慢提高音量。",
   'player.voice.monReasonFeedback': "監聽此路由會造成音訊回授迴路：請選擇其他輸入或輸出",
   'player.voice.monReasonWireless': "無線音訊延遲過大，無法監聽。仍可錄音。",
   'player.voice.monReasonNoInput': "沒有可監聽的輸入。請先選擇麥克風。",

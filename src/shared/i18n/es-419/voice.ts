@@ -17,7 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "El monitoreo necesita la entrada y la salida en un mismo dispositivo, como una interfaz de audio.",
   'player.voice.monReasonLatency': "Este dispositivo no monitorea con la rapidez suficiente (más de 256 frames). La grabación sigue funcionando.",
   'player.voice.monReasonBluetooth': "Bluetooth añade demasiado retraso para monitorear. La grabación sigue funcionando.",
-  'player.voice.monFeedbackRisk': "Esta ruta virtual puede generar realimentación. El monitoreo empieza a −40 dB o menos; sube el nivel con cuidado o elige otra entrada o salida.",
+  'player.voice.monFeedbackRisk': "Esta ruta puede generar realimentación: el monitoreo empieza bajo, a -40 dB. Sube el nivel poco a poco.",
   'player.voice.monReasonFeedback': "Monitorear esta ruta generaría realimentación: elige otra entrada o salida",
   'player.voice.monReasonWireless': "El audio inalámbrico añade demasiado retraso para monitorear. La grabación sigue funcionando.",
   'player.voice.monReasonNoInput': "No hay entrada para monitorear. Elige primero un micrófono.",

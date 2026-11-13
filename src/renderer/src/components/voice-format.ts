@@ -10,6 +10,10 @@ export const clock = (s: number): string => {
 }
 export const dbText = (db: number): string => (db <= -59 ? '\u2212\u221e' : db >= 0 ? String(Math.round(db)) : `\u2212${Math.round(-db)}`)
 
+/** Known native warning identifiers are never rendered as user-facing text. */
+export const monitorWarningText = (warning: string): string => warning === 'route-feedback-risk'
+  ? t('player.voice.monFeedbackRisk') : warning
+
 export const REASON_KEY: Record<VoiceMonitorReason, Key> = {
   'route-separate-devices': 'player.voice.monReasonSeparateDevices',
   'route-latency': 'player.voice.monReasonLatency',

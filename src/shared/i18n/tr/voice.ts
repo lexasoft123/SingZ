@@ -17,7 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "İzleme için giriş ve çıkış, ses arayüzü gibi aynı cihazda olmalı.",
   'player.voice.monReasonLatency': "Bu cihaz izleme için yeterince hızlı değil (256 kareden fazla). Kayıt yine çalışır.",
   'player.voice.monReasonBluetooth': "Bluetooth izleme için çok fazla gecikme ekler. Kayıt yine çalışır.",
-  'player.voice.monFeedbackRisk': "Bu sanal yolda geri besleme oluşabilir. İzleme −40 dB veya altında başlar; seviyeyi dikkatlice artırın ya da başka bir giriş veya çıkış seçin.",
+  'player.voice.monFeedbackRisk': "Bu yolda geri besleme oluşabilir: izleme -40 dB seviyesinde sessizce başlar. Seviyeyi yavaşça artırın.",
   'player.voice.monReasonFeedback': "Bu yolu izlemek geri beslemeye neden olur: farklı bir giriş veya çıkış seçin",
   'player.voice.monReasonWireless': "Kablosuz ses izleme için çok fazla gecikme ekler. Kayıt yine çalışır.",
   'player.voice.monReasonNoInput': "İzlenecek giriş yok. Önce bir mikrofon seçin.",

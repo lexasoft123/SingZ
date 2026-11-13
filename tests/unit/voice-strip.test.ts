@@ -3274,3 +3274,40 @@ describe('virtual-route quiet startup warning', () => {
     c.dispose()
   })
 })
+
+
+describe('localized monitor safety notes and remembered gain', () => {
+  it('maps the native token on the strip and in Track settings in every locale', async () => {
+    const { c, engine } = await setup({ monitorSet: vi.fn(async () => monState({ on: true, gainDb: -40,
+      warnings: ['route-feedback-risk'] })) })
+    await c.toggleMonitor()
+    const locales = ['en', 'es-419', 'pt-BR', 'tr', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW'] as const
+    try {
+      for (const locale of locales) {
+        await loadVoiceStrings(locale); setLocale(locale)
+        const { voice } = await import(`../../src/shared/i18n/${locale}/voice.ts`)
+        const copy = voice['player.voice.monFeedbackRisk']
+        const strip = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never, view: null }))
+        const settings = settingsHtmlOf(c)
+        for (const html of [strip, settings]) {
+          expect(html, locale).toContain(copy)
+          expect(html, locale).not.toContain('route-feedback-risk')
+        }
+      }
+    } finally { setLocale('en'); c.dispose() }
+    expect(voiceEn['player.voice.monFeedbackRisk']).toBe('This route may feed back: the monitor starts quietly at -40 dB. Raise it slowly.')
+  })
+  it.each([-6, 8])('a risky begin followed by a normal begin restores remembered %s dB without moving the fader', async remembered => {
+    let risky = true
+    const memory = new Map([['singz.voice.monitorGain', String(remembered)]])
+    const storage = { getItem: (key: string) => memory.get(key) ?? null, setItem: (key: string, value: string) => { memory.set(key,value) } }
+    const { c, api } = await setup({ monitorSet: vi.fn(async req => monState({ on: req.on,
+      gainDb: risky ? -40 : req.gainDb ?? 0, warnings: risky ? ['route-feedback-risk'] : [] })) }, undefined, undefined, remembered === -6 ? undefined : storage)
+    await c.toggleMonitor(); expect(c.getSnapshot().monitorGainDb).toBe(-40)
+    await c.toggleMonitor(); risky=false
+    await c.toggleMonitor()
+    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: true, gainDb: remembered }))
+    expect(c.getSnapshot().monitorGainDb).toBe(remembered)
+    c.dispose()
+  })
+})
