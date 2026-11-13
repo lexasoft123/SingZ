@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "O monitoramento precisa da entrada e da saída no mesmo dispositivo, como uma interface de áudio.",
   'player.voice.monReasonLatency': "Este dispositivo não monitora rápido o bastante (mais de 256 frames). A gravação continua funcionando.",
   'player.voice.monReasonBluetooth': "O Bluetooth adiciona atraso demais para monitorar. A gravação continua funcionando.",
+  'player.voice.monFeedbackRisk': "Esta rota virtual pode causar realimentação. O monitoramento começa em −40 dB ou menos; aumente o nível com cuidado ou escolha outra entrada ou saída.",
   'player.voice.monReasonFeedback': "Monitorar esta rota causaria realimentação: escolha outra entrada ou saída",
   'player.voice.monReasonWireless': "O áudio sem fio adiciona atraso demais para monitorar. A gravação continua funcionando.",
   'player.voice.monReasonNoInput': "Não há entrada para monitorar. Escolha um microfone primeiro.",

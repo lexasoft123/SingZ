@@ -169,6 +169,7 @@ napi_value result(napi_env env,const VoiceMonitorResult& r) {
   if(!r.reason.empty())text(env,o,"reason",r.reason);
   if(!r.error.empty())text(env,o,"error",r.error);
   if(r.ok && r.latency.bufferFrames)latency(env,o,r.latency);
+  if(r.gainDb)number(env,o,"gainDb",*r.gainDb);
   warnings(env,o,r.warnings);return o;
 }
 napi_value availability(napi_env env,napi_callback_info info) {
@@ -263,7 +264,7 @@ napi_value status(napi_env env,napi_callback_info) {
   // Common status may reopen/re-admit a stopped output while preserving capture.
   const auto r=monitorHost().status();
   if(r.running){monitoredOutput=sharedAudioService().activeOutputUid();monitoredChannels=sharedAudioService().activeOutputConfig().outputChannels;}
-  auto o=object(env);boolean(env,o,"running",r.running);boolean(env,o,"lost",r.lost);
+  auto o=object(env);if(r.gainDb)number(env,o,"gainDb",*r.gainDb);boolean(env,o,"running",r.running);boolean(env,o,"lost",r.lost);
   if(r.running)latency(env,o,r.latency);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
   text(env,o,"outputDeviceUid",monitoredOutput);

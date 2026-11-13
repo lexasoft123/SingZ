@@ -604,3 +604,16 @@ describe('monitor-off meter lease ownership', () => {
     expect(main).not.toContain('async () => { await monitorTakeStore?.disarm() }')
   })
 })
+
+
+describe('native virtual-route gain safety', () => {
+  it('reports the actual quiet startup and migration gain rather than a saved hot request', async () => {
+    const { native, store } = fixture()
+    vi.mocked(native.beginVoiceMonitor).mockResolvedValueOnce({ ok: true, gainDb: -40, warnings: ['route-feedback-risk'] })
+    expect(await store.set({ input, on: true, gainDb: 12 })).toMatchObject({ on: true, gainDb: -40, warnings: ['route-feedback-risk'] })
+    expect((await store.gain(0)).gainDb).toBe(0)
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValue({ running: true, gainDb: -40, warnings: ['route-feedback-risk'] })
+    expect((await store.state()).gainDb).toBe(-40) // Output migration can lower gain before main polls.
+    await store.dispose()
+  })
+})

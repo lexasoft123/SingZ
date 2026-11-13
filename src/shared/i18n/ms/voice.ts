@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "Pemantauan memerlukan input dan output pada satu peranti, seperti antara muka audio.",
   'player.voice.monReasonLatency': "Peranti ini tidak cukup pantas untuk memantau (melebihi 256 bingkai). Rakaman masih berfungsi.",
   'player.voice.monReasonBluetooth': "Bluetooth menambah kelewatan terlalu banyak untuk memantau. Rakaman masih berfungsi.",
+  'player.voice.monFeedbackRisk': "Laluan maya ini mungkin menghasilkan suap balik. Pemantauan bermula pada −40 dB atau lebih rendah; naikkan aras dengan berhati-hati atau pilih input atau output lain.",
   'player.voice.monReasonFeedback': "Pemantauan laluan ini akan menghasilkan suap balik: pilih input atau output lain",
   'player.voice.monReasonWireless': "Audio tanpa wayar menambah kelewatan terlalu banyak untuk memantau. Rakaman masih berfungsi.",
   'player.voice.monReasonNoInput': "Tiada input untuk dipantau. Pilih mikrofon dahulu.",

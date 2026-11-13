@@ -80,6 +80,7 @@ struct VoiceMonitorRender {
 }
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <zcore/device/audio_host.h>
@@ -116,6 +117,7 @@ struct VoiceMonitorResult {
   std::string reason, error;
   VoiceMonitorLatency latency;
   std::vector<std::string> warnings;
+  std::optional<float> gainDb{}; // Actual common-client gain after route safety policy.
 };
 struct VoiceMonitorStatus {
   bool running{false}, lost{false};
@@ -124,6 +126,7 @@ struct VoiceMonitorStatus {
   float peak{0}, rms{0};
   std::string reason; // Optional status diagnostic, e.g. route-changed.
   uint32_t observedCallbackFrames{0};
+  std::optional<float> gainDb{};
 };
 VoiceMonitorAvailability classifyVoiceMonitorRoute(const AudioHostInventory&, const std::string& inputUid,
     uint32_t channel, const std::string& outputUid, bool nativeOutput, bool permission, bool macOS);

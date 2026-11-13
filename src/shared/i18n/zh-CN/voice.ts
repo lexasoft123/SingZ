@@ -18,6 +18,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': '监听需要输入和输出在同一台设备上，例如音频接口。',
   'player.voice.monReasonLatency': '此设备无法足够快地监听（超过 256 帧）。仍可录音。',
   'player.voice.monReasonBluetooth': '蓝牙延迟过大，无法监听。仍可录音。',
+  'player.voice.monFeedbackRisk': "此虚拟路由可能产生音频反馈。监听从 −40 dB 或更低开始；请谨慎提高音量，或选择其他输入或输出。",
   'player.voice.monReasonFeedback': "监听此路由会造成音频反馈回路：请选择其他输入或输出",
   'player.voice.monReasonWireless': '无线音频延迟过大，无法监听。仍可录音。',
   'player.voice.monReasonNoInput': '没有可监听的输入。请先选择麦克风。',

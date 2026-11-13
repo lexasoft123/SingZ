@@ -244,7 +244,7 @@ VoiceMonitorStatus VoiceMonitorHost::status() {
         status.bufferExceedsMaximum) self.stop(false);
     else self.latency=latencyOf(status,self.requested);
   }
-  return {self.running,self.lost,self.latency,warnings(self.warningFlags),self.render.peak.load(),self.render.rms.load(),self.reason,self.observedFrames};
+  return {self.running,self.lost,self.latency,warnings(self.warningFlags),self.render.peak.load(),self.render.rms.load(),self.reason,self.observedFrames,std::nullopt};
 }
 VoiceMonitorResult VoiceMonitorHost::end(uint64_t generation) {
   VoiceMonitorResult result;

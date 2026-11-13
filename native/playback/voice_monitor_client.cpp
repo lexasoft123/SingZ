@@ -10,12 +10,28 @@ VoiceMonitorResult monitorFailure(const std::string& reason, const std::string& 
   result.error = detail;
   return result;
 }
+bool virtualSameDevice(const AudioHostDeviceInfo& input, const AudioHostDeviceInfo& output) noexcept {
+  return input.uid == output.uid && (input.transport == AudioHostTransport::Virtual || output.transport == AudioHostTransport::Virtual);
+}
+bool knownLoopback(const std::string& label) noexcept {
+  // Inventory has a display label, not a driver/manufacturer/topology identity.
+  // Recognize the documented BlackHole family only; renamed/custom drivers are
+  // unclassified, never inferred from channel counts or opaque UID fragments.
+  constexpr char prefix[] = "blackhole";
+  if (label.size() < sizeof(prefix)-1) return false;
+  for (size_t i=0; i<sizeof(prefix)-1; ++i) {
+    const auto c=static_cast<unsigned char>(label[i]);
+    if ((c >= 'A' && c <= 'Z' ? c + ('a'-'A') : c) != prefix[i]) return false;
+  }
+  return label.size()==sizeof(prefix)-1 || label[sizeof(prefix)-1]==' ';
+}
 bool feedbackRoute(const AudioHostDeviceInfo& input, const AudioHostDeviceInfo& output) noexcept {
-  // The inventory currently has no aggregate sub-device membership. Compare
-  // opaque UIDs only; labels cannot establish whether devices are connected.
-  return input.uid == output.uid && (input.transport == AudioHostTransport::Virtual ||
-      input.transport == AudioHostTransport::Aggregate || output.transport == AudioHostTransport::Virtual ||
-      output.transport == AudioHostTransport::Aggregate);
+  return virtualSameDevice(input, output) && (knownLoopback(input.label) || knownLoopback(output.label));
+}
+std::optional<float> monitorGainDb(const CommonVoiceMonitorRender& render) noexcept {
+  const auto gain = render.target.load(std::memory_order_acquire);
+  if (!std::isfinite(gain) || gain <= 0) return std::nullopt;
+  return std::clamp(20.0f * std::log10(gain), kVoiceMonitorGainMinDb, kVoiceMonitorGainMaxDb);
 }
 std::vector<std::string> monitorWarnings(uint32_t flags) {
   std::vector<std::string> notes;
@@ -95,6 +111,7 @@ VoiceMonitorResult CommonVoiceMonitor::begin(const std::string& uid, uint32_t ch
   retained_ = true; input_ = uid; generation_ = generation;
   channel_ = channel;
   route_ = service_.outputRouteGeneration(); lost_ = false; reason_.clear();
+  render_.feedbackRisk.store(0, std::memory_order_relaxed);
   render_.owner = this;
   render_.source = &capture_.source(); render_.reader = {}; render_.queueFrames = queueFrames;
   render_.current = render_.destination = render_.step = 0; render_.remaining = 0;
@@ -111,11 +128,14 @@ VoiceMonitorResult CommonVoiceMonitor::begin(const std::string& uid, uint32_t ch
   service_.setVoiceMonitorRenderer(CommonVoiceMonitorRender::render, &render_, admit);
   const auto admitted = availability(uid, channel, permission);
   if (!admitted.available) { close(); return monitorFailure(admitted.reason, admitted.detail); }
-  return {true, {}, {}, latency(), monitorWarnings(capture_.stats().bufferWarnings)};
+  auto notes = monitorWarnings(capture_.stats().bufferWarnings);
+  if (render_.feedbackRisk.load(std::memory_order_acquire)) notes.insert(notes.begin(), "route-feedback-risk");
+  return {true, {}, {}, latency(), std::move(notes), monitorGainDb(render_)};
 }
 bool CommonVoiceMonitor::setGain(float db) noexcept {
   if (!std::isfinite(db)) return false;
-  render_.target.store(std::pow(10.f, std::clamp(db, kVoiceMonitorGainMinDb, kVoiceMonitorGainMaxDb) / 20.f),
+  db = std::clamp(db, kVoiceMonitorGainMinDb, kVoiceMonitorGainMaxDb);
+  render_.target.store(std::pow(10.f, db / 20.f),
                        std::memory_order_release);
   return true;
 }
@@ -179,6 +199,8 @@ VoiceMonitorStatus CommonVoiceMonitor::status() {
   VoiceMonitorStatus result;
   result.running = retained_; result.lost = lost_; result.reason = reason_;
   result.warnings = monitorWarnings(capture_.stats().bufferWarnings);
+  if (render_.feedbackRisk.load(std::memory_order_acquire)) result.warnings.insert(result.warnings.begin(), "route-feedback-risk");
+  if (retained_) result.gainDb = monitorGainDb(render_);
   const auto output = service_.activeOutputUid();
   for (const auto& device : service_.inventory().devices)
     if ((device.uid == input_ || device.uid == output) &&
@@ -207,10 +229,12 @@ VoiceMonitorResult CommonVoiceMonitor::end(uint64_t generation) {
     while (!render_.silent.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  close(); generation_ = 0; return {true, {}, {}, {}, monitorWarnings(capture_.stats().bufferWarnings)};
+  close(); generation_ = 0; return {true, {}, {}, {}, monitorWarnings(capture_.stats().bufferWarnings), std::nullopt};
 }
 bool CommonVoiceMonitor::admit(void* context, const AudioHostInventory& inventory, const AudioHostConfig& config, const AudioHostResult& result) noexcept {
+  if (!context) return false;
   auto& self = *static_cast<CommonVoiceMonitorRender*>(context);
+  if (!self.owner) return false; // Admission requires a live control owner.
   self.hostPeriod.store(result.latency.bufferFrames, std::memory_order_release);
   // The service has drained callbacks before admission: reset the callback-owned
   // envelope so every successful reopen fades in through the existing ramp.
@@ -220,6 +244,16 @@ bool CommonVoiceMonitor::admit(void* context, const AudioHostInventory& inventor
   for (const auto& device : inventory.devices) if (device.uid == owner.input_ && device.inputChannels) input = &device;
   // Check feedback before reopening the callback gate, not only on the next poll.
   for (const auto& device : inventory.devices) if (device.uid == config.outputDeviceUid && device.outputChannels) {
+    const bool risk = input && virtualSameDevice(*input, device) && !feedbackRoute(*input, device);
+    const auto previousRisk = self.feedbackRisk.exchange(risk ? 1u : 0u, std::memory_order_acq_rel);
+    if (risk && !previousRisk) {
+      // A newly entered unclassified virtual route starts below unity even if
+      // the saved gain was hot. A deliberate later fader move remains allowed.
+      auto gain = self.target.load(std::memory_order_acquire);
+      while (gain > .01f && !self.target.compare_exchange_weak(gain, .01f,
+          std::memory_order_acq_rel, std::memory_order_acquire)) {}
+      // An end() target of zero, or a lower user gain, can never be raised here.
+    }
     return input && !feedbackRoute(*input, device) && device.transport != AudioHostTransport::Bluetooth && device.transport != AudioHostTransport::BluetoothLowEnergy &&
         device.transport != AudioHostTransport::AirPlay && device.transport != AudioHostTransport::ContinuityWireless;
   }

@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "モニターには、オーディオインターフェースのように入力と出力が同じデバイスにある必要があります。",
   'player.voice.monReasonLatency': "このデバイスでは遅延が大きすぎてモニターできません（256フレーム超）。録音は使えます。",
   'player.voice.monReasonBluetooth': "Bluetoothは遅延が大きすぎてモニターできません。録音は使えます。",
+  'player.voice.monFeedbackRisk': "この仮想経路では音声が循環する可能性があります。モニターは−40 dB以下で始まります。慎重に音量を上げるか、別の入力または出力を選んでください。",
   'player.voice.monReasonFeedback': "この経路をモニターすると音声が循環します。別の入力または出力を選んでください",
   'player.voice.monReasonWireless': "ワイヤレス音声は遅延が大きすぎてモニターできません。録音は使えます。",
   'player.voice.monReasonNoInput': "モニターする入力がありません。先にマイクを選んでください。",

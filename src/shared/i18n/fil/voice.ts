@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "Kailangan ng monitoring na nasa iisang device ang input at output, gaya ng audio interface.",
   'player.voice.monReasonLatency': "Hindi sapat ang bilis ng device na ito para sa monitoring (lampas 256 frame). Gumagana pa rin ang recording.",
   'player.voice.monReasonBluetooth': "Masyadong malaki ang delay ng Bluetooth para sa monitoring. Gumagana pa rin ang recording.",
+  'player.voice.monFeedbackRisk': "Maaaring magkaroon ng feedback sa virtual na rutang ito. Magsisimula ang monitoring sa −40 dB o mas mababa; dahan-dahang lakasan o pumili ng ibang input o output.",
   'player.voice.monReasonFeedback': "Magdudulot ng feedback ang pag-monitor sa rutang ito: pumili ng ibang input o output",
   'player.voice.monReasonWireless': "Masyadong malaki ang delay ng wireless audio para sa monitoring. Gumagana pa rin ang recording.",
   'player.voice.monReasonNoInput': "Walang input na imo-monitor. Pumili muna ng mikropono.",

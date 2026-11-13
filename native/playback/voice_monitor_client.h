@@ -13,7 +13,7 @@ struct CommonVoiceMonitorRender {
   VoiceMonitorReader reader;
   std::array<float, kAudioHostMaxFrames> mono{};
   std::atomic<float> target{0}, peak{0}, rms{0};
-  std::atomic<uint32_t> period{0}, hostPeriod{0}, silent{1};
+  std::atomic<uint32_t> period{0}, hostPeriod{0}, silent{1}, feedbackRisk{0};
   uint32_t queueFrames{0}; // Source frames; zero requests the publication floor.
   float current{0}, destination{0}, step{0};
   uint32_t remaining{0};
@@ -74,6 +74,8 @@ class CommonVoiceMonitor final {
   void close() noexcept;
   void routeChanged();
   void refuse(const std::string& reason);
+  // Service control callback; the service joins render before invoking it.
+  static bool admit(void*, const AudioHostInventory&, const AudioHostConfig&, const AudioHostResult&) noexcept;
  private:
   SharedAudioService& service_;
   VoiceMonitorCapture& capture_;
@@ -81,7 +83,6 @@ class CommonVoiceMonitor final {
   bool retained_{false}, lost_{false};
   uint64_t generation_{0}, route_{0};
   uint32_t channel_{0};
-  static bool admit(void*, const AudioHostInventory&, const AudioHostConfig&, const AudioHostResult&) noexcept;
   std::string input_, reason_;
   VoiceMonitorLatency latency();
 };

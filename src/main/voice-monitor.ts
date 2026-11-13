@@ -9,9 +9,9 @@ export interface VoiceMonitorNative {
   hostDevices(): Promise<DesktopAudioHostInventoryResult>
   inputDevices(): Promise<{ ok: boolean; devices: CaptureInputDevice[] }>
   voiceMonitorAvailability(args: { inputUid: string; inputChannel: number; outputDeviceId?: string | null; contextOnly?: boolean } & Partial<VoiceMonitorPlaybackContext>): Promise<Availability>
-  beginVoiceMonitor(args: { inputUid: string; inputChannel: number; outputDeviceId?: string | null; gainDb: number; targetFrames: number; maxFrames: number }, generation: bigint): Promise<OutputDetails & { ok: boolean; reason?: VoiceMonitorReason; error?: string; latency?: VoiceMonitorLatency; warnings?: string[] }>
+  beginVoiceMonitor(args: { inputUid: string; inputChannel: number; outputDeviceId?: string | null; gainDb: number; targetFrames: number; maxFrames: number }, generation: bigint): Promise<OutputDetails & { ok: boolean; reason?: VoiceMonitorReason; error?: string; latency?: VoiceMonitorLatency; warnings?: string[]; gainDb?: number }>
   setVoiceMonitorGain(gainDb: number): Promise<{ ok: boolean }>
-  voiceMonitorStatus(): Promise<OutputDetails & { running: boolean; latency?: VoiceMonitorLatency; warnings?: string[]; lost?: boolean; reason?: VoiceMonitorReason }>
+  voiceMonitorStatus(): Promise<OutputDetails & { running: boolean; latency?: VoiceMonitorLatency; warnings?: string[]; lost?: boolean; reason?: VoiceMonitorReason; gainDb?: number }>
   endVoiceMonitor(generation: bigint): Promise<{ ok: boolean; warnings?: string[] }>
 }
 export function microphonePermission(preferences: { getMediaAccessStatus(type: 'microphone'): string }): boolean {
@@ -58,6 +58,7 @@ export class VoiceMonitorStore {
     if (details.outputDevice !== undefined) this.current.outputDevice = details.outputDevice
     if (details.outputCandidates !== undefined) this.current.outputCandidates = details.outputCandidates
   }
+  private actualGain(details: { gainDb?: number }): void { if (details.gainDb !== undefined && Number.isFinite(details.gainDb)) this.current.gainDb = clamp(details.gainDb) }
   private fail(reason: VoiceMonitorReason): VoiceMonitorState { if (this.current.on || this.current.available === true) this.emit(`monitor stopped · reason=${reason}`); this.current = { ...this.current, available: { reason }, ...(this.generation === undefined ? { on: false, latency: null } : {}) }; return this.snapshot() }
   private processFailed(): VoiceMonitorState { this.emit('monitor stopped · reason=error · audio process unavailable'); this.clearGeneration(); this.current.warnings = []; return this.fail('error') }
   private activeInput?: { deviceName: string; channelIndex: number }
@@ -95,6 +96,7 @@ export class VoiceMonitorStore {
       if (this.current.on) {
         const status = await this.native.voiceMonitorStatus()
         if (!status.running || status.lost) { this.clearGeneration(); return this.fail(status.reason ?? (status.lost ? 'device-lost' : 'error')) }
+        this.actualGain(status)
         this.outputs(status, true)
         this.current.latency = status.latency ?? this.current.latency
         this.current.warnings = status.warnings ?? this.current.warnings
@@ -122,6 +124,7 @@ export class VoiceMonitorStore {
       const result = await this.native.beginVoiceMonitor({ inputUid: selected.uid, inputChannel: selected.channel, gainDb: this.current.gainDb, targetFrames: VOICE_MONITOR_TARGET_FRAMES, maxFrames: VOICE_MONITOR_MAX_FRAMES }, generation)
       this.outputs(result)
       if (!result.ok) { await this.close(); return this.fail(result.reason ?? 'error') }
+      this.actualGain(result)
       this.activeInput = { deviceName: selected.uid, channelIndex: selected.channel }
       this.activeSelection = selection
       this.current = { ...this.current, available: true, on: true, latency: result.latency ?? null, warnings: result.warnings ?? [] }
@@ -143,6 +146,7 @@ export class VoiceMonitorStore {
       this.emit(`monitor stopped · reason=${reason}`)
       this.clearGeneration(); return this.fail(reason)
     }
+    this.actualGain(status)
     this.outputs(status, true); this.current.latency = status.latency ?? this.current.latency
     this.current.warnings = status.warnings ?? this.current.warnings
     return this.snapshot()

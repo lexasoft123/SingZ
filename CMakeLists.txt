@@ -1170,7 +1170,7 @@ if(SINGZ_CORE_TESTS)
   add_test(NAME voice_monitor_client_negative_cue_handback COMMAND voice_monitor_client_negative_cue_handback)
   set_tests_properties(voice_monitor_client_negative_cue_handback PROPERTIES WILL_FAIL TRUE)
   file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor_client.cpp" _common_monitor_control)
-  foreach(_monitor_mutation IN ITEMS reopen suitability input_latency orphan feedback readmit_ramp)
+  foreach(_monitor_mutation IN ITEMS reopen suitability input_latency orphan feedback readmit_ramp aggregate virtual_gain null_owner)
     set(_mutation_service "${_client_service}")
     set(_mutation_control "${_common_monitor_control}")
     if(_monitor_mutation STREQUAL "reopen")
@@ -1189,6 +1189,16 @@ if(SINGZ_CORE_TESTS)
     elseif(_monitor_mutation STREQUAL "readmit_ramp")
       string(REPLACE "  self.current = self.destination = self.step = 0; self.remaining = 0; // Re-admission ramp."
         "  /* negative: resume at the pre-gap gain */" _mutation_control "${_mutation_control}")
+    elseif(_monitor_mutation STREQUAL "aggregate")
+      string(REPLACE "input.transport == AudioHostTransport::Virtual || output.transport == AudioHostTransport::Virtual"
+        "input.transport == AudioHostTransport::Virtual || output.transport == AudioHostTransport::Virtual || input.transport == AudioHostTransport::Aggregate || output.transport == AudioHostTransport::Aggregate"
+        _mutation_control "${_mutation_control}")
+    elseif(_monitor_mutation STREQUAL "virtual_gain")
+      string(REPLACE "if (risk && !previousRisk)" "if (false && risk && !previousRisk)"
+        _mutation_control "${_mutation_control}")
+    elseif(_monitor_mutation STREQUAL "null_owner")
+      string(REPLACE "if (!self.owner) return false;" "if (!self.owner) return true;"
+        _mutation_control "${_mutation_control}")
     elseif(_monitor_mutation STREQUAL "orphan")
       string(REPLACE "    while (capture_.users(VoiceCaptureUser::Monitor)) capture_.release(VoiceCaptureUser::Monitor);"
         "    /* negative: leak a monitor reference without a renderer */" _mutation_control "${_mutation_control}")

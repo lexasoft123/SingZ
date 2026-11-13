@@ -18,6 +18,7 @@ export const voice = {
   'player.voice.monReasonSeparateDevices': 'Monitoring needs the input and output on one device, like an audio interface.',
   'player.voice.monReasonLatency': 'This device cannot monitor fast enough (over 256 frames). Recording still works.',
   'player.voice.monReasonBluetooth': 'Bluetooth adds too much delay to monitor. Recording still works.',
+  'player.voice.monFeedbackRisk': "Feedback may occur on this virtual route. Monitoring starts at −40 dB or lower; raise the level carefully or choose another input or output.",
   'player.voice.monReasonFeedback': "Monitoring this route would feed back into itself: choose a different input or output",
   'player.voice.monReasonWireless': 'Wireless audio adds too much delay to monitor. Recording still works.',
   'player.voice.monReasonNoInput': 'No input to monitor. Choose a microphone first.',

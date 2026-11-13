@@ -185,10 +185,19 @@ history mechanism. No CPU or jitter figure is recorded for either path.
     History routes ignore legacy duplex `monitoringSuitability`: built-in,
     wired, virtual and aggregate devices are allowed; virtual/unclassified
     routes carry an estimated-latency warning, and unknown transport is delayed.
-    A virtual/aggregate input and output sharing a UID is refused as
-    `route-feedback` before admission; physical same-device routes stay allowed.
-    Inventory has no aggregate sub-device list, so hidden membership cannot yet
-    be checked (add it to this guard when the provider exposes it).
+    Aggregate same-device routes remain allowed with that warning. Only a
+    recognized same-UID virtual loopback (BlackHole family label) is refused
+    as `route-feedback`; physical device pairs and remote adapters are not
+    blanket-refused. Inventory has labels/transport/channel counts, not driver
+    identity, manufacturer, topology or aggregate membership. Unclassified
+    same-UID virtual routes are allowed with a localized feedback warning and
+    gain at -40 dB or lower on begin or entry during output migration. A later
+    deliberate fader move is allowed and survives period-only reopens. This is
+    the minimal low-gain fallback, without an additional confirmation flow.
+    [BlackHole documents output-to-corresponding-input loopback](https://github.com/ExistentialAudio/BlackHole#readme).
+    [NoMachine documents independent microphone forwarding](https://kb.nomachine.com/DT08U00292).
+    These labels are policy hints, never proof that an arbitrary renamed driver
+    is safe; unknown routes retain the warning and low-gain entry policy.
 11. **Permission.** Nothing opens an input or prompts at app or song start.
     Speaker-on is a user gesture and asks through `src/main/mic-access.ts` like
     recording; a refusal is the typed `permission` reason.

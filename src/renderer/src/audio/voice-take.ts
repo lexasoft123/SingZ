@@ -1615,6 +1615,8 @@ export class VoiceController {
     const on = available && st.on
     this.monitorOpen = on
     this.set({
+      ...(on && st.warnings.includes('route-feedback-risk') && !this.monitorGainSending && !this.monitorGainDirty && Number.isFinite(st.gainDb)
+        ? { monitorGainDb: clampMonitorGainDb(st.gainDb) } : {}),
       ...(on ? {} : { monitorHint: false }),
       ...(st.outputDevice !== undefined ? { monitorOutputDevice: st.outputDevice } : {}),
       ...(st.inputDevice !== undefined ? { monitorInputDevice: st.inputDevice } : {}),
@@ -1822,7 +1824,7 @@ export class VoiceController {
         this.applyMonitorState(st)
         if (lost) this.raiseMonitorError()
       } else {
-        this.set({ monitor: { ...this.model.monitor, latency: st.latency, warnings: st.warnings }, ...(st.outputDevice !== undefined ? { monitorOutputDevice: st.outputDevice } : {}) })
+        this.applyMonitorState(st) // Includes native gain reduction on entry to a virtual feedback-risk route.
       }
     } catch {
       /* the next poll retries */

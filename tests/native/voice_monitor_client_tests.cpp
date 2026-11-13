@@ -72,18 +72,38 @@ int main(){
     inventory.devices[1].monitoringSuitability=AudioHostMonitoringSuitability::HighLatency;
     CHECK(classifyCommonVoiceMonitorRoute(inventory,"in",0,"out",true).available);
   }
-  for (auto transport : {AudioHostTransport::Virtual, AudioHostTransport::Aggregate}) {
-    auto loop = devices(); loop.devices[0].outputChannels = 2; loop.devices[0].transport = transport;
-    const auto refused = classifyCommonVoiceMonitorRoute(loop,"in",0,"in",true);
-    CHECK(!refused.available && refused.reason=="route-feedback" && !refused.detail.empty());
-    CHECK(classifyCommonVoiceMonitorRoute(loop,"in",0,"out",true).available);
+  auto loop = devices(); loop.devices[0].outputChannels = 2;
+  loop.devices[0].transport = AudioHostTransport::Virtual;loop.devices[0].label="BlackHole 2ch";
+  auto refused = classifyCommonVoiceMonitorRoute(loop,"in",0,"in",true);
+  CHECK(!refused.available && refused.reason=="route-feedback" && !refused.detail.empty());
+  CHECK(classifyCommonVoiceMonitorRoute(loop,"in",0,"out",true).available);
+  loop.devices[0].label="NoMachine Audio Adapter";
+  CHECK(classifyCommonVoiceMonitorRoute(loop,"in",0,"in",true).available);
+  loop.devices[0].label="Custom Virtual Device";
+  CHECK(classifyCommonVoiceMonitorRoute(loop,"in",0,"in",true).available);
+  loop.devices[0].transport=AudioHostTransport::Aggregate;
+  for (const char* label : {"Mic + headphones", "BlackHole 2ch"}) {
+    loop.devices[0].label=label;CHECK(classifyCommonVoiceMonitorRoute(loop,"in",0,"in",true).available);
   }
+  CommonVoiceMonitorRender ownerless;AudioHostConfig admissionConfig;AudioHostResult admissionOpening;
+  CHECK(!CommonVoiceMonitor::admit(nullptr,inventory,admissionConfig,admissionOpening));
+  CHECK(!CommonVoiceMonitor::admit(&ownerless,inventory,admissionConfig,admissionOpening));
   for (auto transport : {AudioHostTransport::BuiltIn, AudioHostTransport::Usb}) {
     auto physical = devices(); physical.devices[0].outputChannels=2;physical.devices[0].transport=transport;
     CHECK(classifyCommonVoiceMonitorRoute(physical,"in",0,"in",true).available);
   }
   CHECK(monitor.begin("in",0,true,0,1).ok);
   CHECK(capture.users(VoiceCaptureUser::Monitor)==1 && output->opens==1 && output->writes==0);
+  auto virtualPair=devices();virtualPair.devices[0].outputChannels=2;
+  virtualPair.devices[0].transport=AudioHostTransport::Virtual;virtualPair.devices[0].label="NoMachine";
+  AudioHostConfig virtualOutput;virtualOutput.outputDeviceUid="in";
+  CommonVoiceMonitorRender stopping;stopping.owner=&monitor;stopping.target.store(0);
+  CHECK(CommonVoiceMonitor::admit(&stopping,virtualPair,virtualOutput,admissionOpening));
+  CHECK(stopping.target.load()==0); // Safety entry must never unmute a concurrent end.
+  stopping.feedbackRisk.store(0);stopping.target.store(.001f);
+  CHECK(CommonVoiceMonitor::admit(&stopping,virtualPair,virtualOutput,admissionOpening));
+  CHECK(stopping.target.load()==.001f); // Never raise a quieter user gain.
+
   CHECK(input->config.requestedBufferFrames==32 && input->config.maximumAcceptableBufferFrames==256);
   auto began=monitor.status(); CHECK(began.running && began.latency.queueFrames==384 && began.latency.delayed);
   std::array<float,64> pcm;pcm.fill(.25f);
@@ -276,12 +296,32 @@ int main(){
   switchedSong->stop();CHECK(service.setPlaybackOutputCurrent(false));
   CHECK(monitor.status().running && input->opens==1 && input->starts==1);
   CHECK(monitor.end(0).ok && capture.users(VoiceCaptureUser::Monitor)==0);
-  output->inventory.devices[1].transport=AudioHostTransport::Virtual;service.refreshInventory();
+  output->inventory.devices[1].transport=AudioHostTransport::Virtual;
+  output->inventory.devices[1].label="BlackHole 2ch";service.refreshInventory();
   CHECK(service.configureOutput("other").ok && monitor.begin("out",0,true,0,12).ok);
   render(64);CHECK(std::abs(left[63]-.0625f)<1e-5);
   CHECK(service.configureOutput("out").ok);render(1);
   CHECK(left[0]==0 && left[63]==0); // No feedback leaks before the first control poll.
   CHECK(!monitor.status().running && monitor.status().reason=="route-feedback");
+  output->inventory.devices[1].label="NoMachine Audio Adapter";service.refreshInventory();
+  auto quiet = monitor.begin("out",0,true,12,13);
+  CHECK(quiet.ok && quiet.gainDb && *quiet.gainDb==-40);
+  CHECK(std::find(quiet.warnings.begin(),quiet.warnings.end(),"route-feedback-risk")!=quiet.warnings.end());
+  render(64);CHECK(std::abs(left[63]-.000625f)<1e-6);
+  CHECK(monitor.setGain(0));render(4);CHECK(std::abs(left[63]-.0625f)<1e-5);
+  service.parkOutput();CHECK(monitor.status().running);render(64);
+  CHECK(monitor.status().gainDb==0); // A period/reopen seam preserves deliberate gain adjustment.
+  CHECK(service.configureOutput("other").ok && monitor.status().running);
+  CHECK(service.configureOutput("out").ok);render(4);
+  CHECK(std::abs(left[63]-.000625f)<1e-6 && monitor.status().gainDb==-40); // Quiet before any poll.
+  CHECK(monitor.end(13).ok);
+  CHECK(monitor.begin("out",0,true,-60,14).gainDb==-60);CHECK(monitor.end(14).ok);
+  output->inventory.devices[1].transport=AudioHostTransport::Aggregate;
+  output->inventory.devices[1].label="Microphone + Headphones";service.refreshInventory();
+  CHECK(monitor.begin("out",0,true,0,15).ok);
+  const auto aggregate = monitor.status();CHECK(aggregate.running && aggregate.gainDb==0 && !aggregate.warnings.empty());
+  CHECK(std::find(aggregate.warnings.begin(),aggregate.warnings.end(),"route-feedback-risk")==aggregate.warnings.end());
+  render(64);CHECK(std::abs(left[63]-.0625f)<1e-5);CHECK(monitor.end(15).ok);
   output->inventory.devices[1].transport=AudioHostTransport::Usb;service.refreshInventory();
   // Orphan reconciliation preserves the independent take owner.
   const auto known=service.inputDevices();AudioInputConfig orphan;orphan.deviceUid="in";

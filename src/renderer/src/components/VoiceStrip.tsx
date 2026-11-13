@@ -182,6 +182,7 @@ function statusLine(
   if (state === 'input-missing') {
     return { cls: 'warn', text: t('player.voice.inputMissing'), action: { label: t('player.voice.inputBtn'), run: () => void c.refreshInputs() } }
   }
+  if (m.monitor.on && m.monitor.warnings.includes('route-feedback-risk')) return { cls: 'warn', text: t('player.voice.monFeedbackRisk') }
   if (m.monitorNote === 'other-input') return { cls: 'warn', text: t('player.voice.monitorOtherInput') }
   if (m.recording) return { cls: '', text: t('player.voice.msgRecording') }
   if (m.listen === 'take') return { cls: '', text: t('player.voice.msgListenAlone') }

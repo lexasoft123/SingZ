@@ -297,6 +297,9 @@ export class VoiceTakeStore {
           this.armed = null
           return { ok: false, reason: selected.reason ?? 'error', message: selected.reason === 'no-input' ? 'The selected microphone is unavailable.' : 'The microphone could not be armed.' }
         }
+        // Preserve the existing meter Arm's purpose. The take acquires its own
+        // native Take user below; it does not convert a monitor-only meter Arm
+        // into independently armed record readiness after the take ends.
         this.armed = { generation: selected.generation, deviceName: selected.deviceName ?? request.input.deviceName, channelIndex: request.input.channelIndex, owner: this.armed?.owner, monitorOnly: this.armed?.monitorOnly, requestedDeviceName: request.input.deviceName }
       }
       await mkdir(paths.dir, { recursive: true })

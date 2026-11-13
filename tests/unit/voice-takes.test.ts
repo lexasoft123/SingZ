@@ -1343,3 +1343,17 @@ describe('renderer meter arm ownership', () => {
     expect(native.disarmCapture).toHaveBeenCalledExactlyOnceWith(1n)
   })
 })
+
+
+describe('take user versus pre-existing meter Arm purpose', () => {
+  it('keeps a monitor-only meter Arm monitor-only across a take; Take owns capture separately', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-monitor-take-purpose-')); roots.push(root)
+    const native = fakeNative(); native.disarmCapture = vi.fn(native.disarmCapture)
+    const s = new VoiceTakeStore({ rootDir: root, native })
+    await s.arm({ input: request.input, monitorOnly: true }, {})
+    expect((await s.start(request)).ok).toBe(true)
+    await s.releaseMonitorInput(); expect(native.disarmCapture).not.toHaveBeenCalled() // Active Take protects capture.
+    await s.stop()
+    await s.releaseMonitorInput(); expect(native.disarmCapture).toHaveBeenCalledExactlyOnceWith(1n)
+  })
+})

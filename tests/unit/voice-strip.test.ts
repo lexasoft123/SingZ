@@ -3254,3 +3254,23 @@ describe('meter ownership transfer ordering', () => {
     c.dispose()
   })
 })
+
+
+describe('virtual-route quiet startup warning', () => {
+  it('shows the native quiet gain and a localized feedback warning, even while recording', async () => {
+    const { c, api, engine } = await setup({
+      monitorSet: vi.fn(async () => monState({ on: true, gainDb: -40, warnings: ['route-feedback-risk'] }))
+    })
+    await c.toggleMonitor()
+    expect(c.getSnapshot().monitorGainDb).toBe(-40)
+    let html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never, view: null }))
+    expect(html).toContain(voiceEn['player.voice.monFeedbackRisk'])
+    expect(html).not.toContain('route-feedback-risk')
+    c.setFader(monitorDbToFader(0)); expect(c.getSnapshot().monitorGainDb).toBe(0) // A deliberate adjustment is allowed.
+    await vi.waitFor(() => expect(api.monitorGain).toHaveBeenCalledWith({ gainDb: 0 }))
+    await c.toggleRecord()
+    html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never, view: null }))
+    expect(html).toContain(voiceEn['player.voice.monFeedbackRisk'])
+    c.dispose()
+  })
+})
