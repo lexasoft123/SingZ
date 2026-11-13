@@ -1,4 +1,5 @@
-#include "native/playback/take_conform.h"
+#include "take_conform_fixture.h"
+#include "take_conform_stream_tests.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -85,6 +86,12 @@ void tests() {
   const auto path=(std::filesystem::temp_directory_path()/("singz-conform-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".wav")).string();
   writeTakeConformWav(path,x.pcm);auto roundtrip=readTakeConformWav(path);std::filesystem::remove(path);
   check(roundtrip.sampleRate==44100 && roundtrip.samples==x.pcm.samples,"PCM16 WAV roundtrip");
+  p=tone(1);r=request(p.samples.size());r.outputRate=47999;x=conformTakePcm(p,r);
+  p={11025,std::vector<int16_t>(11025)};for(size_t i=0;i<p.samples.size();++i)p.samples[i]=static_cast<int16_t>(10000*std::sin(i*440*2*3.141592653589793/11025));
+  r=request(p.samples.size());r.outputRate=192000;x=conformTakePcm(p,r);
+  p={192000,std::vector<int16_t>(192000)};for(size_t i=0;i<p.samples.size();++i)p.samples[i]=static_cast<int16_t>(10000*std::sin(i*440*2*3.141592653589793/192000));
+  r=request(p.samples.size(),0.75);r.settings[0].transposeSemitones=2;x=conformTakePcm(p,r);
+  check(x.signalsmithPasses==1,"Maximum-rate fixture must traverse streaming DSP");
   p=tone(2,12000);r=request(p.samples.size());r.outputRate=8000;x=conformTakePcm(p,r);
   double energy=0;for(size_t i=1000;i+1000<x.pcm.samples.size();++i)energy+=double(x.pcm.samples[i])*x.pcm.samples[i];
   check(std::sqrt(energy/(x.pcm.samples.size()-2000))<30,"Output downsampling must reject aliased tone");
@@ -150,19 +157,15 @@ void tests() {
   TakeConformPcm tail{rate,{keyChange.pcm.samples.begin()+rate*3,keyChange.pcm.samples.begin()+rate*7/2}};
   check(std::abs(1200*std::log2(frequency(tail)/440))<5,"Continuous shifter follows recorded-key changes");
   std::cout<<"key-change discontinuity "<<keyDiscontinuity<<" PCM16 units\n";
-  // Reject by bytes BEFORE any output-sized float allocation or WAV payload read.
-  auto large=request(p.samples.size());large.startPositionSec=1500;large.songDurationProjectFrames=uint64_t(rate)*1600;
-  bool memoryRejected=false;try{conformTakePcm(p,large);}catch(const std::exception&e){memoryRejected=std::string(e.what()).find("memory budget")!=std::string::npos;}
-  check(memoryRejected,"Reject oversized output by resident-byte admission");
-  const auto admissionPath=(std::filesystem::temp_directory_path()/("singz-conform-admission-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".wav")).string();
-  writeTakeConformWav(admissionPath,{192000,std::vector<int16_t>(1,0)});
-  {std::fstream file(admissionPath,std::ios::binary|std::ios::in|std::ios::out);
-    const uint32_t bytes=uint32_t(192000*600*2);
-    auto put=[&](int at,uint32_t value){const char b[]{char(value),char(value>>8),char(value>>16),char(value>>24)};file.seekp(at);file.write(b,4);};
-    put(4,bytes+36);put(40,bytes);
+  // Storage grows on disk, not in resident PCM. Sanity guards are time/RIFF only.
+  const auto invalid=conformFixturePath(),unused=conformFixturePath();
+  writeTakeConformWav(invalid,{rate,std::vector<int16_t>(1,0)});
+  {std::fstream file(invalid,std::ios::binary|std::ios::in|std::ios::out);
+    const uint32_t bytes=uint32_t(rate*(kTakeConformMaximumSeconds+1)*2);
+    auto put=[&](int at,uint32_t value){const char b[]{char(value),char(value>>8),char(value>>16),char(value>>24)};file.seekp(at);file.write(b,4);};put(4,bytes+36);put(40,bytes);
   }
-  memoryRejected=false;try{readTakeConformWav(admissionPath);}catch(const std::exception&e){memoryRejected=std::string(e.what()).find("memory budget")!=std::string::npos;}
-  std::filesystem::remove(admissionPath);check(memoryRejected,"Ten-minute 192 kHz WAV must reject before allocating payload");
+  bool refused=false;try{conformTakeFile(invalid,unused,request(1));}catch(const TakeConformError&e){refused=e.code()==TakeConformFailure::TakeTooLong && std::string(e.what()).find("four-hour")!=std::string::npos;}
+  std::filesystem::remove(invalid);check(refused && !std::filesystem::exists(unused),"Refuse over-four-hour take before payload IO");
   p=tone(1);r=request(p.samples.size(),0.75);r.settings[0].transposeSemitones=2;
   TakeConformPcm parallelA, parallelB;
   std::thread a([&]{parallelA=conformTakePcm(p,r).pcm;}), b([&]{parallelB=conformTakePcm(p,r).pcm;});
@@ -182,24 +185,14 @@ void tests() {
 }
 }
 int main(int argc,char **argv){try{
-  if(argc>1 && std::string(argv[1])=="benchmark"){
-    const int seconds=argc>2?std::stoi(argv[2]):300;
-    auto p=tone(seconds);auto r=request(p.samples.size(),0.75);r.settings[0].transposeSemitones=2;
-    r.anchors.clear();r.anchors.push_back({0,0});
-    for(uint64_t frame=rate*2;frame<p.samples.size();frame+=rate*2)r.anchors.push_back({frame,frame*0.75});
-    r.anchors.push_back({p.samples.size(),p.samples.size()*0.75});
-    auto start=std::chrono::steady_clock::now();auto x=conformTakePcm(p,r);
-    double rss=0;
-#if defined(__unix__) || defined(__APPLE__)
-    rusage usage{};getrusage(RUSAGE_SELF,&usage);
-#if defined(__APPLE__)
-    rss=double(usage.ru_maxrss)/(1024*1024);
-#else
-    rss=double(usage.ru_maxrss)/1024;
-#endif
-#endif
-    std::cout<<seconds<<"-second take: "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()<<" seconds; "
-      <<"peak RSS "<<rss<<" MiB; admitted peak "<<double(x.estimatedPeakBytes)/(1024*1024)<<" MiB; Signalsmith instances "<<x.signalsmithPasses<<"\n";
-  }else tests();
+  if(argc>1 && std::string(argv[1])=="stream"){stream_tests::benchmark(argc>2?std::stoul(argv[2]):7200,argc>3?std::stoul(argv[3]):48000,argc>4?std::stoul(argv[4]):48000);return 0;}
+  if(argc>1 && std::string(argv[1])=="stream-failures"){stream_tests::failures();return 0;}
+  if(argc>1 && std::string(argv[1])=="resident-negative"){
+    auto p=tone(300);auto r=request(p.samples.size(),0.75);r.settings[0].transposeSemitones=2;
+    singz_v2_reference::TakeConformRequest old;old.anchors={{0,0},{p.samples.size(),p.samples.size()*0.75}};old.settings={{0,2}};old.effects={{"pitch-follow",true,0,false}};old.outputRate=rate;old.songDurationProjectFrames=rate*600;
+    const auto result=singz_v2_reference::conformTakePcm(p,old);check(!result.pcm.samples.empty(),"Reference produced no PCM");
+    std::cout<<"Resident-v2 negative-control RSS "<<stream_tests::peakRss()<<" MiB\n";check(stream_tests::peakRss()<16,"Resident v2 exceeds streaming RSS bound");return 0;
+  }
+  tests();
   return 0;
 }catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

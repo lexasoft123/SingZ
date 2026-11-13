@@ -354,6 +354,8 @@ export function withVoiceTakeLane(request: DesktopNativePlaybackEngineRequest): 
       const source = String(next++), map = String(next++), gain = String(next++)
       const node = (id: string, type: string, execution: string, inputs: unknown[], outputs: unknown[], parameters = {}) =>
         ({ id, type, typeVersion: 1, execution, unavailable: 'silence', ports: { inputs, outputs }, parameters, binding: { kind: 'project-lane', laneId: VOICE_TAKE_LANE_ID } })
+      // The native channel map uses coefficient 1 per output for any mono
+      // project lane, exactly as it does for a mono stem; gain remains unity.
       const mono = { id: 'out', channels: 1 }, stereo = { id: 'out', channels: output.channels }
       raw.nodes.push(node(source, GRAPH_NODE_TYPES.projectLaneSource, 'native', [], [mono]),
         node(map, GRAPH_NODE_TYPES.channelMap, 'builtin', [{ id: 'in', channels: 1 }], [stereo]),

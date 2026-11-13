@@ -337,11 +337,20 @@ export interface VoiceMonitorGainRequest {
 // ADR 0016: transient native lane. These values never enter project persistence.
 export const VOICE_TAKE_LANE_ID = 'voice:take'
 export type VoiceTakeLaneOmission = 'lane-limit' | 'node-limit' | 'graph-incompatible' | 'native-unavailable'
+export type VoiceTakeConformFailure = 'take-too-long' | 'memory-budget' | 'graph-budget' | 'conform-error'
+export interface VoiceTakeConformedWaveform { offsetSec: number; durationSec: number; peaks: number[] }
+export function isVoiceTakeConformedWaveform(value: unknown): value is VoiceTakeConformedWaveform {
+  if (!value || typeof value !== 'object') return false
+  const wave = value as VoiceTakeConformedWaveform
+  return Object.keys(wave).every(k => ['offsetSec', 'durationSec', 'peaks'].includes(k)) &&
+    Number.isFinite(wave.offsetSec) && wave.offsetSec >= 0 && Number.isFinite(wave.durationSec) && wave.durationSec >= 0 &&
+    Array.isArray(wave.peaks) && wave.peaks.length <= VOICE_TAKE_PEAKS_MAX && wave.peaks.every(p => Number.isFinite(p) && p >= 0 && p <= 1)
+}
 export type VoiceTakeLaneError = 'conform-failed' | 'timeout' | 'cancelled' | 'prepare-failed'
 export type VoiceTakeLaneState =
   | { status: 'idle' | 'conforming' | 'ready' }
   | { status: 'omitted'; reason: VoiceTakeLaneOmission }
-  | { status: 'error'; reason: VoiceTakeLaneError }
+  | { status: 'error'; reason: VoiceTakeLaneError; conformReason?: VoiceTakeConformFailure }
 export interface VoiceTakeLaneControl { gain: number; muted: boolean; solo: boolean; suppressed: boolean }
 export interface VoiceTakeLaneSource { path: string }
 export interface VoiceTakeConformOptions {
@@ -355,8 +364,8 @@ export interface VoiceTakeConformRequest extends VoiceTakeConformOptions {
   requestId: string
 }
 export type VoiceTakeConformResult =
-  | { ok: true; path: string; key: string; durationFrames: number; cached: boolean; leaseId: string }
-  | { ok: false; reason: 'conform-failed' | 'timeout' | 'cancelled' }
+  | { ok: true; path: string; key: string; durationFrames: number; cached: boolean; leaseId: string; waveform?: VoiceTakeConformedWaveform }
+  | { ok: false; reason: 'conform-failed' | 'timeout' | 'cancelled'; conformReason?: VoiceTakeConformFailure }
 export interface VoiceTakeInvalidateRequest {
   songId: string
   takeId: string

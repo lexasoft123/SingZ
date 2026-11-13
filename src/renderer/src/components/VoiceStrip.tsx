@@ -275,12 +275,13 @@ export default function VoiceStrip({
     }
   }, [selected, controller])
 
-  const spanSec = take ? (rec ? m.elapsedSec * take.tempo : take.durationSec * take.tempo) : 0
+  const waveform = !rec && m.lane.status === 'ready' ? take?.conformedWaveform : undefined
+  const spanSec = take ? (rec ? m.elapsedSec * take.tempo : (waveform?.durationSec ?? take.durationSec * take.tempo)) : 0
   // The same time axis as the stems: the shared view (or the whole song), in song seconds.
   const viewS = view?.s ?? 0
   const viewE = view?.e ?? duration
   const viewSpan = viewE - viewS
-  const shownStart = drag ? drag.startSec : take ? take.startSec : 0
+  const shownStart = drag ? drag.startSec : take ? (waveform?.offsetSec ?? take.startSec) : 0
   const left = viewSpan > 0 && take ? ((shownStart - viewS) / viewSpan) * 100 : 0
   const width = viewSpan > 0 ? Math.max(0.3, (spanSec / viewSpan) * 100) : 0
   const clipVisible = take !== null && viewSpan > 0 && left < 100 && left + width > 0
@@ -528,7 +529,7 @@ export default function VoiceStrip({
               role="option"
               aria-selected={selected}
               tabIndex={0}
-              className={`vs-clip${rec ? ' recording' : ''}${take.peaks?.length ? ' has-wave' : ''}${take.partial ? ' partial' : ''}${listening ? ' playing' : ''}${selected ? ' selected' : ''}${drag ? ' dragging' : ''}${rec ? '' : ' selectable'}`}
+              className={`vs-clip${rec ? ' recording' : ''}${(waveform?.peaks ?? take.peaks)?.length ? ' has-wave' : ''}${take.partial ? ' partial' : ''}${listening ? ' playing' : ''}${selected ? ' selected' : ''}${drag ? ' dragging' : ''}${rec ? '' : ' selectable'}`}
               style={{ left: `${left}%`, width: `${width}%` }}
               aria-label={t('player.voice.clipLabel', { n: take.n, time: clock(shownStart) })}
               onPointerDown={(e) => {
@@ -580,7 +581,7 @@ export default function VoiceStrip({
                 }
               }}
             >
-              <ClipWave peaks={take.peaks} />
+              <ClipWave peaks={waveform?.peaks ?? take.peaks} />
               {(drag || tagText || silent) && (
                 <span className="vs-clip-tags">
                   {(drag || tagText) && (

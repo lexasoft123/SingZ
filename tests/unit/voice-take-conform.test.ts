@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile, rename, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile, rename, symlink, open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { prepareConformRequest, VoiceTakeConformer, type TakeConformNative, type TakeConformNativeRequest } from '../../src/main/voice-take-conform'
+import { ConformTakeError, isConformTakeError, prepareConformRequest, VoiceTakeConformer, type TakeConformNative, type TakeConformNativeRequest } from '../../src/main/voice-take-conform'
 import { defaultVoiceTakeEffects, resolveVoiceTakeTimeline, type VoiceTakeSidecar } from '../../src/shared/voice-take'
 const locked = vi.hoisted(() => new Set<string>())
 vi.mock('node:fs/promises', async importOriginal => {
@@ -44,6 +44,18 @@ beforeEach(async () => {
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 describe('offline take conform cache', () => {
+  it.each(['take-too-long', 'memory-budget', 'conform-error', 'cancelled'] as const)('preserves the native %s code and detail without message parsing', async code => {
+    native.conformTake = async () => ({ ok: false, errorCode: code, detail: 'opaque producer diagnostic', durationFrames: 0 })
+    const error = await new VoiceTakeConformer(root, native).conformTake('song', 'take', options).catch(error => error)
+    expect(error).toBeInstanceOf(ConformTakeError)
+    expect(isConformTakeError(error)).toBe(true)
+    expect(error).toMatchObject({ code, detail: 'opaque producer diagnostic', message: 'opaque producer diagnostic' })
+    expect((await readdir(join(root, 'song', '.conform'))).filter(name => name.endsWith('.tmp'))).toEqual([])
+  })
+  it('gives unexpected producer exceptions the conform-error code', async () => {
+    native.conformTake = async () => { throw new Error('decoder exploded') }
+    await expect(new VoiceTakeConformer(root, native).conformTake('song', 'take', options)).rejects.toMatchObject({ code: 'conform-error', detail: 'decoder exploded' })
+  })
   it('publishes a complete WAV atomically and hits the identical key', async () => {
     const c = new VoiceTakeConformer(root, native)
     const first = await c.conformTake('song', 'take', options)
@@ -52,6 +64,25 @@ describe('offline take conform cache', () => {
     expect(calls).toHaveLength(1)
     expect(await readFile(first.path)).toEqual(wav())
     expect((await readdir(join(root, 'song'))).filter(s => s.endsWith('.tmp'))).toEqual([])
+  })
+  it('admits a two-hour take using header/metadata only, and refuses over four hours', async () => {
+    const rate = 48000, frames = rate * 7200
+    const h = wav(0, rate); h.writeUInt32LE(frames * 2 + 36, 4); h.writeUInt32LE(frames * 2, 40)
+    const handle = await open(join(root, 'song', 'take.wav'), 'r+')
+    try { await handle.write(h, 0, 44, 0); await handle.truncate(frames * 2 + 44) } finally { await handle.close() }
+    const s = side(); s.sampleRate = rate; s.durationSec = 7200; s.anchors = [{ takeFrame: 0, projectFrame: 0 }, { takeFrame: frames, projectFrame: frames }]
+    s.settings.push({ atSec: 3600, tempo: 1, transposeSemitones: 0 })
+    await writeFile(join(root, 'song', 'take.json'), JSON.stringify(s))
+    const c = new VoiceTakeConformer(root, native)
+    expect((await c.conformTake('song', 'take', { songDurationProjectFrames: frames, outputRate: rate })).cached).toBe(false)
+    expect(calls[0].settings[1].takeFrame).toBe(rate * 3600)
+    h.writeUInt32LE(rate * 14401 * 2, 40)
+    await writeFile(join(root, 'song', 'take.wav'), h)
+    await expect(c.conformTake('song', 'take', { songDurationProjectFrames: frames, outputRate: rate })).rejects.toMatchObject({ code: 'take-too-long', detail: 'Take exceeds four-hour conform limit' })
+  })
+  it('charges disk quota to the placed take rather than the whole song', async () => {
+    const c = new VoiceTakeConformer(root, native, { maxEntries: 1, maxBytes: 40000 })
+    expect((await c.conformTake('song', 'take', { ...options, songDurationProjectFrames: 8000 * 7200 })).durationFrames).toBe(8000)
   })
   it('invalidates moves, effects, rate, duration, anchors, and re-recordings', async () => {
     const c = new VoiceTakeConformer(root, native)

@@ -34,7 +34,7 @@ import type {
   VoiceTakePeaksResult,
   VoiceTakeSummary
 } from '../../../shared/voice-take'
-import { defaultVoiceTakeEffects, isVoiceTakeEffects, type VoiceTakeEffect, type VoiceTakeConformOptions, type VoiceTakeConformResult, type VoiceTakeInvalidateRequest, type VoiceTakeLaneControl, type VoiceTakeLaneSource, type VoiceTakeLaneState } from '../../../shared/voice-take'
+import { defaultVoiceTakeEffects, isVoiceTakeEffects, isVoiceTakeConformedWaveform, type VoiceTakeEffect, type VoiceTakeConformOptions, type VoiceTakeConformResult, type VoiceTakeInvalidateRequest, type VoiceTakeLaneControl, type VoiceTakeLaneSource, type VoiceTakeLaneState } from '../../../shared/voice-take'
 import { stableVoiceSongId } from './voice-song-id'
 import { micOwnership } from './mic-ownership'
 
@@ -160,12 +160,14 @@ export interface VoiceTake {
   userOffsetSec: number
   /** Loudest absolute sample (0..1) per slice of the take: live level readings while recording, then main's WAV peaks. */
   peaks?: number[]
+  conformedWaveform?: import('../../../shared/voice-take').VoiceTakeConformedWaveform
 }
 
 export interface VoiceModel {
   /** WP4 binds preparing/omission/error copy and disabled M/S reasons here. */
   lane: VoiceTakeLaneState
   effects: VoiceTakeEffect[]
+  currentTranspose: number
   songId: string | null
   /** The Voice strip is on screen (the app-level monitor chip shows only while it is not). */
   stripMounted: boolean
@@ -236,6 +238,7 @@ export const MONITOR_GAIN_DEFAULT_DB = -12
 const HINT_SEEN = new WeakSet<object>() // engines whose singer has already seen the headphones hint
 
 export const INITIAL_VOICE_MODEL: VoiceModel = {
+  currentTranspose: 0,
   lane: { status: 'idle' },
   effects: defaultVoiceTakeEffects(),
   songId: null,
@@ -312,6 +315,7 @@ export const canPressRecord = (m: VoiceModel): boolean => m.recording || recordB
 export const CLIP_DB = -0.1
 /** One live-waveform bucket spans this much take time. */
 export const PEAK_STEP_SEC = 0.05
+const LIVE_PEAKS_MAX = 100_000
 const SEEK_JUMP_SEC = 0.75
 const STORAGE_KEY = 'singz.voice.input'
 const MONITOR_GAIN_KEY = 'singz.voice.monitorGain'
@@ -391,6 +395,7 @@ export class VoiceController {
   private startToken = 0
   /** Peak per PEAK_STEP_SEC of the take being recorded (see VoiceTake.peaks). */
   private livePeaks: number[] = []
+  private livePeakStepSec = PEAK_STEP_SEC
   private availRetryTimers: ReturnType<typeof setTimeout>[] = []
   /** availToken at the moment a monitor error was raised: only a later availability answer may clear it. */
   private monitorErrorMark = -1
@@ -538,7 +543,7 @@ export class VoiceController {
     if (!this.model.take || !this.model.songId || this.model.starting || this.model.recording || this.finalizingTake) return
     if (!this.deps.engine.setVoiceTakeLane) return // older/mobile engine
     const token = this.laneToken
-    this.set({ lane: { status: 'conforming' } })
+    this.set({ lane: { status: 'conforming' }, take: this.model.take ? { ...this.model.take, conformedWaveform: undefined } : null })
     this.laneTimer = setTimeout(() => {
       this.laneTimer = null
       void this.conformLane(token)
@@ -582,7 +587,9 @@ export class VoiceController {
         this.laneLease = result.ok ? lease : null
         await this.releaseLaneLease(old)
         if (stale()) return // the next adoption/removal owns this lease now
-        this.set({ lane: result.ok ? state : { status: 'error', reason: result.reason } })
+        const current = this.model.take
+        this.set({ lane: result.ok ? state : { status: 'error', reason: result.reason, ...(result.conformReason ? { conformReason: result.conformReason } : {}) },
+          ...(current && result.ok && state.status === 'ready' && isVoiceTakeConformedWaveform(result.waveform) ? { take: { ...current, conformedWaveform: result.waveform } } : {}) })
         await this.syncLaneControl()
       } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') await this.releaseLaneLease(lease)
@@ -620,10 +627,12 @@ export class VoiceController {
     // The song's output or native route changing changes what monitoring can do: re-ask. Availability
     // does not depend on song playback, so play/pause alone never re-asks.
     const { engine } = this.deps
+    if (this.model.currentTranspose !== engine.transpose) this.set({ currentTranspose: engine.transpose })
     let route = `${engine.outputDeviceId}|${engine.nativeActive}`
     let playing = engine.playing
     let laneExtent = `${engine.duration}|${engine.voiceTakeOutputRate}`
     const unsub = engine.subscribe?.(() => {
+      if (this.model.currentTranspose !== engine.transpose) this.set({ currentTranspose: engine.transpose })
       const extent = `${engine.duration}|${engine.voiceTakeOutputRate}`
       if (extent !== laneExtent) {
         laneExtent = extent
@@ -1111,6 +1120,7 @@ export class VoiceController {
     this.lastPos = engine.position
     this.takeCount += 1
     this.livePeaks = []
+    this.livePeakStepSec = PEAK_STEP_SEC
     this.set({
       starting: false,
       recording: true,
@@ -1892,10 +1902,17 @@ export class VoiceController {
     }
   }
 
-  /** Fold one level reading into the live waveform: the loudest reading per PEAK_STEP_SEC bucket; silent gaps stay 0. */
+  /** Fold readings into bounded buckets, merging adjacent buckets as the take grows. */
   private pushPeak(db: number): void {
-    const idx = Math.max(0, Math.floor((this.now() - this.startedAtMs) / 1000 / PEAK_STEP_SEC))
-    if (idx > 100_000) return
+    const elapsed = Math.max(0, (this.now() - this.startedAtMs) / 1000)
+    let idx = Math.floor(elapsed / this.livePeakStepSec)
+    while (idx >= LIVE_PEAKS_MAX) {
+      const length = Math.ceil(this.livePeaks.length / 2)
+      for (let i = 0; i < length; i++) this.livePeaks[i] = Math.max(this.livePeaks[i * 2] ?? 0, this.livePeaks[i * 2 + 1] ?? 0)
+      this.livePeaks.length = length
+      this.livePeakStepSec *= 2
+      idx = Math.floor(elapsed / this.livePeakStepSec)
+    }
     while (this.livePeaks.length <= idx) this.livePeaks.push(0)
     this.livePeaks[idx] = Math.max(this.livePeaks[idx]!, Math.min(1, Math.pow(10, Math.max(-120, db) / 20)))
   }

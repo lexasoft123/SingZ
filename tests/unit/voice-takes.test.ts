@@ -2,11 +2,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { VoiceTakeStore, type VoiceTakeNative } from '../../src/main/voice-takes'
+import { VoiceTakeStore, appendLegacySetting, type VoiceTakeNative } from '../../src/main/voice-takes'
 import { defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects, resolveVoiceTakeTimeline, VOICE_TAKE_ANCHORS_MAX, VOICE_TAKE_EFFECTS_MAX } from '../../src/shared/voice-take'
 import { EventEmitter } from 'node:events'
 import { isAllowed } from '../../src/main/media'
 import { createVoiceTakeNative, registerVoiceTakeIpc } from '../../src/main/voice-takes-ipc'
+import { ConformTakeError, type ConformTakeErrorCode } from '../../src/main/voice-take-conform'
 
 const voiceIpc = vi.hoisted(() => ({ handlers: new Map<string, (...args: any[]) => Promise<any>>(),
   conform: vi.fn(), invalidate: vi.fn(async () => {}), release: vi.fn(async () => {}) }))
@@ -14,6 +15,20 @@ vi.mock('electron', async actual => ({ ...await actual<typeof import('electron')
   ipcMain: { handle: (channel: string, handler: (...args: any[]) => Promise<any>) => voiceIpc.handlers.set(channel, handler) } }))
 vi.mock('../../src/main/voice-take-conform', async actual => ({ ...await actual<typeof import('../../src/main/voice-take-conform')>(),
   conformTake: voiceIpc.conform, invalidateConformedTake: voiceIpc.invalidate, releaseConformedTake: voiceIpc.release }))
+
+describe('bounded legacy settings timeline', () => {
+  it('keeps the first and latest changes and never exceeds the cap', () => {
+    const settings = [{ atSec: 0, tempo: 1, transposeSemitones: 0 }]
+    for (let i = 1; i <= VOICE_TAKE_ANCHORS_MAX + 100; i++)
+      appendLegacySetting(settings, { atSec: i, tempo: i % 2 ? .5 : 1, transposeSemitones: 0 })
+    expect(settings).toHaveLength(VOICE_TAKE_ANCHORS_MAX)
+    expect(settings[0]).toEqual({ atSec: 0, tempo: 1, transposeSemitones: 0 })
+    expect(settings.at(-1)).toEqual({ atSec: VOICE_TAKE_ANCHORS_MAX + 100, tempo: 1, transposeSemitones: 0 })
+    const last = settings.at(-1)!
+    expect(appendLegacySetting(settings, { ...last, atSec: last.atSec + 1 })).toBe(false)
+    expect(settings.at(-1)).toEqual(last)
+  })
+})
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -537,6 +552,19 @@ describe('take peaks, moving and deleting (voice lane)', () => {
     expect(coarse.stepSec).toBeGreaterThan(fine.stepSec)
     expect(coarse.durationSec).toBeCloseTo(100, 3)
   })
+  it('reads only the requested placed waveform span', async () => {
+    const root = withRoot(); mkdirSync(join(root, 'song-1'))
+    const path = join(root, 'song-1', 'placed.wav')
+    const samples = Int16Array.from({ length: 8000 }, (_, i) => i >= 2000 && i < 4000 ? 16384 : 0)
+    writeFileSync(path, pcm(8000, samples))
+    const { computeWavPeaks } = await import('../../src/main/voice-takes')
+    const placed = await computeWavPeaks(path, 20000, 2000, 4000)
+    const raw = await computeWavPeaks(path)
+    expect(placed.durationSec).toBe(.25)
+    expect(placed.peaks.every(p => p === .5)).toBe(true)
+    expect(raw.durationSec).toBe(1)
+    expect(raw.peaks[0]).toBe(0)
+  })
   it('the peak cache keeps only the 16 most recent takes', async () => {
     const root = withRoot(); const dir = join(root, 'song-1'); mkdirSync(dir)
     for (let i = 0; i < 20; i++) writeFileSync(join(dir, `t${i}.wav`), wav(8000, 800))
@@ -913,6 +941,21 @@ describe('ADR 0016 conform IPC leases and cancellation', () => {
     expect(voiceIpc.conform).toHaveBeenCalledTimes(1)
     expect(store.setEffects).toHaveBeenLastCalledWith('song', 'take', [])
   })
+  it.each([
+    ['take-too-long', 'memory budget', { ok: false, reason: 'conform-failed', conformReason: 'take-too-long' }],
+    ['memory-budget', 'take too long', { ok: false, reason: 'conform-failed', conformReason: 'memory-budget' }],
+    ['conform-error', 'take too long', { ok: false, reason: 'conform-failed', conformReason: 'conform-error' }],
+    ['cancelled', 'memory budget', { ok: false, reason: 'cancelled' }]
+  ])('prefers typed conform code %s to misleading text', async (code, message, expected) => {
+    const { call } = register()
+    voiceIpc.conform.mockRejectedValueOnce(new ConformTakeError(code as ConformTakeErrorCode, message as string))
+    expect(await call('voice:conform', req)).toEqual(expected)
+  })
+  it('retains message mapping for untyped conform errors', async () => {
+    const { call } = register()
+    voiceIpc.conform.mockRejectedValueOnce(new Error('Conform cache is full'))
+    expect(await call('voice:conform', req)).toEqual({ ok: false, reason: 'conform-failed', conformReason: 'memory-budget' })
+  })
   it('cancels an in-flight conform and rejects invalid ids/rates/effects without throwing', async () => {
     const { call } = register()
     let finish!: (value: unknown) => void
@@ -926,10 +969,10 @@ describe('ADR 0016 conform IPC leases and cancellation', () => {
     for (const patch of [{ songId: '../x' }, { outputRate: NaN }, { songDurationProjectFrames: 0 }, { effects: [{ id: 'unknown' }] }])
       expect(await call('voice:conform', { ...req, ...patch })).toEqual({ ok: false, reason: 'conform-failed' })
   })
-  it('releases pinned files when the owning renderer is destroyed', async () => {
+  it.each(['destroyed', 'render-process-gone', 'did-start-navigation'])('releases pinned files on renderer %s', async event => {
     const { call, sender } = register()
     await call('voice:conform', req)
-    sender.emit('destroyed')
+    sender.emit(event, {}, 'url', false, true)
     await vi.waitFor(() => expect(voiceIpc.release).toHaveBeenCalledWith('/private/conformed-voice.wav'))
   })
 })

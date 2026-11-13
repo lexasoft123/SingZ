@@ -621,6 +621,31 @@ graphSnapshot(const singz::NativePlaybackStatus &status) {
   return *status.graphSnapshot;
 }
 
+// A mono recording and a mono stem traverse the same channel matrix. Assert
+// absolute per-channel gain too: equal but jointly attenuated lanes is a bug.
+void monoStemAndVoiceTakeHaveIdenticalChannelLevels() {
+  const std::string wav=writeWav("mono-lane-parity.wav",1,std::vector<float>(4096,1.0F));
+  std::array<std::array<float,2>,2> levels{};
+  const char *ids[]{"stem","voice:take"};
+  for(size_t index=0;index<2;++index) {
+    auto backend=std::make_unique<ManualOutputBackend>();auto *fake=backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    auto request=config();request.masterGain=0.25F;
+    std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane(ids[index],wav));
+    CHECK(session.prepare(std::move(request),std::move(lanes),1).ok);
+    CHECK(session.openOutput(1).ok && session.start(1).ok);
+    CHECK(fake->drive(128));
+    for(size_t frame=0;frame<128;++frame) {
+      CHECK(near(fake->left[frame],pcm16(1.0F)*0.25F,0.000001F));
+      CHECK(near(fake->right[frame],pcm16(1.0F)*0.25F,0.000001F));
+    }
+    levels[index]={fake->left[127],fake->right[127]};
+    CHECK(session.unload(1).ok);
+  }
+  CHECK(levels[0]==levels[1]);
+  std::remove(wav.c_str());
+}
+
 void outputMeterSeparatesStereoEnergyFromPeaks() {
   std::vector<float> pcm(4096, 0.0F);
   for (size_t frame = 0; frame < pcm.size() / 2; frame += 4) {
@@ -8245,6 +8270,8 @@ void portableGraphDocumentMaterializesActualTopology() {
 } // namespace
 
 int main() {
+  if(std::getenv("SINGZ_MONO_PARITY_REGRESSION_ONLY")){monoStemAndVoiceTakeHaveIdenticalChannelLevels();return 0;}
+  monoStemAndVoiceTakeHaveIdenticalChannelLevels();
   if(std::getenv("SINGZ_HELD_CAPACITY_REGRESSION_ONLY")){heldSongCapacitySurvivesSmallerGraphRequest();return 0;}
 
   if(std::getenv("SINGZ_REANCHOR_REGRESSION_ONLY")) {

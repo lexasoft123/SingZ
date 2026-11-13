@@ -1243,10 +1243,10 @@ napi_value cancelTake(napi_env env, napi_callback_info info) {
 // never takes the capture owner mutex and is checked once per DSP block.
 struct ConformJob {
   napi_env env{}; napi_async_work work{}; napi_deferred deferred{};
-  std::string id, inputPath, outputPath, error;
+  std::string id, inputPath, outputPath, error, errorCode;
   singz::TakeConformRequest request;
   std::shared_ptr<std::atomic<bool>> cancelled;
-  uint64_t frames{0}; uint32_t inputLatency{0}, outputLatency{0}; bool registered{false};
+  uint64_t frames{0}; uint32_t inputLatency{0}, outputLatency{0}; bool registered{false}, outputComplete{false};
 };
 std::mutex conformMutex;
 std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> conformJobs;
@@ -1312,11 +1312,12 @@ napi_value conformTake(napi_env env, napi_callback_info info) {
       [](napi_env, void *data) {
         auto *j = static_cast<ConformJob *>(data);
         try {
-          auto result = singz::conformTakePcm(singz::readTakeConformWav(j->inputPath), j->request, j->cancelled.get());
-          if (j->cancelled->load()) throw std::runtime_error("Take conform cancelled");
-          singz::writeTakeConformWav(j->outputPath, result.pcm);
-          j->frames = result.pcm.samples.size(); j->inputLatency = result.inputLatencyFrames; j->outputLatency = result.outputLatencyFrames;
-        } catch (const std::exception &e) { j->error = e.what(); }
+          auto result = singz::conformTakeFile(j->inputPath, j->outputPath, j->request, j->cancelled.get());
+          if (j->cancelled->load()) { std::error_code ignored; std::filesystem::remove(std::filesystem::path(std::u8string(j->outputPath.begin(), j->outputPath.end())), ignored); throw singz::TakeConformError(singz::TakeConformFailure::Cancelled,"Take conform cancelled"); }
+          j->outputComplete = true;
+          j->frames = result.durationFrames; j->inputLatency = result.inputLatencyFrames; j->outputLatency = result.outputLatencyFrames;
+        } catch (const singz::TakeConformError &e) { j->error = e.what(); j->errorCode = singz::takeConformFailureCode(e.code()); }
+        catch (const std::exception &e) { j->error = e.what(); j->errorCode = "conform-error"; }
       }, [](napi_env env, napi_status status, void *data) {
         std::unique_ptr<ConformJob> j(static_cast<ConformJob *>(data));
         { std::lock_guard lock(conformMutex); conformJobs.erase(j->id); }
@@ -1324,6 +1325,12 @@ napi_value conformTake(napi_env env, napi_callback_info info) {
         napi_value result{}; napi_create_object(env, &result);
         set(env, result, "ok", boolValue(env, j->error.empty() && !j->cancelled->load()));
         set(env, result, "error", stringValue(env, j->cancelled->load() ? "Take conform cancelled" : j->error));
+        if (j->cancelled->load() && j->outputComplete) { std::error_code ignored; std::filesystem::remove(std::filesystem::path(std::u8string(j->outputPath.begin(), j->outputPath.end())), ignored); }
+        if (j->cancelled->load() || status != napi_ok) j->errorCode = "cancelled";
+        if (!j->errorCode.empty()) {
+          set(env, result, "errorCode", stringValue(env, j->errorCode));
+          set(env, result, "detail", stringValue(env, j->cancelled->load() ? "Take conform cancelled" : j->error));
+        }
         set(env, result, "durationFrames", numberValue(env, static_cast<double>(j->frames)));
         set(env, result, "inputLatencyFrames", uintValue(env, j->inputLatency)); set(env, result, "outputLatencyFrames", uintValue(env, j->outputLatency));
         napi_resolve_deferred(env, j->deferred, result); napi_delete_async_work(env, j->work);
@@ -1333,7 +1340,7 @@ napi_value conformTake(napi_env env, napi_callback_info info) {
   } catch (const std::exception &e) {
     if (job->registered) { std::lock_guard lock(conformMutex); conformJobs.erase(job->id); }
     if (job->work) napi_delete_async_work(env, job->work);
-    napi_throw_error(env, nullptr, e.what()); return nullptr;
+    napi_throw_error(env, "conform-error", e.what()); return nullptr;
   }
 }
 napi_value cancelTakeConform(napi_env env, napi_callback_info info) {

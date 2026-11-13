@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AUDIO_RPC_BYTES, AUDIO_RPC_LIMIT, AudioProcessRpc, audioMessageBytes, audioMethodAllowed, type AudioRequest } from '../../src/main/audio-process-rpc'
+import { AUDIO_RPC_BYTES, AUDIO_RPC_LIMIT, AUDIO_RPC_TIMEOUT_MS, AudioProcessRpc, audioMessageBytes, audioMethodAllowed, type AudioRequest } from '../../src/main/audio-process-rpc'
 
 afterEach(() => vi.useRealTimers())
 
@@ -60,6 +60,18 @@ describe('dedicated audio process control channel', () => {
     await expect(rpc.request('owner', 'playbackStatus', [])).rejects.toThrow('timed out')
   })
 
+  it('gives streaming conform its bounded longer deadline while preserving explicit timeouts', async () => {
+    vi.useFakeTimers()
+    const { rpc, sent, endpoint } = fixture(AUDIO_RPC_TIMEOUT_MS)
+    const work = rpc.request('binding', 'conformTake', ['input', 'output', {}, 'job'])
+    await vi.advanceTimersByTimeAsync(AUDIO_RPC_TIMEOUT_MS)
+    expect(endpoint.kill).not.toHaveBeenCalled()
+    rpc.receive({ type: 'reply', epoch: 'epoch-a', id: sent[0].id, ok: true, value: { ok: true } })
+    await expect(work).resolves.toEqual({ ok: true })
+    const custom = fixture(30)
+    const bounded = expect(custom.rpc.request('binding', 'conformTake', [])).rejects.toThrow('timed out')
+    await vi.advanceTimersByTimeAsync(30); await bounded; expect(custom.endpoint.kill).toHaveBeenCalledOnce()
+  })
   it('terminates the lifetime on a malformed successful reply', async () => {
     const { rpc, sent, endpoint } = fixture()
     const pending = rpc.request('owner', 'playbackStatus', [])

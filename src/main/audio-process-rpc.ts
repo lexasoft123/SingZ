@@ -8,6 +8,7 @@ export interface AudioProcessEndpoint {
 export const AUDIO_RPC_LIMIT = 64
 export const AUDIO_RPC_BYTES = 64 * 1024 * 1024
 export const AUDIO_RPC_TIMEOUT_MS = 120_000
+export const AUDIO_CONFORM_TIMEOUT_MS = 10 * 60_000
 
 export const AUDIO_OWNER_METHODS: ReadonlySet<string> = new Set([
   'configureMicrophoneMix', 'stopMicrophoneMix', 'microphoneMixStatus', 'devices', 'hostDevices',
@@ -108,7 +109,7 @@ export class AudioProcessRpc {
       const timer = setTimeout(() => {
         this.fail(new Error(`Audio process timed out during ${method}`))
         this.endpoint.kill()
-      }, this.timeoutMs)
+      }, method === 'conformTake' && this.timeoutMs === AUDIO_RPC_TIMEOUT_MS ? AUDIO_CONFORM_TIMEOUT_MS : this.timeoutMs)
       this.pending.set(id, { resolve: value => resolve(value as T), reject, timer, bytes })
       this.bytes += bytes
       try { this.endpoint.postMessage({ type: 'request', epoch: this.epoch, id, target, method, args, locale: getLocale() } satisfies AudioRequest) }

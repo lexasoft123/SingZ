@@ -242,6 +242,23 @@ describe('recording', () => {
     expect(c.getSnapshot().take?.peaks).toEqual(live)
     c.dispose()
   })
+  it('decimates a three-hour live waveform while retaining its beginning and end', async () => {
+    const { c } = await setup()
+    await c.toggleRecord()
+    const internal = c as unknown as { pushPeak(db: number): void; livePeaks: number[]; livePeakStepSec: number; startedAtMs: number }
+    const start = internal.startedAtMs
+    for (let second = 0; second <= 3 * 60 * 60; second++) {
+      clock = start + second * 1000
+      internal.pushPeak(second === 0 || second === 10800 ? 0 : -120)
+    }
+    expect(internal.livePeaks.length).toBeLessThanOrEqual(100000)
+    expect(internal.livePeakStepSec).toBeGreaterThan(.05)
+    expect(internal.livePeaks[0]).toBe(1)
+    expect(internal.livePeaks.at(-1)).toBe(1)
+    expect((internal.livePeaks.length - 1) * internal.livePeakStepSec).toBeLessThanOrEqual(10800)
+    expect(internal.livePeaks.length * internal.livePeakStepSec).toBeGreaterThan(10800)
+    c.dispose()
+  })
   it('discard still removes the take', async () => {
     const { c, api } = await setup()
     await c.toggleRecord()
@@ -2822,6 +2839,30 @@ describe('ADR 0016 controller lane lifecycle', () => {
     expect(api.monitorSet).not.toHaveBeenCalled(); expect(api.monitorGain).not.toHaveBeenCalled()
     c.dispose()
   })
+  it('uses the conformed span and peaks only after the lane is ready', async () => {
+    let finish!: (value: VoiceTakeConformResult) => void
+    const x = await laneSetup({ conformTake: vi.fn(() => new Promise(resolve => { finish = resolve })) })
+    expect(x.c.getSnapshot().take?.conformedWaveform).toBeUndefined()
+    const waveform = { offsetSec: 12, durationSec: 2, peaks: [.7, .2] }
+    finish({ ok: true, path: '/placed.wav', key: 'k', durationFrames: 672000, cached: false, leaseId: 'l', waveform })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(x.c.getSnapshot().take?.conformedWaveform).toEqual(waveform)
+    expect(x.c.getSnapshot().take?.durationSec).not.toBe(waveform.durationSec)
+    x.c.dispose()
+  })
+  it('drops the old waveform during a move and adopts the new offset', async () => {
+    const conformTake = vi.fn(async (_song: string, _take: string, _options: unknown, requestId: string) => ({
+      ok: true as const, path: '/placed.wav', key: requestId, durationFrames: 48000, cached: false, leaseId: requestId,
+      waveform: { offsetSec: conformTake.mock.calls.length === 1 ? 10 : 20, durationSec: 2, peaks: [.8] }
+    }))
+    const x = await laneSetup({ conformTake })
+    expect(x.c.getSnapshot().take?.conformedWaveform?.offsetSec).toBe(10)
+    await x.c.moveTake(20)
+    expect(x.c.getSnapshot().take?.conformedWaveform).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(150)
+    expect(x.c.getSnapshot().take?.conformedWaveform?.offsetSec).toBe(20)
+    x.c.dispose()
+  })
   it('silences before capture starts, never rebuilds until finalized, then replaces once and retires the old lease', async () => {
     let finish!: (value: Awaited<ReturnType<VoiceTakeApi['recordStop']>>) => void
     const x = await laneSetup({ recordStart: vi.fn(async () => ({ ok: true, takeId: 'take-new' })),
@@ -2864,6 +2905,11 @@ describe('ADR 0016 controller lane lifecycle', () => {
     await engine.play(); expect(engine.playing).toBe(true)
     c.toggleSolo(); expect(c.getSnapshot().solo).toBe(false)
     c.dispose()
+  })
+  it.each(['take-too-long', 'memory-budget', 'conform-error'] as const)('exposes %s conform failure in the lane state', async conformReason => {
+    const x = await laneSetup({ conformTake: vi.fn(async () => ({ ok: false as const, reason: 'conform-failed' as const, conformReason })) })
+    expect(x.c.getSnapshot().lane).toEqual({ status: 'error', reason: 'conform-failed', conformReason })
+    x.c.dispose()
   })
   it('times out a stalled bridge, keeps transport usable, and releases a late result', async () => {
     let publish!: (value: VoiceTakeConformResult) => void

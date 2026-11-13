@@ -92,6 +92,20 @@ const summary = (sidecar: VoiceTakeSidecar): VoiceTakeSummary => ({
   timelineApproximate: sidecar.timelineApproximate === true || !sidecar.anchors
 })
 
+/** Bound legacy wall-clock changes, preserving the initial state and latest state.
+ * Once full, intermediate changes are approximate and the newest replaces the tail. */
+export function appendLegacySetting(settings: VoiceTakeSettingsPoint[], point: VoiceTakeSettingsPoint): boolean {
+  const last = settings.at(-1)
+  if (last && last.tempo === point.tempo && last.transposeSemitones === point.transposeSemitones) return false
+  if (last && point.atSec <= last.atSec) {
+    if (settings.length > 1) settings[settings.length - 1] = { ...point, atSec: last.atSec }
+    return true
+  }
+  if (settings.length < VOICE_TAKE_ANCHORS_MAX) settings.push(point)
+  else settings[settings.length - 1] = point
+  return true
+}
+
 const validSettings = (point: { tempo: number; transposeSemitones: number }): boolean =>
   Number.isFinite(point.tempo) && point.tempo >= .25 && point.tempo <= 4 &&
   Number.isFinite(point.transposeSemitones) && Math.abs(point.transposeSemitones) <= 24
@@ -121,16 +135,17 @@ const readWavInfo = async (path: string): Promise<{ sampleRate: number; dataByte
  * Waveform peaks of a pcm16 mono WAV: the loudest absolute sample (0..1) per slice, one slice per ~10 ms,
  * coarser only when that would exceed `maxPeaks`. Streamed in chunks; never holds the whole file.
  */
-export async function computeWavPeaks(path: string, maxPeaks = VOICE_TAKE_PEAKS_MAX): Promise<{ stepSec: number; durationSec: number; peaks: number[] }> {
+export async function computeWavPeaks(path: string, maxPeaks = VOICE_TAKE_PEAKS_MAX, startFrame = 0, endFrame?: number): Promise<{ stepSec: number; durationSec: number; peaks: number[] }> {
   const info = await readWavInfo(path)
-  const frames = info.frames
+  const start = Math.max(0, Math.min(info.frames, Math.floor(startFrame)))
+  const frames = Math.max(0, Math.min(info.frames, endFrame ?? info.frames) - start)
   const stepFrames = Math.max(1, Math.round(info.sampleRate * 0.01), Math.ceil(frames / Math.max(1, maxPeaks)))
   const peaks: number[] = new Array(Math.ceil(frames / stepFrames)).fill(0)
   const handle = await open(path, 'r')
   try {
     const chunk = Buffer.alloc(64 * 1024)
     let frame = 0
-    let position = 44
+    let position = 44 + start * 2
     while (frame < frames) {
       const want = Math.min(chunk.length, (frames - frame) * 2)
       const { bytesRead } = await handle.read(chunk, 0, want, position)
@@ -426,7 +441,7 @@ export class VoiceTakeStore {
     // Older addons retain the historical wall-clock fallback, visibly approximate.
     if (active.faultSerial === undefined) {
       active.timelineApproximate = true
-      active.settings.push({ atSec: elapsed, tempo: change.tempo, transposeSemitones: change.transposeSemitones })
+      appendLegacySetting(active.settings, { atSec: elapsed, tempo: change.tempo, transposeSemitones: change.transposeSemitones })
     }
     return { ok: true }
   }

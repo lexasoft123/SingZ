@@ -3,9 +3,22 @@ import { lstat, mkdir, open, readFile, readdir, rename, rm, utimes } from 'node:
 import { join } from 'node:path'
 import { defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects, resolveVoiceTakeTimeline, VOICE_TAKE_SIDECAR_VERSION, type VoiceTakeEffect, type VoiceTakeSidecar } from '../shared/voice-take'
 
+export type ConformTakeErrorCode = 'take-too-long' | 'memory-budget' | 'conform-error' | 'cancelled'
+export class ConformTakeError extends Error {
+  constructor(public readonly code: ConformTakeErrorCode, public readonly detail: string) {
+    super(detail)
+    this.name = code === 'cancelled' ? 'AbortError' : 'ConformTakeError'
+  }
+}
+export const isConformTakeError = (error: unknown): error is ConformTakeError => error instanceof ConformTakeError
+const nativeErrorCode = (code: unknown): ConformTakeErrorCode =>
+  code === 'take-too-long' || code === 'memory-budget' || code === 'cancelled' ? code : 'conform-error'
+
 export const TAKE_CONFORM_VERSION = 'take-conform-2'
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/
-const MAX_BYTES = 256 * 1024 * 1024
+const MAX_BYTES = 8 * 1024 * 1024 * 1024 // disk quota; no PCM is retained in memory
+const MAX_TAKE_SECONDS = 4 * 60 * 60
+const MAX_WAV_FRAMES = Math.floor((0xffffffff - 36) / 2)
 const MAX_ENTRIES = 8
 export interface TakeConformNativeRequest {
   anchors: { takeFrame: number; projectFrame: number }[]
@@ -18,7 +31,7 @@ export interface TakeConformNativeRequest {
 }
 export interface TakeConformNative {
   conformTake(input: string, output: string, request: TakeConformNativeRequest, job: string): Promise<{
-    ok: boolean; error?: string; durationFrames: number; inputLatencyFrames?: number; outputLatencyFrames?: number
+    ok: boolean; error?: string; errorCode?: ConformTakeErrorCode; detail?: string; durationFrames: number; inputLatencyFrames?: number; outputLatencyFrames?: number
   }>
   cancelTakeConform(job: string): Promise<void> | void
 }
@@ -31,8 +44,8 @@ export interface ConformTakeOptions {
   signal?: AbortSignal
 }
 const finite = (n: number, bound: number): boolean => Number.isFinite(n) && Math.abs(n) <= bound
-function check(condition: unknown, message: string): asserts condition { if (!condition) throw new Error(message) }
-const cancelled = (): Error => Object.assign(new Error('Take conform cancelled'), { name: 'AbortError' })
+function check(condition: unknown, message: string, code: ConformTakeErrorCode = 'conform-error'): asserts condition { if (!condition) throw new ConformTakeError(code, message) }
+const cancelled = (): ConformTakeError => new ConformTakeError('cancelled', 'Take conform cancelled')
 
 /** Bounded cache beside the raw take. No PCM is copied over RPC. All file IO is
  * asynchronous and native DSP executes on a worker in the audio utility process.
@@ -58,7 +71,7 @@ export class VoiceTakeConformer {
     check(typeof songId === 'string' && typeof takeId === 'string' && ID.test(songId) && ID.test(takeId), 'Invalid take id')
     check(Number.isSafeInteger(options.outputRate) && options.outputRate >= 8000 && options.outputRate <= 192000 &&
       Number.isSafeInteger(options.songDurationProjectFrames) && options.songDurationProjectFrames >= 0 &&
-      options.songDurationProjectFrames <= Math.min(36000 * options.outputRate, (this.limits.maxBytes - 44) / 2), 'Invalid conform duration/rate')
+      options.songDurationProjectFrames <= 36000 * options.outputRate, 'Invalid conform duration/rate')
     check(this.active.has(songId) || this.active.size < 4, 'Conform queue is full')
     const previous = this.active.get(songId)
     previous?.stop()
@@ -80,7 +93,8 @@ export class VoiceTakeConformer {
       for (const path of [this.rootDir, dir]) check((await lstat(path)).isDirectory() && !(await lstat(path)).isSymbolicLink(), 'Invalid conform directory')
       const identity = async (): Promise<string> => {
         const s = await lstat(raw, { bigint: true })
-        check(s.isFile() && !s.isSymbolicLink() && s.size <= BigInt(600 * 192000 * 2 + 44), 'Invalid conform take file')
+        check(s.isFile() && !s.isSymbolicLink(), 'Invalid conform take file')
+        check(s.size <= BigInt(0xffffffff + 8), 'Take file exceeds RIFF size bounds', 'memory-budget')
         return [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':')
       }
       const before = await identity()
@@ -94,9 +108,10 @@ export class VoiceTakeConformer {
       const header = Buffer.alloc(44)
       try { check((await file.read(header, 0, 44, 0)).bytesRead === 44, 'Invalid take WAV') } finally { await file.close() }
       const frames = header.readUInt32LE(40) / 2, rate = header.readUInt32LE(24)
-      check(Number.isInteger(frames) && rate === sidecar.sampleRate && rate >= 8000 && rate <= 192000 && frames <= 600 * rate &&
+      check(Number.isInteger(frames) && rate === sidecar.sampleRate && rate >= 8000 && rate <= 192000 &&
         header.toString('ascii', 0, 4) === 'RIFF' && header.toString('ascii', 8, 16) === 'WAVEfmt ' &&
         header.readUInt16LE(20) === 1 && header.readUInt16LE(22) === 1 && header.readUInt16LE(34) === 16, 'Invalid take WAV')
+      check(frames <= MAX_TAKE_SECONDS * rate, 'Take exceeds four-hour conform limit', 'take-too-long')
       const request = prepareConformRequest(sidecar, frames, options)
       const key = createHash('sha256').update(JSON.stringify([TAKE_CONFORM_VERSION, before, request])).digest('hex')
       const cacheDir = join(dir, '.conform')
@@ -127,13 +142,14 @@ export class VoiceTakeConformer {
         signedRound((request.startPositionSec+request.userOffsetSec)*options.outputRate)+bodyFrames))
       // Windows keeps an open lane file undeletable. Reserve the replacement
       // before rendering; busy old files count against the hard cache bounds.
+      check(duration <= MAX_WAV_FRAMES, 'Conform output exceeds RIFF bounds', 'memory-budget')
       await this.prune(dir, '', path, duration * 2 + 44)
       const temp = join(cacheDir, `${name}.${job}.tmp`)
       try {
         assertCurrent()
         const result = await this.native.conformTake(raw, temp, request, job)
         assertCurrent()
-        check(result.ok, result.error || 'Take conform failed')
+        if (!result.ok) throw new ConformTakeError(nativeErrorCode(result.errorCode), result.detail || result.error || 'Take conform failed')
         check(Number.isSafeInteger(result.durationFrames) && result.durationFrames >= 0 && result.durationFrames <= options.songDurationProjectFrames, 'Invalid conform result')
         check(await identity() === before && await readFile(sidecarPath, 'utf8') === sideText, 'Take changed during conform')
         const rendered = await lstat(temp)
@@ -150,7 +166,11 @@ export class VoiceTakeConformer {
     })()
     this.active.set(songId, { job, stop, done })
     try { return await done }
-    catch (error) { if (retainedPath) this.release(retainedPath); throw error }
+    catch (error) {
+      if (retainedPath) this.release(retainedPath)
+      if (isConformTakeError(error)) throw error
+      throw new ConformTakeError('conform-error', error instanceof Error ? error.message : String(error))
+    }
     finally {
       options.signal?.removeEventListener('abort', stop)
       if (this.active.get(songId)?.job === job) this.active.delete(songId)
@@ -207,7 +227,7 @@ export class VoiceTakeConformer {
       if ((entries + 1 > this.limits.maxEntries || bytes + row.bytes > this.limits.maxBytes) && await remove(row.path)) continue
       bytes += row.bytes; entries++
     }
-    check(bytes <= this.limits.maxBytes && entries <= this.limits.maxEntries, 'Conform cache is full (lane files still in use)')
+    check(bytes <= this.limits.maxBytes && entries <= this.limits.maxEntries, 'Conform cache is full (lane files still in use)', 'memory-budget')
   }
 }
 
@@ -222,7 +242,7 @@ export function prepareConformRequest(sidecar: VoiceTakeSidecar, frames: number,
   const legacy = sidecar.anchors === undefined ? resolveVoiceTakeTimeline({ ...sidecar, durationSec: frames / rate }) : undefined
   check(Array.isArray(sidecar.settings) && sidecar.settings.length > 0 && sidecar.settings.length <= 20000, 'Invalid take settings')
   const settings = (legacy?.settings ?? sidecar.settings).map((s, i, all) => {
-    check(finite(s.atSec, 600) && s.atSec >= 0 && (i ? s.atSec > all[i - 1].atSec : s.atSec === 0) &&
+    check(finite(s.atSec, MAX_TAKE_SECONDS) && s.atSec >= 0 && (i ? s.atSec > all[i - 1].atSec : s.atSec === 0) &&
       s.atSec <= frames / rate && finite(s.tempo, 4) && s.tempo >= 0.25 && finite(s.transposeSemitones, 24), 'Invalid take settings point')
     return { takeFrame: Math.round(s.atSec * rate), transposeSemitones: s.transposeSemitones }
   })

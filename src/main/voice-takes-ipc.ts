@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { allowFile } from './media'
-import { conformTake, invalidateConformedTake, releaseConformedTake } from './voice-take-conform'
+import { computeWavPeaks } from './voice-takes'
+import { conformTake, invalidateConformedTake, releaseConformedTake, isConformTakeError } from './voice-take-conform'
 import { isVoiceTakeEffects, type VoiceTakeConformRequest, type VoiceTakeConformResult } from '../shared/voice-take'
 import { desktopAudioProcess } from './audio-process'
 import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
@@ -135,6 +136,7 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   const mutations = new Map<string, Promise<unknown>>()
   const leases = new Map<string, { owner: number; songId: string; takeId: string; path: string }>()
   const watched = new Set<number>()
+  const waveCache = new Map<string, import('../shared/voice-take').VoiceTakeConformedWaveform>()
   const validId = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(v)
   const key = (owner: number, id: string): string => `${owner}:${id}`
   ipcMain.handle(VOICE_IPC.conform, async (event, raw: VoiceTakeConformRequest): Promise<VoiceTakeConformResult> => {
@@ -146,14 +148,16 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
     if (jobs.has(id) || leases.has(id)) return { ok: false, reason: 'conform-failed' }
     if (!watched.has(owner)) {
       watched.add(owner)
-      event.sender.once('destroyed', () => {
-        watched.delete(owner)
+      const releaseOwner = () => {
         for (const [id, job] of jobs) if (id.startsWith(`${owner}:`)) job.abort()
         for (const [id, lease] of leases) if (lease.owner === owner) {
           leases.delete(id)
           void releaseConformedTake(lease.path).then(() => invalidateConformedTake(lease.songId, lease.takeId, { cancelActive: false })).catch(() => {})
         }
-      })
+      }
+      event.sender.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame && !_inPlace) releaseOwner() })
+      event.sender.on('render-process-gone', releaseOwner)
+      event.sender.once('destroyed', () => { releaseOwner(); watched.delete(owner) })
     }
     const controller = new AbortController()
     jobs.set(id, controller)
@@ -176,11 +180,35 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
         await invalidateConformedTake(raw.songId, raw.takeId, { cancelActive: false })
         return { ok: false, reason: timedOut ? 'timeout' : 'cancelled' }
       }
+      let waveform = waveCache.get(result.key)
+      if (!waveform) {
+        try {
+          const take = (await store.list(raw.songId)).find(t => t.takeId === raw.takeId)
+          if (take) {
+            const startFrame = Math.max(0, Math.min(result.durationFrames, Math.round((take.startPositionSec + (take.userOffsetSec ?? 0)) * raw.outputRate)))
+            const peaks = await computeWavPeaks(result.path, undefined, startFrame, result.durationFrames)
+            waveform = { offsetSec: startFrame / raw.outputRate, durationSec: peaks.durationSec, peaks: peaks.peaks }
+            waveCache.set(result.key, waveform)
+            while (waveCache.size > 16) waveCache.delete(waveCache.keys().next().value as string)
+          }
+        } catch { /* raw waveform remains available */ }
+      }
+      if (controller.signal.aborted || event.sender.isDestroyed()) {
+        await releaseConformedTake(result.path)
+        return { ok: false, reason: timedOut ? 'timeout' : 'cancelled' }
+      }
       leases.set(id, { owner, songId: raw.songId, takeId: raw.takeId, path: result.path })
       allowFile(result.path)
-      return { ok: true, ...result, leaseId: raw.requestId }
-    } catch {
-      return { ok: false, reason: timedOut ? 'timeout' : controller.signal.aborted ? 'cancelled' : 'conform-failed' }
+      return { ok: true, ...result, leaseId: raw.requestId, ...(waveform ? { waveform } : {}) }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      const code = isConformTakeError(error) ? error.code : undefined
+      if (timedOut) return { ok: false, reason: 'timeout' }
+      if (controller.signal.aborted || code === 'cancelled') return { ok: false, reason: 'cancelled' }
+      const conformReason = code === 'take-too-long' || code === 'memory-budget' || code === 'conform-error'
+        ? code
+        : /too long|exceeds RIFF/i.test(message) ? 'take-too-long' : /memory|cache is full/i.test(message) ? 'memory-budget' : /graph.*budget/i.test(message) ? 'graph-budget' : 'conform-error'
+      return { ok: false, reason: 'conform-failed', conformReason }
     } finally {
       clearTimeout(timeout); jobs.delete(id)
       if (latestBySong.get(raw.songId) === controller) latestBySong.delete(raw.songId)

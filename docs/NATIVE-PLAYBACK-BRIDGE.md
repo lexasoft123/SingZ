@@ -1155,7 +1155,8 @@ outputPath, request, jobId)` (four arguments, asynchronous) and
 `cancelTakeConform(jobId)` (one argument, synchronous, cooperative). They are
 control-plane binding RPCs used by `src/main/voice-take-conform.ts`, never render
 callbacks or renderer-facing file APIs. Native work runs on a libuv worker in
-SingZ Audio, with at most four pending jobs and a 90-second DSP deadline. A newer
+SingZ Audio, with at most four pending jobs, an eight-minute work deadline and a ten-minute
+conform RPC deadline. A newer
 request for the same song cancels and drains the previous job before rendering.
 
 The portable `native/playback/take_conform` API accepts canonical PCM16 mono WAV
@@ -1163,7 +1164,7 @@ and a strictly increasing take/project anchor map (both coordinates at the raw
 take rate), recorded pitch settings, ordered effects, placement, song duration
 (at output rate), and output rate. It produces a PCM16 mono lane at tempo-1
 project time. Each anchor interval is stretched by delta-project/delta-take;
-settings changes split intervals for pitch compensation. The first pitch slot is
+settings changes update the continuous processor for pitch compensation. The first pitch slot is
 fused into the stretch pass to avoid another phase-vocoder stage. `pitch-follow` applies
 `-recordedTranspose + manualOffsetSemitones` when enabled. Bypass leaves that
 slot inactive; the song bus still applies its ordinary
@@ -1174,22 +1175,37 @@ transport settings are never part of the conform cache key.
 Offline processing uses the same pinned Signalsmith 1.3.2 backend, cheaper
 preset, seed and tonality limit as `signalsmith_time_pitch.cpp`; it does not
 instantiate its equal-frame-count real-time ProcessorHandle. Blocks have
-unequal input/output counts. Context warms each interval; the discarded prefix
-includes input latency multiplied by stretch ratio plus output latency, and
-zero-padding drains the delayed output. At 48 kHz these latencies are 2400 input
-and 4320 output frames. Sparse single-sample clicks with an otherwise zero
-65-sample neighbourhood use an exactly mapped transient branch, avoiding phase
-vocoder transient smearing; voiced audio stays in Signalsmith. The existing zCore polyphase sinc
-resampler converts the output rate after effects, with its delay removed. Identity processing is sample
-exact. Placement rounds once to output frames, inserts silence or trims the
-negative head, and truncates the tail at the song duration.
+unequal input/output counts. One instance retains phase across every anchor and
+settings change. Its input cursor follows
+`inverse(projectOutputFrame + outputLatency) + inputLatency`, including warm-up
+and zero-padded drain. At 48 kHz the latencies are 2400 input and 4320 output
+frames. Zero-pitch drift within 0.001 of unity uses direct interpolation; exact
+identity remains sample-equal. All other audio, including sparse impulses, goes
+through Signalsmith. Quiet input is normalised with gain restored at output;
+a fixed sub-PCM floor prevents the backend silence shortcut from dropping its
+clock. Output-rate conversion reproduces the pinned zCore polyphase coefficients,
+priming and delay, caching at most 1 MiB of coefficient phases. It never allocates a
+rate-pair-sized coefficient table.
+
+`conformTakeFile` reads the raw WAV in bounded blocks (one peak scan, then the
+render pass) and progressively writes a fresh temporary WAV. Only two 64 KiB
+input pages, a 64 KiB output buffer, DSP state and bounded converter scratch
+remain resident. No take-sized PCM is held. The WAV header is patched and the
+file synced before returning; cancellation, truncation or a changed source
+removes the temporary file. Failures carry `errorCode` (`take-too-long`,
+`memory-budget`, `conform-error`, or `cancelled`) and a diagnostic `detail`;
+`memory-budget` denotes file-size/cache admission, not a resident-PCM budget.
+The main wrapper preserves these as `ConformTakeError.code` and `.detail`. Input is limited to four hours and ordinary RIFF
+size bounds. The version remains `take-conform-2`: frozen committed-v2 fixture
+comparisons require byte-identical WAV output. Placement inserts silence or
+trims a negative head and never exceeds the song duration.
 
 The main wrapper validates ids and paths, reads asynchronously, and caches in a
 `.conform` subdirectory beside the take, hidden from orphan-WAV recovery. SHA-256 covers raw file identity (device/inode/size/nanosecond timestamps),
 anchors, recorded settings, ordered effects, placement, song duration, rate and
 algorithm version. Rendering uses a unique temporary file and rename; cancelled,
 failed or changed-source work is never published. Per-song cache bounds are eight
-files and 256 MiB; Windows files held by a playing lane remain charged to that
+files and 8 GiB of disk storage; Windows files held by a playing lane remain charged to that
 budget until the next prune can unlink them. Space for a replacement is reserved
 before rendering; a full cache fails explicitly. Stale variants and deleted-take files are reclaimed
 on the next conform or explicit `invalidate`. Take deletion/move callers may
