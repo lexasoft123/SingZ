@@ -199,7 +199,7 @@ function statusLine(
   }
   if (m.monitor.on && m.monitorHint) return { cls: '', text: t('player.voice.monitorHint') }
   if (m.monitor.on) return { cls: '', text: t('player.voice.msgMonitoring') }
-  if (m.monitor.avail !== 'ok') return { cls: 'warn', text: monitorReasonText(m) }
+  // Monitoring-unavailable is not drawn in the lane: the speaker's tooltip/aria description and the settings route line carry the reason.
   return null
 }
 

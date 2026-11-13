@@ -9,6 +9,7 @@ import './voice-strip.css'
 
 /** The route line: resolved output device, buffer and delay while monitoring. */
 function routeLine(m: VoiceModel): string {
+  if (!m.monitor.on && m.monitor.avail !== 'ok' && m.monitor.reason) return t(REASON_KEY[m.monitor.reason])
   const lat = m.monitor.latency
   if (!m.monitor.on || !lat || !m.monitorOutputDevice) return t('player.voice.routeIdle')
   return t(lat.source === 'measured' ? 'player.voice.routeMeasured' : 'player.voice.routeEstimated', {
@@ -107,7 +108,7 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
               <label><input type="checkbox" checked={effect.enabled} disabled={locked} onChange={e => patch({ enabled: e.target.checked })} /> {effect.enabled ? t('player.voice.pitchFollowChip', { shift: sgn(shift) }) : t('player.voice.pitchFollowOff')}</label>
             </Tooltip>
             <Tooltip label={t('player.voice.manualOffsetHelp')}>
-              <label>{t('player.voice.manualOffset')} <input type="range" min={-12} max={12} step={1} value={effect.params.manualOffsetSemitones} disabled={locked || !effect.enabled}
+              <label>{t('player.voice.manualOffset')} <input className="vs-vol vs-vol-accent" type="range" min={-12} max={12} step={1} value={effect.params.manualOffsetSemitones} disabled={locked || !effect.enabled}
                 aria-valuetext={`${sgn(effect.params.manualOffsetSemitones)} st`}
                 onChange={e => patch({ params: { manualOffsetSemitones: Number(e.target.value) } })} /> <output>{sgn(effect.params.manualOffsetSemitones)} st</output></label>
             </Tooltip>

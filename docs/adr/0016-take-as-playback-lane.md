@@ -155,6 +155,14 @@ make the map regress. Hardware verification must record a tone take across a
 tempo 1 → 0.5 seam and measure anchor error in milliseconds before, at and after
 the seam. An error above 5 ms opens a follow-up on audible-history mapping.
 
+**Seam acceptance gate (mac driver `tests/e2e/mac/voice-take-lane-e2e.cjs`).** A
+generated take with anchors `[0, 4 s at 1x, 8 s at 0.5x]` and 20 ms 1 kHz bursts
+at take 1, 3.9, 4.1 and 7 s is conformed and measured; the gate is the
+energy-weighted centroid of each burst within 2 ms of its anchor-mapped position.
+The 25%/70% threshold onset is printed but not gated: the time-stretch itself
+smears it by about ±7.5 ms, which is inherent, not an alignment error. Anchors of
+a real recorded take across a tempo change still need a microphone run.
+
 ## Work packages
 
 Coordinator: Claude `opus` (specs, result review, commit gate, `code-reviewer`

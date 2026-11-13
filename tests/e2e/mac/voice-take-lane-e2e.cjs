@@ -1,6 +1,10 @@
 /* ADR 0016 engine-lane acceptance, generated microphone-only fixture with
  * exact anchors. Run on the current built app/addon with an operator-selected
- * SILENT loopback output (E2E_OUTPUT_UID). No personal projects are opened.
+ * output (E2E_OUTPUT_UID). A virtual loopback/NoMachine-type output (inventory
+ * transport 'virtual') runs unmuted and measures outputPeak; a real device keeps
+ * SINGZ_MUTE and is judged on lane receipts, its peak rows printed NOT MEASURED.
+ * A first muted launch also runs the ADR 0016 seam gate (centroid within 2 ms).
+ * No personal projects are opened.
  *
  * npm run build
  * E2E_OUTPUT_UID='<native loopback UID>' node tests/e2e/mac/voice-take-lane-e2e.cjs
@@ -22,7 +26,7 @@ const { createProject } = require('../../shared/box-retained-fixture.cjs')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const root = path.resolve(__dirname, '../../..'), rate = 48000
 const outputUid = process.env.E2E_OUTPUT_UID
-assert.ok(outputUid, 'E2E_OUTPUT_UID must select the reserved silent loopback endpoint (native output bypasses Chromium mute)')
+assert.ok(outputUid, 'E2E_OUTPUT_UID must select the output endpoint (a virtual loopback/NoMachine-type output is preferred)')
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-voice-lane-'))
 const profile = path.join(scratch, 'profile'), library = path.join(scratch, 'library'), songDir = path.join(library, 'Voice lane fixture')
 const rows = []
@@ -35,8 +39,10 @@ async function until(label, read, accept, timeout = 20000) {
   throw new Error(`${label}: ${JSON.stringify(value)}`)
 }
 // Every row, the negative control included, lands in the printed table with PASS/FAIL before any assertion throws.
-const row = (name, value, limit) => { const pass = value <= limit; rows.push({ test: name, value, limit: `<= ${limit}`, result: pass ? 'PASS' : 'FAIL' }); assert.ok(pass, name) }
-const rowAtLeast = (name, value, limit) => { const pass = value > limit; rows.push({ test: name, value, limit: `> ${limit}`, result: pass ? 'PASS' : 'FAIL' }); assert.ok(pass, name) }
+const row = (name, value, limit, note = '') => { const pass = value <= limit; rows.push({ test: name, value, limit: `<= ${limit}`, result: pass ? 'PASS' : 'FAIL', note }); assert.ok(pass, name) }
+const rowAtLeast = (name, value, limit, note = '') => { const pass = value > limit; rows.push({ test: name, value, limit: `> ${limit}`, result: pass ? 'PASS' : 'FAIL', note }); assert.ok(pass, name) }
+// Something this run cannot measure is never a PASS.
+const rowUnmeasured = (name, note) => rows.push({ test: name, value: '-', limit: '-', result: 'NOT MEASURED', note })
 // First launch shows the quick-start welcome and the 'Setting up SingZ' model wizard (the scratch SINGZ_MODELS_DIR has
 // no models); their scrims block .lib-card clicks. Seed the seen flag (the app's own key) and press the wizard's
 // own Skip, as a singer would.
@@ -52,6 +58,22 @@ async function clearFirstRun(win) {
   }
   throw new Error('first-run quick-start/model wizard did not clear')
 }
+// ADR 0016 seam fixture: silence with 20 ms 1 kHz bursts at take 1, 3.9, 4.1 and 7 s (2 ms raised-cosine edges).
+const SEAM_BURSTS = [1, 3.9, 4.1, 7], SEAM_START = 1, BURST_SEC = .02
+function writeBursts(file) {
+  const frames = rate * 8, b = Buffer.alloc(44 + frames * 2), n = Math.round(BURST_SEC * rate), edge = Math.round(.002 * rate)
+  b.write('RIFF'); b.writeUInt32LE(b.length - 8, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16)
+  b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28)
+  b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(frames * 2, 40)
+  for (const at of SEAM_BURSTS) for (let i = 0; i < n; i++) {
+    const env = Math.min(1, i / edge, (n - 1 - i) / edge), w = env < 1 ? .5 - .5 * Math.cos(Math.PI * env) : 1
+    b.writeInt16LE(Math.round(12000 * w * Math.sin(2 * Math.PI * 1000 * i / rate)), 44 + 2 * (Math.round(at * rate) + i))
+  }
+  fs.writeFileSync(file, b)
+  return b.length
+}
+// Project-domain time of take time t through the anchors [0 -> S, 4 s at 1x -> S+4, 8 s at 0.5x -> S+6].
+const seamProject = t => SEAM_START + (t <= 4 ? t : 4 + (t - 4) * .5)
 function writeTone(file) {
   const frames = rate * 8, b = Buffer.alloc(44 + frames * 2)
   b.write('RIFF'); b.writeUInt32LE(b.length - 8, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16)
@@ -60,6 +82,48 @@ function writeTone(file) {
   for (let i = 0; i < frames; i++) b.writeInt16LE(Math.round(6000 * Math.sin(2 * Math.PI * 440 * i / rate)), 44 + 2 * i)
   fs.writeFileSync(file, b)
   return b.length
+}
+async function startApp(profileDir, mute) {
+  fs.writeFileSync(path.join(profileDir, 'settings.json'), JSON.stringify({ projectsRoot: library, language: 'en', outputDeviceId: `native:${outputUid}` }))
+  const env = { ...process.env, SINGZ_USERDATA_DIR: profileDir, SINGZ_MODELS_DIR: path.join(scratch, 'models'), SINGZ_PACK_DIR: path.join(scratch, 'pack'),
+    SINGZ_NO_SYNC: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en' }
+  delete env.SINGZ_MUTE
+  if (mute) env.SINGZ_MUTE = '1'
+  app = await _electron.launch({ executablePath: require('electron'), args: [path.join(root, 'out/main/index.js')], env })
+  await quietLaunch(app)
+  const win = await app.firstWindow()
+  await clearFirstRun(win)
+  await win.waitForSelector('.lib-card', { timeout: 60000 })
+  await win.locator('.lib-card').filter({ hasText: 'Voice lane fixture' }).first().click()
+  await win.waitForFunction(() => window.__test?.phase === 'ready' && __test.engine.duration > 0, null, { timeout: 60000 })
+  const inventory = await win.evaluate(() => window.singz.audioHostDevices('coreaudio'))
+  const output = inventory.ok && inventory.devices.find(d => d.uid === outputUid && d.outputChannels > 0)
+  assert.ok(output, 'E2E_OUTPUT_UID is not a connected output')
+  await win.evaluate(uid => __test.engine.setOutput(`native:${uid}`), outputUid)
+  await win.waitForFunction(() => __test.engine.voiceTakeLaneState.status === 'ready', null, { timeout: 110000 })
+  return { win, virtual: output.transport === 'virtual' }
+}
+function readConformed(file) {
+  const buf = fs.readFileSync(file), ch = buf.readUInt16LE(22), r = buf.readUInt32LE(24), frames = (buf.length - 44) / (2 * ch)
+  const x = new Float64Array(frames)
+  for (let i = 0; i < frames; i++) x[i] = buf.readInt16LE(44 + 2 * ch * i)
+  return { x, r }
+}
+// Energy-weighted centroid and the 25%/70% onsets of the burst expected near centre time c (project seconds).
+function measureBurst({ x, r }, c) {
+  const lo = Math.max(0, Math.round((c - .07) * r)), hi = Math.min(x.length, Math.round((c + .07) * r))
+  let peak = 0, e = 0, m = 0
+  for (let i = lo; i < hi; i++) { peak = Math.max(peak, Math.abs(x[i])); e += x[i] * x[i]; m += i * x[i] * x[i] }
+  assert.ok(peak > 500, `burst near ${c.toFixed(3)} s is present in the conformed lane`)
+  const onset = f => { for (let i = lo; i < hi; i++) if (Math.abs(x[i]) >= f * peak) return i / r; return NaN }
+  return { centroid: m / e / r, onset25: onset(.25), onset70: onset(.7) }
+}
+function writeSidecar(dir, takeId, songId, name, bytes, extra) {
+  fs.writeFileSync(path.join(dir, `${takeId}.json`), JSON.stringify({ version: 1, songId, takeId, songTitle: name, songArtist: '',
+    createdAt: new Date().toISOString(), sampleRate: rate, channels: 1, durationSec: 8, inputLatencyFrames: 0, outputLatencyFrames: 0, graphLatencyFrames: 0,
+    latencySource: 'measured-trim', input: { deviceName: 'generated fixture', channelIndex: 0 },
+    effects: [{ id: 'pitch-follow', enabled: true, params: { manualOffsetSemitones: 0, preserveFormants: false } }], timelineApproximate: false,
+    status: 'complete', name: null, matchPercent: null, monitoring: false, audio: { fileName: `${takeId}.wav`, format: 'wav-pcm16', byteSize: bytes, checksum: null }, ...extra }))
 }
 ;(async () => {
   try {
@@ -72,30 +136,46 @@ function writeTone(file) {
     const shared = require('esbuild').transformSync(fs.readFileSync(path.join(root, 'src/renderer/src/audio/voice-song-id.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code
     const mod = { exports: {} }; new Function('module', 'exports', shared)(mod, mod.exports)
     const songId = mod.exports.stableVoiceSongId({ path: fixture.songPath, projectDir: songDir })
-    const takeId = '11111111-2222-4333-8444-555555555555', dir = path.join(profile, 'voice-takes', songId)
+
+    // ── Launch 1: ADR 0016 seam gate. Always muted (conform only prepares, nothing plays); also learns the transport. ──
+    const seamProfile = path.join(scratch, 'profile-seam'), seamDir = path.join(seamProfile, 'voice-takes', songId)
+    fs.mkdirSync(seamDir, { recursive: true })
+    const seamId = '22222222-3333-4444-8555-666666666666'
+    const seamBytes = writeBursts(path.join(seamDir, `${seamId}.wav`))
+    writeSidecar(seamDir, seamId, songId, doc.name, seamBytes, { startPositionSec: SEAM_START, userOffsetSec: 0,
+      settings: [{ atSec: 0, tempo: 1, transposeSemitones: 0 }, { atSec: 4, tempo: .5, transposeSemitones: 0 }],
+      anchors: [{ takeFrame: 0, projectFrame: SEAM_START * rate }, { takeFrame: 4 * rate, projectFrame: (SEAM_START + 4) * rate },
+        { takeFrame: 8 * rate, projectFrame: (SEAM_START + 6) * rate }] })
+    fs.mkdirSync(path.join(scratch, 'profile-main'), { recursive: true })
+    let started = await startApp(seamProfile, true)
+    const virtual = started.virtual
+    const seamPath = await started.win.evaluate(() => __test.engine.voiceTakeSource.path)
+    const seamPcm = readConformed(seamPath)
+    // The gate is the energy-weighted CENTROID (within 2 ms). The 25%/70% onset is smeared by about +-7.5 ms by the
+    // time-stretch itself, so it is printed, never gated.
+    for (const t of SEAM_BURSTS) {
+      const expected = seamProject(t + BURST_SEC / 2), got = measureBurst(seamPcm, expected)
+      const errMs = (got.centroid - expected) * 1000
+      row(`seam gate: burst at take ${t} s, centroid error (ms)  [onset25 ${((got.onset25 - seamProject(t)) * 1000).toFixed(1)} ms, onset70 ${((got.onset70 - seamProject(t)) * 1000).toFixed(1)} ms vs ideal; centroid ${got.centroid.toFixed(4)} s]`, Math.abs(errMs), 2,
+        `expected centre ${expected.toFixed(4)} s, signed ${errMs.toFixed(2)} ms; onset smear is documented, not gated`)
+    }
+    // Negative control: a 5 ms shifted expectation must fail the same gate.
+    rowAtLeast('seam gate negative control: 5 ms shifted expectation is rejected (ms off)', Math.abs((measureBurst(seamPcm, seamProject(1.01)).centroid - (seamProject(1.01) + .005)) * 1000), 2)
+    await app.close().catch(() => {}); app = null
+
+    // ── Launch 2: placement, receipts and (only on a virtual loopback) peaks. ──
+    const profileMain = path.join(scratch, 'profile-main'), dir = path.join(profileMain, 'voice-takes', songId)
     fs.mkdirSync(dir, { recursive: true })
+    const takeId = '11111111-2222-4333-8444-555555555555'
     const bytes = writeTone(path.join(dir, `${takeId}.wav`)), start = 2.125, offset = .125, placed = start + offset
-    fs.writeFileSync(path.join(dir, `${takeId}.json`), JSON.stringify({ version: 1, songId, takeId, songTitle: doc.name, songArtist: '',
-      createdAt: new Date().toISOString(), sampleRate: rate, channels: 1, startPositionSec: start, userOffsetSec: offset, durationSec: 8,
-      inputLatencyFrames: 0, outputLatencyFrames: 0, graphLatencyFrames: 0, latencySource: 'measured-trim', input: { deviceName: 'generated fixture', channelIndex: 0 },
-      settings: [{ atSec: 0, tempo: 1, transposeSemitones: 0 }], anchors: [{ takeFrame: 0, projectFrame: start * rate }, { takeFrame: 8 * rate, projectFrame: (start + 8) * rate }],
-      effects: [{ id: 'pitch-follow', enabled: true, params: { manualOffsetSemitones: 0, preserveFormants: false } }], timelineApproximate: false,
-      status: 'complete', name: null, matchPercent: null, monitoring: false, audio: { fileName: `${takeId}.wav`, format: 'wav-pcm16', byteSize: bytes, checksum: null } }))
-    fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ projectsRoot: library, language: 'en', outputDeviceId: `native:${outputUid}` }))
-    app = await _electron.launch({ executablePath: require('electron'), args: [path.join(root, 'out/main/index.js')], env: { ...process.env,
-      SINGZ_USERDATA_DIR: profile, SINGZ_MODELS_DIR: path.join(scratch, 'models'), SINGZ_PACK_DIR: path.join(scratch, 'pack'),
-      SINGZ_NO_SYNC: '1', SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en' } })
-    await quietLaunch(app)
-    const win = await app.firstWindow()
-    await clearFirstRun(win)
-    await win.waitForSelector('.lib-card', { timeout: 60000 })
-    await win.locator('.lib-card').filter({ hasText: 'Voice lane fixture' }).first().click()
-    await win.waitForFunction(() => window.__test?.phase === 'ready' && __test.engine.duration > 0, null, { timeout: 60000 })
-    const inventory = await win.evaluate(() => window.singz.audioHostDevices('coreaudio'))
-    const output = inventory.ok && inventory.devices.find(d => d.uid === outputUid && d.outputChannels > 0)
-    assert.ok(output && output.transport === 'virtual', 'select a virtual loopback output; this driver never renders on a physical speaker')
-    await win.evaluate(uid => __test.engine.setOutput(`native:${uid}`), outputUid)
-    await win.waitForFunction(() => __test.engine.voiceTakeLaneState.status === 'ready', null, { timeout: 110000 })
+    writeSidecar(dir, takeId, songId, doc.name, bytes, { startPositionSec: start, userOffsetSec: offset,
+      settings: [{ atSec: 0, tempo: 1, transposeSemitones: 0 }], anchors: [{ takeFrame: 0, projectFrame: start * rate }, { takeFrame: 8 * rate, projectFrame: (start + 8) * rate }] })
+    // A virtual loopback makes nothing audible, so SINGZ_MUTE (which forces masterGain 0) is dropped and peaks are real.
+    // A real device stays muted and is judged on lane receipts.
+    const muted = !virtual
+    rows.push({ test: 'output transport', value: virtual ? 'virtual' : 'physical', limit: '-', result: 'INFO', note: muted ? 'SINGZ_MUTE kept: peak not measurable under mute' : 'unmuted loopback: peak rows measured' })
+    started = await startApp(profileMain, muted)
+    const win = started.win
     const source = await win.evaluate(() => __test.engine.voiceTakeSource.path)
     const conformed = fs.readFileSync(source), conformedRate = conformed.readUInt32LE(24)
     let first = -1
@@ -130,12 +210,24 @@ function writeTone(file) {
       await win.locator('body').click({ position: { x: 5, y: 5 } }); await win.keyboard.press('Space')
       await alignment(`native source anchor ${tempo}x / ${transpose}st (ms)`)
       await controls(false, true) // after Play: the receipt needs an open generation; a stopped control is replayed at Play
-      const audible = await until('Solo voice has native signal', status, s => Number(s.outputPeak) > .005)
-      row(`Solo voice signal ${tempo}x / ${transpose}st`, Number(audible.outputPeak) > .005 ? 0 : 1, 0)
-      await controls(true, true)
-      await until('Mute silences isolated voice', status, s => Number(s.outputPeak) < .001, 12000)
-      row(`Mute voice ${tempo}x / ${transpose}st`, 0, 0)
-      await controls(false, true)
+      if (muted) {
+        // SINGZ_MUTE forces masterGain 0 (mutedMasterGain), so outputPeak is always ~0: judge the lane receipts instead.
+        const a = await controls(false, true), before = Number(a.lanes.find(l => l.id === 'voice:take').cursorFrames)
+        const b = await until('voice lane cursor advances under Solo', status, s => Number(s.lanes.find(l => l.id === 'voice:take')?.cursorFrames) > before + rate / 10)
+        row(`Solo receipt + voice cursor advancing ${tempo}x / ${transpose}st (frames moved, must be > 0)`, Number(b.lanes.find(l => l.id === 'voice:take').cursorFrames) > before ? 0 : 1, 0, 'peak not measurable under mute')
+        rowUnmeasured(`Solo voice signal ${tempo}x / ${transpose}st`, 'peak not measurable under mute')
+        const m = await controls(true, true)
+        row(`Mute receipt (voice muted, solo kept) ${tempo}x / ${transpose}st`, m.lanes.some(l => l.id === 'voice:take' && l.muted && l.solo) ? 0 : 1, 0, 'peak not measurable under mute')
+        rowUnmeasured(`Mute voice ${tempo}x / ${transpose}st`, 'peak not measurable under mute')
+        await controls(false, true)
+      } else {
+        const audible = await until('Solo voice has native signal', status, s => Number(s.outputPeak) > .005)
+        row(`Solo voice signal ${tempo}x / ${transpose}st`, Number(audible.outputPeak) > .005 ? 0 : 1, 0)
+        await controls(true, true)
+        const silent = await until('Mute silences isolated voice', status, s => Number(s.outputPeak) < .001, 12000)
+        row(`Mute voice ${tempo}x / ${transpose}st`, Number(silent.outputPeak) < .001 ? 0 : 1, 0)
+        await controls(false, true)
+      }
     }
     await win.evaluate(async ({ placed }) => { const e = __test.engine; e.pause(); await e.setTempo(1); await e.setTranspose(0); await e.setRegion({ start: placed + 1, end: placed + 2 }, true); e.seek(placed + 1); await e.play() }, { placed })
     await until('A-B wrap', status, s => Number(s.loopCount) >= 2)

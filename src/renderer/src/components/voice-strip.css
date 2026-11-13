@@ -333,3 +333,7 @@ body.modal-open .vs-preparing::before { animation-play-state: paused; }
 .vs-effect-chip, .vs-head .vs-btn, .vs-take-actions { flex: none; }
 /* Narrow lane: the status text goes first (its tooltip and Retry keep the detail); take actions stay reachable. */
 @container vs-head (max-width: 560px) { .vs-lane-state { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } .vs-head > .sz-tip-wrap:has(> .vs-lane-state) { width: 0; } .vs-listen-old > span { display: none; } }
+
+.vs-effect input[type='checkbox'] { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.vs-effect input[type='range'].vs-vol-accent { flex: 1; min-width: 0; margin: 6px 0; }
+.vs-effect input:disabled { opacity: 0.4; cursor: not-allowed; }

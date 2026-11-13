@@ -1047,6 +1047,11 @@ describe('live monitoring (M2)', () => {
     expect(html).toMatch(/aria-disabled="true"[^>]*aria-describedby="voice-monitor-why"|aria-describedby="voice-monitor-why"[^>]*aria-disabled="true"/)
     expect(html).toContain('id="voice-monitor-why"')
     expect(html).toContain('Monitoring needs the input and output on one device')
+    // the reason is only the speaker's description: nothing is drawn as lane text (no vs-note content)
+    expect(html).toMatch(/<span class="vs-note [^"]*"[^>]*>\s*<\/span>|<span class="vs-note "><\/span>/)
+    expect(html.match(/on one device/g)?.length).toBeGreaterThan(0)
+    expect(html).not.toMatch(/class="vs-note warn"/)
+    expect(settingsHtmlOf(off.c)).toContain('Monitoring needs the input and output on one device') // route line
     off.c.dispose()
   })
 })
@@ -1957,6 +1962,7 @@ describe('i18n key set', () => {
   })
 })
 
+const settingsHtmlOf = (c: VoiceController): string => renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: c, onClose: () => undefined }))
 describe('markup', () => {
   const render = async (setupFn?: (c: VoiceController) => Promise<void>): Promise<string> => {
     const { c, engine } = await setup()
@@ -3157,3 +3163,31 @@ async function setupStripForCss(): Promise<string> {
   x.c.dispose()
   return html
 }
+
+describe('take lane state binding and themed effect controls', () => {
+  it('the strip shows the controller lane error even while engine.voiceTakeLaneState is idle', async () => {
+    const x = await setup({ list: vi.fn(async () => [summary()]), conformTake: vi.fn(async () => ({ ok: false, reason: 'conform-failed', conformReason: 'conform-error' }) as VoiceTakeConformResult) },
+      e => Object.assign(e, { voiceTakeOutputRate: 48000, setVoiceTakeLane: vi.fn(async () => ({ status: 'idle' })), setVoiceTakeControl: vi.fn(async () => {}), voiceTakeLaneState: { status: 'idle' } }))
+    await vi.advanceTimersByTimeAsync(300)
+    expect(x.engine.voiceTakeLaneState).toEqual({ status: 'idle' })
+    expect(x.c.getSnapshot().lane.status).toBe('error')
+    const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: x.c, engine: x.engine as never }))
+    expect(html).toContain('Take preparation failed')
+    expect(html).toMatch(/class="vs-btn"[^>]*>Retry</)
+    x.c.dispose()
+    // negative control: a ready lane never shows the failure
+    const ok = await setup({ list: vi.fn(async () => [summary()]) }, e => Object.assign(e, { voiceTakeOutputRate: 48000, setVoiceTakeLane: vi.fn(async () => ({ status: 'ready' })), setVoiceTakeControl: vi.fn(async () => {}) }))
+    await vi.advanceTimersByTimeAsync(300)
+    expect(renderToStaticMarkup(createElement(VoiceStrip, { controller: ok.c, engine: ok.engine as never }))).not.toContain('Take preparation failed')
+    ok.c.dispose()
+  })
+  it('Effects rows use the themed slider class and an amber-accented checkbox, not raw controls', async () => {
+    const x = await setup({ list: vi.fn(async () => [summary()]) })
+    const html = renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: x.c, onClose: () => undefined }))
+    expect(html).toMatch(/<input class="vs-vol vs-vol-accent" type="range"[^>]*min="-12"/)
+    const css = readFileSync(new URL('../../src/renderer/src/components/voice-strip.css', import.meta.url), 'utf8')
+    expect(css).toMatch(/\.vs-effect input\[type='checkbox'\][^}]*accent-color: var\(--accent\)/)
+    expect(css).not.toMatch(/\.vs-effect input\[type='checkbox'\][^}]*accent-color: (blue|#00|auto)/) // negative control
+    x.c.dispose()
+  })
+})
