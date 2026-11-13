@@ -26,12 +26,16 @@
 set -euo pipefail
 
 ROOT=${1:-"$(cd "$(dirname "$0")/.." && pwd)"}
-if command -v python3 >/dev/null 2>&1; then
-  ZCORE_PYTHON=python3
-elif command -v python >/dev/null 2>&1; then
-  ZCORE_PYTHON=python
-else
-  echo "analyze-source-hash: Python 3 is required to verify the zCore submodule" >&2
+ZCORE_PYTHON=
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 &&
+    "$candidate" -c 'import sys; sys.exit(sys.version_info.major != 3)' >/dev/null 2>&1; then
+    ZCORE_PYTHON=$candidate
+    break
+  fi
+done
+if [ -z "$ZCORE_PYTHON" ]; then
+  echo "analyze-source-hash: a working Python 3 is required to verify the zCore submodule" >&2
   exit 1
 fi
 ZCORE_REVISION=$("$ZCORE_PYTHON" "$ROOT/scripts/verify-zcore-submodule.py" \

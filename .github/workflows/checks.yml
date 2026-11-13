@@ -339,11 +339,17 @@ jobs:
       # binaries in their own step keeps the Test budget for running tests.
       - name: Build tests
         working-directory: ${{ env.G }}
+        # The dev profile optimizes at level 2; optimizing the large test binary
+        # exceeds the macOS runner's budget without changing test coverage.
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: ${{ runner.os == 'macOS' && '0' || '2' }}
         timeout-minutes: 45
         run: node ../../scripts/with-native-build-lock.mjs --owner ci-gpui-test-build -- cargo test --locked --no-run
 
       - name: Test
         working-directory: ${{ env.G }}
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: ${{ runner.os == 'macOS' && '0' || '2' }}
         timeout-minutes: 40
         run: node ../../scripts/with-native-build-lock.mjs --owner ci-gpui-test -- cargo test --locked
 

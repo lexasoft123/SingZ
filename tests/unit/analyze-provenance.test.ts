@@ -129,6 +129,19 @@ describe('scripts/analyze-source-hash.sh', () => {
     expect(b.stdout.trim()).toBe(a.stdout.trim())
   })
 
+  it('falls back to python when python3 exists but cannot run', async () => {
+    if (process.platform === 'win32') return // POSIX sh fixtures require Unix.
+    const dir = mkdtempSync(join(tmpdir(), 'singz-python-'))
+    const python = execFileSync('which', ['python3'], { encoding: 'utf8' }).trim()
+    writeFileSync(join(dir, 'python3'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    writeFileSync(join(dir, 'python'), `#!/bin/sh\nexec "${python}" "$@"\n`, { mode: 0o755 })
+    const expected = (await run('bash', [HASH_SCRIPT, ROOT])).stdout.trim()
+    const actual = await run('bash', [HASH_SCRIPT, ROOT], {
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }
+    })
+    expect(actual.stdout.trim()).toBe(expected)
+  })
+
   it('refuses a root with no sources at all', async () => {
     await expect(run('bash', [HASH_SCRIPT, join(ROOT, 'no-such-checkout')])).rejects.toThrow()
   })
