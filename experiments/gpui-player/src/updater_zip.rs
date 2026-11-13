@@ -400,6 +400,10 @@ impl Archive {
             }
         }
         // Links last, so nothing is ever written through one.
+        #[cfg(not(unix))]
+        if let Some(e) = links.first() {
+            bail!("payload links are not supported here: {}", e.name);
+        }
         for e in &links {
             let mut target = Vec::new();
             stream(&mut self.file, e, cancelled, &mut |chunk| {
@@ -412,8 +416,6 @@ impl Archive {
             ensure_parents(into, &path)?;
             #[cfg(unix)]
             std::os::unix::fs::symlink(&target, &path).with_context(|| format!("link {}", e.name))?;
-            #[cfg(not(unix))]
-            bail!("payload links are not supported here: {}", e.name);
         }
         // The lexical rule cannot see composed links (`a -> .` then
         // `b -> a/../..`): resolve every link now and require its target to

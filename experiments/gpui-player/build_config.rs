@@ -29,12 +29,19 @@ impl Selected {
     }
 }
 
+/// Cargo treats missing watched files as always stale. Watch existing inputs;
+/// creating an absent config requires touching build_config.rs to rerun Cargo.
+/// Required release builds reject missing configuration instead of shipping it.
 pub fn rerun_directives(root: &Path) -> Vec<String> {
-    vec![
-        format!("cargo:rerun-if-changed={}", root.join(CANONICAL_PATH).display()),
-        format!("cargo:rerun-if-changed={}", root.join(LEGACY_PATH).display()),
-        format!("cargo:rerun-if-env-changed={REQUIRE_ENV}"),
-    ]
+    let mut directives = Vec::new();
+    for path in [CANONICAL_PATH, LEGACY_PATH] {
+        let path = root.join(path);
+        if fs::symlink_metadata(&path).is_ok() {
+            directives.push(format!("cargo:rerun-if-changed={}", path.display()));
+        }
+    }
+    directives.push(format!("cargo:rerun-if-env-changed={REQUIRE_ENV}"));
+    directives
 }
 
 pub fn read_source(path: &Path) -> Input {
@@ -217,12 +224,24 @@ mod tests {
     }
     #[test]
     fn both_sources_and_requirement_flag_are_cargo_rerun_inputs() {
-        let root = Path::new("repository with spaces");
-        let directives = rerun_directives(root);
-        assert!(directives.contains(&format!("cargo:rerun-if-changed={}", root.join(CANONICAL_PATH).display())));
-        assert!(directives.contains(&format!("cargo:rerun-if-changed={}", root.join(LEGACY_PATH).display())));
+        let root = std::env::temp_dir().join(format!("singz-build-rerun {}", std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(root.clone());
+        let canonical = format!("cargo:rerun-if-changed={}", root.join(CANONICAL_PATH).display());
+        // Absent canonical file: not watched, or every build recompiles.
+        let directives = rerun_directives(&root);
+        assert!(!directives.contains(&canonical));
+        let legacy = format!("cargo:rerun-if-changed={}", root.join(LEGACY_PATH).display());
+        assert!(!directives.contains(&legacy));
         assert!(directives.contains(&format!("cargo:rerun-if-env-changed={REQUIRE_ENV}")));
         assert!(!directives.iter().any(|line| line.contains("SINGZ_GDRIVE_CONFIG")));
+        fs::create_dir_all(root.join("mobile")).unwrap();
+        fs::write(root.join(CANONICAL_PATH), "{}").unwrap();
+        assert!(rerun_directives(&root).contains(&canonical));
+        fs::create_dir_all(root.join("src/main")).unwrap();
+        fs::write(root.join(LEGACY_PATH), "").unwrap();
+        assert!(rerun_directives(&root).contains(&legacy));
     }
     #[test]
     fn file_presence_read_failures_and_dangling_links_do_not_masquerade_as_absence() {

@@ -26,6 +26,11 @@ fn main() {
     let canonical = build_config::read_source(&root.join(build_config::CANONICAL_PATH));
     let legacy = build_config::read_source(&root.join(build_config::LEGACY_PATH));
     let selected = build_config::select(&canonical, &legacy);
+    // Canonical wins once present but is unwatched while absent (see
+    // build_config::rerun_directives), so say how to pick it up later.
+    if matches!(canonical, build_config::Input::Missing) {
+        println!("cargo:warning=mobile/gdrive.config.json is absent: after adding it, run 'touch experiments/gpui-player/build_config.rs' to embed it");
+    }
     let required =
         env::var_os(build_config::REQUIRE_ENV).as_deref() == Some(std::ffi::OsStr::new("1"));
     if let Err(message) = build_config::require_config(required, &selected) {
