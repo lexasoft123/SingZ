@@ -2244,7 +2244,7 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
   if (source.generation == 0) {
     const auto meter = sharedAudioService().outputMeter();
     source.outputPeak = meter.peak;
-    source.outputClippedBlocks = static_cast<uint32_t>(std::min<uint64_t>(meter.clippedBlocks, UINT32_MAX));
+    source.outputClippedBlocks = 0; // Song consumers must not see lifetime bus clips.
   }
   napi_value result{};
   napi_create_object(env, &result);

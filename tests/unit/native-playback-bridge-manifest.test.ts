@@ -46,7 +46,7 @@ describe('desktop playback addon exports', () => {
     const idleMeter = functionBody(functionBody(addon, 'napi_value playbackStatus('), 'if (source.generation == 0)')
     expect(idleMeter).toContain('sharedAudioService().outputMeter()')
     expect(idleMeter).toContain('source.outputPeak = meter.peak')
-    expect(idleMeter).toContain('source.outputClippedBlocks =')
+    expect(idleMeter).toContain('source.outputClippedBlocks = 0;')
   })
   it('exports exactly the manifest names, in order', () => {
     expect(addonExportNames(addon)).toEqual(manifest.methods.desktopAddon.map(m => m.name))

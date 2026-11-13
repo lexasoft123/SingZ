@@ -264,9 +264,9 @@ export interface VoiceTakeMoveRequest {
 }
 export type VoiceTakeMoveResult = { ok: true; take: VoiceTakeSummary } | { ok: false; error: string }
 
-// ---- Live monitoring (milestone 2, ADR 0014 + decision record) ----
-// The monitor is a second small duplex host on the SAME physical device as the song output (mic in, mono
-// voice out). Routes whose input and output are different devices are unavailable in v1.
+// ---- Live monitoring (ADR 0017 common mixer + shared capture history) ----
+// The selected input may differ from the common app output. Output selection
+// fields remain deprecated until WP6; they never choose a monitor output.
 
 /** Buffer target and the largest accepted IO buffer, in frames at the device rate. */
 export const VOICE_MONITOR_TARGET_FRAMES = 32
@@ -291,11 +291,18 @@ export interface VoiceMonitorLatency {
   bufferFrames: number
   inputDeviceFrames: number
   outputDeviceFrames: number
-  /** 2 x buffer + input (latency + safety) + output (latency + safety), at the device rate. */
+  /** Estimated total queue, buffers and device delay, converted to output-rate frames. */
   roundTripFrames: number
   roundTripMs: number
   /** 'estimated' until measured against a loopback for this device (spike). */
   source: 'estimated' | 'measured'
+  /** History lookback in capture-rate frames. */
+  queueFrames?: number
+  /** Negotiated/observed input period in capture-rate frames (inputSampleRate). */
+  inputBufferFrames?: number
+  inputSampleRate?: number
+  /** Estimated round trip exceeds the 10 ms same-device budget. */
+  delayed?: boolean
 }
 
 export interface VoiceMonitorOutputDevice { id: string; name: string }

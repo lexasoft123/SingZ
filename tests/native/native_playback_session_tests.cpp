@@ -8450,9 +8450,12 @@ void serviceMasterMeterReportsDeviceOutput() {
     CHECK(fake->drive(256));
     CHECK(session.status().outputClippedBlocks == clips);
     // Publications retain the graph counter's uint32 saturation semantics.
-    service.masterMeterState().clippedBlocks.fetch_add(UINT32_MAX, std::memory_order_relaxed);
+    auto* graphClips = service.masterMeterState().songClips.load(std::memory_order_relaxed);
+    CHECK(graphClips != nullptr);
+    graphClips->store(UINT32_MAX, std::memory_order_relaxed);
     CHECK(session.status().outputClippedBlocks == UINT32_MAX);
     CHECK(session.outputMeter().clippedBlocks == UINT32_MAX);
+    CHECK(fake->drive(256) && session.status().outputClippedBlocks == UINT32_MAX);
     CHECK(session.unload(generation).ok);
     const auto idle = [](void*, const singz::AudioHostRenderBlock& block) noexcept {
       for (uint32_t channel = 0; channel < block.outputChannels; ++channel)
@@ -8463,16 +8466,67 @@ void serviceMasterMeterReportsDeviceOutput() {
     service.setTrainingRenderer(idle, nullptr);
     CHECK(service.ensureOutput().ok && fake->drive(256));
     CHECK(near(session.outputMeter().peak, service.outputMeter().peak, 1e-6F));
-    CHECK(session.status().outputClippedBlocks == std::min<uint64_t>(service.outputMeter().clippedBlocks, UINT32_MAX));
+    CHECK(session.status().outputClippedBlocks == 0);
+    CHECK(session.outputMeter().clippedBlocks == 0);
     service.clearTrainingRenderer();
   }
   CHECK(singz::sharedAudioService().setMasterGain(1));
   std::remove(hot.c_str()); std::remove(quiet.c_str());
 }
 
+void idleMeterDoesNotCarryClipsIntoTheNextSong() {
+  const auto hot = writeWav("idle-clips-hot.wav", 1, std::vector<float>(4096, 0.95F));
+  const auto clean = writeWav("idle-clips-clean.wav", 1, std::vector<float>(4096, 0.4F));
+  auto physical = std::make_unique<ManualOutputBackend>(); auto* fake = physical.get();
+  auto& service = singz::sharedAudioService();
+  CHECK(service.configureProvider(std::move(physical), "idle-clip-window").ok);
+  CHECK(service.setMasterGain(1) && service.ensureOutput().ok && fake->drive(256));
+  auto host = service.playbackBackend(std::make_unique<ManualOutputBackend>(), "idle-clip-window");
+  singz::NativePlaybackSession session(std::move(host));
+  const auto start = [&](uint64_t generation, const std::string& path) {
+    auto request = config(); request.serviceOwnsMasterGain = true;
+    std::vector<singz::NativePlaybackLaneSource> lanes; lanes.push_back(lane("song", path));
+    CHECK(session.prepare(std::move(request), std::move(lanes), generation).ok);
+    CHECK(session.status().outputClippedBlocks == 0);
+    CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+  };
+  const auto idle = [&] {
+    CHECK(session.status().outputClippedBlocks == 0 && "song clip window ended");
+    CHECK(session.outputMeter().clippedBlocks == 0);
+    CHECK(session.status().outputPeak == service.outputMeter().peak);
+  };
+  start(1, hot);
+  for (unsigned i = 0; i < 3; ++i) CHECK(fake->drive(256));
+  CHECK(session.status().outputClippedBlocks == 3);
+  CHECK(session.unload(1).ok); idle();
+  start(2, clean); CHECK(fake->drive(256));
+  CHECK(session.status().outputClippedBlocks == 0);
+  CHECK(session.stop(2).ok && session.status().outputClippedBlocks == 0);
+  const auto training = [](void*, const singz::AudioHostRenderBlock& block) noexcept {
+    for (uint32_t channel = 0; channel < block.outputChannels; ++channel)
+      for (uint32_t frame = 0; frame < block.frames; ++frame) block.output[channel][frame] += 0.95F;
+    return true;
+  };
+  const auto before = service.outputMeter().clippedBlocks;
+  service.setTrainingRenderer(training, nullptr);
+  CHECK(service.ensureOutput().ok && fake->drive(256));
+  CHECK(session.status().outputClippedBlocks == 0 && "stopped song clip window frozen");
+  CHECK(session.outputMeter().clippedBlocks == 0);
+  CHECK(session.unload(2).ok); idle();
+  CHECK(service.outputMeter().clippedBlocks == before + 1); idle();
+  service.clearTrainingRenderer();
+  start(3, clean); CHECK(fake->drive(256));
+  CHECK(session.status().outputClippedBlocks == 0);
+  CHECK(session.unload(3).ok); idle();
+  std::remove(hot.c_str()); std::remove(clean.c_str());
+}
+
 } // namespace
 
 int main() {
+  if (std::getenv("SINGZ_SERVICE_MASTER_IDLE_REGRESSION_ONLY")) {
+    idleMeterDoesNotCarryClipsIntoTheNextSong(); return 0;
+  }
   if (std::getenv("SINGZ_SERVICE_MASTER_METER_REGRESSION_ONLY")) {
     serviceMasterMeterReportsDeviceOutput(); return 0;
   }
@@ -8511,6 +8565,7 @@ int main() {
     return 0;
   }
   serviceMasterMeterReportsDeviceOutput();
+  idleMeterDoesNotCarryClipsIntoTheNextSong();
   hotSongIsLimitedAfterTheServiceMaster();
   serviceMasterPinsOnlyTheAppGainAndPreservesTiming();
   songVolumeIsAppliedOnceThroughTheSharedService();

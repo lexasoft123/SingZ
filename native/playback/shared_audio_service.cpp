@@ -54,8 +54,9 @@ struct SharedAudioService::Impl {
     std::atomic<bool> failed{false};
     std::atomic<uint64_t> callbacks{0};
     std::atomic<uint64_t> frames{0};
-  } playback, training, microphone;
+  } playback, training, microphone, monitor;
   ServiceMasterStage master;
+  uint64_t monitorGeneration{0};
   mutable std::mutex mutex;
   std::unique_ptr<AudioHostBackend> backend;
   AudioHostInventory cached;
@@ -265,16 +266,18 @@ struct SharedAudioService::Impl {
     for (uint32_t channel = 0; channel < block.outputChannels; ++channel)
       if (block.output && block.output[channel])
         std::fill_n(block.output[channel], block.frames, 0.0F);
+    self.master.meter.clearSongTargets();
+    // A registered graph meter remains alive through the final bus pass.
+    AudioInputCallbackScope playbackScope(self.playback.gate);
     {
-      AudioInputCallbackScope scope(self.playback.gate);
-      if (scope && self.playback.render &&
+      if (playbackScope && self.playback.render &&
           !self.playback.render(self.playback.context, block)) {
         self.playback.failed.store(true, std::memory_order_release);
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
         recordBoxSongFailure(block.callbackHostTimeNs, block.frames);
 #endif
       }
-      if (scope) {
+      if (playbackScope) {
         self.playback.callbacks.fetch_add(1, std::memory_order_relaxed);
         self.playback.frames.fetch_add(block.frames, std::memory_order_relaxed);
       }
@@ -290,6 +293,12 @@ struct SharedAudioService::Impl {
       if (scope && self.microphone.render &&
           !self.microphone.render(self.microphone.context, block))
         self.microphone.failed.store(true, std::memory_order_release);
+    }
+    {
+      AudioInputCallbackScope scope(self.monitor.gate);
+      if (scope && self.monitorGeneration == self.outputGeneration.load(std::memory_order_acquire) && self.monitor.render &&
+          !self.monitor.render(self.monitor.context, block))
+        self.monitor.failed.store(true, std::memory_order_release);
     }
     self.master.process(block);
     self.frames.fetch_add(block.frames, std::memory_order_relaxed);
@@ -321,6 +330,12 @@ struct SharedAudioService::Impl {
         route.outputChannels == config.outputChannels && route.inputDeviceUid == config.inputDeviceUid &&
         route.inputChannels == config.inputChannels && route.exclusive == config.exclusive &&
         (config.requestedSampleRate == 0 || route.requestedSampleRate == config.requestedSampleRate);
+    // History monitoring never renegotiates the output period. A song joining
+    // the running idle host adopts its capacity/period without a hardware seam.
+    if (monitor.render && samePhysical && current.format.maximumFrames != 0 &&
+        current.format.maximumFrames <= config.maximumFrames &&
+        (current.state == AudioHostState::Running || current.state == AudioHostState::Open))
+      return {true, AudioHostError::None, current.state, current.format, current.latency, {}};
     if (monitorBufferHeld && samePhysical && provider == "coreaudio" &&
         (current.state == AudioHostState::Running || current.state == AudioHostState::Open)) {
       // The physical host and its writer lease outlive graph generations.
@@ -339,6 +354,7 @@ struct SharedAudioService::Impl {
       drain(playback.gate);
       playback.failed.store(true, std::memory_order_release);
     }
+    drain(monitor.gate); // Route seam: never replay live voice on a new route.
     outputGeneration.fetch_add(1, std::memory_order_release);
     backend->stop();
     monitorBufferHeld = false;
@@ -397,6 +413,16 @@ struct SharedAudioService::Impl {
     }
     config.outputDeviceUid = selected;
     return config;
+  }
+  // Control mutex held. A song handback must not disturb live/scheduled cues
+  // or microphone output; keep its ledger hold until the last client detaches.
+  void completeIdleBufferHandbackLocked() {
+    if (songOutputCurrent || monitor.render || !route.holdSharedDeviceBuffer) return;
+    if (training.render || microphone.render) return;
+    backend->stop();
+    outputGeneration.fetch_add(1, std::memory_order_release);
+    monitorBufferHeld = false;
+    route.holdSharedDeviceBuffer = false;
   }
   void retireIdleBoxProducerLocked() noexcept {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
@@ -620,7 +646,7 @@ void SharedAudioService::setTrainingRenderer(AudioHostRender render, void* conte
   impl_->training.context = context;
   impl_->training.failed.store(false, std::memory_order_release);
   if (render) impl_->training.gate.open();
-  else impl_->retireIdleBoxProducerLocked();
+  else { impl_->completeIdleBufferHandbackLocked(); impl_->retireIdleBoxProducerLocked(); }
 }
 void SharedAudioService::clearTrainingRenderer() { setTrainingRenderer(nullptr, nullptr); }
 void SharedAudioService::setMicrophoneRenderer(AudioHostRender render, void* context) {
@@ -630,9 +656,20 @@ void SharedAudioService::setMicrophoneRenderer(AudioHostRender render, void* con
   impl_->microphone.context = context;
   impl_->microphone.failed.store(false, std::memory_order_release);
   if (render) impl_->microphone.gate.open();
-  else impl_->retireIdleBoxProducerLocked();
+  else { impl_->completeIdleBufferHandbackLocked(); impl_->retireIdleBoxProducerLocked(); }
 }
 void SharedAudioService::clearMicrophoneRenderer() { setMicrophoneRenderer(nullptr, nullptr); }
+void SharedAudioService::setVoiceMonitorRenderer(AudioHostRender render, void* context) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  drain(impl_->monitor.gate);
+  impl_->monitor.render = render;
+  impl_->monitor.context = context;
+  impl_->monitorGeneration = impl_->outputGeneration.load(std::memory_order_acquire);
+  impl_->monitor.failed.store(false, std::memory_order_release);
+  if (render) impl_->monitor.gate.open();
+  else impl_->completeIdleBufferHandbackLocked();
+}
+void SharedAudioService::clearVoiceMonitorRenderer() { setVoiceMonitorRenderer(nullptr, nullptr); }
 bool SharedAudioService::setMasterGain(float gain) noexcept {
   if (!std::isfinite(gain) || gain < 0.0F || gain > 4.0F) return false;
   impl_->master.target.store(gain, std::memory_order_release);
@@ -706,21 +743,15 @@ bool SharedAudioService::setPlaybackOutputCurrent(bool current) {
   if (current && (impl_->provider != "coreaudio" || !impl_->playback.render ||
                   impl_->route.outputDeviceUid.empty())) return false;
   impl_->songOutputCurrent = current;
-  if (!current && impl_->route.holdSharedDeviceBuffer) {
-    // Graph unloads used for native re-prepares retain this host. Only the
-    // explicit native-session handback releases its changing buffer lease.
-    impl_->backend->stop();
-    impl_->outputGeneration.fetch_add(1,std::memory_order_release);
-    impl_->monitorBufferHeld = false;
-    impl_->route.holdSharedDeviceBuffer = false;
-  }
+  if (!current) impl_->completeIdleBufferHandbackLocked();
   return true;
 }
 uint32_t SharedAudioService::retainedPlaybackCapacity(const AudioHostConfig& config) const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   const auto& route=impl_->route;
   const auto status=impl_->backend->status();
-  if (!impl_->monitorBufferHeld || impl_->provider!="coreaudio" || !impl_->songOutputCurrent ||
+  const bool heldSong = impl_->monitorBufferHeld && impl_->provider=="coreaudio" && impl_->songOutputCurrent;
+  if ((!heldSong && !impl_->monitor.render) ||
       (status.state!=AudioHostState::Running && status.state!=AudioHostState::Open) ||
       route.outputDeviceUid!=config.outputDeviceUid || route.outputChannels!=config.outputChannels ||
       route.requestedSampleRate!=config.requestedSampleRate || route.exclusive!=config.exclusive)
@@ -779,6 +810,8 @@ void SharedAudioService::shutdown() noexcept {
   drain(impl_->playback.gate);
   drain(impl_->training.gate);
   drain(impl_->microphone.gate);
+  drain(impl_->monitor.gate);
+  impl_->monitor.render = nullptr;
   impl_->microphone.render = nullptr;
   impl_->songOutputCurrent = false;
   impl_->monitorBufferHeld = false;

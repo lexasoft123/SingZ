@@ -168,37 +168,31 @@ describe('voice monitoring', () => {
     expect(native.voiceMonitorAvailability).toHaveBeenCalledWith({ inputUid: 'mic', inputChannel: 1 })
     expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0].inputChannel).toBe(1)
   })
-  it('forwards explicit output UIDs, echoes native choices and isolates snapshots', async () => {
+  it('ignores deprecated output UIDs, echoes the common route and isolates snapshots', async () => {
     const { store, native } = fixture()
     const outputDevice = { id: 'mic', name: 'Interface' }
     const outputCandidates = [{ ...outputDevice, usable: true }, { id: 'other', name: 'Interface', usable: false, reason: 'route-separate-devices' as const }]
     vi.mocked(native.voiceMonitorAvailability).mockResolvedValue({ available: true, outputDevice, outputCandidates })
     const state = await store.availability({ input, outputDeviceId: 'mic' })
-    expect(native.voiceMonitorAvailability).toHaveBeenLastCalledWith({ inputUid: 'mic', inputChannel: 0, outputDeviceId: 'mic' })
+    expect(native.voiceMonitorAvailability).toHaveBeenLastCalledWith({ inputUid: 'mic', inputChannel: 0 })
     expect(state).toMatchObject({ outputDevice, outputCandidates })
     state.outputCandidates![0].name = 'caller mutation'
     state.outputDevice!.name = 'caller mutation'
     expect((await store.state()).outputDevice).toEqual(outputDevice)
     expect((await store.state()).outputCandidates).toEqual(outputCandidates)
     await store.set({ input, on: true, outputDeviceId: 'mic' })
-    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0]).toMatchObject({ outputDeviceId: 'mic' })
+    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0]).not.toHaveProperty('outputDeviceId')
     expect((await store.state()).on).toBe(true)
     await store.dispose()
   })
-  it('closes the old output before restarting a changed valid selection, retaining the input', async () => {
+  it('deprecated output changes never restart capture or select another monitor output', async () => {
     const { store, native } = fixture()
-    let selected = 'mic'
-    vi.mocked(native.voiceMonitorAvailability).mockImplementation(async args => ({ available: true, outputDevice: { id: args.outputDeviceId ?? selected, name: 'same label' } }))
     await store.set({ input, on: true })
-    selected = 'other'
     await store.set({ input, on: true, outputDeviceId: 'other' })
-    expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(2)
-    expect(native.endVoiceMonitor).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(native.endVoiceMonitor).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(native.beginVoiceMonitor).mock.invocationCallOrder[1])
-    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[1][0]).toMatchObject({ inputUid: 'mic', outputDeviceId: 'other' })
     await store.set({ input, on: true, outputDeviceId: null })
-    expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(3) // changing explicit -> follow must update future routing even on the same device
-    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[2][0]).not.toHaveProperty('outputDeviceId')
+    expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1)
+    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
+    for (const [args] of vi.mocked(native.voiceMonitorAvailability).mock.calls) expect(args).not.toHaveProperty('outputDeviceId')
     await store.dispose()
   })
   it('stops the old monitor and refuses a separate-device selection with native metadata', async () => {
@@ -385,6 +379,30 @@ describe('voice monitoring', () => {
     expect(native.beginVoiceMonitor).not.toHaveBeenCalled()
     expect(preferences.askForMediaAccess).not.toHaveBeenCalled()
   })
+  it.each(['win32', 'linux'] as const)('keeps monitoring unavailable on unqualified %s', async platform => {
+    const { native } = fixture()
+    const store = new VoiceMonitorStore(native, () => true, platform)
+    expect(await store.availability({ input })).toMatchObject({ on: false, available: { reason: 'platform' } })
+    expect(await store.availability({ input, contextOnly: true, playbackContext: { webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: '' } })).toMatchObject({ available: { reason: 'platform' } })
+    expect(await store.set({ input, on: true })).toMatchObject({ on: false, available: { reason: 'platform' } })
+    expect(native.inputDevices).not.toHaveBeenCalled()
+    expect(native.voiceMonitorAvailability).not.toHaveBeenCalled()
+    expect(native.beginVoiceMonitor).not.toHaveBeenCalled()
+    await store.dispose()
+  })
+  it('carries queue/delayed latency and preserves terminal route reasons without restarting', async () => {
+    const { native, store } = fixture()
+    const latency = { sampleRate: 48000, requestedFrames: 32, bufferFrames: 512, inputDeviceFrames: 64,
+      outputDeviceFrames: 0, roundTripFrames: 1856, roundTripMs: 38.667, source: 'estimated' as const,
+      queueFrames: 1280, delayed: true }
+    vi.mocked(native.beginVoiceMonitor).mockResolvedValueOnce({ ok: true, latency })
+    expect(await store.set({ input, on: true })).toMatchObject({ on: true, latency })
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValueOnce({ running: false, reason: 'error' })
+    expect(await store.state()).toMatchObject({ on: false, available: { reason: 'error' } })
+    await store.songChanged('new-song')
+    expect((await store.state()).on).toBe(false)
+    expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1)
+  })
   it('marks a lost device unavailable and releases the monitor', async () => {
     const { store, native } = fixture()
     await store.set({ input, on: true })
@@ -401,7 +419,7 @@ describe('voice monitoring', () => {
   })
   it('reports unsupported platforms and missing native availability', async () => {
     const { native } = fixture()
-    expect((await new VoiceMonitorStore(native, () => true, 'win32').availability({ input })).available).toEqual({ reason: 'platform' })
+    expect((await new VoiceMonitorStore(native, () => true, 'aix').availability({ input })).available).toEqual({ reason: 'platform' })
     vi.mocked(native.voiceMonitorAvailability).mockRejectedValueOnce(new Error('missing export'))
     expect((await new VoiceMonitorStore(native, () => true, 'darwin').availability({ input })).available).toEqual({ reason: 'platform' })
   })

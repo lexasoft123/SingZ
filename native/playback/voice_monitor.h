@@ -105,6 +105,10 @@ struct VoiceMonitorLatency {
   uint32_t requestedFrames{32}, bufferFrames{0}, inputDeviceFrames{0}, outputDeviceFrames{0};
   uint64_t roundTripFrames{0};
   double roundTripMs{0};
+  uint32_t queueFrames{0}; // Source-rate history queue, zero only before capture establishes its period.
+  bool delayed{false};
+  uint32_t inputBufferFrames{0};
+  double inputSampleRate{0};
 };
 struct VoiceMonitorResult {
   bool ok{false};

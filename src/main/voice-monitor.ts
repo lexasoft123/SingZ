@@ -10,7 +10,7 @@ export interface VoiceMonitorNative {
   voiceMonitorAvailability(args: { inputUid: string; inputChannel: number; outputDeviceId?: string | null; contextOnly?: boolean } & Partial<VoiceMonitorPlaybackContext>): Promise<Availability>
   beginVoiceMonitor(args: { inputUid: string; inputChannel: number; outputDeviceId?: string | null; gainDb: number; targetFrames: number; maxFrames: number }, generation: bigint): Promise<OutputDetails & { ok: boolean; reason?: VoiceMonitorReason; error?: string; latency?: VoiceMonitorLatency; warnings?: string[] }>
   setVoiceMonitorGain(gainDb: number): Promise<{ ok: boolean }>
-  voiceMonitorStatus(): Promise<OutputDetails & { running: boolean; latency?: VoiceMonitorLatency; warnings?: string[]; lost?: boolean }>
+  voiceMonitorStatus(): Promise<OutputDetails & { running: boolean; latency?: VoiceMonitorLatency; warnings?: string[]; lost?: boolean; reason?: VoiceMonitorReason }>
   endVoiceMonitor(generation: bigint): Promise<{ ok: boolean; warnings?: string[] }>
 }
 export function microphonePermission(preferences: { getMediaAccessStatus(type: 'microphone'): string }): boolean {
@@ -37,7 +37,7 @@ export class VoiceMonitorStore {
     this.pending = result.catch(() => undefined)
     return result
   }
-  private snapshot(): VoiceMonitorState { return { ...this.current, warnings: [...this.current.warnings],
+  private snapshot(): VoiceMonitorState { return { ...this.current, latency: this.current.latency ? { ...this.current.latency } : null, warnings: [...this.current.warnings],
     outputDevice: this.current.outputDevice ? { ...this.current.outputDevice } : null,
     outputCandidates: this.current.outputCandidates?.map(device => ({ ...device })) ?? [] } }
   /** A probe never rewrites the route of a monitor that is running; only its own status (`running`) does. */
@@ -49,7 +49,7 @@ export class VoiceMonitorStore {
   private fail(reason: VoiceMonitorReason): VoiceMonitorState { this.current = { ...this.current, available: { reason }, ...(this.generation === undefined ? { on: false, latency: null } : {}) }; return this.snapshot() }
   private processFailed(): VoiceMonitorState { this.clearGeneration(); this.current.warnings = []; return this.fail('error') }
   private activeInput?: { deviceName: string; channelIndex: number }
-  private async resolve(request: VoiceMonitorAvailabilityRequest, owns = false): Promise<{ state: VoiceMonitorState; uid?: string; channel?: number; outputId?: string }> {
+  private async resolve(request: VoiceMonitorAvailabilityRequest, owns = false): Promise<{ state: VoiceMonitorState; uid?: string; channel?: number }> {
     if (this.platform !== 'darwin') { await this.close(); return { state: this.fail('platform') } }
     if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) { await this.close(); return { state: this.fail('no-input') } }
     const result = await this.native.inputDevices()
@@ -62,28 +62,27 @@ export class VoiceMonitorStore {
     const device = name ? unique(devices.filter(d => d.uid === name)) ?? unique(devices.filter(d => d.label === name)) ?? unique(devices.filter(d => normalize(d.label) === normalize(name))) : undefined
     if (device && input.channelIndex >= device.channels) { await this.close(); return { state: this.fail('no-input') } }
     if (!device) {
-      this.outputs(await this.native.voiceMonitorAvailability({ inputUid: '', inputChannel: 0,
-        ...(request.outputDeviceId == null ? {} : { outputDeviceId: request.outputDeviceId }) }), owns)
+      this.outputs(await this.native.voiceMonitorAvailability({ inputUid: '', inputChannel: 0 }), owns)
       await this.close(); return { state: this.fail('no-input') }
     }
     const inventory = await this.native.hostDevices()
     const routeDevice = inventory.ok ? inventory.devices.find(d => d.uid === device.uid) : undefined
     if (!routeDevice || !['input', 'duplex'].includes(routeDevice.direction) || !routeDevice.transport || routeDevice.transport === 'unknown') { await this.close(); return { state: this.fail('error') } }
     const channel = input.channelIndex
-    const availability = await this.native.voiceMonitorAvailability({ inputUid: device.uid, inputChannel: channel,
-      ...(request.outputDeviceId == null ? {} : { outputDeviceId: request.outputDeviceId }) })
+    const availability = await this.native.voiceMonitorAvailability({ inputUid: device.uid, inputChannel: channel })
     this.outputs(availability, owns) // a foreground probe never rewrites a running monitor's route; a set() owns it
     if (!availability.available) { await this.close(); return { state: this.fail(availability.reason ?? 'error') } }
     this.current.available = true
-    return { state: this.snapshot(), uid: device.uid, channel, outputId: availability.outputDevice?.id ?? request.outputDeviceId ?? undefined }
+    return { state: this.snapshot(), uid: device.uid, channel }
   }
   availability(request: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState> { return this.serial(async () => { try {
+    if (this.platform !== 'darwin') { await this.close(); return this.fail('platform') }
     if (request.contextOnly && request.playbackContext) {
       const response = await this.native.voiceMonitorAvailability({ inputUid: '', inputChannel: 0, contextOnly: true, ...request.playbackContext })
       if (!response.available) { if (this.generation !== undefined) await this.close(); return this.fail(response.reason ?? 'error') }
       if (this.current.on) {
         const status = await this.native.voiceMonitorStatus()
-        if (!status.running || status.lost) { this.clearGeneration(); return this.fail(status.lost ? 'device-lost' : 'error') }
+        if (!status.running || status.lost) { this.clearGeneration(); return this.fail(status.reason ?? (status.lost ? 'device-lost' : 'error')) }
       }
       return this.snapshot()
     }
@@ -98,14 +97,14 @@ export class VoiceMonitorStore {
       }
       const selected = await this.resolve(request, true)
       if (!selected.uid || selected.channel === undefined) return selected.state
-      const selection = JSON.stringify([selected.uid, selected.channel, selected.outputId ?? '', request.outputDeviceId ?? null])
+      const selection = JSON.stringify([selected.uid, selected.channel])
       if (this.current.on && this.activeSelection === selection) return this.snapshot()
       if (this.generation !== undefined) await this.close()
       if (!this.permission()) return this.fail('permission')
       if (request.gainDb !== undefined) this.current.gainDb = clamp(request.gainDb)
       const generation = ++nextGeneration
       this.generation = generation
-      const result = await this.native.beginVoiceMonitor({ inputUid: selected.uid, inputChannel: selected.channel, ...(request.outputDeviceId == null ? {} : { outputDeviceId: request.outputDeviceId }), gainDb: this.current.gainDb, targetFrames: VOICE_MONITOR_TARGET_FRAMES, maxFrames: VOICE_MONITOR_MAX_FRAMES }, generation)
+      const result = await this.native.beginVoiceMonitor({ inputUid: selected.uid, inputChannel: selected.channel, gainDb: this.current.gainDb, targetFrames: VOICE_MONITOR_TARGET_FRAMES, maxFrames: VOICE_MONITOR_MAX_FRAMES }, generation)
       this.outputs(result)
       if (!result.ok) { await this.close(); return this.fail(result.reason ?? 'error') }
       this.activeInput = { deviceName: selected.uid, channelIndex: selected.channel }
@@ -115,7 +114,7 @@ export class VoiceMonitorStore {
     } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError) && this.generation !== undefined) await this.close().catch(() => undefined); return this.fail('error') }
   }) }
   gain(gainDb: number): Promise<VoiceMonitorState> { return this.serial(async () => { try { const value = clamp(gainDb); if (this.current.on && !(await this.native.setVoiceMonitorGain(value)).ok) { await this.close(); return this.fail('error') } this.current.gainDb = value; return this.snapshot() } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
-  state(): Promise<VoiceMonitorState> { return this.serial(async () => { try { if (this.current.on) { const status = await this.native.voiceMonitorStatus(); if (status.lost || !status.running) { this.clearGeneration(); return this.fail(status.lost ? 'device-lost' : 'error') } this.outputs(status, true); this.current.latency = status.latency ?? this.current.latency; this.current.warnings = status.warnings ?? this.current.warnings } return this.snapshot() } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
+  state(): Promise<VoiceMonitorState> { return this.serial(async () => { try { if (this.current.on) { const status = await this.native.voiceMonitorStatus(); if (status.lost || !status.running) { this.clearGeneration(); return this.fail(status.reason ?? (status.lost ? 'device-lost' : 'error')) } this.outputs(status, true); this.current.latency = status.latency ?? this.current.latency; this.current.warnings = status.warnings ?? this.current.warnings } return this.snapshot() } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }
   private clearGeneration(): void {
     this.generation = undefined
     this.activeSelection = undefined

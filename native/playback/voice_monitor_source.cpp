@@ -264,7 +264,11 @@ AudioInputResult VoiceMonitorCapture::retain(VoiceCaptureUser user, const AudioI
   if (index >= s.users.size() || s.users[index] == UINT32_MAX)
     return AudioInputResult::failure(AudioInputState::Error, "invalid capture user", config.channel);
   if (s.total()) {
-    if (!sameCapture(config, s.config) || s.state.load(std::memory_order_acquire) != AudioInputState::Running)
+    // Joining an active route must never renegotiate its buffer or restart a
+    // take. Opening preferences apply only when the first user opens capture.
+    if (config.deviceUid != s.config.deviceUid || config.channel != s.config.channel ||
+        config.ringBlocks != s.config.ringBlocks ||
+        s.state.load(std::memory_order_acquire) != AudioInputState::Running)
       return AudioInputResult::failure(AudioInputState::Error, "another capture route is retained", config.channel);
     auto result = s.opened;
     if (sink) { std::lock_guard sinkLock(s.sinkControl); s.sink = std::move(sink); }

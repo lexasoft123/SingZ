@@ -2823,17 +2823,10 @@ struct PreparedPlaybackGraph {
   float masterGain{1.0F};
   bool serviceOwnsMasterGain{false};
   NativePlaybackSession::OutputMeter serviceOutputMeter() const noexcept {
-    NativePlaybackSession::OutputMeter result{true, transportGeneration, 0, 0, 0};
-    if (!callback.serviceMeterStarted.load(std::memory_order_acquire)) return result;
-    const auto meter = sharedAudioService().outputMeter();
-    if (meter.callbacks <= callback.serviceMeterCallbackBaseline.load(std::memory_order_relaxed))
-      return result;
-    const auto baseline = callback.serviceMeterClipBaseline.load(std::memory_order_relaxed);
-    result.peak = meter.peak;
-    result.rms = meter.rms;
-    result.clippedBlocks = static_cast<uint32_t>(std::min<uint64_t>(
-        meter.clippedBlocks >= baseline ? meter.clippedBlocks - baseline : 0, UINT32_MAX));
-    return result;
+    return {true, transportGeneration,
+            callback.serviceOutputPeak.load(std::memory_order_relaxed),
+            callback.serviceOutputClippedBlocks.load(std::memory_order_relaxed),
+            callback.serviceOutputRms.load(std::memory_order_relaxed)};
   }
   float graphMasterGain() const noexcept {
     return serviceOwnsMasterGain ? 1.0F : masterGain;
@@ -6258,14 +6251,12 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
     return failPreparation(NativePlaybackError::InvalidConfiguration,
                            "Native playback configuration is invalid");
   }
-#if defined(__APPLE__) && TARGET_OS_OSX
   AudioHostConfig retainedRoute;
   retainedRoute.outputDeviceUid=config.outputDeviceUid;retainedRoute.outputChannels=config.outputChannels;
   retainedRoute.requestedSampleRate=config.requestedSampleRate;retainedRoute.exclusive=config.exclusive;
   // Allocate the replacement graph for the retained host BEFORE materializing
   // DSP. Merely accepting a larger host at open would leave graph storage short.
   config.maximumFrames=std::max(config.maximumFrames,sharedAudioService().retainedPlaybackCapacity(retainedRoute));
-#endif
   const double timePitchCorrection =
       config.transposeSemitones - 12.0 * std::log2(config.playbackRate);
   const bool needsTimePitch =
@@ -6781,8 +6772,9 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   prepared->serviceOwnsMasterGain = config.serviceOwnsMasterGain;
   if (config.serviceOwnsMasterGain) {
     auto& meter = sharedAudioService().masterMeterState();
-    prepared->callback.serviceMeterClips = &meter.clippedBlocks;
-    prepared->callback.serviceMeterCallbacks = &meter.callbacks;
+    prepared->callback.serviceMeterPeakTarget = &meter.songPeak;
+    prepared->callback.serviceMeterRmsTarget = &meter.songRms;
+    prepared->callback.serviceMeterClipTarget = &meter.songClips;
     prepared->callback.serviceMeterResetEpoch = &meter.resetEpoch;
   }
   prepared->laneDecodeFallback = laneDecodeFallback;
@@ -8790,7 +8782,8 @@ NativePlaybackStatus NativePlaybackSession::status() const {
   if (rendering == nullptr && impl_->serviceMasterMeterUsed) {
     const auto meter = sharedAudioService().outputMeter();
     result.outputPeak = meter.peak;
-    result.outputClippedBlocks = static_cast<uint32_t>(std::min<uint64_t>(meter.clippedBlocks, UINT32_MAX));
+    // No graph means no per-generation clipping window.
+    result.outputClippedBlocks = 0;
   }
   return result;
 }
@@ -8923,8 +8916,7 @@ NativePlaybackSession::OutputMeter NativePlaybackSession::outputMeter() const no
       return graph->serviceOutputMeter();
     if (graph == nullptr && impl_->serviceMasterMeterUsed) {
       const auto meter = sharedAudioService().outputMeter();
-      return {true, 0, meter.peak,
-              static_cast<uint32_t>(std::min<uint64_t>(meter.clippedBlocks, UINT32_MAX)), meter.rms};
+      return {true, 0, meter.peak, 0, meter.rms};
     }
     if (graph == nullptr || graph->callback.outputLimiter.state == nullptr) return {};
     return {true, graph->transportGeneration,

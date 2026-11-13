@@ -1,5 +1,7 @@
 #include "voice_monitor_bridge.h"
 #include "../playback/voice_monitor.h"
+#include "../playback/voice_monitor_client.h"
+#include <cstdlib>
 #include "../playback/shared_audio_service.h"
 #include "native_audio_ownership.h"
 #include "microphone_mix_bridge.h"
@@ -19,21 +21,60 @@ extern "C" void* const AVMediaTypeAudio;
 namespace singz {
 namespace {
 std::mutex control;
-VoiceMonitorHost host;
+// Cross-platform DSP stays testable; shipping v1 awaits windows-field qualification.
+constexpr bool monitorPlatformSupported() noexcept {
+#if defined(__APPLE__) && TARGET_OS_OSX
+  return true;
+#else
+  return false;
+#endif
+}
+// One-release escape hatch; no second output host is constructed by default.
+class Monitor {
+  bool legacy_ = [] { const char* flag = std::getenv("SINGZ_LEGACY_VOICE_MONITOR"); return flag && std::string(flag) == "1"; }();
+  std::unique_ptr<VoiceMonitorHost> legacyHost_;
+  CommonVoiceMonitor common_{sharedAudioService(), sharedVoiceMonitorCapture()};
+ public:
+  Monitor() { if (legacy_) legacyHost_ = std::make_unique<VoiceMonitorHost>(); }
+  VoiceMonitorAvailability availability(const std::string& uid, uint32_t channel,
+      const std::string& output, bool native, bool permission) {
+    if (!monitorPlatformSupported()) {
+      VoiceMonitorAvailability result; result.reason="platform";
+      result.detail="Live monitoring is available on macOS"; return result;
+    }
+    return legacy_ ? legacyHost_->availability(uid,channel,output,native,permission) : common_.availability(uid,channel,permission);
+  }
+  VoiceMonitorResult begin(const std::string& uid, uint32_t channel, const std::string& output,
+      bool native, bool permission, float gain, uint32_t target, uint32_t maximum, uint64_t generation,
+      const std::vector<uint32_t>& channels, SharedAudioService* service) {
+    if (!monitorPlatformSupported()) {
+      VoiceMonitorResult result; result.reason="platform";
+      result.error="Live monitoring is available on macOS"; return result;
+    }
+    return legacy_ ? legacyHost_->begin(uid,channel,output,native,permission,gain,target,maximum,generation,channels,service) :
+        common_.begin(uid,channel,permission,gain,generation);
+  }
+  bool setGain(float value) { return legacy_ ? legacyHost_->setGain(value) : common_.setGain(value); }
+  VoiceMonitorStatus status() { return legacy_ ? legacyHost_->status() : common_.status(); }
+  VoiceMonitorResult end(uint64_t generation) { return legacy_ ? legacyHost_->end(generation) : common_.end(generation); }
+  void close() { if (legacy_) legacyHost_->close(); else common_.close(); }
+  void routeChanged() { if (legacy_) legacyHost_->routeChanged(); else common_.routeChanged(); }
+};
+// Construct only after the first explicit RPC; static teardown never orders
+// the common capture/service owners before this client.
+Monitor& monitorHost() { static auto* host = new Monitor; return *host; }
 std::string monitoredOutput;
 std::vector<uint32_t> monitoredChannels;
 NativeAudioOwnership* ownership=nullptr;
 VoiceMonitorEnvironmentLifetime environments;
-bool browserPlaying=false;
-std::string browserOutput;
-std::optional<std::string> selectedOutput, monitorOutput;
+
 std::string monitoredInput;
 uint32_t monitoredInputChannel=0;
 bool useAllowed() {
   bool supported=false;
   if (ownership) {
     // Recording and native playback (including training cues) coexist with
-    // the duplex monitor. Deny unknown future owners instead of assuming.
+    // the common monitor. Deny unknown future owners instead of assuming.
     switch (ownership->snapshot().kind) {
       case NativeAudioOwnerKind::None:
       case NativeAudioOwnerKind::Capture:
@@ -56,20 +97,14 @@ bool permissionGranted() {
   return reinterpret_cast<Query>(objc_msgSend)(reinterpret_cast<id>(device),
       sel_registerName("authorizationStatusForMediaType:"),reinterpret_cast<id>(AVMediaTypeAudio))==3;
 #else
-  return false;
+  return false; // Unsupported platforms never open a monitoring input.
 #endif
 }
-VoiceMonitorSongRoute currentRoute(const std::optional<std::string>& requestedMonitorOutput = monitorOutput) {
+VoiceMonitorSongRoute currentRoute() {
   auto& service=sharedAudioService();
-  const auto status=service.status();
-  const auto config=service.voiceMonitorOutputConfig(requestedMonitorOutput ? requestedMonitorOutput : selectedOutput, requestedMonitorOutput.has_value());
-  auto route=voiceMonitorSongRoute(config,service.providerId(),status,service.outputRouteGeneration(),service.playbackOutputCurrent());
-  // Unsupported providers are a platform refusal, never a browser mismatch.
-  if (service.providerId()!="coreaudio") { route.output.clear();route.channels.clear(); }
-  // With no song, opening the selected CoreAudio endpoint is sufficient.
-  route.native=!route.output.empty() &&
-      (requestedMonitorOutput || service.playbackOutputCurrent() || voiceMonitorBrowserOutputCompatible(browserPlaying,browserOutput,route.output));
-  return route;
+  const auto config=service.voiceMonitorOutputConfig();
+  return {config.outputDeviceUid, !config.outputDeviceUid.empty(), config.outputChannels,
+      service.status(), service.outputRouteGeneration()};
 }
 napi_value object(napi_env env) {napi_value o;napi_create_object(env,&o);return o;}
 void boolean(napi_env env,napi_value o,const char* key,bool b) {napi_value v;napi_get_boolean(env,b,&v);napi_set_named_property(env,o,key,v);}
@@ -85,16 +120,13 @@ void latency(napi_env env,napi_value o,const VoiceMonitorLatency& l) {
   number(env,v,"sampleRate",l.sampleRate);number(env,v,"requestedFrames",l.requestedFrames);
   number(env,v,"bufferFrames",l.bufferFrames);number(env,v,"inputDeviceFrames",l.inputDeviceFrames);
   number(env,v,"outputDeviceFrames",l.outputDeviceFrames);number(env,v,"roundTripFrames",static_cast<double>(l.roundTripFrames));
-  number(env,v,"roundTripMs",l.roundTripMs);text(env,v,"source","estimated");napi_set_named_property(env,o,"latency",v);
+  number(env,v,"roundTripMs",l.roundTripMs);number(env,v,"queueFrames",l.queueFrames);number(env,v,"inputBufferFrames",l.inputBufferFrames);number(env,v,"inputSampleRate",l.inputSampleRate);boolean(env,v,"delayed",l.delayed);text(env,v,"source","estimated");napi_set_named_property(env,o,"latency",v);
 }
 void outputs(napi_env env,napi_value o,const std::string& input,uint32_t channel,const std::string& output) {
-  const auto choices=voiceMonitorOutputChoices(sharedAudioService().inventory(),input,channel,output,
-#if defined(__APPLE__) && TARGET_OS_OSX
-      true
-#else
-      false
-#endif
-  );
+  (void)input; (void)channel;
+  VoiceMonitorOutputChoices choices;
+  for (const auto& device : sharedAudioService().inventory().devices)
+    if (device.uid==output && device.outputChannels) { choices.id=device.uid;choices.name=device.label; }
   napi_value resolved;
   if(choices.id.empty()) napi_get_null(env,&resolved);
   else { resolved=object(env);text(env,resolved,"id",choices.id);text(env,resolved,"name",choices.name); }
@@ -122,17 +154,6 @@ bool selection(napi_env env,napi_value o,std::string& uid,uint32_t& channel,bool
   uid.resize(length+1);if(napi_get_value_string_utf8(env,v,uid.data(),uid.size(),&length)!=napi_ok)return false;
   uid.resize(length);channel=static_cast<uint32_t>(n);return uid.find('\0')==std::string::npos;
 }
-bool outputSelection(napi_env env,napi_value arg,std::optional<std::string>& choice) {
-  napi_value value;napi_valuetype type;
-  if(napi_get_named_property(env,arg,"outputDeviceId",&value)!=napi_ok || napi_typeof(env,value,&type)!=napi_ok) return false;
-  if(type==napi_undefined || type==napi_null) { choice.reset();return true; }
-  size_t length=0;
-  if(type!=napi_string || napi_get_value_string_utf8(env,value,nullptr,0,&length)!=napi_ok || !length || length>4096) return false;
-  std::string uid(length+1,'\0');
-  if(napi_get_value_string_utf8(env,value,uid.data(),uid.size(),&length)!=napi_ok) return false;
-  uid.resize(length);if(uid.find('\0')!=std::string::npos)return false;
-  choice=std::move(uid);return true;
-}
 bool generation(napi_env env,napi_value v,uint64_t& g){bool exact=false;return napi_get_value_bigint_uint64(env,v,&g,&exact)==napi_ok && exact && g;}
 napi_value result(napi_env env,const VoiceMonitorResult& r) {
   auto o=object(env);boolean(env,o,"ok",r.ok);
@@ -143,15 +164,18 @@ napi_value result(napi_env env,const VoiceMonitorResult& r) {
 }
 napi_value availability(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);
-  std::string uid;uint32_t channel=0;std::optional<std::string> outputChoice;
+  std::string uid;uint32_t channel=0;
   bool contextOnly=false;
   napi_value contextFlag;
   if(argc==1 && napi_get_named_property(env,arg,"contextOnly",&contextFlag)==napi_ok)
     napi_get_value_bool(env,contextFlag,&contextOnly);
-  if(argc!=1 || (!contextOnly && (!selection(env,arg,uid,channel,true) || !outputSelection(env,arg,outputChoice)))) {
+  if(argc!=1 || (!contextOnly && !selection(env,arg,uid,channel,true))) {
     auto o=object(env);boolean(env,o,"available",false);text(env,o,"reason","error");text(env,o,"detail","Invalid input selection");return o;
   }
   std::lock_guard lock(control);
+  if (!monitorPlatformSupported()) {
+    auto o=object(env);boolean(env,o,"available",false);text(env,o,"reason","platform");return o;
+  }
   if(contextOnly) {
     napi_value value;size_t length=0;bool playing=false;
     auto readUid=[&](const char* key,std::string& target) {
@@ -165,41 +189,43 @@ napi_value availability(napi_env env,napi_callback_info info) {
     if(napi_get_named_property(env,arg,"webAudioPlaying",&value)!=napi_ok ||
         napi_get_value_bool(env,value,&playing)!=napi_ok || !readUid("browserOutputUid",browser) ||
         !readUid("selectedOutputUid",selected)) return error(env,"Invalid playback context");
-    browserPlaying=playing;browserOutput=std::move(browser);selectedOutput=std::move(selected);
-    const auto route=currentRoute();
-    AudioHostConfig output;output.outputDeviceUid=route.output;output.outputChannels=route.channels;
-    if(!monitoredOutput.empty() && !voiceMonitorSameOutput(monitoredOutput,monitoredChannels,output,route.native)) {
-      host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();
-    }
+    // Context publication never selects a monitor output. The app route RPC
+    // owns output changes, and the common client observes its generation.
+    (void)playing; (void)browser; (void)selected;
+    monitorHost().status();
     auto o=object(env);boolean(env,o,"available",true);return o;
   }
-  const auto route=currentRoute(outputChoice);
+  const auto route=currentRoute();
   if(!useAllowed()) {
     auto o=object(env);boolean(env,o,"available",false);text(env,o,"reason","error");
-    text(env,o,"detail","Audio input is busy or unsupported");outputs(env,o,uid,channel,outputChoice ? *outputChoice : route.output);return o;
+    text(env,o,"detail","Audio input is busy or unsupported");outputs(env,o,uid,channel,route.output);return o;
   }
-  const auto r=host.availability(uid,channel,route.output,route.native,permissionGranted());
+  const auto r=monitorHost().availability(uid,channel,route.output,route.native,permissionGranted());
   auto o=object(env);boolean(env,o,"available",r.available);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
   if(!r.detail.empty())text(env,o,"detail",r.detail);
   if(!r.deviceUid.empty())text(env,o,"deviceUid",r.deviceUid);
   if(r.minBufferFrames)number(env,o,"minBufferFrames",r.minBufferFrames);
   if(r.maxBufferFrames)number(env,o,"maxBufferFrames",r.maxBufferFrames);
-  outputs(env,o,uid,channel,outputChoice ? *outputChoice : route.output);
+  outputs(env,o,uid,channel,route.output);
   return o;
 }
 napi_value begin(napi_env env,napi_callback_info info) {
   size_t argc=2;napi_value args[2]{};napi_get_cb_info(env,info,&argc,args,nullptr,nullptr);
-  std::string uid;uint32_t channel=0;std::optional<std::string> outputChoice;uint64_t g=0;double gain=0,target=0,maximum=0;
-  if(argc!=2 || !selection(env,args[0],uid,channel) || !outputSelection(env,args[0],outputChoice) || !generation(env,args[1],g) ||
+  std::string uid;uint32_t channel=0;uint64_t g=0;double gain=0,target=0,maximum=0;
+  if(argc!=2 || !selection(env,args[0],uid,channel) || !generation(env,args[1],g) ||
       !scalar(env,args[0],"gainDb",gain) || !scalar(env,args[0],"targetFrames",target) ||
       !scalar(env,args[0],"maxFrames",maximum) || target!=32 || maximum!=256)return error(env,"Invalid monitor configuration or generation");
+  if (!monitorPlatformSupported()) {
+    VoiceMonitorResult unavailable; unavailable.reason="platform";
+    unavailable.error="Live monitoring is available on macOS"; return result(env,unavailable);
+  }
   std::lock_guard lock(control);
   if(!useAllowed())return error(env,"Audio input is busy or unsupported");
-  const auto route=currentRoute(outputChoice);
-  auto r=host.begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,double(kVoiceMonitorGainMinDb),double(kVoiceMonitorGainMaxDb))),32,256,g,route.channels,&sharedAudioService());
-  if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;monitorOutput=outputChoice;monitoredInput=uid;monitoredInputChannel=channel;}
-  auto o=result(env,r);outputs(env,o,uid,channel,outputChoice ? *outputChoice : route.output);return o;
+  const auto route=currentRoute();
+  auto r=monitorHost().begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,double(kVoiceMonitorGainMinDb),double(kVoiceMonitorGainMaxDb))),32,256,g,route.channels,&sharedAudioService());
+  if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;monitoredInput=uid;monitoredInputChannel=channel;}
+  auto o=result(env,r);outputs(env,o,uid,channel,route.output);return o;
 }
 napi_value outputCurrent(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};bool current=false;
@@ -213,20 +239,13 @@ napi_value gain(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);double gain=0;
   if(argc!=1 || napi_get_value_double(env,arg,&gain)!=napi_ok || !std::isfinite(gain)){auto o=object(env);boolean(env,o,"ok",false);return o;}
   std::lock_guard lock(control);auto o=object(env);
-  boolean(env,o,"ok",host.setGain(static_cast<float>(std::clamp(gain,double(kVoiceMonitorGainMinDb),double(kVoiceMonitorGainMaxDb)))));return o;
+  boolean(env,o,"ok",monitorHost().setGain(static_cast<float>(std::clamp(gain,double(kVoiceMonitorGainMinDb),double(kVoiceMonitorGainMaxDb)))));return o;
 }
 napi_value status(napi_env env,napi_callback_info) {
   std::lock_guard lock(control);
   const auto route=currentRoute();
-  AudioHostConfig output;output.outputDeviceUid=route.output;output.outputChannels=route.channels;
-  if(!monitoredOutput.empty()) {
-    if(!voiceMonitorSameOutput(monitoredOutput,monitoredChannels,output,route.native)) {
-      host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();
-    } else if(!useAllowed()) {
-      host.close();monitoredOutput.clear();monitoredChannels.clear();
-    }
-  }
-  const auto r=host.status();auto o=object(env);boolean(env,o,"running",r.running);boolean(env,o,"lost",r.lost);
+  if(!useAllowed()) { monitorHost().close();monitoredOutput.clear();monitoredChannels.clear(); }
+  const auto r=monitorHost().status();auto o=object(env);boolean(env,o,"running",r.running);boolean(env,o,"lost",r.lost);
   if(r.running)latency(env,o,r.latency);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
   text(env,o,"outputDeviceUid",monitoredOutput);
@@ -258,12 +277,12 @@ napi_value status(napi_env env,napi_callback_info) {
 napi_value end(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);uint64_t g=0;
   if(argc!=1 || !generation(env,arg,g)){auto o=object(env);boolean(env,o,"ok",false);return o;}
-  std::lock_guard lock(control);auto r=host.end(g);if(r.ok){monitoredOutput.clear();monitoredChannels.clear();}
+  std::lock_guard lock(control);auto r=monitorHost().end(g);if(r.ok){monitoredOutput.clear();monitoredChannels.clear();}
   auto o=object(env);boolean(env,o,"ok",r.ok);warnings(env,o,r.warnings);return o;
 }
 template<napi_callback Callback> napi_value exceptionResult(napi_env env,const char* message) {
   if constexpr(Callback==begin || Callback==status) {
-    std::lock_guard lock(control);host.close();monitoredOutput.clear();monitoredChannels.clear();
+    std::lock_guard lock(control);monitorHost().close();monitoredOutput.clear();monitoredChannels.clear();
   }
   auto o=object(env);
   if constexpr(Callback==availability) {
@@ -300,8 +319,8 @@ void defineVoiceMonitorExports(napi_env env,napi_value exports,NativeAudioOwners
 bool cleanupVoiceMonitor() noexcept {
   std::lock_guard lock(control);
   if(!environments.detach())return false;
-  host.close();monitoredOutput.clear();monitoredChannels.clear();ownership=nullptr;
-  browserPlaying=false;browserOutput.clear();selectedOutput.reset();monitorOutput.reset();monitoredInput.clear();
+  monitorHost().close();monitoredOutput.clear();monitoredChannels.clear();ownership=nullptr;
+  monitoredInput.clear();
   return true;
 }
 }

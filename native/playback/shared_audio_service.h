@@ -23,8 +23,19 @@ struct ServiceMasterMeterSnapshot {
 };
 struct ServiceMasterMeter {
   static_assert(std::atomic<uint64_t>::is_always_lock_free);
+  static_assert(std::atomic<std::atomic<float>*>::is_always_lock_free);
+  static_assert(std::atomic<std::atomic<uint32_t>*>::is_always_lock_free);
   std::atomic<float> peak{0}, rms{0};
   std::atomic<uint64_t> clippedBlocks{0}, callbacks{0}, resetEpoch{0};
+  // Registered by the admitted song callback; cleared before every bus block.
+  // The service holds that client's gate until these publications complete.
+  std::atomic<std::atomic<float>*> songPeak{nullptr}, songRms{nullptr};
+  std::atomic<std::atomic<uint32_t>*> songClips{nullptr};
+  void clearSongTargets() noexcept {
+    songPeak.store(nullptr, std::memory_order_relaxed);
+    songRms.store(nullptr, std::memory_order_relaxed);
+    songClips.store(nullptr, std::memory_order_relaxed);
+  }
   ServiceMasterMeterSnapshot snapshot() const noexcept {
     const auto blocks = callbacks.load(std::memory_order_acquire);
     return {peak.load(std::memory_order_relaxed), rms.load(std::memory_order_relaxed),
@@ -89,6 +100,14 @@ struct ServiceMasterStage {
     if (clipped && count != UINT64_MAX)
       meter.clippedBlocks.store(count + 1, std::memory_order_relaxed);
     meter.callbacks.fetch_add(1, std::memory_order_release);
+    if (auto* value = meter.songPeak.load(std::memory_order_relaxed))
+      value->store(heldPeak, std::memory_order_relaxed);
+    if (auto* value = meter.songRms.load(std::memory_order_relaxed))
+      value->store(meter.rms.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    if (auto* value = meter.songClips.load(std::memory_order_relaxed)) {
+      const auto previous = value->load(std::memory_order_relaxed);
+      if (clipped && previous != UINT32_MAX) value->store(previous + 1, std::memory_order_relaxed);
+    }
   }
 };
 // SINGZ_SERVICE_MASTER_RT_END
@@ -120,6 +139,9 @@ class SharedAudioService final {
   // Additive microphone client sees song plus training and preserves that PCM.
   void setMicrophoneRenderer(AudioHostRender render, void* context);
   void clearMicrophoneRenderer();
+  // Additive live voice, independent of song/lane lifetime; drained on detach.
+  void setVoiceMonitorRenderer(AudioHostRender render, void* context);
+  void clearVoiceMonitorRenderer();
   // Linear 0..4, ramped over 128 frames after ALL additive clients. Available
   // without a song; rejects invalid values without changing the target.
   bool setMasterGain(float gain) noexcept;

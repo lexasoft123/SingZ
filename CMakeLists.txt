@@ -370,6 +370,32 @@ target_link_libraries(singz_voice_monitor_source PUBLIC zCore::routing SingZ::zc
 set_target_properties(singz_voice_monitor_source PROPERTIES POSITION_INDEPENDENT_CODE YES)
 add_dependencies(singz_voice_monitor_source singz_check_voice_monitor_source_realtime singz_voice_monitor_source_rt)
 
+# Common history monitor: strict callback compilation plus transitive source policy.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/voice_monitor_client.h native/playback/shared_audio_service.cpp)
+file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor_client.h" _monitor_client_header)
+string(REGEX MATCH "// SINGZ_MONITOR_CLIENT_RT_BEGIN[^@]*// SINGZ_MONITOR_CLIENT_RT_END" _monitor_client_rt "${_monitor_client_header}")
+if(NOT _monitor_client_rt)
+  message(FATAL_ERROR "Common monitor RT markers are missing")
+endif()
+set(_monitor_client_leaf "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-client-rt.cpp")
+file(WRITE "${_monitor_client_leaf}" "#include \"${SINGZ_REPO_ROOT}/native/playback/voice_monitor_client.h\"\n")
+set(_monitor_client_scan "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-client-rt.txt")
+file(WRITE "${_monitor_client_scan}" "${_monitor_client_rt}")
+set(_monitor_client_manifest "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-client-realtime.cmake")
+file(WRITE "${_monitor_client_manifest}" "set(SINGZ_ZDSP_RT_FILES [==[${_monitor_client_scan}]==])\n")
+add_library(singz_voice_monitor_client_rt OBJECT "${_monitor_client_leaf}")
+target_compile_features(singz_voice_monitor_client_rt PRIVATE cxx_std_20)
+target_link_libraries(singz_voice_monitor_client_rt PRIVATE singz_voice_monitor_source)
+singz_configure_realtime_target(singz_voice_monitor_client_rt)
+add_custom_target(singz_check_voice_monitor_client_realtime
+  COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${_monitor_client_manifest}"
+    -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake" VERBATIM)
+add_library(singz_voice_monitor_client STATIC native/playback/voice_monitor_client.cpp)
+target_compile_features(singz_voice_monitor_client PUBLIC cxx_std_20)
+target_link_libraries(singz_voice_monitor_client PUBLIC singz_voice_monitor_source)
+set_target_properties(singz_voice_monitor_client PROPERTIES POSITION_INDEPENDENT_CODE YES)
+add_dependencies(singz_voice_monitor_client singz_voice_monitor_client_rt singz_check_voice_monitor_client_realtime)
+
 add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/record_placement.cpp
   native/playback/record_placement.h
@@ -466,6 +492,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     singz_microphone_mix
     singz_voice_monitor_source
     singz_voice_monitor
+    singz_voice_monitor_client
     SingZ::native_playback_session
     singz_native_audio_ownership)
   if(SINGZ_BOX_LOOPZ_ROUTING)
@@ -1095,6 +1122,75 @@ if(SINGZ_CORE_TESTS)
       -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
   set_tests_properties(voice_monitor_realtime_policy_negative PROPERTIES WILL_FAIL TRUE)
 
+  add_executable(voice_monitor_client_tests tests/native/voice_monitor_client_tests.cpp native/playback/shared_audio_service.cpp
+    "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(voice_monitor_client_tests PRIVATE cxx_std_20)
+  target_include_directories(voice_monitor_client_tests PRIVATE "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(voice_monitor_client_tests PRIVATE singz_voice_monitor_client)
+  add_test(NAME voice_monitor_client_tests COMMAND voice_monitor_client_tests)
+  add_test(NAME voice_monitor_client_realtime_source_policy COMMAND "${CMAKE_COMMAND}"
+    "-DSINGZ_ZDSP_RT_MANIFEST=${_monitor_client_manifest}" -DSINGZ_ZDSP_RT_PROFILE=monitor
+    -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
+
+  file(READ "${SINGZ_REPO_ROOT}/native/playback/shared_audio_service.cpp" _client_service)
+  string(REPLACE "    self.master.process(block);\n" "" _client_after_master "${_client_service}")
+  if(_client_after_master STREQUAL _client_service)
+    message(FATAL_ERROR "Common monitor after-master mutant did not remove the final master")
+  endif()
+  set(_client_before_monitor "${_client_after_master}")
+  string(REPLACE "      AudioInputCallbackScope scope(self.monitor.gate);"
+    "      self.master.process(block);\n      AudioInputCallbackScope scope(self.monitor.gate);"
+    _client_after_master "${_client_after_master}")
+  if(_client_after_master STREQUAL _client_before_monitor)
+    message(FATAL_ERROR "Common monitor after-master mutant did not insert a master before voice")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/monitor-after-master.cpp" "${_client_after_master}")
+  add_executable(voice_monitor_client_negative_after_master tests/native/voice_monitor_client_tests.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/monitor-after-master.cpp" "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(voice_monitor_client_negative_after_master PRIVATE cxx_std_20)
+  target_include_directories(voice_monitor_client_negative_after_master PRIVATE
+    "${ZCORE_ROOT}/zdsp/tests" "${SINGZ_REPO_ROOT}/native/playback")
+  target_link_libraries(voice_monitor_client_negative_after_master PRIVATE singz_voice_monitor_client)
+  add_dependencies(voice_monitor_client_tests voice_monitor_client_negative_after_master)
+  add_test(NAME voice_monitor_client_negative_after_master COMMAND voice_monitor_client_negative_after_master)
+  set_tests_properties(voice_monitor_client_negative_after_master PROPERTIES WILL_FAIL TRUE)
+  string(REPLACE "    if (training.render || microphone.render) return;\n" ""
+    _client_early_handback "${_client_service}")
+  if(_client_early_handback STREQUAL _client_service)
+    message(FATAL_ERROR "Common monitor cue-handback mutant no longer changes source")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/monitor-early-handback.cpp" "${_client_early_handback}")
+  add_executable(voice_monitor_client_negative_cue_handback tests/native/voice_monitor_client_tests.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/monitor-early-handback.cpp" "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(voice_monitor_client_negative_cue_handback PRIVATE cxx_std_20)
+  target_include_directories(voice_monitor_client_negative_cue_handback PRIVATE
+    "${ZCORE_ROOT}/zdsp/tests" "${SINGZ_REPO_ROOT}/native/playback")
+  target_link_libraries(voice_monitor_client_negative_cue_handback PRIVATE singz_voice_monitor_client)
+  add_dependencies(voice_monitor_client_tests voice_monitor_client_negative_cue_handback)
+  add_test(NAME voice_monitor_client_negative_cue_handback COMMAND voice_monitor_client_negative_cue_handback)
+  set_tests_properties(voice_monitor_client_negative_cue_handback PROPERTIES WILL_FAIL TRUE)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/monitor-client-forbidden.txt" "${_monitor_client_rt}\nstd::mutex forbidden;\n")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/monitor-client-forbidden.cmake"
+    "set(SINGZ_ZDSP_RT_FILES [==[${CMAKE_CURRENT_BINARY_DIR}/monitor-client-forbidden.txt]==])\n")
+  add_test(NAME voice_monitor_client_negative_rt COMMAND "${CMAKE_COMMAND}"
+    "-DSINGZ_ZDSP_RT_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/monitor-client-forbidden.cmake"
+    -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
+  set_tests_properties(voice_monitor_client_negative_rt PROPERTIES WILL_FAIL TRUE)
+
+  add_executable(voice_monitor_client_clock_tests tests/native/voice_monitor_client_clock_tests.cpp)
+  target_compile_features(voice_monitor_client_clock_tests PRIVATE cxx_std_20)
+  target_link_libraries(voice_monitor_client_clock_tests PRIVATE singz_voice_monitor_client)
+  add_test(NAME voice_monitor_client_clock_tests COMMAND voice_monitor_client_clock_tests)
+  add_test(NAME voice_monitor_client_negative_clock COMMAND voice_monitor_client_clock_tests negative)
+  set_tests_properties(voice_monitor_client_negative_clock PROPERTIES WILL_FAIL TRUE)
+  set_tests_properties(voice_monitor_client_clock_tests PROPERTIES TIMEOUT 240)
+  # Four ten-minute clock cases run in optimized Release. Instrumented builds
+  # exercise the same clock/callback paths for ten virtual seconds per case.
+  if(CMAKE_CXX_FLAGS MATCHES "-fsanitize")
+    set_tests_properties(voice_monitor_client_clock_tests voice_monitor_client_negative_clock
+      PROPERTIES ENVIRONMENT "SINGZ_MONITOR_CLOCK_SECONDS=10")
+  endif()
+
   add_executable(shared_audio_service_tests
     native/playback/shared_audio_service.cpp
     tests/native/shared_audio_service_tests.cpp)
@@ -1172,6 +1268,28 @@ if(SINGZ_CORE_TESTS)
     COMMAND native_playback_session_tests)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/native_playback_session.cpp)
   file(READ "${SINGZ_REPO_ROOT}/native/playback/native_playback_session.cpp" _reanchor_source)
+  string(REPLACE "// No graph means no per-generation clipping window.\n    result.outputClippedBlocks = 0;"
+    "result.outputClippedBlocks = static_cast<uint32_t>(std::min<uint64_t>(meter.clippedBlocks, UINT32_MAX));"
+    _idle_clip_mutant "${_reanchor_source}")
+  string(REPLACE "return {true, 0, meter.peak, 0, meter.rms};"
+    "return {true, 0, meter.peak, static_cast<uint32_t>(std::min<uint64_t>(meter.clippedBlocks, UINT32_MAX)), meter.rms};"
+    _idle_clip_mutant "${_idle_clip_mutant}")
+  if(_idle_clip_mutant STREQUAL _reanchor_source)
+    message(FATAL_ERROR "Service idle clip counter negative control needs updating")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/native-playback-idle-clips.cpp" "${_idle_clip_mutant}")
+  add_executable(service_master_negative_idle_clips tests/native/native_playback_session_tests.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/native-playback-idle-clips.cpp" "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(service_master_negative_idle_clips PRIVATE cxx_std_20)
+  target_include_directories(service_master_negative_idle_clips PRIVATE
+    "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback" "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(service_master_negative_idle_clips PRIVATE SingZ::native_playback_session)
+  add_dependencies(native_playback_session_tests service_master_negative_idle_clips)
+  add_test(NAME service_master_idle_clips COMMAND "${CMAKE_COMMAND}" -E env
+    SINGZ_SERVICE_MASTER_IDLE_REGRESSION_ONLY=1 $<TARGET_FILE:native_playback_session_tests>)
+  add_test(NAME service_master_negative_idle_clips COMMAND "${Python3_EXECUTABLE}" -c
+    "import os,subprocess,sys; p=subprocess.run([r'$<TARGET_FILE:service_master_negative_idle_clips>'],env=dict(os.environ,SINGZ_SERVICE_MASTER_IDLE_REGRESSION_ONLY='1'),capture_output=True,text=True); print(p.stdout+p.stderr); sys.exit(1 if p.returncode != 0 and 'song clip window ended' in p.stderr else 0)")
+  set_tests_properties(service_master_negative_idle_clips PROPERTIES WILL_FAIL TRUE)
   string(REPLACE "if (rendering->serviceOwnsMasterGain) {" "if (false && rendering->serviceOwnsMasterGain) {"
     _master_meter_mutant "${_reanchor_source}")
   string(REPLACE "if (graph != nullptr && graph->serviceOwnsMasterGain)"
@@ -1719,4 +1837,9 @@ endif()
 
 if(TARGET voice_monitor_tests AND TARGET voice_monitor_source_tests)
   add_dependencies(voice_monitor_tests voice_monitor_source_tests)
+endif()
+
+# Canonical monitor preset target builds every common-client test it selects.
+if(TARGET voice_monitor_tests AND TARGET voice_monitor_client_tests AND TARGET voice_monitor_client_clock_tests)
+  add_dependencies(voice_monitor_tests voice_monitor_client_tests voice_monitor_client_clock_tests)
 endif()

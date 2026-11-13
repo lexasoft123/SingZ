@@ -326,13 +326,20 @@ factor. After song, training and microphone clients sum, the service applies a
 128-frame linear master ramp followed by an in-place -1 dBFS hard ceiling.
 For service-owned masters, `outputPeak`, `outputClippedBlocks` and output RMS
 come from this final shared bus, including cues and microphone clients: peak
-and RMS are post-ceiling, and a callback counts as clipped only if its post-gain
-signal exceeds the ceiling. Peak keeps the existing 20 dB/s release. Polling
+and RMS are post-ceiling (peak caps at -1 dBFS), and a callback counts as clipped
+only if its post-gain signal is `> ceiling`; equality is not clipping (the old
+graph detection used `>=`). Peak keeps the existing 20 dB/s release. Polling
 never consumes the saturating clip count; each graph starts a fresh count on
 its first rendered block (including a swap landing), while pause, seek and
 reopening that same graph retain it. Preparing a candidate does not reset the
-active meter. With no song, the desktop status reports the service peak and
-its lifetime clip count. Non-service products retain their graph meter.
+active meter. The final pass publishes only into the graph admitted in that
+callback, whose gate remains held through publication. Confirmed stop freezes
+that graph's count; subsequent idle callbacks cannot alter it, and reopening
+the same graph resumes counting without importing intervening idle clips.
+With no graph, the per-generation status/getter and desktop RPC
+keep the idle service peak/RMS but report zero clipped blocks. The service's
+lifetime total remains internal diagnostics and never enters the song clip
+indicator. Non-service products retain their graph meter.
 This stage has no lookahead, storage delay or effect on graph/output latency,
 callback timestamps, presentation history or take placement. The legacy second
 monitor host remains outside this stage until the common-host migration lands.

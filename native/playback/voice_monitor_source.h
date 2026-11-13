@@ -97,6 +97,8 @@ class VoiceMonitorCapture {
   ~VoiceMonitorCapture();
   VoiceMonitorCapture(const VoiceMonitorCapture&) = delete;
   VoiceMonitorCapture& operator=(const VoiceMonitorCapture&) = delete;
+  // Active-route joins preserve its opening buffer policy; only device,
+  // channel and delivery-ring identity must match, so toggles cannot retune takes.
   AudioInputResult retain(VoiceCaptureUser, const AudioInputConfig&,
       AudioInputSink = {}, const std::vector<AudioInputDevice>* inventory = nullptr);
   bool retainExisting(VoiceCaptureUser);

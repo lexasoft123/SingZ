@@ -1142,7 +1142,7 @@ export class MultitrackEngine {
     this.emit()
   }
 
-  /** Peak before the native safety limiter, or at the Web Audio output. */
+  /** Final service peak for native playback, or the Web Audio output peak. */
   readOutputPeak(): { peak: number; clipped: boolean; clipCount?: number } {
     if (this.nativePlayback?.active) {
       const status = this.nativePlayback.status
