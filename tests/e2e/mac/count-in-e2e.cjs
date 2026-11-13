@@ -187,7 +187,13 @@ const SLACK = 0.5
 
 const val = (win, expr) => win.evaluate(`(${expr})`)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-const logSince = async (win, fromMs) => (await val(win, 'window.singz.getLog()')).filter((x) => x.t >= fromMs)
+// The driver stamps `fromMs` with its own Date.now() just before it presses a
+// button, and the main process logs the resulting graph build 0-13 ms later; on
+// Windows the two clocks differ by one ~15 ms tick, so a build stamped just
+// before the window was silently dropped. Open the window 50 ms early (every
+// step before a press sleeps far longer than that).
+const LOG_WINDOW_MARGIN_MS = 50
+const logSince = async (win, fromMs) => (await val(win, 'window.singz.getLog()')).filter((x) => x.t >= fromMs - LOG_WINDOW_MARGIN_MS)
 const dspComplaints = (lines) =>
   lines
     .filter((x) => x.source === 'dsp' && (x.level === 'warn' || x.level === 'error'))
