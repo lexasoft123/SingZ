@@ -78,7 +78,7 @@ ready.then(async () => {
   for (const name of [
     'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats',
     'recordTake', 'finishTake', 'cancelTake',
-    'voiceMonitorAvailability', 'beginVoiceMonitor', 'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor',
+    'voiceMonitorAvailability', 'beginVoiceMonitor', 'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor', 'setPlaybackOutputCurrent',
     'audioHostDevices',
     'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
     'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',
@@ -172,6 +172,14 @@ ready.then(async () => {
   assert.equal(typeof voiceMonitor.songProcessBufferFrames, 'number')
   assert.equal(typeof voiceMonitor.songObservedCallbackFrames, 'number')
   assert.equal(typeof voiceMonitor.monitorObservedCallbackFrames, 'number')
+  assert.equal(voiceMonitor.songOutputCurrent, false)
+  for (const field of ['callbacks', 'deliveredFrames', 'periodChanges', 'sequenceGaps',
+    'timestampChanges', 'clockChanges', 'routeChanges', 'positiveSampleGapFrames', 'sampleRegressions',
+    'maxCallbackExcessNs', 'maxOutputExcessNs', 'periodOutputExcessNs', 'lastFlags', 'lastFrames'])
+    assert.match(voiceMonitor.songCallbackDiagnostics[field], /^(?:0|[1-9][0-9]*)$/)
+  assert.equal(addon.setPlaybackOutputCurrent(true).ok, false)
+  assert.equal(addon.setPlaybackOutputCurrent('false').ok, false)
+  assert.equal(addon.setPlaybackOutputCurrent(false).ok, true)
   const voiceInput = { inputUid: 'smoke:never-opened', inputChannel: 0 }
   const voiceAvailability = addon.voiceMonitorAvailability(voiceInput)
   assert.equal(voiceAvailability.available, false)

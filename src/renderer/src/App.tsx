@@ -1135,6 +1135,10 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     localStorage.setItem('singz.audio', JSON.stringify(audioPrefs))
     localStorage.setItem('singz.desktop.native-playback', audioPrefs.nativePlayback ? '1' : '0')
+    if (detectedDesktopPlatform() === 'darwin' && audioPrefs.nativePlayback === false)
+      void window.singz?.setDesktopPlaybackNativeOutputCurrent?.(false).catch(() => {
+        console.error('Native output state update failed')
+      })
   }, [audioPrefs])
 
   // AudioPrefs is the provider source of truth. Inject it before browser

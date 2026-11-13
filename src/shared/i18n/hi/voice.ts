@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "फ़ेडर: आवाज़ का स्तर। मॉनिटर स्तर बदलने के लिए क्लिक करें",
   'player.voice.faderToVoice': "फ़ेडर: मॉनिटर स्तर। आवाज़ का स्तर बदलने के लिए क्लिक करें",
   'player.voice.monitorHint': "फ़ीडबैक से बचने के लिए हेडफ़ोन का इस्तेमाल करें",
+  'player.voice.monitorOtherInput': "रिकॉर्डिंग के दौरान मॉनिटरिंग रिकॉर्डिंग वाले इनपुट का इस्तेमाल करती है। दूसरा इनपुट मॉनिटर करने के लिए रिकॉर्डिंग रोकें।",
   'player.voice.monitorLevel': "मॉनिटर स्तर",
   'player.voice.monitorWarning': "मॉनिटरिंग नोट: {text}",
   'player.voice.msgMonitoring': "मॉनिटरिंग चालू है। आप खुद को लाइव सुन रहे हैं।",

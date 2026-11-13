@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "Fader: volumen de la voz. Haz clic para ajustar el volumen del monitoreo",
   'player.voice.faderToVoice': "Fader: volumen del monitoreo. Haz clic para ajustar el volumen de la voz",
   'player.voice.monitorHint': "Usa audífonos para evitar el acople",
+  'player.voice.monitorOtherInput': "Durante la grabación, el monitoreo usa la entrada de la toma. Detén la toma para monitorear otra entrada.",
   'player.voice.monitorLevel': "Volumen del monitoreo",
   'player.voice.monitorWarning': "Nota del monitoreo: {text}",
   'player.voice.msgMonitoring': "Monitoreo activado. Te escuchas en vivo.",

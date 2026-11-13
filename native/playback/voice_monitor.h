@@ -112,10 +112,10 @@ struct VoiceMonitorSongRoute {
   uint64_t generation{0};
 };
 inline VoiceMonitorSongRoute voiceMonitorSongRoute(const AudioHostConfig& config,
-    const std::string& provider, const AudioHostStatus& status, uint64_t generation) {
+    const std::string& provider, const AudioHostStatus& status, uint64_t generation, bool currentSongOutput) {
   // Status/generations are retained for diagnostics only. Unit teardown and
   // re-prepare do not change the selected native provider/UID/channel map.
-  return {config.outputDeviceUid,provider=="coreaudio" && !config.outputDeviceUid.empty(),
+  return {config.outputDeviceUid,currentSongOutput && provider=="coreaudio" && !config.outputDeviceUid.empty(),
       config.outputChannels,status,generation};
 }
 // Host Open/Running/Stopped states and stream generations are lifecycle facts,

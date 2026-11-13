@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "Fader: antas ng boses. I-click para antas ng monitor ang i-adjust",
   'player.voice.faderToVoice': "Fader: antas ng monitor. I-click para antas ng boses ang i-adjust",
   'player.voice.monitorHint': "Gumamit ng headphones para maiwasan ang feedback",
+  'player.voice.monitorOtherInput': "Habang nagre-record, ang input ng take ang gamit ng monitoring. Itigil ang take para mag-monitor ng ibang input.",
   'player.voice.monitorLevel': "Antas ng monitor",
   'player.voice.monitorWarning': "Tala sa monitoring: {text}",
   'player.voice.msgMonitoring': "Naka-on ang monitoring. Naririnig mo ang sarili mo nang live.",

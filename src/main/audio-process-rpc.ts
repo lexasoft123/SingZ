@@ -15,7 +15,7 @@ export const AUDIO_OWNER_METHODS: ReadonlySet<string> = new Set([
   'preparePlayback', 'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback',
   'seekPlayback', 'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
   'setPlaybackMasterGain', 'playbackStatus', 'measurePlaybackLanes', 'unloadPlayback', 'begin', 'cancel',
-  'rendererGone', 'rendererDetached', 'state', 'stats'
+  'rendererGone', 'rendererDetached', 'state', 'stats', 'setPlaybackOutputCurrent'
 ])
 export const AUDIO_BINDING_METHODS: ReadonlySet<string> = new Set([
   'initializeSharedAudio', 'refreshSharedAudioInventory', 'inputDevices', 'beginCapture', 'cancelCapture',

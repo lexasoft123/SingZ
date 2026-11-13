@@ -1516,6 +1516,7 @@ export interface SingzApi {
     gain: number
   ): Promise<DesktopPlaybackResult>
   desktopPlaybackStatus(): Promise<DesktopPlaybackStatus>
+  setDesktopPlaybackNativeOutputCurrent?(current: boolean): Promise<{ ok: boolean; error?: string }>
   unloadDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
   /** The open's lane measure: header, peaks, envelope and RMS off the stem
    *  files, so a song native playback will play is never decoded through

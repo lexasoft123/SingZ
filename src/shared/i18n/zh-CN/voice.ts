@@ -31,6 +31,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': '推子：声音音量。点击改为调节监听音量',
   'player.voice.faderToVoice': '推子：监听音量。点击改为调节声音音量',
   'player.voice.monitorHint': '请戴耳机，以免产生啸叫',
+  'player.voice.monitorOtherInput': '录音时监听使用录音所用的输入。请先停止录音，再监听其他输入。',
   'player.voice.monitorLevel': '监听音量',
   'player.voice.monitorWarning': '监听提示：{text}',
   'player.voice.msgMonitoring': '监听已开启。你可以实时听到自己。',

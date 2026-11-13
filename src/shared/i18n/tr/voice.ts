@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "Fader: ses düzeyi. İzleme düzeyini ayarlamak için tıklayın",
   'player.voice.faderToVoice': "Fader: izleme düzeyi. Ses düzeyini ayarlamak için tıklayın",
   'player.voice.monitorHint': "Geri besleme olmaması için kulaklık kullanın",
+  'player.voice.monitorOtherInput': "Kayıt sırasında izleme, kaydın girişini kullanır. Başka bir girişi izlemek için kaydı durdurun.",
   'player.voice.monitorLevel': "İzleme düzeyi",
   'player.voice.monitorWarning': "İzleme notu: {text}",
   'player.voice.msgMonitoring': "İzleme açık. Kendinizi canlı duyuyorsunuz.",

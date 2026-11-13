@@ -866,6 +866,8 @@ struct NativePlaybackTestHooks {
   uint64_t timePitchPrimeNs{0};
   // Test-only slow/blocked streaming decoder, called on the staging thread.
   void (*beforeStreamingStageDecode)(void*) noexcept {nullptr};
+  // Deterministic callback progress during off-RT recovery priming.
+  void (*afterReanchorPrime)(void*) noexcept {nullptr};
 };
 
 // Reusable ordinary-thread composition owner. It accepts only already-opened

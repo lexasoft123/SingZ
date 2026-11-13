@@ -31,6 +31,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': 'Фейдер: громкость голоса. Нажмите, чтобы настроить громкость прослушивания',
   'player.voice.faderToVoice': 'Фейдер: громкость прослушивания. Нажмите, чтобы настроить громкость голоса',
   'player.voice.monitorHint': 'Используйте наушники, чтобы избежать обратной связи',
+  'player.voice.monitorOtherInput': 'Во время записи прослушивание использует вход дубля. Остановите запись, чтобы слушать другой вход.',
   'player.voice.monitorLevel': 'Громкость прослушивания',
   'player.voice.monitorWarning': 'Заметка о прослушивании: {text}',
   'player.voice.msgMonitoring': 'Прослушивание включено. Вы слышите себя сразу.',

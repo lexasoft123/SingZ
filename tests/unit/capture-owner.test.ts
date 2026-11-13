@@ -226,6 +226,7 @@ function fakeBinding(): NativeCaptureBinding & {
     beginVoiceMonitor: async () => ({ ok: false, reason: 'platform' }),
     setVoiceMonitorGain: async () => ({ ok: false }),
     voiceMonitorStatus: async () => ({ running: false }),
+    setPlaybackOutputCurrent: vi.fn(() => ({ ok: true })),
     endVoiceMonitor: async () => ({ ok: true }),
     inputDevices: () => ({
       ok: true,
@@ -1244,7 +1245,7 @@ describe('streamed-lane starvation', () => {
 
 describe('voice monitor addon identity', () => {
   it('rejects each missing monitor export', () => {
-    const methods = ['voiceMonitorAvailability', 'beginVoiceMonitor', 'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor'] as const
+    const methods = ['voiceMonitorAvailability', 'beginVoiceMonitor', 'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor', 'setPlaybackOutputCurrent'] as const
     for (const method of methods) {
       const binding = fakeBinding()
       const stale = { ...binding, [method]: undefined }
@@ -1279,5 +1280,29 @@ describe('one process-wide native capture binding', () => {
     expect(invalid).toThrow('wrong exports')
     expect(invalid).toThrow('wrong exports')
     expect(fatal).toHaveBeenCalledOnce()
+  })
+})
+
+
+describe('native output currentness admission', () => {
+  it('validates boolean and renderer ownership, keeps native rebuilds current and clears explicit handback', async () => {
+    const native = fakeBinding()
+    native.preparePlayback = async (_config, _lanes, generation) => ({ ...playbackResult(generation.toString()), ownershipRetained: true })
+    const owner = new CaptureOwner(native)
+    const update = vi.mocked(native.setPlaybackOutputCurrent)
+    expect(owner.setPlaybackOutputCurrent(3, 'false').ok).toBe(false)
+    expect(owner.setPlaybackOutputCurrent(3, true).ok).toBe(false)
+    expect(update).not.toHaveBeenCalled()
+    const prepared = await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    expect(prepared.ok).toBe(true)
+    expect(owner.setPlaybackOutputCurrent(4, false).ok).toBe(false)
+    expect(owner.setPlaybackOutputCurrent(3, true).ok).toBe(true)
+    update.mockClear()
+    expect(owner.unloadPlayback(3, prepared.generation).ok).toBe(true)
+    expect(update).not.toHaveBeenCalled() // full native rebuild uses this unload too
+    expect(owner.setPlaybackOutputCurrent(3, false).ok).toBe(true)
+    expect(update).toHaveBeenCalledExactlyOnceWith(false)
+    const restarted = new CaptureOwner(undefined, () => { throw new Error('unavailable') })
+    expect(restarted.setPlaybackOutputCurrent(3, true).ok).toBe(false)
   })
 })

@@ -1325,11 +1325,16 @@ describe('monitor level preset, memory and hint', () => {
     const b = await setup({}, undefined, undefined, store)
     expect(b.c.getSnapshot().monitorGainDb).toBe(-17)
     b.c.dispose()
-    for (const [raw, want] of [['99', 12], ['-999', -60], ['loud', -12]] as const) {
-      const r = await setup({}, undefined, undefined, memory({ 'singz.voice.monitorGain': raw }))
-      expect(r.c.getSnapshot().monitorGainDb, raw).toBe(want)
+    for (const raw of ['99', '-999', 'loud', '', '   ', 'NaN', 'Infinity']) {
+      const junk = memory({ 'singz.voice.monitorGain': raw })
+      const r = await setup({}, undefined, undefined, junk)
+      expect(r.c.getSnapshot().monitorGainDb, JSON.stringify(raw)).toBe(-12) // never 0 dB, never clamped up to +12
+      expect(junk.m.get('singz.voice.monitorGain')).toBe('-12') // junk is rewritten with the default
       r.c.dispose()
     }
+    const ok = await setup({}, undefined, undefined, memory({ 'singz.voice.monitorGain': ' -6.5 ' }))
+    expect(ok.c.getSnapshot().monitorGainDb).toBe(-6.5)
+    ok.c.dispose()
   })
   it('monitorSet carries the remembered gain, so monitoring never opens louder than it', async () => {
     const { c, api } = await setup({}, undefined, undefined, memory({ 'singz.voice.monitorGain': '-30' }))
@@ -1382,11 +1387,133 @@ describe('monitor level preset, memory and hint', () => {
   it('markup: the mode chip says which level the fader edits', async () => {
     const { c, engine } = await setup()
     const render = (): string => renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
-    expect(render()).toContain('aria-label="Fader: voice level. Click to set the monitor level instead"')
+    let html = render()
+    expect(html).toContain('title="Fader: voice level. Click to set the monitor level instead"')
+    expect(html).toMatch(/aria-pressed="false"[^>]*aria-label="Monitor level"[^>]*title="Fader: voice level/)
     c.toggleFaderMode()
-    const html = render()
-    expect(html).toContain('aria-label="Fader: monitor level. Click to set the voice level instead"')
-    expect(html).toContain('aria-label="Monitor level"')
+    html = render()
+    expect(html).toContain('title="Fader: monitor level. Click to set the voice level instead"')
+    expect(html).toMatch(/aria-pressed="true"[^>]*aria-label="Monitor level"[^>]*title="Fader: monitor level/) // fixed name, state in aria-pressed
+    c.dispose()
+  })
+})
+
+describe('monitoring during a take, route changes, and the arm window (hardware run 3)', () => {
+  /** A fake main where an arm while a take holds the input is refused as busy. */
+  function busyMain() {
+    const st = { recording: false, armed: false, armCalls: 0 }
+    return {
+      st,
+      api: {
+        arm: vi.fn(async () => {
+          st.armCalls++
+          if (st.recording) return { ok: false as const, reason: 'busy' as const, message: 'a take is active' }
+          st.armed = true
+          return { ok: true as const }
+        }),
+        disarm: vi.fn(async () => { st.armed = false; return { ok: true } }),
+        recordStart: vi.fn(async () => { st.recording = true; return { ok: true as const, takeId: 'take-1' } }),
+        recordStop: vi.fn(async () => { st.recording = false; return { ok: true, take: summary() } })
+      }
+    }
+  }
+  it('monitor on during a take: no arm, no error, the take is unaffected', async () => {
+    const m = busyMain()
+    const { c, api } = await setup(m.api as never)
+    await c.toggleRecord()
+    expect(c.state).toBe('recording')
+    await c.toggleMonitor()
+    expect(m.api.arm).not.toHaveBeenCalled()
+    expect(c.getSnapshot().error).toBeNull()
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    expect(c.state).toBe('recording')
+    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: true }))
+    await c.toggleRecord() // the take completes fine
+    expect(c.state).toBe('take-review')
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    expect(m.api.disarm).not.toHaveBeenCalled() // monitoring now holds the input
+    await c.toggleMonitor()
+    await vi.waitFor(() => expect(m.api.disarm).toHaveBeenCalled()) // and releases it when it ends
+    c.dispose()
+  })
+  it('monitor off during a take only releases the monitor: no disarm, the take keeps recording', async () => {
+    const m = busyMain()
+    const { c, api } = await setup(m.api as never)
+    await c.toggleMonitor() // armed by monitoring
+    await c.toggleRecord()
+    m.api.disarm.mockClear()
+    await c.toggleMonitor()
+    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: false }))
+    expect(m.api.disarm).not.toHaveBeenCalled()
+    expect(c.state).toBe('recording')
+    await c.toggleRecord()
+    expect(m.api.disarm).toHaveBeenCalled() // the take's stop releases it once monitoring is off
+    c.dispose()
+  })
+  it('a monitor for a different input than the take records is refused with a note, not an error', async () => {
+    const m = busyMain()
+    const two = [{ id: 'a', label: 'Zen', deviceName: 'zen', channelIndex: 0, channels: 2 }, { id: 'b', label: 'Zen', deviceName: 'zen', channelIndex: 1, channels: 2 }]
+    const { c, engine, api } = await setup(m.api as never, undefined, two)
+    c.selectInput('a')
+    await c.toggleRecord()
+    ;(c as unknown as { takeInput: { deviceName: string; channelIndex: number } }).takeInput = { deviceName: 'zen', channelIndex: 1 }
+    await c.toggleMonitor()
+    expect(c.getSnapshot().monitorNote).toBe('other-input')
+    expect(c.getSnapshot().error).toBeNull()
+    expect(c.getSnapshot().monitor.on).toBe(false)
+    expect(api.monitorSet).not.toHaveBeenCalledWith(expect.objectContaining({ on: true }))
+    expect(renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))).toContain("Monitoring while recording uses the take&#x27;s input")
+    c.dispose()
+  })
+  it('re-asks availability when the song output changes: speakers disable the button with the reason, the interface re-enables it', async () => {
+    let route = 'interface'
+    let emit = () => undefined as void
+    const sep = { reason: 'route-separate-devices' as const }
+    const { c, api, engine } = await setup({}, (e) => {
+      Object.defineProperty(e, 'outputDeviceId', { get: () => route })
+      ;(e as unknown as { subscribe: (fn: () => void) => () => void }).subscribe = (fn) => { emit = fn; return () => undefined }
+    })
+    c.bindSong({ path: '/a.mp3', projectDir: null, title: 'A', artist: '' })
+    await vi.waitFor(() => expect(c.getSnapshot().songId).not.toBeNull())
+    api.monitorAvailability.mockClear()
+    api.monitorAvailability.mockResolvedValue(monState({ available: sep, on: false, latency: null }))
+    route = 'speakers'
+    emit()
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('route-separate-devices'))
+    const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
+    expect(html).toMatch(/aria-disabled="true"[^>]*aria-describedby="voice-monitor-why"|aria-describedby="voice-monitor-why"[^>]*aria-disabled="true"/)
+    api.monitorAvailability.mockResolvedValue(monState({ on: false }))
+    route = 'interface'
+    emit()
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.avail).toBe('ok'))
+    c.dispose()
+  })
+  it('re-asks availability right before each toggle-on and refuses with the reason if main says unavailable', async () => {
+    const { c, api } = await setup()
+    expect(c.getSnapshot().monitor.avail).toBe('ok')
+    api.monitorAvailability.mockResolvedValue(monState({ available: { reason: 'route-separate-devices' }, on: false, latency: null }))
+    await c.toggleMonitor()
+    expect(api.monitorSet).not.toHaveBeenCalled()
+    expect(c.getSnapshot().monitor.reason).toBe('route-separate-devices')
+    expect(c.getSnapshot().armed).toBe(false) // nothing armed for a refused monitor
+    c.dispose()
+  })
+  it('between its arm landing and monitorSet replying, a selection does not re-arm what monitoring armed', async () => {
+    let reply!: (v: VoiceMonitorState) => void
+    const inputs2 = [{ id: 'z0', label: 'Zen', deviceName: 'zen', channelIndex: 0, channels: 4 }, { id: 'z3', label: 'Zen', deviceName: 'zen', channelIndex: 3, channels: 4 }]
+    const { c, api } = await setup({}, undefined, inputs2)
+    api.monitorSet.mockImplementationOnce(() => new Promise<VoiceMonitorState>((r) => { reply = r }))
+    const toggling = c.toggleMonitor()
+    await vi.waitFor(() => expect(c.getSnapshot().armed).toBe(true)) // the arm landed, monitorSet is in flight
+    api.arm.mockClear()
+    c.selectInput('z3')
+    reply(monState({ on: true }))
+    await toggling
+    await vi.advanceTimersByTimeAsync(0)
+    await Promise.resolve()
+    expect(api.arm).not.toHaveBeenCalled() // never re-armed: the singer did not arm it
+    expect(c.getSnapshot().armed).toBe(false)
+    expect(c.getSnapshot().monitor.on).toBe(false)
     c.dispose()
   })
 })

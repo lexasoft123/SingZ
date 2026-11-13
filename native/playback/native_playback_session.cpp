@@ -1295,6 +1295,15 @@ struct PreparedPlaybackTransport {
         deactivateSignalsmithTimePitchLoop(timePitchProcessor);
         break;
       case PlaybackTransportCommandKind::Reanchor:
+        // Priming runs off RT while this source can keep rendering. A plan
+        // for an older position must never rewind a healthy source. A wedged
+        // renderer has not advanced, so its exact prepared recovery still lands.
+        if (command.reanchorPlan.valid() &&
+            (callbackProjectFrame != command.projectFrame ||
+             callbackProjectFractionQ32 != command.projectFractionQ32)) {
+          discardSignalsmithTimePitchReanchor(timePitchProcessor, command.reanchorPlan);
+          break;
+        }
         if (command.reanchorPlan.valid()) {
           callbackProjectFrame = command.projectFrame;
           callbackProjectFractionQ32 = command.projectFractionQ32;
@@ -7951,6 +7960,8 @@ NativePlaybackSession::reanchorTransport(uint64_t generation) {
       return failure(NativePlaybackError::GraphFailure, generation, impl_->state,
                      "The playback clock reanchor could not be prepared off RT");
   }
+  if (impl_->testHooks && impl_->testHooks->afterReanchorPrime)
+    impl_->testHooks->afterReanchorPrime(impl_->testHooks->context);
   if (!impl_->prepared->transport.reanchor(
           anchor.projectFrame, anchor.projectFractionQ32, timePitchPlan))
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,

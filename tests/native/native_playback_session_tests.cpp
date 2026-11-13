@@ -6055,6 +6055,69 @@ void aLoopArmedAheadOfTheEarIsNotHeardYet() {
    now (twoSeeksRacedAgainstTheCallbackNeverWedge, and the processor-level
    perCommandSeekPlans), so priming failure — refused at the command — is
    again the only way the arm can fail. */
+void callbackPeriodChangesKeepTheSourceContinuous() {
+  std::vector<float> pcm(100000);
+  for(size_t i=0;i<pcm.size();++i)pcm[i]=.1f+static_cast<float>(i%997)*.0003f;
+  const auto path=writeWav("changing-callback-period.wav",1,pcm);
+  auto backend=std::make_unique<ManualOutputBackend>();auto* fake=backend.get();
+  singz::NativePlaybackSession session(std::move(backend));auto request=config();
+  std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane("song",path));
+  CHECK(session.prepare(std::move(request),std::move(lanes),301).ok);
+  CHECK(session.openOutput(301).ok && session.start(301).ok);
+  CHECK(fake->drive(512));const auto baseline=session.status();uint64_t delivered=512;
+  fake->captureOutput=true;
+  for(unsigned cycle=0;cycle<50;++cycle) {
+    for(const uint32_t frames:{32u,32u,32u,32u,512u}) {
+      fake->setPresentationLatency(0,frames,0);
+      CHECK(fake->drive(frames));delivered+=frames;
+      const auto now=session.status();
+      CHECK(now.generation==301 && now.renderedProjectFrame==static_cast<int64_t>(delivered));
+      CHECK(now.continuousFrame==delivered && now.host.discontinuities==baseline.host.discontinuities);
+      CHECK(now.transportDiscontinuities==baseline.transportDiscontinuities && now.adapterRenderFailures==0);
+    }
+  }
+  fake->captureOutput=false;
+  for(size_t i=0;i<fake->outputTrace.size();++i)CHECK(near(fake->outputTrace[i],pcm16(pcm[i+512])));
+  std::printf("period seam: 50 cycles, delivered=%llu project=%lld hostDiscDelta=0 transportDiscDelta=0\n",
+    static_cast<unsigned long long>(delivered),static_cast<long long>(session.status().renderedProjectFrame));
+  CHECK(session.unload(301).ok);std::remove(path.c_str());
+}
+void aStaleReanchorNeverRewindsTheSource() {
+  const auto path=writeWav("stale-reanchor.wav",1,std::vector<float>(50000,.1f));
+  auto backend=std::make_unique<ManualOutputBackend>();auto* fake=backend.get();
+  singz::NativePlaybackTestHooks hooks{};hooks.context=fake;
+  hooks.afterReanchorPrime=[](void* context) noexcept {
+    auto* output=static_cast<ManualOutputBackend*>(context);
+    for(int i=0;i<3;++i)CHECK(output->drive(512));
+  };
+  singz::NativePlaybackSession session(std::move(backend),&hooks);auto request=config();
+  request.playbackRate=.75;request.transposeSemitones=2;
+  std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane("song",path));
+  CHECK(session.prepare(std::move(request),std::move(lanes),302).ok);
+  CHECK(session.openOutput(302).ok && session.start(302).ok && fake->drive(512));
+  CHECK(fake->drive(32,singz::AudioHostDiscontinuitySequenceGap));
+  const auto before=session.status();CHECK(before.renderedProjectFrame==408);
+  CHECK(session.reanchorTransport(302).ok); // three512 callbacks while priming
+  const auto primed=session.status();CHECK(primed.renderedProjectFrame==1560);
+  CHECK(fake->drive(32));const auto after=session.status();
+  std::printf("reanchor seam: before=%lld duringPrime=%lld after=%lld expected1584; tdisc=%llu->%llu; old after432 lost1152 project frames (32ms output at rate0.75)\n",
+    static_cast<long long>(before.renderedProjectFrame),static_cast<long long>(primed.renderedProjectFrame),
+    static_cast<long long>(after.renderedProjectFrame),static_cast<unsigned long long>(before.transportDiscontinuities),
+    static_cast<unsigned long long>(after.transportDiscontinuities));
+  std::fflush(stdout);
+  CHECK(after.renderedProjectFrame==1584 && after.continuousFrame==2112);
+  CHECK(after.transportDiscontinuities==before.transportDiscontinuities && after.adapterRenderFailures==0);
+  // A stationary recovery still consumes its exact plan; pause/resume and seek
+  // remain source commands, and are covered through their normal API below.
+  hooks.afterReanchorPrime=nullptr;
+  CHECK(session.reanchorTransport(302).ok && fake->drive(32));
+  CHECK(session.status().transportDiscontinuities==after.transportDiscontinuities+1);
+  CHECK(session.pause(302).ok && fake->drive(32));const auto paused=session.status().renderedProjectFrame;
+  CHECK(fake->drive(32) && session.status().renderedProjectFrame==paused);
+  CHECK(session.resume(302).ok && fake->drive(32) && session.status().renderedProjectFrame==paused+24);
+  CHECK(session.seek(302,400).ok && fake->drive(32) && session.status().renderedProjectFrame==424);
+  CHECK(session.unload(302).ok);std::remove(path.c_str());
+}
 void hostBoundariesWithoutSourceMovementKeepRendering() {
   const std::string wav = writeWav("host-boundary-no-source-move.wav", 1,
                                    std::vector<float>(50000, 0.1F));
@@ -8144,6 +8207,10 @@ void portableGraphDocumentMaterializesActualTopology() {
 } // namespace
 
 int main() {
+  if(std::getenv("SINGZ_REANCHOR_REGRESSION_ONLY")) {
+    callbackPeriodChangesKeepTheSourceContinuous();aStaleReanchorNeverRewindsTheSource();return 0;
+  }
+
   decodedSeekThenStopKeepsItsTimePitchBoundaryPrepared();
   streamingSeekReturnsBeforeDecoder();
   outputMeterSeparatesStereoEnergyFromPeaks();
@@ -8164,6 +8231,8 @@ int main() {
     std::puts("native playback quarantined swap tests: ok");
     return 0;
   }
+  callbackPeriodChangesKeepTheSourceContinuous();
+  aStaleReanchorNeverRewindsTheSource();
   mixerEditsWithoutCallbacksKeepTheLatestValues();
   compositionAndLifetime();
   streamedLanesPlayTheSameAudioAsDecodedOnes();

@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "페이더: 보컬 레벨. 클릭하면 모니터 레벨을 조절합니다",
   'player.voice.faderToVoice': "페이더: 모니터 레벨. 클릭하면 보컬 레벨을 조절합니다",
   'player.voice.monitorHint': "피드백을 막으려면 헤드폰을 사용하세요",
+  'player.voice.monitorOtherInput': "녹음 중 모니터링은 녹음에 쓰는 입력을 사용합니다. 다른 입력을 모니터링하려면 녹음을 멈추세요.",
   'player.voice.monitorLevel': "모니터 레벨",
   'player.voice.monitorWarning': "모니터링 참고: {text}",
   'player.voice.msgMonitoring': "모니터링 켜짐. 내 소리를 실시간으로 듣습니다.",

@@ -293,7 +293,9 @@ export class MultitrackEngine {
     this.aheadEpoch++
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
-    if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead) this.beginNativePlaybackUnload()
+    if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead)
+      this.beginNativePlaybackUnload(detectedDesktopPlatform() === 'darwin' &&
+        desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback))
   }
 
   setRetainedProjectIdentity(identity: { dir: string; songPath: string } | null): void {
@@ -498,7 +500,7 @@ export class MultitrackEngine {
   /** Start or retry one client-owned unload without leaving a rejecting
    * promise unobserved. A failed promise and its typed error remain available
    * for the next deliberate load/play/teardown boundary. */
-  private beginNativePlaybackUnload(): Promise<void> | null {
+  private beginNativePlaybackUnload(retainNativeRoute = false): Promise<void> | null {
     // An ahead generation is not active — it never opened — but it holds
     // decoded lanes and the addon's playback lease, and it goes with the
     // song like an active one (the facade's unload handles the ahead-only
@@ -507,7 +509,7 @@ export class MultitrackEngine {
     if (this.nativePlaybackUnload && this.nativePlaybackUnloadError === null) {
       return this.nativePlaybackUnload
     }
-    const operation = this.nativePlayback.unload()
+    const operation = this.nativePlayback.unload({ retainNativeRoute })
     this.nativePlaybackUnload = operation
     this.nativePlaybackUnloadError = null
     void operation.then(() => {
@@ -586,6 +588,9 @@ export class MultitrackEngine {
     } catch (error) {
       cleanupError = error
     }
+
+    if (detectedDesktopPlatform() === 'darwin')
+      await (typeof window === 'undefined' ? undefined : window.singz?.setDesktopPlaybackNativeOutputCurrent)?.(false)
 
     // No late completion may resurrect renderer transport state. Emit only
     // after native cleanup and route restoration have produced their final
@@ -1695,7 +1700,9 @@ export class MultitrackEngine {
     this.aheadEpoch++
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
-    if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead) this.beginNativePlaybackUnload()
+    if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead)
+      this.beginNativePlaybackUnload(detectedDesktopPlatform() === 'darwin' &&
+        desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback))
     this.stopSources()
     this.cancelPendingClicks()
     this.nextClickIdx = null
@@ -1902,6 +1909,9 @@ export class MultitrackEngine {
     if (this.desiredOutputId.startsWith('native:')) {
       throw new Error('This ALSA output needs native playback. Enable it in Settings and use a supported audio format.')
     }
+
+    if (detectedDesktopPlatform() === 'darwin')
+      await (typeof window === 'undefined' ? undefined : window.singz?.setDesktopPlaybackNativeOutputCurrent)?.(false)
 
     // Native declined, so Web Audio is about to do the playing — and it can
     // only do it from samples. A lane released to an earlier native

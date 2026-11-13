@@ -160,6 +160,7 @@ function statusLine(
   if (state === 'input-missing') {
     return { cls: 'warn', text: t('player.voice.inputMissing'), action: { label: t('player.voice.inputBtn'), run: () => void c.refreshInputs() } }
   }
+  if (m.monitorNote === 'other-input') return { cls: 'warn', text: t('player.voice.monitorOtherInput') }
   if (m.recording) return { cls: '', text: t('player.voice.msgRecording') }
   if (m.listen === 'take') return { cls: '', text: t('player.voice.msgListenAlone') }
   if (m.listen === 'with-song' && m.take) {
@@ -343,7 +344,7 @@ export default function VoiceStrip({
             className={`vs-chip${faderMonitor ? ' active' : ''}`}
             aria-pressed={faderMonitor}
             aria-disabled={m.monitor.on}
-            aria-label={faderMonitor ? t('player.voice.faderToVoice') : t('player.voice.faderToMonitor')}
+            aria-label={t('player.voice.monitorLevel')}
             title={faderMonitor ? t('player.voice.faderToVoice') : t('player.voice.faderToMonitor')}
             onClick={() => controller.toggleFaderMode()}
           >

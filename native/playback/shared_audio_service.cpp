@@ -61,6 +61,8 @@ struct SharedAudioService::Impl {
   AudioHostConfig route;
   std::string preferredOutputUid;
   bool parked = false;
+  bool songOutputCurrent = false;
+  OutputCallbackDiagnostics callbackDiagnostics;
   std::string provider;
   bool enumerated{false};
   bool watchDevices{true};
@@ -254,6 +256,9 @@ struct SharedAudioService::Impl {
   }
   static bool render(void* context, const AudioHostRenderBlock& block) noexcept {
     auto& self = *static_cast<Impl*>(context);
+#if defined(__APPLE__) && TARGET_OS_OSX
+    self.callbackDiagnostics.observe(block);
+#endif
     for (uint32_t channel = 0; channel < block.outputChannels; ++channel)
       if (block.output && block.output[channel])
         std::fill_n(block.output[channel], block.frames, 0.0F);
@@ -427,6 +432,7 @@ class SharedAudioService::Client final : public AudioHostBackend {
     self.preferredOutputUid = config.outputDeviceUid == self.cached.defaultOutputUid &&
         self.preferredOutputUid != config.outputDeviceUid
         ? std::string{} : config.outputDeviceUid;
+    self.songOutputCurrent = self.provider == "coreaudio";
     self.playback.render = render;
     self.playback.context = context;
     self.playback.failed.store(false, std::memory_order_release);
@@ -563,7 +569,8 @@ AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostB
   impl_->backend->stop();
   impl_->removeListeners();
   impl_->backend = std::move(backend); impl_->provider = effectiveProvider;
-  impl_->route = {}; impl_->preferredOutputUid.clear(); impl_->enumerated = false;
+  impl_->route = {}; impl_->songOutputCurrent = false;
+  impl_->preferredOutputUid.clear(); impl_->enumerated = false;
   return impl_->openLocked({});
 }
 AudioHostResult SharedAudioService::ensureOutput() {
@@ -626,6 +633,20 @@ std::string SharedAudioService::activeOutputUid() const {
 AudioHostConfig SharedAudioService::activeOutputConfig() const {
   std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->route;
 }
+OutputCallbackDiagnosticSnapshot SharedAudioService::callbackDiagnostics() const noexcept {
+  return snapshotOutputCallbacks(impl_->callbackDiagnostics);
+}
+bool SharedAudioService::playbackOutputCurrent() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->songOutputCurrent;
+}
+bool SharedAudioService::setPlaybackOutputCurrent(bool current) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (current && (impl_->provider != "coreaudio" || !impl_->playback.render ||
+                  impl_->route.outputDeviceUid.empty())) return false;
+  impl_->songOutputCurrent = current;
+  return true;
+}
 uint64_t SharedAudioService::outputRouteGeneration() const noexcept {
   return impl_->outputGeneration.load(std::memory_order_acquire);
 }
@@ -645,6 +666,7 @@ void SharedAudioService::shutdown() noexcept {
   drain(impl_->training.gate);
   drain(impl_->microphone.gate);
   impl_->microphone.render = nullptr;
+  impl_->songOutputCurrent = false;
   impl_->playback.render = nullptr;
   impl_->training.render = nullptr;
   impl_->removeListeners();

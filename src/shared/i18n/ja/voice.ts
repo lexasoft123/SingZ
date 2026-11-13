@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "フェーダー: ボイスのレベル。クリックでモニターのレベルに切り替え",
   'player.voice.faderToVoice': "フェーダー: モニターのレベル。クリックでボイスのレベルに切り替え",
   'player.voice.monitorHint': "ハウリングを防ぐため、ヘッドホンを使ってください",
+  'player.voice.monitorOtherInput': "録音中のモニターは、録音と同じ入力を使います。別の入力をモニターするには録音を止めてください。",
   'player.voice.monitorLevel': "モニターのレベル",
   'player.voice.monitorWarning': "モニターのメモ: {text}",
   'player.voice.msgMonitoring': "モニター中です。自分の声がリアルタイムで聞こえます。",

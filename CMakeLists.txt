@@ -282,11 +282,19 @@ endif()
 set(_voice_rt_source "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-render.cpp")
 file(WRITE "${_voice_rt_source}" "#include <algorithm>\n#include <atomic>\n#include <bit>\n#include <cmath>\n#include <zcore/device/audio_host_render.h>\nnamespace singz {\n${_voice_monitor_rt}\n}\n")
 set(SINGZ_VOICE_MONITOR_RT_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-realtime.cmake")
-file(WRITE "${SINGZ_VOICE_MONITOR_RT_MANIFEST}" "set(SINGZ_ZDSP_RT_FILES [==[${_voice_rt_source}]==] [==[${ZCORE_ROOT}/zcore/include/zcore/device/audio_host_render.h]==])\n")
+file(WRITE "${SINGZ_VOICE_MONITOR_RT_MANIFEST}" "set(SINGZ_ZDSP_RT_FILES [==[${_voice_rt_source}]==] [==[${ZCORE_ROOT}/zcore/include/zcore/device/audio_host_render.h]==] [==[${SINGZ_REPO_ROOT}/native/playback/output_callback_diagnostics.h]==])\n")
 add_library(singz_voice_monitor_render OBJECT "${_voice_rt_source}")
 target_compile_features(singz_voice_monitor_render PRIVATE cxx_std_20)
 target_link_libraries(singz_voice_monitor_render PRIVATE SingZ::zcore_device)
 singz_configure_realtime_target(singz_voice_monitor_render)
+# Compile the additional callback telemetry leaf under the same strict rules.
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/output-callback-diagnostics-rt.cpp"
+  "#include \"${SINGZ_REPO_ROOT}/native/playback/output_callback_diagnostics.h\"\nvoid checkOutputCallback(singz::OutputCallbackDiagnostics& d, const singz::AudioHostRenderBlock& b) noexcept { d.observe(b); }\n")
+add_library(singz_output_callback_diagnostics_render OBJECT "${CMAKE_CURRENT_BINARY_DIR}/output-callback-diagnostics-rt.cpp")
+target_compile_features(singz_output_callback_diagnostics_render PRIVATE cxx_std_20)
+target_link_libraries(singz_output_callback_diagnostics_render PRIVATE SingZ::zcore_device)
+singz_configure_realtime_target(singz_output_callback_diagnostics_render)
+add_dependencies(singz_voice_monitor_render singz_output_callback_diagnostics_render)
 add_custom_target(singz_check_voice_monitor_realtime ALL
   COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_VOICE_MONITOR_RT_MANIFEST}"
     -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake"
@@ -749,7 +757,7 @@ if(SINGZ_CORE_TESTS)
   # identical behavior suite. Expected failure proves the checks are sensitive.
   file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor.cpp" _voice_monitor_control)
   foreach(_mutant IN ITEMS ramp clamp finite timestamp xrun mono route buffer steps generation lost song gain latency fade
-      song_optin suitability latency_suitability provider_error sanitized denormal denormal_output route_fade route_reason environments guard_box guard_mix guard_owner inventory settle all_outputs output_map input_channel input_range stale_song_period native_route_state)
+      song_optin suitability latency_suitability provider_error sanitized denormal denormal_output route_fade route_reason environments guard_box guard_mix guard_owner inventory settle all_outputs output_map input_channel input_range stale_song_period native_route_state current_native_route)
     if((_mutant STREQUAL "song_optin" OR _mutant STREQUAL "stale_song_period") AND NOT APPLE)
       continue() # This opt-in policy is macOS-only.
     endif()
@@ -824,6 +832,8 @@ if(SINGZ_CORE_TESTS)
       string(REPLACE "config.inputChannels={channel};" "config.inputChannels={0};" _control "${_control}")
     elseif(_mutant STREQUAL "input_range")
       string(REPLACE "if (channel>=input->inputChannels)" "if (false)" _control "${_control}")
+    elseif(_mutant STREQUAL "current_native_route")
+      string(REPLACE "currentSongOutput && provider" "provider" _header "${_header}")
     elseif(_mutant STREQUAL "native_route_state")
       string(REPLACE "provider==\"coreaudio\" && !config.outputDeviceUid.empty()"
         "provider==\"coreaudio\" && !config.outputDeviceUid.empty() && (status.state==AudioHostState::Open || status.state==AudioHostState::Running || status.state==AudioHostState::Suspended)"
@@ -934,6 +944,27 @@ if(SINGZ_CORE_TESTS)
     SingZ::native_playback_session)
   add_test(NAME native_playback_session_tests
     COMMAND native_playback_session_tests)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/native_playback_session.cpp)
+  file(READ "${SINGZ_REPO_ROOT}/native/playback/native_playback_session.cpp" _reanchor_source)
+  string(REPLACE "if (command.reanchorPlan.valid() &&\n            (callbackProjectFrame"
+    "if (false && command.reanchorPlan.valid() &&\n            (callbackProjectFrame" _stale_reanchor "${_reanchor_source}")
+  if(_stale_reanchor STREQUAL _reanchor_source)
+    message(FATAL_ERROR "Stale reanchor negative control needs updating")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/native-playback-stale-reanchor.cpp" "${_stale_reanchor}")
+  add_executable(native_playback_stale_reanchor_negative
+    tests/native/native_playback_session_tests.cpp "${CMAKE_CURRENT_BINARY_DIR}/native-playback-stale-reanchor.cpp"
+    "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(native_playback_stale_reanchor_negative PRIVATE cxx_std_20)
+  target_include_directories(native_playback_stale_reanchor_negative PRIVATE "${SINGZ_REPO_ROOT}" "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(native_playback_stale_reanchor_negative PRIVATE SingZ::native_playback_session)
+  add_dependencies(native_playback_session_tests native_playback_stale_reanchor_negative)
+  # CHECK aborts intentionally in this suite; a wrapper converts that expected
+  # signal failure to a regular code1 so CTest WILL_FAIL tests the assertion.
+  add_test(NAME native_playback_stale_reanchor_negative
+    COMMAND "${Python3_EXECUTABLE}" -c
+      "import os,subprocess,sys; p=subprocess.run([r'$<TARGET_FILE:native_playback_stale_reanchor_negative>'],env=dict(os.environ,SINGZ_REANCHOR_REGRESSION_ONLY='1'),capture_output=True,text=True); print(p.stdout+p.stderr); sys.exit(1 if p.returncode != 0 and 'after.renderedProjectFrame==1584' in p.stderr else 0)")
+  set_tests_properties(native_playback_stale_reanchor_negative PROPERTIES WILL_FAIL TRUE)
   add_test(NAME native_playback_stale_retirement_failure_tests
     COMMAND "${CMAKE_COMMAND}" -E env
       SINGZ_NATIVE_PLAYBACK_STALE_RETIREMENT_FAILURE=1

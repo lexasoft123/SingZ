@@ -731,6 +731,88 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
+  it('keeps a healthy sequence-gap source running without another re-anchor, but recovers a failed render', async () => {
+    let gaps = 0
+    let failures = 0
+    const h = seamHarness(generation => playing(generation, {
+      transportDiscontinuities: String(gaps), lastTransportBoundary: gaps ? 'sequence-gap' : 'none',
+      adapterRenderFailures: failures, renderedProjectFrame: String(48000 + gaps * 32)
+    }))
+    expect(await h.start()).toBe(true)
+    await vi.advanceTimersByTimeAsync(120)
+    h.calls.length = 0
+    for (let cycle = 0; cycle < 50; cycle++) {
+      gaps++
+      await vi.advanceTimersByTimeAsync(60)
+    }
+    expect(h.calls).toEqual([])
+    expect(h.client.status?.renderedProjectFrame).toBe(String(48000 + 50 * 32))
+    failures++
+    await vi.advanceTimersByTimeAsync(120)
+    expect(h.calls).toContain('reanchor:1')
+    await h.client.unload()
+  })
+
+  it('retries failed-render recovery when a stale re-anchor plan produces no echo', async () => {
+    let failures = 0
+    const h = seamHarness(generation => playing(generation, { adapterRenderFailures: failures }))
+    expect(await h.start()).toBe(true)
+    await vi.advanceTimersByTimeAsync(120)
+    h.calls.length = 0
+    failures = 1
+    await vi.advanceTimersByTimeAsync(120)
+    expect(h.calls).toEqual(['reanchor:1'])
+    // The source advanced while priming, so the core discarded its stale
+    // plan. No ClockReanchored boundary arrives; a new failed block still owes recovery.
+    failures = 2
+    await vi.advanceTimersByTimeAsync(120)
+    expect(h.calls).toEqual(['reanchor:1', 'reanchor:1'])
+    await h.client.unload()
+  })
+
+  it('clears native route currentness only after browser handback, retaining it through native re-prepare', async () => {
+    const h = seamHarness(generation => playing(generation))
+    const notify = vi.fn(async () => ({ ok: true }))
+    h.api.setDesktopPlaybackNativeOutputCurrent = notify
+    expect(await h.start()).toBe(true)
+    await h.client.pause()
+    await h.client.reconfigure({ metronome: { ...h.metronome, click: true } })
+    expect(h.calls).toContain('unload:1')
+    expect(notify).not.toHaveBeenCalled()
+    await h.client.unload()
+    expect(notify).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it('retains the selected native route while changing songs, then clears it on a genuine browser handback', async () => {
+    const h = seamHarness(generation => playing(generation))
+    const notify = vi.fn(async () => ({ ok: true }))
+    h.api.setDesktopPlaybackNativeOutputCurrent = notify
+    expect(await h.start()).toBe(true)
+    await h.client.unload({ retainNativeRoute: true })
+    expect(notify).not.toHaveBeenCalled()
+    expect(await h.start()).toBe(true)
+    await h.client.unload()
+    expect(notify).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it('restores the signed song position on a real output move without involving monitoring', async () => {
+    const h = seamHarness(generation => playing(generation, { renderedProjectFrame: '192000' }))
+    const inventory = await h.api.audioHostDevices('coreaudio')
+    expect(await h.start({ durationSeconds: 30 })).toBe(true)
+    ;(h.api.audioHostDevices as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...inventory, defaultOutputUid: 'new-speakers', devices: inventory.devices.map(device => ({
+        ...device, uid: 'new-speakers'
+      }))
+    })
+    await h.client.reconfigure({}, { refreshRoute: true })
+    expect(h.calls).toContain('unload:1')
+    expect(h.prepared[1]).toMatchObject({ outputDeviceUid: 'new-speakers', preparedStartProjectFrame: 192000,
+      initialTransport: { state: 'playing' } })
+    expect(h.client.transportActive).toBe(true)
+    expect(h.client.status?.renderedProjectFrame).toBe('192000')
+    await h.client.unload()
+  })
+
   it('ignores period-only CoreAudio inventory changes between prepare-ahead and Play', async () => {
     const h = seamHarness(generation => playing(generation))
     const inventory = await h.api.audioHostDevices('coreaudio')
@@ -4138,4 +4220,24 @@ describe('Linux ALSA output ownership', () => {
       }
     }
   )
+})
+
+
+it('clears cached native-route intent when Settings disables CoreAudio, without touching other platforms', () => {
+  const source = readFileSync('src/renderer/src/App.tsx', 'utf8')
+  const start = source.indexOf("    localStorage.setItem('singz.audio'")
+  const end = source.indexOf('\n  }, [audioPrefs])', start)
+  expect(start).toBeGreaterThan(0)
+  expect(end).toBeGreaterThan(start)
+  // Execute the actual preference-effect body with injected platform/API.
+  const apply = new Function('localStorage', 'audioPrefs', 'detectedDesktopPlatform', 'window', source.slice(start, end))
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    for (const enabled of [true, false]) {
+      const notify = vi.fn(async () => ({ ok: true }))
+      apply({ setItem: vi.fn() }, { nativePlayback: enabled }, () => platform,
+        { singz: { setDesktopPlaybackNativeOutputCurrent: notify } })
+      if (platform === 'darwin' && !enabled) expect(notify).toHaveBeenCalledExactlyOnceWith(false)
+      else expect(notify).not.toHaveBeenCalled()
+    }
+  }
 })

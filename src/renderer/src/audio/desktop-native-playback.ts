@@ -1528,7 +1528,7 @@ export class DesktopNativePlaybackClient {
       }
       this.recoveryKind = null
       try {
-        await this.lease.restoreLegacyOutput()
+        await this.restoreLegacyOutput()
       } catch (restoreError) {
         this.recoveryProvider = request.provider
         this.recoveryKind = 'route-restore'
@@ -2377,7 +2377,7 @@ export class DesktopNativePlaybackClient {
     return operation
   }
 
-  async unload(): Promise<void> {
+  async unload(options: { retainNativeRoute?: boolean } = {}): Promise<void> {
     return this.serialize(async () => {
       this.stopPolling()
       const ahead = this.ahead
@@ -2394,7 +2394,7 @@ export class DesktopNativePlaybackClient {
         if (this.ownsOutput) {
           const provider = this.recoveryProvider ?? this.request?.provider ?? 'coreaudio'
           try {
-            await this.lease.restoreLegacyOutput()
+            await this.restoreLegacyOutput(options.retainNativeRoute === true)
           } catch (error) {
             this.recoveryProvider = provider
             this.recoveryKind = 'route-restore'
@@ -2427,7 +2427,7 @@ export class DesktopNativePlaybackClient {
       this.recoveryKind = 'route-restore'
       const provider = this.recoveryProvider ?? 'coreaudio'
       try {
-        await this.lease.restoreLegacyOutput()
+        await this.restoreLegacyOutput(options.retainNativeRoute === true)
       } catch (error) {
         this.onStateChange(this.last)
         throw new DesktopNativeRecoveryError(
@@ -2475,6 +2475,14 @@ export class DesktopNativePlaybackClient {
       this.recoveryKind = 'prepare-retry'
       this.onStateChange(this.last)
     })
+  }
+
+  private async restoreLegacyOutput(retainNativeRoute = false): Promise<void> {
+    await this.lease.restoreLegacyOutput()
+    // Unload also occurs inside native rebuilds; only a completed browser
+    // handback says the cached native song route is no longer current.
+    const notify = typeof window === 'undefined' ? undefined : window.singz?.setDesktopPlaybackNativeOutputCurrent
+    if (!retainNativeRoute && notify && (this.request?.provider ?? this.recoveryProvider) === 'coreaudio') await notify(false)
   }
 
   private observeTransportBoundary(generation: string, status: DesktopPlaybackStatus): void {
@@ -2532,7 +2540,9 @@ export class DesktopNativePlaybackClient {
         this.reanchorEchoPending = false
         return
       }
-      if (key === previous.key) return
+      // A stale recovery plan may be discarded after the source advanced;
+      // it produces no echo. Rising render failures must still be retried.
+      this.reanchorEchoPending = false
     }
     const advancing = status.transportState === 'playing' || status.transportState === 'pre-roll'
     // Seeks and loops are boundaries the session primes for itself.
@@ -2540,6 +2550,12 @@ export class DesktopNativePlaybackClient {
       status.lastTransportBoundary !== 'source-seek' && status.lastTransportBoundary !== 'source-loop'
     const failing = failures > previous.failures && advancing
     if (!boundary && !failing) return
+    // A healthy source keeps its Stretch history across a host sample-clock
+    // gap. Re-priming it adds a reset and can replay the prime's elapsed time.
+    // Failed-render recovery remains authoritative even for this boundary.
+    if (status.lastTransportBoundary === 'sequence-gap' && !failing &&
+        status.routeGeneration === previous.key.split(':')[0] &&
+        status.streamGeneration === previous.key.split(':')[1]) return
     // Nothing is re-anchored while a seam is armed. The command would name
     // the new generation, and the core queues it on the replacement, which
     // has taken no clock yet: it is anchored at the frame the replacement was

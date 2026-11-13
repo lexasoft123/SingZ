@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "Fader: mức giọng. Nhấp để chỉnh mức nghe lại",
   'player.voice.faderToVoice': "Fader: mức nghe lại. Nhấp để chỉnh mức giọng",
   'player.voice.monitorHint': "Hãy dùng tai nghe để tránh hú",
+  'player.voice.monitorOtherInput': "Khi đang ghi âm, nghe lại giọng dùng đầu vào của bản ghi. Hãy dừng ghi để nghe lại đầu vào khác.",
   'player.voice.monitorLevel': "Mức nghe lại",
   'player.voice.monitorWarning': "Ghi chú nghe lại: {text}",
   'player.voice.msgMonitoring': "Đang nghe lại giọng. Bạn nghe thấy mình trực tiếp.",

@@ -300,13 +300,14 @@ void channelTests() {
       AudioHostState::Open,AudioHostState::Running,AudioHostState::Suspended}) {
     AudioHostStatus status;status.state=state;status.streamGeneration=generation;
     status.latency.bufferFrames=32;status.observedCallbackFrames=32;
-    const auto snapshot=voiceMonitorSongRoute(route,"coreaudio",status,generation++);
+    const auto snapshot=voiceMonitorSongRoute(route,"coreaudio",status,generation++,true);
     CHECK(snapshot.native && snapshot.output=="usb" && snapshot.channels==std::vector<uint32_t>({2,3}));
     CHECK(voiceMonitorSameOutput("usb",{2,3},route,snapshot.native));
     CHECK(snapshot.song.state==state && snapshot.song.streamGeneration==snapshot.generation);
   }
-  CHECK(!voiceMonitorSongRoute(route,"box-loopz",{},1).native);
-  CHECK(!voiceMonitorSongRoute({},"coreaudio",{},1).native);
+  CHECK(!voiceMonitorSongRoute(route,"box-loopz",{},1,true).native);
+  CHECK(!voiceMonitorSongRoute(route,"coreaudio",{},1,false).native);
+  CHECK(!voiceMonitorSongRoute({},"coreaudio",{},1,true).native);
   CHECK(!voiceMonitorSameOutput("other",{2,3},route,true));
   CHECK(!voiceMonitorSameOutput("usb",{0,1},route,true));
   CHECK(!voiceMonitorSameOutput("usb",{2,3},route,false));
@@ -533,6 +534,44 @@ void repeatedSharedBufferTests() {
   CHECK(host.status().state==AudioHostState::Error && host.status().discontinuities==1);
 #endif
 }
+void currentOutputAndGapTests() {
+  auto song=std::make_shared<Record>();SharedAudioService service(std::make_unique<FakeHost>(song));
+  CHECK(!service.playbackOutputCurrent() && !service.setPlaybackOutputCurrent(true));
+  CHECK(service.configureProvider(std::make_unique<FakeHost>(song),"coreaudio").ok);
+  CHECK(!service.playbackOutputCurrent()); // startup/training host is not a song
+  AudioHostConfig config;config.outputDeviceUid="usb";config.outputChannels={0,1};unsigned callbacks=0;
+  auto client=service.playbackBackend(std::make_unique<FakeHost>(song),"coreaudio");
+  CHECK(client->open(config,songRender,&callbacks).ok && client->start().ok);
+  CHECK(service.playbackOutputCurrent());
+  client->stop();client.reset();CHECK(service.playbackOutputCurrent()); // native re-prepare seam
+  CHECK(service.setPlaybackOutputCurrent(false) && !service.playbackOutputCurrent()); // Web Audio handback
+  CHECK(!service.setPlaybackOutputCurrent(true)); // stale retained physical route cannot re-arm
+  client=service.playbackBackend(std::make_unique<FakeHost>(song),"coreaudio");
+  CHECK(client->open(config,songRender,&callbacks).ok && service.playbackOutputCurrent());
+  client->stop();service.shutdown();CHECK(!service.playbackOutputCurrent());
+  SharedAudioService restarted(std::make_unique<FakeHost>(std::make_shared<Record>()));
+  CHECK(!restarted.playbackOutputCurrent());
+
+  OutputCallbackDiagnostics diagnostics;AudioHostRenderBlock b;
+  b.frames=512;b.sampleRate=48000;b.streamGeneration=1;b.routeGeneration=1;
+  b.outputTimestampHardware=true;b.callbackHostTimeNs=b.outputHostTimeNs=1000000000;
+  diagnostics.observe(b);
+  b.outputFrame=512;b.callbackHostTimeNs+=10666666;b.outputHostTimeNs+=10666666;b.frames=32;
+  diagnostics.observe(b);
+  auto d=snapshotOutputCallbacks(diagnostics);
+  CHECK(d.periodChanges==1 && d.positiveSampleGapFrames==0 && d.sequenceGaps==0 && d.deliveredFrames==544);
+  CHECK(d.maxCallbackExcessNs==0 && d.maxOutputExcessNs==0 && d.periodOutputExcessNs==0);
+  // Deliberate negative control: a REAL missing1536-frame span. Neither period
+  // math nor a healthy transport may pretend this supplied timestamp gap vanished.
+  b.outputFrame+=32+1536;b.callbackHostTimeNs+=666666+32000000;b.outputHostTimeNs+=666666+32000000;
+  b.discontinuity=AudioHostDiscontinuitySequenceGap;diagnostics.observe(b);
+  d=snapshotOutputCallbacks(diagnostics);
+  CHECK(d.sequenceGaps==1 && d.positiveSampleGapFrames==1536 && d.periodOutputExcessNs==32000000);
+  CHECK(d.maxCallbackExcessNs==32000000 && d.maxOutputExcessNs==32000000);
+  OutputCallbackDiagnostics unknownRate;b.sampleRate=std::numeric_limits<double>::min();
+  unknownRate.observe(b);unknownRate.observe(b);
+  CHECK(unknownRate.maxCallbackExcessNs.load()==0 && unknownRate.maxOutputExcessNs.load()==0);
+}
 void songTests() {
   auto song=std::make_shared<Record>();SharedAudioService service(std::make_unique<FakeHost>(song));
   auto client=service.playbackBackend(std::make_unique<FakeHost>(song),"");
@@ -594,4 +633,4 @@ void songTests() {
   globalClient->stop();shared.shutdown();client->stop();
 }
 }
-int main(){renderTests();routeTests();hostTests();channelTests();sharedMonitorLeaseTests();repeatedSharedBufferTests();songTests();std::printf("voice_monitor_tests: %d failures\n",failures);return failures?1:0;}
+int main(){renderTests();routeTests();hostTests();channelTests();sharedMonitorLeaseTests();repeatedSharedBufferTests();currentOutputAndGapTests();songTests();std::printf("voice_monitor_tests: %d failures\n",failures);return failures?1:0;}

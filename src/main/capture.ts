@@ -80,6 +80,7 @@ export interface NativeCaptureBinding {
   beginVoiceMonitor: import('./voice-monitor').VoiceMonitorNative['beginVoiceMonitor']
   setVoiceMonitorGain: import('./voice-monitor').VoiceMonitorNative['setVoiceMonitorGain']
   voiceMonitorStatus: import('./voice-monitor').VoiceMonitorNative['voiceMonitorStatus']
+  setPlaybackOutputCurrent(current: boolean): { ok: boolean; error?: string }
   endVoiceMonitor: import('./voice-monitor').VoiceMonitorNative['endVoiceMonitor']
 
   exportAudio?(sourceFd: number | number[], destinationFd: number, format: 'wav' | 'flac' | 'mp3', job: string): Promise<{ ok: boolean; error?: string }>
@@ -809,7 +810,7 @@ export function validateCaptureBindingIdentity(
     'initializeSharedAudio', 'refreshSharedAudioInventory', 'scheduleTrainingCue', 'cancelTrainingCues', 'setTrainingCueGain', 'trainingCueStatus', 'captureRecording',
     'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats', 'recordTake', 'finishTake', 'cancelTake', 'playTake', 'stopTake', 'presentationQuery',
     'audioHostProviders', 'audioHostDevices', 'voiceMonitorAvailability', 'beginVoiceMonitor',
-    'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor',
+    'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor', 'setPlaybackOutputCurrent',
     'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
     'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',
     'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
@@ -1963,6 +1964,17 @@ export class CaptureOwner {
     return result
   }
 
+  setPlaybackOutputCurrent(rendererId: number, current: unknown): { ok: boolean; error?: string } {
+    if (typeof current !== 'boolean' ||
+        (this.playbackRendererId !== null && this.playbackRendererId !== rendererId) ||
+        (current && (!this.playbackGeneration || this.playbackRendererId !== rendererId)))
+      return { ok: false, error: 'Invalid native output state' }
+    const binding = this.native()
+    if (!binding) return { ok: false, error: 'Native output is unavailable' }
+    try { return binding.setPlaybackOutputCurrent(current) }
+    catch { return { ok: false, error: 'Native output state could not be updated' } }
+  }
+
   unloadPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
     const pending = this.playbackPending?.generation === generation &&
       this.playbackPending.rendererId === rendererId ? this.playbackPending : null
@@ -2164,6 +2176,10 @@ export class CaptureOwner {
           this.playbackRendererId = null
         }
       } catch { /* addon cleanup hook remains the final fail-closed owner */ }
+    }
+    if (!this.playbackGeneration && this.binding) {
+      try { this.binding.setPlaybackOutputCurrent(false) }
+      catch { /* the process cleanup hook remains the final owner */ }
     }
     if (this.generation && this.binding) {
       try {

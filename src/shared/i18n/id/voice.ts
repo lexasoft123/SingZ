@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "Fader: level suara. Klik untuk mengatur level pemantauan",
   'player.voice.faderToVoice': "Fader: level pemantauan. Klik untuk mengatur level suara",
   'player.voice.monitorHint': "Gunakan headphone untuk menghindari umpan balik",
+  'player.voice.monitorOtherInput': "Saat merekam, pemantauan memakai input rekaman. Hentikan rekaman untuk memantau input lain.",
   'player.voice.monitorLevel': "Level pemantauan",
   'player.voice.monitorWarning': "Catatan pemantauan: {text}",
   'player.voice.msgMonitoring': "Pemantauan aktif. Anda mendengar diri sendiri secara langsung.",

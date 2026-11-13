@@ -31,6 +31,7 @@ export const voice = {
   'player.voice.faderToMonitor': 'Fader: voice level. Click to set the monitor level instead',
   'player.voice.faderToVoice': 'Fader: monitor level. Click to set the voice level instead',
   'player.voice.monitorHint': 'Use headphones to avoid feedback',
+  'player.voice.monitorOtherInput': 'Monitoring while recording uses the take\'s input. Stop the take to monitor another input.',
   'player.voice.monitorLevel': 'Monitor level',
   'player.voice.monitorWarning': 'Monitoring note: {text}',
   'player.voice.msgMonitoring': 'Monitoring on. You hear yourself live.',

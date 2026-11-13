@@ -241,7 +241,7 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
   const localBox = process.env.SINGZ_SURFACE === 'box' && !process.env.SINGZ_BOX_AUDIO_SOCKET
   const rendererMethods = new Set(['configureMicrophoneMix', 'stopMicrophoneMix',
     'preparePlayback', 'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback', 'seekPlayback',
-    'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback'])
+    'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback', 'setPlaybackOutputCurrent'])
   const rendererId = (id: number): number => localBox ? id + 1000 : id
   const cleanup = new Set<number>()
   const unavailable = new CaptureOwner(undefined, () => { throw new Error('Dedicated audio process unavailable; restart SingZ') })
@@ -264,6 +264,8 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
         try { return await desktopAudioProcess.call('owner', method, args) }
         catch (error) {
           reportFallback(method, error)
+          if (method === 'setPlaybackOutputCurrent' && args[1] === false)
+            desktopAudioProcess.terminate(new Error('Native output handback could not be confirmed'))
           if (process.env.SINGZ_SURFACE === 'box' && process.env.SINGZ_BOX_AUDIO_SOCKET) throw error
           const fallback = unavailable[method as keyof CaptureOwner]
           if (typeof fallback !== 'function') throw error

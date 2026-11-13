@@ -75,6 +75,9 @@ export interface VoiceEnginePort {
   readonly playing: boolean
   readonly position: number
   readonly duration?: number
+  /** The song's output route: a change re-asks monitor availability. */
+  readonly outputDeviceId?: string
+  subscribe?(fn: () => void): () => void
   readonly tempo: number
   readonly transpose: number
   play(): Promise<void>
@@ -157,6 +160,8 @@ export interface VoiceModel {
   faderMode: 'voice' | 'monitor'
   /** True during the first monitoring episode of the session: shows the quiet headphones hint. */
   monitorHint: boolean
+  /** A quiet, non-error note about monitoring (never an error state). */
+  monitorNote: 'other-input' | null
   error: VoiceErrorKind | null
   /** Why the last take ended without the singer pressing stop. */
   stoppedBy: 'seek' | 'auto' | null
@@ -203,6 +208,7 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   monitorGainDb: MONITOR_GAIN_DEFAULT_DB,
   faderMode: 'voice',
   monitorHint: false,
+  monitorNote: null,
   error: null,
   stoppedBy: null,
   take: null,
@@ -304,6 +310,8 @@ export class VoiceController {
   private songEpoch = 0
   private disposed = false
   private startToken = 0
+  /** The device and channel the running take records from. */
+  private takeInput: { deviceName: string; channelIndex: number } | null = null
   private inputToken = 0
   /** A re-arm after an input change is under way (a quicker second selection inherits it). */
   private rearmPending = false
@@ -333,11 +341,15 @@ export class VoiceController {
     this.model = { ...this.model, monitorGainDb: this.readMonitorGain() }
   }
 
+  /** Strict: a blank, non-numeric or out-of-range stored value is junk, replaced by the default. */
   private readMonitorGain(): number {
     try {
       const raw = this.deps.storage?.getItem(MONITOR_GAIN_KEY)
-      const v = raw === null || raw === undefined ? NaN : Number(raw)
-      if (Number.isFinite(v)) return Math.max(-60, Math.min(12, v))
+      if (raw === null || raw === undefined) return MONITOR_GAIN_DEFAULT_DB
+      const text = raw.trim()
+      const v = text === '' ? NaN : Number(text)
+      if (Number.isFinite(v) && v >= -60 && v <= 12) return v
+      this.deps.storage?.setItem(MONITOR_GAIN_KEY, String(MONITOR_GAIN_DEFAULT_DB))
     } catch {
       /* unreadable: the safe default */
     }
@@ -382,8 +394,18 @@ export class VoiceController {
     const md = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
     const onChange = (): void => void this.refreshInputs()
     md?.addEventListener?.('devicechange', onChange)
+    // The song's output moving (e.g. to the laptop speakers) changes what monitoring can do.
+    let route = this.deps.engine.outputDeviceId
+    const unsub = this.deps.engine.subscribe?.(() => {
+      const now = this.deps.engine.outputDeviceId
+      if (now !== route) {
+        route = now
+        void this.refreshMonitorAvailability()
+      }
+    })
     return () => {
       md?.removeEventListener?.('devicechange', onChange)
+      unsub?.()
       this.dispose()
     }
   }
@@ -693,6 +715,7 @@ export class VoiceController {
     }
     const startPos = engine.position
     this.recordingId = res.takeId
+    this.takeInput = inputRequest(input)
     this.armOpen = false // main reuses the open input for the take
     this.startedAtMs = this.now()
     this.lastTickMs = this.startedAtMs
@@ -759,7 +782,13 @@ export class VoiceController {
       res = { ok: false, reason: 'error' }
     }
     // The take is over, so the input is no longer held open for it.
-    if (!this.model.monitor.on) void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
+    this.takeInput = null
+    if (this.model.monitor.on) {
+      // The take held the input; monitoring now holds it, so turning monitoring off releases it.
+      this.armedByMonitor = true
+    } else {
+      void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
+    }
     if (res.reason === 'device-lost') void this.releaseMonitor()
     if (this.disposed) return
     if (res.ok && res.take) {
@@ -1048,27 +1077,31 @@ export class VoiceController {
     })
   }
 
-  /** Ask main whether this input can be monitored; on input change, arm, song load and device change, not on a timer. */
+  /** Ask main whether this input can be monitored; on input change, arm, song load, device change and output-route change, not on a timer. */
   async refreshMonitorAvailability(): Promise<void> {
     // A toggle in flight owns the monitor state; its own reply carries availability.
     if (this.model.songId === null || this.model.monitor.on || this.monitorPending) return
     const token = ++this.availToken
+    const st = await this.fetchMonitorAvailability()
+    if (!st || token !== this.availToken || this.disposed || this.model.monitor.on || this.monitorPending) return
+    this.applyMonitorState({ ...st, on: false })
+  }
+
+  private async fetchMonitorAvailability(): Promise<VoiceMonitorState | null> {
     try {
-      const st = await this.deps.api.monitorAvailability({ input: this.monitorRequestInput() })
-      if (token !== this.availToken || this.disposed || this.model.monitor.on || this.monitorPending) return
-      this.applyMonitorState({ ...st, on: false })
+      return await this.deps.api.monitorAvailability({ input: this.monitorRequestInput() })
     } catch {
-      // Availability is advisory; a toggle attempt will report the real failure.
+      return null // advisory; a toggle attempt reports the real failure
     }
   }
 
   async toggleMonitor(): Promise<void> {
     const m = this.model
     if (m.monitor.on) {
-      await this.releaseMonitor()
+      await this.releaseMonitor() // mid-take this only releases the monitor: the take keeps the input
       return
     }
-    if (this.monitorPending || m.songId === null || m.monitor.avail !== 'ok' || m.inputMissing || m.perm === 'denied') return
+    if (this.monitorPending || m.songId === null || m.inputMissing || m.perm === 'denied') return
     const token = ++this.monitorToken
     this.monitorPending = true
     let armedHere = false
@@ -1081,8 +1114,22 @@ export class VoiceController {
       void this.forceDisarm()
     }
     try {
-      // Monitoring needs the input open (meter live): arm it unless the singer already did.
-      if (!this.model.armed) {
+      // Availability is re-asked right before turning on (the output may have moved since).
+      const av = await this.fetchMonitorAvailability()
+      if (stale()) return
+      if (av) this.applyMonitorState({ ...av, on: false })
+      if (this.model.monitor.avail !== 'ok') return // refused: the reason is already shown
+      const holding = this.model.recording || this.model.starting
+      if (holding) {
+        // The take holds the input: never arm over it. Monitor only the take's own input.
+        const want = this.monitorRequestInput()
+        const took = this.takeInput
+        if (took && (took.deviceName !== want.deviceName || took.channelIndex !== want.channelIndex)) {
+          this.set({ monitorNote: 'other-input' })
+          return
+        }
+      } else if (!this.model.armed) {
+        // Monitoring needs the input open (meter live): arm it unless the singer already did.
         const ok = await this.armInput(false)
         if (stale()) {
           // Superseded (input changed, song changed) while arming: do not leave it open.
@@ -1094,7 +1141,10 @@ export class VoiceController {
         }
         if (!ok) return
         armedHere = true
+        // From here the arm is monitoring's, not the singer's (a selection must not re-arm it).
+        this.armedByMonitor = true
       }
+      this.set({ monitorNote: null })
       const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb })
       if (stale()) {
         // Torn down while main was opening it: do not leave it on.
@@ -1129,7 +1179,10 @@ export class VoiceController {
     const ownArm = this.armedByMonitor
     this.armedByMonitor = false
     if (!this.monitorOpen && !this.model.monitor.on) {
-      if (ownArm) void this.forceDisarm()
+      if (ownArm) {
+        if (this.model.armed && !this.model.recording) this.set({ armed: false })
+        void this.forceDisarm()
+      }
       return
     }
     this.monitorOpen = false

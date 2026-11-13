@@ -58,7 +58,7 @@ VoiceMonitorSongRoute currentRoute() {
   auto& service=sharedAudioService();
   const auto status=service.status();
   const auto config=service.activeOutputConfig();
-  return voiceMonitorSongRoute(config,service.providerId(),status,service.outputRouteGeneration());
+  return voiceMonitorSongRoute(config,service.providerId(),status,service.outputRouteGeneration(),service.playbackOutputCurrent());
 }
 napi_value object(napi_env env) {napi_value o;napi_create_object(env,&o);return o;}
 void boolean(napi_env env,napi_value o,const char* key,bool b) {napi_value v;napi_get_boolean(env,b,&v);napi_set_named_property(env,o,key,v);}
@@ -132,6 +132,17 @@ napi_value begin(napi_env env,napi_callback_info info) {
   if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;}
   return result(env,r);
 }
+napi_value outputCurrent(napi_env env,napi_callback_info info) {
+  size_t argc=1;napi_value arg{};bool current=false;
+  napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);
+  if(argc!=1 || napi_get_value_bool(env,arg,&current)!=napi_ok)return error(env,"Invalid output state");
+  std::lock_guard lock(control);
+  auto o=object(env);boolean(env,o,"ok",sharedAudioService().setPlaybackOutputCurrent(current));
+  if(!current && !monitoredOutput.empty()) {
+    host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();
+  }
+  return o;
+}
 napi_value gain(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);double gain=0;
   if(argc!=1 || napi_get_value_double(env,arg,&gain)!=napi_ok || !std::isfinite(gain)){auto o=object(env);boolean(env,o,"ok",false);return o;}
@@ -164,6 +175,16 @@ napi_value status(napi_env env,napi_callback_info) {
   number(env,o,"monitorObservedCallbackFrames",r.observedCallbackFrames);
   number(env,o,"songProcessBufferFrames",route.song.latency.bufferFrames);
   number(env,o,"songObservedCallbackFrames",route.song.observedCallbackFrames);
+  const auto d=sharedAudioService().callbackDiagnostics();
+  auto diagnostics=object(env);
+#define SONG_DIAG(name) text(env,diagnostics,#name,std::to_string(d.name))
+  SONG_DIAG(callbacks);SONG_DIAG(deliveredFrames);SONG_DIAG(periodChanges);SONG_DIAG(sequenceGaps);
+  SONG_DIAG(timestampChanges);SONG_DIAG(clockChanges);SONG_DIAG(routeChanges);
+  SONG_DIAG(positiveSampleGapFrames);SONG_DIAG(sampleRegressions);SONG_DIAG(maxCallbackExcessNs);
+  SONG_DIAG(maxOutputExcessNs);SONG_DIAG(periodOutputExcessNs);SONG_DIAG(lastFlags);SONG_DIAG(lastFrames);
+#undef SONG_DIAG
+  napi_set_named_property(env,o,"songCallbackDiagnostics",diagnostics);
+  boolean(env,o,"songOutputCurrent",sharedAudioService().playbackOutputCurrent());
   warnings(env,o,r.warnings);return o;
 }
 napi_value end(napi_env env,napi_callback_info info) {
@@ -200,6 +221,7 @@ void defineVoiceMonitorExports(napi_env env,napi_value exports,NativeAudioOwners
   ownership=owner;
   environments.attach();
   napi_property_descriptor properties[]={
+    {"setPlaybackOutputCurrent",nullptr,guarded<outputCurrent>,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"voiceMonitorAvailability",nullptr,guarded<availability>,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"beginVoiceMonitor",nullptr,guarded<begin>,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"setVoiceMonitorGain",nullptr,guarded<gain>,nullptr,nullptr,nullptr,napi_default,nullptr},

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AUDIO_RPC_BYTES, AUDIO_RPC_LIMIT, AudioProcessRpc, audioMessageBytes, type AudioRequest } from '../../src/main/audio-process-rpc'
+import { AUDIO_RPC_BYTES, AUDIO_RPC_LIMIT, AudioProcessRpc, audioMessageBytes, audioMethodAllowed, type AudioRequest } from '../../src/main/audio-process-rpc'
 
 afterEach(() => vi.useRealTimers())
 
@@ -88,4 +88,11 @@ describe('dedicated audio process control channel', () => {
     expect(endpoint.kill).toHaveBeenCalledOnce()
     expect(rpc.outstandingBytes).toBe(0)
   })
+})
+
+
+it('allowlists native output intent only through validated ownership', () => {
+  expect(audioMethodAllowed('owner', 'setPlaybackOutputCurrent')).toBe(true)
+  expect(audioMethodAllowed('binding', 'setPlaybackOutputCurrent')).toBe(false)
+  expect(audioMethodAllowed('owner', 'setPlaybackOutputCurrentUnsafe')).toBe(false)
 })

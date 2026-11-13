@@ -261,6 +261,8 @@ const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
   desktopPlaybackStatus: () => ipcRenderer.invoke('audio-host:playback-status'),
   measureDesktopPlaybackLanes: (request) =>
     ipcRenderer.invoke('audio-host:playback-measure', request),
+  setDesktopPlaybackNativeOutputCurrent: current =>
+    ipcRenderer.invoke('audio-host:playback-output-current', current),
   unloadDesktopPlayback: (generation) =>
     ipcRenderer.invoke('audio-host:playback-unload', generation),
 

@@ -971,10 +971,16 @@ function registerIpc(): void {
     }
   )
   ipcMain.handle('audio-host:playback-unload', async (event, generation: unknown) => {
-    await disposeWithin(voiceMonitor, 2000)
     // Logged by the owner, which also sees the unloads that come back ok
     // WITHOUT a cleanup receipt — the case worth a line.
     return captureOwner.unloadPlayback(event.sender.id, playbackGeneration(generation))
+  })
+
+  ipcMain.handle('audio-host:playback-output-current', async (event, current: unknown) => {
+    if (typeof current !== 'boolean') return { ok: false, error: 'Invalid native output state' }
+    const result = await captureOwner.setPlaybackOutputCurrent(event.sender.id, current)
+    if (result.ok && !current) await disposeWithin(voiceMonitor, 2000)
+    return result
   })
 
   ipcMain.handle('stems:reveal', (_e, raw: string) => {

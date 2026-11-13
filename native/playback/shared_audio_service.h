@@ -1,5 +1,6 @@
 #pragma once
 
+#include "output_callback_diagnostics.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,6 +45,11 @@ class SharedAudioService final {
   std::string activeOutputUid() const;
   // UID and physical output channel map copied together under the route lock.
   AudioHostConfig activeOutputConfig() const;
+  // Current song output intent, independent of transient client/host stop.
+  // A completed browser handback clears it; a native client open sets it.
+  bool playbackOutputCurrent() const;
+  OutputCallbackDiagnosticSnapshot callbackDiagnostics() const noexcept;
+  bool setPlaybackOutputCurrent(bool current);
   uint64_t outputRouteGeneration() const noexcept;
   // Mobile may park the shared output while another route owns the device.
   void parkOutput() noexcept;

@@ -30,6 +30,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.faderToMonitor': "เฟเดอร์: ระดับเสียงร้อง คลิกเพื่อปรับระดับมอนิเตอร์แทน",
   'player.voice.faderToVoice': "เฟเดอร์: ระดับมอนิเตอร์ คลิกเพื่อปรับระดับเสียงร้องแทน",
   'player.voice.monitorHint': "ใช้หูฟังเพื่อหลีกเลี่ยงเสียงหอน",
+  'player.voice.monitorOtherInput': "ขณะอัดเสียง การมอนิเตอร์ใช้อินพุตเดียวกับที่อัด หยุดอัดก่อนหากต้องการมอนิเตอร์อินพุตอื่น",
   'player.voice.monitorLevel': "ระดับเสียงมอนิเตอร์",
   'player.voice.monitorWarning': "หมายเหตุการมอนิเตอร์: {text}",
   'player.voice.msgMonitoring': "เปิดมอนิเตอร์อยู่ คุณได้ยินเสียงตัวเองแบบสด",
