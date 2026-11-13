@@ -180,6 +180,8 @@ export const box = {
   'box.status.ended': "Song ended",
   'box.status.error': "Playback problem",
   'box.navigation.currentNamed': "Current song: {name}",
+  'box.navigation.backToSong': "Back to the song · {time}",
+  'box.navigation.nowPlaying': "Now playing · {time} / {duration}",
   'box.navigation.account': 'Google Drive',
   'box.state.downloading': 'Download in progress',
   'box.state.downloadRequired': 'Download required',

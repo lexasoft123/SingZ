@@ -188,6 +188,8 @@ export const box: Translation<typeof english> = {
   'box.status.ended': "Песня закончилась",
   'box.status.error': "Проблема воспроизведения",
   'box.navigation.currentNamed': "Текущая песня: {name}",
+  'box.navigation.backToSong': "Вернуться к песне · {time}",
+  'box.navigation.nowPlaying': "Сейчас играет · {time} / {duration}",
   'box.navigation.account': 'Google Drive',
   'box.state.downloading': 'Идёт загрузка',
   'box.state.downloadRequired': 'Нужна загрузка',

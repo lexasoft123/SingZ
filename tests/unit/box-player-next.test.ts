@@ -14,12 +14,12 @@ const snapshot = (over: Partial<BoxTransportSnapshot>): BoxTransportSnapshot => 
 
 const render = (snap: BoxTransportSnapshot, next: { title: string; artist: string | null } | null): string => renderToStaticMarkup(createElement(Player, {
   snapshot: snap, controlsVisible: true, next,
-  onLibrary: () => {}, onMix: () => {}, onQueue: () => {}, onNext: () => {}, onSettings: () => {}, onToggle: () => {}, onSeek: () => {}, onSeekBy: () => {}, onWake: () => {}
+  onLibrary: () => {}, onMix: () => {}, onQueue: () => {}, onAccount: () => {}, onNext: () => {}, onSettings: () => {}, onToggle: () => {}, onSeek: () => {}, onSeekBy: () => {}, onWake: () => {}
 }))
 const ready = { item: { name: 'Old Song', dir: '/old' }, lyrics: { status: 'ready', lines: [{ start: 0, end: 1, text: 'a' }] }, metadata: {} }
 const tree = (snap: BoxTransportSnapshot, calls: string[]): ReactElement => createElement(Player, {
   snapshot: snap, controlsVisible: true, next: null,
-  onLibrary: () => {}, onMix: () => {}, onQueue: () => {}, onNext: () => {}, onSettings: () => {}, onToggle: () => calls.push('toggle'),
+  onLibrary: () => {}, onMix: () => {}, onQueue: () => {}, onAccount: () => {}, onNext: () => {}, onSettings: () => {}, onToggle: () => calls.push('toggle'),
   onSeek: p => calls.push(`seek:${p}`), onSeekBy: () => {}, onWake: () => {}
 })
 /** Player has no hooks of its own, so call it and walk the returned element tree to the control's props. */

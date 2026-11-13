@@ -181,6 +181,8 @@ export const box: Record<keyof typeof english, string> = {
   'box.status.ended': "歌曲已结束",
   'box.status.error': "播放出现问题",
   'box.navigation.currentNamed': "当前歌曲：{name}",
+  'box.navigation.backToSong': "返回歌曲 · {time}",
+  'box.navigation.nowPlaying': "正在播放 · {time} / {duration}",
   'box.navigation.account': 'Google Drive',
   'box.state.downloading': '正在下载',
   'box.state.downloadRequired': '需要下载',

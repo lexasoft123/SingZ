@@ -122,7 +122,7 @@ describe('controls never move the lyrics; meters stay', () => {
   } as unknown as BoxTransportSnapshot)
   const render = (controlsVisible: boolean): string => renderToStaticMarkup(createElement(Player, {
     snapshot: snapshot(), controlsVisible, next: { title: 'Next', artist: null },
-    onLibrary: () => {}, onMix: () => {}, onQueue: () => {}, onNext: () => {}, onSettings: () => {}, onToggle: () => {}, onSeek: () => {}, onSeekBy: () => {}, onWake: () => {}
+    onLibrary: () => {}, onMix: () => {}, onQueue: () => {}, onAccount: () => {}, onNext: () => {}, onSettings: () => {}, onToggle: () => {}, onSeek: () => {}, onSeekBy: () => {}, onWake: () => {}
   }))
   it('renders identical lyric rows and the same two meters whether the controls are shown or hidden', () => {
     const shown = render(true), hidden = render(false)
@@ -138,10 +138,11 @@ describe('controls never move the lyrics; meters stay', () => {
     }
     expect(hidden).toContain('data-controls="hidden"')
   })
-  it('keeps the strip controls and their remote order: seek, from start, back, play, forward, next, mix, queue', () => {
+  it('keeps the strip controls and their remote order: seek, from start, back, play, forward, next, mix; Queue lives in the top bar', () => {
     const html = render(true)
-    const order = ['seek', 'from-start', 'previous', 'play', 'forward5', 'next-song', 'mix', 'queue'].map(name => html.indexOf(`data-control="${name}"`))
+    const order = ['seek', 'from-start', 'previous', 'play', 'forward5', 'next-song', 'mix'].map(name => html.indexOf(`data-control="${name}"`))
     expect(order.every(index => index > 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
+    expect(html).not.toContain('data-control="queue"')
   })
 })

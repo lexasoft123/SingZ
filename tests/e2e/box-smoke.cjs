@@ -113,6 +113,7 @@ let app = null
   await page.waitForSelector('[data-app="singz-box"]', { timeout: 60000 })
   await page.waitForSelector('[data-project-dir]', { timeout: 30000 })
   const headers = await page.locator('.box-list-heading [role="columnheader"]').allTextContents()
+  if (process.env.BOX_SHOT_DIR) await page.screenshot({ path: path.join(process.env.BOX_SHOT_DIR, 'songs.png') })
   check(headers.slice(0, 6).join('|') === 'Artist|Song|Key|BPM|Vocal range|Time', 'catalog keeps artist-first compact columns')
   check(await page.locator('.box-song-row').count() === 2, 'real isolated catalog lists both projects')
   await page.waitForFunction(() => Array.from(document.querySelectorAll('.box-song-row .box-time')).every(cell => cell.textContent === '0:30'), null, { timeout: 30000 })
@@ -231,8 +232,9 @@ let app = null
   })
 
   await watchdog.run('queue changes preserve current playback and selection asks', 90, async () => {
-    await page.locator('[data-control="queue"]').click()
+    await page.locator('.box-navigation button:nth-child(2)').click()
     await page.waitForSelector('.queue-main')
+    if (process.env.BOX_SHOT_DIR) await page.screenshot({ path: path.join(process.env.BOX_SHOT_DIR, 'queue.png') })
     check(await page.locator('.queue-row').count() === 2, 'queue contains both explicitly added songs')
     await page.locator('.queue-row', { hasText: 'Fixture B' }).focus()
     await page.getByRole('button', { name: 'Move up', exact: true }).click()
@@ -253,7 +255,7 @@ let app = null
     await page.waitForSelector('.box-player[data-active-song]', { timeout: 60000 })
     check(await page.locator('.box-player').getAttribute('data-playing') === 'false', 'confirmed replacement opens paused')
     check(Number(await page.locator('.box-player').getAttribute('data-position')) === 0, 'confirmed replacement starts at zero')
-    await page.locator('[data-control="queue"]').click()
+    await page.locator('.box-navigation button:nth-child(2)').click()
     check(await page.locator('.queue-row').count() === 1, 'opening never consumes the selected queue entry')
     await page.locator('[data-queue-return]').click()
   })
@@ -340,8 +342,8 @@ let app = null
     await page.locator('[data-control="play"]').click()
     await page.waitForSelector('.box-player[data-playing="true"]')
     await page.waitForSelector('.box-player[data-controls="hidden"]', { timeout: 15000 })
-    check(await page.locator('.player-header .box-logo').isVisible() && await page.locator('.player-song strong').isVisible(), 'logo and song name stay visible while controls are hidden')
-    check(!await page.locator('.player-header-actions').isVisible(), 'header buttons hide with the controls')
+    check(await page.locator('.player-header .box-logo').isVisible() && await page.locator('.player-header .box-song-pill strong').isVisible(), 'logo and song pill stay visible while controls are hidden')
+    check(!await page.locator('.player-header .box-nav-group').isVisible() && !await page.locator('.player-header .box-utilities').isVisible(), 'top bar tabs and utilities hide with the controls')
     const geometry = () => page.evaluate(() => ({
       rows: [...document.querySelectorAll('.player-lyric-scale')].map(el => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height, getComputedStyle(el).opacity].join(',') }),
       area: (r => [r.left, r.top, r.width, r.height].join(','))(document.querySelector('.player-lyrics').getBoundingClientRect()),

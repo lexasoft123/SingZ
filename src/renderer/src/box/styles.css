@@ -40,19 +40,20 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .box-tv button, .box-tv input, .box-tv [data-remote-focus] { transition: none; }
 .box-tv .pill { justify-content: center; font-weight: 600; line-height: var(--box-row-line); text-align: center; white-space: nowrap; }
 .box-tv button:focus-visible, .box-tv input:focus-visible { outline: 2px solid var(--sz-accent); outline-offset: 3px; }
-.box-titlebar { height: 64px; display: flex; align-items: center; gap: 28px; padding: 0 var(--box-page-x); border-bottom: 1px solid var(--sz-line); }
+.box-titlebar { --bar-h: 38px; --bar-pill-h: 46px; height: 64px; display: flex; align-items: center; gap: 28px; padding: 0 var(--box-page-x); border-bottom: 1px solid var(--sz-line); }
 .box-logo { font-weight: 800; font-size: var(--box-brand-size); line-height: var(--box-brand-line); letter-spacing: .02em; font-variation-settings: 'wdth' 88; white-space: nowrap; }
 .box-logo > span { color: var(--sz-accent); font-style: italic; margin-left: 1px; }
 .box-logo small { font: 400 var(--box-meta-size)/var(--box-meta-line) var(--sz-font-mono); color: var(--sz-dim); margin-left: 10px; }
-.box-navigation { height: 38px; padding: 3px; border: 1px solid var(--sz-line); border-radius: 9px; background: color-mix(in srgb, var(--sz-panel-deep) 72%, transparent); gap: 0; }
-.box-navigation button { padding: 0 20px; border-radius: 6px; border: 0; background: transparent; color: var(--sz-dim); font-family: var(--sz-font-display); font-size: var(--box-label-size); line-height: var(--box-label-line); font-weight: 600; }
+.box-nav-group { display: flex; align-items: center; gap: 20px; }
+.box-titlebar-divider { width: 1px; height: 28px; background: var(--sz-line-strong); }
+/* The kit's .mode-seg clips with overflow: hidden, which cut the 2px focus ring of its buttons; the ring must stay whole. */
+.box-titlebar .box-navigation { height: var(--bar-h); padding: 3px; border: 1px solid var(--sz-line); border-radius: 999px; overflow: visible; background: color-mix(in srgb, var(--sz-panel-deep) 72%, transparent); gap: 4px; }
+.box-navigation button { padding: 0 20px; border-radius: 999px; border: 0; background: transparent; color: var(--sz-dim); font-family: var(--sz-font-display); font-size: var(--box-label-size); line-height: var(--box-label-line); font-weight: 600;; outline-offset: 2px; }
 .box-navigation button.on { color: var(--sz-text); background: color-mix(in srgb, var(--sz-line-strong) 52%, transparent); }
-.box-utilities { margin-left: auto; display: flex; align-items: center; gap: 24px; }
+.box-utilities { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .box-utilities .pill { font-size: 17px; padding: 8px 16px; }
 .box-utilities button[data-here="true"] { color: var(--sz-accent); border-color: var(--sz-accent); box-shadow: inset 0 -3px 0 var(--sz-accent); font-weight: 700; }
 .box-utilities button[data-here="true"]::before { content: "▸ "; }
-.box-current-song { display: inline-flex; align-items: center; gap: 8px; max-width: 320px; }
-.box-current-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .box-main { height: 836px; padding: var(--box-page-top) var(--box-page-x) var(--box-page-bottom); display: grid; grid-template-rows: 64px 48px 56px minmax(0, 1fr) 44px; min-height: 0; }
 .box-heading { display: flex; gap: 18px; align-items: baseline; }
 .box-heading h1, .queue-heading h1 { font-size: var(--box-title-size); letter-spacing: -.025em; line-height: var(--box-title-line); font-weight: 700; margin: 0; }
@@ -108,13 +109,8 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 /* Option C. 1600x900 is the 1280x720 design x1.25. Title row, lyric area, strip band and meter row are
    fixed-height flex children: showing or hiding the controls only fades the strip inside its reserved band. */
 .player-content { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 22px 30px 12px; }
-.player-header { flex: 0 0 43px; height: 43px; display: flex; align-items: center; gap: 15px; padding: 0 0 0 10px; }
+.player-header { --bar-h: 36px; --bar-pill-h: 43px; flex: 0 0 43px; height: 43px; display: flex; align-items: center; gap: 14px; padding: 0 0 0 10px; border-bottom: 0; }
 .player-header .box-logo { font-size: 22px; line-height: 28px; }
-.player-song { display: flex; flex-direction: column; gap: 2px; padding-left: 15px; border-left: 1px solid var(--sz-line-strong); min-width: 0; }
-.player-song strong { font-size: 20px; font-weight: 650; white-space: nowrap; max-width: 900px; overflow: hidden; text-overflow: ellipsis; }
-.player-song > span { font-size: 15px; color: var(--sz-dim); }
-.player-header-actions { margin-left: auto; }
-.player-header-actions .pill { min-height: var(--box-compact-height); font-size: var(--box-label-size); padding: 8px 16px; }
 .player-chrome { opacity: 1; visibility: visible; transition: opacity .18s ease, visibility 0s; }
 .box-player[data-controls="hidden"] .player-chrome { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .18s ease, visibility 0s linear .18s; }
 .player-lyrics { position: relative; flex: 1 1 0; min-height: 0; overflow: hidden; }
@@ -267,8 +263,6 @@ body.win:not(.glass) .box-tv .modal-scrim { background: rgba(18, 16, 13, .96); b
 .detail-metadata dt { font-size: var(--box-label-size); line-height: var(--box-label-line); margin-bottom: 8px; }
 .detail-metadata dd { font-size: var(--box-section-size); line-height: var(--box-section-line); }
 /* The singing surface keeps its compact chrome independently of page body type. */
-.player-song strong { line-height: 24px; }
-.player-song > span { line-height: 20px; }
 .player-hints { line-height: 18px; }
 .mixer-header h2 { font-size: 24px; font-weight: 700; margin: 0 4px 0 0; }
 .mixer-header .mode-seg button { font-size: 16px; padding: 4px 18px; }
@@ -306,3 +300,14 @@ body.win:not(.glass) .box-tv .modal-scrim { background: rgba(18, 16, 13, .96); b
 .detail-key-controls { display: flex; align-items: center; gap: 20px; margin-top: 18px; }
 .detail-key-controls .pill { min-width: 72px; min-height: 56px; font-size: 28px; }
 .detail-key-offset { font: 24px var(--sz-font-mono); color: var(--sz-text); min-width: 160px; text-align: center; }
+
+/* Top bar controls share one height and the pill shape; the song pill is the one filled control. */
+.box-titlebar .box-utilities .pill { height: var(--bar-h); min-height: 0; padding: 0 16px; border-radius: 999px; line-height: 1; }
+.box-titlebar .box-song-pill { display: inline-flex; align-items: center; gap: 10px; height: var(--bar-pill-h); min-height: 0; max-width: 340px; padding: 0 18px 0 6px; border: 2px solid var(--sz-accent); border-radius: 999px; background: var(--sz-accent); color: var(--sz-accent-ink); text-align: left; flex: none; }
+.box-song-badge { flex: none; width: 28px; height: 28px; border-radius: 50%; display: inline-grid; place-items: center; background: var(--sz-accent-ink); color: var(--sz-accent); }
+.box-song-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+.box-song-text strong { font-size: var(--box-label-size); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.box-song-text small { font-size: 12px; white-space: nowrap; opacity: .78; font-variant-numeric: tabular-nums; }
+.box-titlebar .box-song-pill[data-state="current"] { background: color-mix(in srgb, var(--sz-accent) 14%, transparent); color: var(--sz-accent); cursor: default; }
+.box-song-pill[data-state="current"] .box-song-badge { background: var(--sz-accent); color: var(--sz-accent-ink); }
+.box-song-pill[data-state="current"] small { color: var(--sz-dim); opacity: 1; }
