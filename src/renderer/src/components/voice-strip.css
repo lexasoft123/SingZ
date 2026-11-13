@@ -171,8 +171,8 @@
 /* take lane */
 .vs-tl { grid-column: 2; grid-row: var(--extra-row); display: flex; flex-direction: column; min-width: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 /* The stack's scrub overlay (z 5) covers this lane for seeking and the playhead; real controls sit above it. */
-.vs-note .vs-btn, .vs-take-actions { position: relative; z-index: 6; }
-.vs-head { height: 30px; display: flex; align-items: center; gap: 10px; padding: 4px 0 0 12px; min-width: 0; }
+.vs-note .vs-btn, .vs-take-actions, .vs-head > .sz-tip-wrap > .vs-effect-chip, .vs-head > .sz-tip-wrap > .vs-lane-state, .vs-head > .sz-tip-wrap > .vs-btn { position: relative; z-index: 6; } /* above the stack's scrub overlay (z 5); the playhead layer (z 7) stays pointer-events: none */
+.vs-head { container-type: inline-size; container-name: vs-head; height: 30px; display: flex; align-items: center; gap: 10px; padding: 4px 0 0 12px; min-width: 0; }
 .vs-note { flex: 1; min-width: 0; font-size: 11px; color: var(--dim); display: flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; }
 .vs-note > span { overflow: hidden; text-overflow: ellipsis; }
 .vs-note.warn { color: var(--accent); }
@@ -307,3 +307,29 @@ body.modal-open .vs-rec-t.recording .vs-rec-core { animation-play-state: paused;
 .vs-mon-chip svg { width: 14px; height: 14px; }
 .vs-mon-chip:hover { background: color-mix(in srgb, #5be3b0 22%, transparent); }
 .vs-mon-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.vs-effect-chip { flex: none; height: 18px; padding: 0 8px; border-radius: 9px; border: 1px solid var(--line-strong); background: var(--accent-soft); color: var(--accent); font: inherit; font-size: 10.5px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.vs-effect-chip.dim { background: transparent; color: var(--dim); }
+.vs-effect-chip:hover { border-color: var(--accent); }
+.vs-effect-chip:focus-visible, .vs-lane-state:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vs-lane-state { flex: 0 1 auto; min-width: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--dim); }
+.vs-lane-state.bad { color: var(--danger); }
+.vs-listen-old { display: inline-flex; align-items: center; gap: 3px; padding-left: 6px; border-left: 1px solid var(--line-strong); font-size: 10px; color: var(--dim); }
+.vs-chip[aria-disabled='true'] { opacity: 0.35; cursor: not-allowed; }
+.vs-preparing { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; background: rgba(23, 19, 16, 0.55); color: var(--text); font-size: 10.5px; pointer-events: none; }
+.vs-preparing::before { content: ''; width: 10px; height: 10px; margin-right: 6px; border-radius: 50%; border: 2px solid var(--dim); border-top-color: var(--accent); animation: vs-spin 0.9s linear infinite; }
+.vs-preparing { grid-auto-flow: column; justify-content: center; align-items: center; }
+body.modal-open .vs-preparing::before { animation-play-state: paused; }
+@keyframes vs-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .vs-preparing::before { animation: none; } }
+.vs-effects { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 10px; }
+.vs-effects > li { border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; }
+.vs-effect { display: grid; gap: 8px; }
+.vs-effect label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.vs-effect input[type='range'] { flex: 1; min-width: 0; }
+.vs-effect output { min-width: 3.5em; text-align: right; font-family: var(--font-mono); }
+
+.vs-head > .sz-tip-wrap:has(> .vs-lane-state) { flex: 0 1 auto; min-width: 0; }
+.vs-effect-chip, .vs-head .vs-btn, .vs-take-actions { flex: none; }
+/* Narrow lane: the status text goes first (its tooltip and Retry keep the detail); take actions stay reachable. */
+@container vs-head (max-width: 560px) { .vs-lane-state { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } .vs-head > .sz-tip-wrap:has(> .vs-lane-state) { width: 0; } .vs-listen-old > span { display: none; } }

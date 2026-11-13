@@ -35,8 +35,8 @@ import { MonitorChipView } from '../../src/renderer/src/components/VoiceMonitorC
 import Tooltip, { placeTip, TipController, TIP_DELAY_MS } from '../../src/renderer/src/components/Tooltip'
 import { micOwnership, PREVIEW_YIELD_TIMEOUT_MS } from '../../src/renderer/src/audio/mic-ownership'
 import { micPreviewErrorCopy, micPreviewErrorKind } from '../../src/renderer/src/audio/mic-preview'
-import { takeIsSilent } from '../../src/renderer/src/components/voice-format'
-import VoiceTrackSettings from '../../src/renderer/src/components/VoiceTrackSettings'
+import { laneText, takeIsSilent } from '../../src/renderer/src/components/voice-format'
+import VoiceTrackSettings, { OrderedEffects } from '../../src/renderer/src/components/VoiceTrackSettings'
 import { VoiceRecordButton } from '../../src/renderer/src/components/voice-record-button'
 import type { VoiceMonitorState, VoiceTakeSummary, VoiceTakeConformResult } from '../../src/shared/voice-take'
 
@@ -1532,7 +1532,7 @@ describe('monitor level preset, memory and hint', () => {
     let html = render()
     expect(html).toContain('aria-label="Arm for recording"')
     expect(html).toMatch(/class="vs-ib vs-mon"[^>]*aria-pressed="false"[^>]*aria-label="Monitor my voice \(off\)"/)
-    expect(html).toContain('aria-label="Voice level"')
+    expect(html).toContain('aria-label="Take playback level"')
     // negative control: the old Mon chip and its fader-mode tooltips are gone
     expect(html).not.toMatch(/>Mon</)
     expect(html).not.toContain('Click to set the monitor level instead')
@@ -1545,7 +1545,7 @@ describe('monitor level preset, memory and hint', () => {
     html = render()
     expect(html).toMatch(/class="vs-ib vs-mon active"[^>]*aria-pressed="true"[^>]*aria-label="Monitoring on\. Click to turn off"/)
     expect(html).toContain('aria-label="Monitor level"')
-    expect(html).not.toContain('aria-label="Voice level"')
+    expect(html).not.toContain('aria-label="Take playback level"')
     c.dispose()
   })
 })
@@ -1972,9 +1972,9 @@ describe('markup', () => {
     expect(html).toContain('aria-label="Voice strip"')
     expect(html).toContain('aria-label="Arm for recording"')
     expect(html).toMatch(/aria-pressed="false"[^>]*aria-label="Arm for recording"|aria-label="Arm for recording"[^>]*aria-pressed="false"/)
-    expect(html).toContain('aria-label="Mute voice take playback"')
-    expect(html).toContain('aria-label="Solo voice"')
-    expect(html).toContain('aria-label="Voice level"')
+    expect(html).toContain('aria-label="Mute the take"')
+    expect(html).toContain('aria-label="Solo the take (monitor is not affected)"')
+    expect(html).toContain('aria-label="Take playback level"')
     expect(html).toContain('role="meter"')
     expect(html).toContain('aria-label="Monitor my voice (off)"')
     expect(html).toMatch(/aria-pressed="false"[^>]*aria-label="Monitor my voice \(off\)"|aria-label="Monitor my voice \(off\)"[^>]*aria-pressed="false"/)
@@ -2984,3 +2984,176 @@ describe('ADR 0016 controller lane lifecycle', () => {
     c.dispose()
   })
 })
+
+
+describe('take lane presentation', () => {
+  it('distinguishes preparation, omitted and error reasons', () => {
+    expect(laneText({ status: 'conforming' })).toBe('Preparing take for playback')
+    expect(laneText({ status: 'omitted', reason: 'lane-limit' })).toBe('Too many tracks for take playback')
+    expect(laneText({ status: 'error', reason: 'conform-failed', conformReason: 'take-too-long' })).toBe('Take is too long to prepare')
+    expect(laneText({ status: 'error', reason: 'conform-failed', conformReason: 'memory-budget' })).toBe('Not enough memory to prepare the take')
+    expect(laneText({ status: 'error', reason: 'conform-failed', conformReason: 'graph-budget' })).toBe('Too many tracks for take playback')
+    expect(laneText({ status: 'error', reason: 'conform-failed', conformReason: 'conform-error' })).toBe('Take preparation failed')
+    expect(laneText({ status: 'error', reason: 'cancelled' })).toBe('Take preparation was cancelled')
+    expect(laneText({ status: 'ready' })).toBe('')
+  })
+  it('renders generic slots in order', () => {
+    const html = renderToStaticMarkup(createElement(OrderedEffects, { slots: [{ id: 'a', content: 'First' }, { id: 'b', content: 'Second' }] }))
+    expect(html).toContain('<ol')
+    expect(html.indexOf('First')).toBeLessThan(html.indexOf('Second'))
+  })
+})
+
+describe('take lane strip interaction', () => {
+  const lane = (status: 'ready' | 'omitted' = 'ready') => vi.fn(async (source: { path: string } | null) =>
+    (source ? (status === 'ready' ? { status: 'ready' } : { status: 'omitted', reason: 'lane-limit' }) : { status: 'idle' }) as never)
+  async function strip(opts: { transpose?: number; recorded?: number; conform?: VoiceTakeConformResult; laneStatus?: 'ready' | 'omitted' } = {}) {
+    const x = await setup({
+      list: vi.fn(async () => [summary({ transposeSemitones: opts.recorded ?? 0 })]),
+      ...(opts.conform ? { conformTake: vi.fn(async () => opts.conform!) } : {})
+    }, engine => {
+      Object.assign(engine, { voiceTakeOutputRate: 48000, setVoiceTakeLane: lane(opts.laneStatus), setVoiceTakeControl: vi.fn(async () => {}), _tr: opts.transpose ?? 0 })
+    })
+    x.c.bindSong({ path: '/a.mp3', projectDir: null, title: 'A', artist: '' }) // adopts the engine's song key
+    await vi.advanceTimersByTimeAsync(300)
+    const html = (): string => renderToStaticMarkup(createElement(VoiceStrip, { controller: x.c, engine: x.engine as never }))
+    return { ...x, html }
+  }
+  const failed = (conformReason: 'take-too-long' | 'memory-budget' | 'graph-budget' | 'conform-error'): VoiceTakeConformResult =>
+    ({ ok: false, reason: 'conform-failed', conformReason }) as VoiceTakeConformResult
+
+  it('the pitch follow chip shows the applied shift (song key minus recorded key) and dims at zero', async () => {
+    const shifted = await strip({ transpose: 5, recorded: 2 })
+    expect(shifted.html()).toMatch(/class="vs-effect-chip"[^>]*aria-pressed="true"[^>]*>Pitch follow \+3 st</)
+    shifted.c.dispose()
+    const flat = await strip({ transpose: 2, recorded: 2 })
+    expect(flat.html()).toMatch(/class="vs-effect-chip dim"[^>]*>Pitch follow 0 st</) // negative control: zero stays visible, dimmed
+    flat.c.dispose()
+  })
+  it('bypass toggles through setTakeEffects, keeps the take and shows the off state', async () => {
+    const x = await strip({ transpose: 5, recorded: 2 })
+    x.c.setTakeEffects(x.c.getSnapshot().effects.map(e => ({ ...e, enabled: false })))
+    expect(x.c.getSnapshot().effects[0].enabled).toBe(false)
+    const html = x.html()
+    expect(html).toMatch(/class="vs-effect-chip dim"[^>]*aria-pressed="false"[^>]*>Pitch follow off</)
+    expect(html).not.toContain('Pitch follow +3 st')
+    expect(settingsHtml(x.c)).toContain('Pitch follow off')
+    x.c.setTakeEffects(x.c.getSnapshot().effects.map(e => ({ ...e, enabled: true })))
+    expect(x.html()).toContain('Pitch follow +3 st')
+    x.c.dispose()
+  })
+  function settingsHtml(c: VoiceController): string { return renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: c, onClose: () => undefined })) }
+  it('the Effects section lists pitch follow with the bypass-only note, offset and formants', async () => {
+    const x = await strip({ transpose: 1 })
+    const html = settingsHtml(x.c)
+    expect(html).toContain('<ol class="vs-effects">')
+    expect(html).toContain('Effects')
+    expect(html).toContain('The song key shift still applies to every lane')
+    expect(html).toMatch(/type="range"[^>]*min="-12"[^>]*max="12"/)
+    expect(html).toContain('Preserve formants')
+    x.c.dispose()
+  })
+  it('adds a manual offset to the shown shift', async () => {
+    const x = await strip({ transpose: 2, recorded: 2 })
+    x.c.setTakeEffects(x.c.getSnapshot().effects.map(e => ({ ...e, params: { ...e.params, manualOffsetSemitones: 2 } })))
+    expect(x.html()).toContain('Pitch follow +2 st')
+    x.c.dispose()
+  })
+  it('tags "Voice shifted" only beyond about three semitones', async () => {
+    const far = await strip({ transpose: 4 })
+    expect(far.html()).toContain('Voice shifted')
+    far.c.dispose()
+    const near = await strip({ transpose: 3 })
+    expect(near.html()).not.toContain('Voice shifted')
+    near.c.dispose()
+  })
+  it.each([
+    ['take-too-long', 'Take is too long to prepare'],
+    ['memory-budget', 'Not enough memory to prepare the take'],
+    ['graph-budget', 'Too many tracks for take playback'],
+    ['conform-error', 'Take preparation failed']
+  ] as const)('shows the specific %s copy with Retry, never a blank lane', async (reason, copy) => {
+    const x = await strip({ conform: failed(reason) })
+    const html = x.html()
+    expect(html).toContain(copy)
+    expect(html).toMatch(/class="vs-btn"[^>]*>Retry</)
+    expect(html).not.toContain('Plays with the song')
+    x.c.dispose()
+  })
+  it('shows conforming copy without Retry, omitted copy without Retry, and ready as "plays with the song"', async () => {
+    let finish!: (v: VoiceTakeConformResult) => void
+    const slow = await setup({ list: vi.fn(async () => [summary()]), conformTake: vi.fn(() => new Promise<VoiceTakeConformResult>(r => { finish = r })) },
+      e => Object.assign(e, { voiceTakeOutputRate: 48000, setVoiceTakeLane: lane(), setVoiceTakeControl: vi.fn(async () => {}) }))
+    await vi.advanceTimersByTimeAsync(300)
+    let html = renderToStaticMarkup(createElement(VoiceStrip, { controller: slow.c, engine: slow.engine as never }))
+    expect(html).toContain('Preparing take for playback')
+    expect(html).not.toMatch(/class="vs-btn"[^>]*>Retry</)
+    finish({ ok: true, path: '/p.wav', key: 'k', durationFrames: 1, cached: false, leaseId: 'l' })
+    await vi.advanceTimersByTimeAsync(0)
+    html = renderToStaticMarkup(createElement(VoiceStrip, { controller: slow.c, engine: slow.engine as never }))
+    expect(html).toContain('Plays with the song')
+    expect(html).not.toContain('Preparing take for playback')
+    expect(html).not.toMatch(/class="vs-btn"[^>]*>Retry</)
+    slow.c.dispose()
+    const omitted = await strip({ laneStatus: 'omitted' })
+    expect(omitted.html()).toContain('Too many tracks for take playback')
+    expect(omitted.html()).not.toMatch(/class="vs-btn"[^>]*>Retry</)
+    omitted.c.dispose()
+  })
+  it('M and S name the take and are disabled with a reason until a take can play', async () => {
+    const ok = await strip()
+    let html = ok.html()
+    expect(html).toMatch(/aria-pressed="false"[^>]*aria-disabled="false"[^>]*aria-label="Mute the take"/)
+    expect(html).toContain('aria-label="Solo the take (monitor is not affected)"')
+    expect(html).not.toMatch(/aria-disabled="true"[^>]*aria-label="Mute the take"/)
+    ok.c.dispose()
+    const bad = await strip({ conform: failed('conform-error') })
+    html = bad.html()
+    expect(html).toMatch(/aria-disabled="true"[^>]*aria-label="Mute the take"/)
+    expect(html).toMatch(/aria-disabled="true"[^>]*aria-label="Solo the take \(monitor is not affected\)"/)
+    bad.c.dispose()
+  })
+  it('keeps the old Listen buttons in a labelled secondary group', async () => {
+    const x = await strip()
+    expect(x.html()).toMatch(/role="group" aria-label="Listen back \(old\)"/)
+    x.c.dispose()
+  })
+})
+
+describe('Voice strip header stacking and narrow layout (CSS)', () => {
+  const css = readFileSync(new URL('../../src/renderer/src/components/voice-strip.css', import.meta.url), 'utf8')
+  const rules = [...css.matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map(m => ({ sel: m[1].trim(), body: m[2] }))
+  const raised = (cls: string, from = rules): boolean => from.some(r => r.sel.split(',').some(s => s.includes(`.${cls}`) && s.includes('.vs-head') || s.includes(`.${cls}`) && s.trim().startsWith('.vs-note') || s.trim() === `.${cls}`) &&
+    /position:\s*relative/.test(r.body) && Number(/z-index:\s*(\d+)/.exec(r.body)?.[1] ?? 0) >= 6)
+  it('every interactive/status class rendered in .vs-head sits above the scrub overlay (z >= 6)', async () => {
+    const x = await setupStripForCss()
+    const head = x.slice(x.indexOf('class="vs-head"'), x.indexOf('class="vs-track"'))
+    const classes = new Set([...head.matchAll(/<(?:button|span)[^>]*class="([^"]*)"[^>]*(?:aria-pressed|role="status"|type="button")/g)].flatMap(m => m[1].split(' ')).filter(c => ['vs-effect-chip', 'vs-lane-state', 'vs-btn'].includes(c)))
+    expect(classes.has('vs-effect-chip')).toBe(true)
+    expect(classes.has('vs-lane-state')).toBe(true)
+    for (const c of classes) expect(raised(c), c).toBe(true)
+    expect(raised('vs-take-actions')).toBe(true)
+    // negative control: a class without a raising rule is rejected by the same check
+    expect(raised('vs-take-info')).toBe(false)
+    expect(raised('vs-effect-chip', rules.filter(r => !/z-index:\s*6/.test(r.body)))).toBe(false)
+  })
+  it('the header keeps the take actions and lets the status text shrink and hide first', () => {
+    expect(css).toMatch(/\.vs-lane-state \{[^}]*flex: 0 1 auto[^}]*max-width: 160px[^}]*text-overflow: ellipsis/)
+    expect(css).toMatch(/\.vs-take-actions \{ flex: none; \}|\.vs-take-actions \{ flex: none/)
+    expect(css).toMatch(/@container vs-head \(max-width: \d+px\) \{[^}]*\.vs-lane-state/)
+    expect(css).toMatch(/\.vs-head \{[^}]*container-type: inline-size/)
+    expect(css).not.toMatch(/\.vs-take-actions \{[^}]*flex: (?:0 )?1/) // negative control
+  })
+  it('an idle lane is neutral, not a red "unavailable"', async () => {
+    expect(laneText({ status: 'idle' })).toBe('')
+    const html = await setupStripForCss()
+    expect(html).not.toContain('vs-lane-state bad')
+  })
+})
+async function setupStripForCss(): Promise<string> {
+  const x = await setup({ list: vi.fn(async () => [summary()]) })
+  await vi.advanceTimersByTimeAsync(300)
+  const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: x.c, engine: x.engine as never }))
+  x.c.dispose()
+  return html
+}

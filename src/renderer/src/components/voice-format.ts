@@ -1,6 +1,6 @@
 import { t, type Key } from '../i18n'
-import type { RecordBlock } from '../audio/voice-take'
-import type { VoiceMonitorReason } from '../../../shared/voice-take'
+import type { RecordBlock, VoiceModel } from '../audio/voice-take'
+import type { VoiceMonitorReason, VoiceTakeLaneState } from '../../../shared/voice-take'
 
 export const sgn = (n: number): string => (n > 0 ? `+${n}` : n < 0 ? `\u2212${-n}` : '0')
 export const clock = (s: number): string => {
@@ -39,3 +39,30 @@ export function takeIsSilent(peaks: number[] | undefined): boolean {
   for (const p of peaks) if (p >= SILENT_PEAK) return false
   return true
 }
+
+/** Human-readable state of the transient playback lane. */
+export function laneText(lane: VoiceTakeLaneState): string {
+  if (lane.status === 'conforming') return t('player.voice.preparingTake')
+  if (lane.status === 'idle' || lane.status === 'ready') return '' // idle: no lane support or not started yet, neutral until a real state arrives
+  if (lane.status === 'omitted') return t(lane.reason === 'lane-limit' || lane.reason === 'node-limit' ? 'player.voice.laneTooManyTracks' : 'player.voice.laneUnavailable')
+  if (lane.status !== 'error') return ''
+  switch (lane.conformReason ?? lane.reason) {
+    case 'take-too-long': return t('player.voice.laneTooLong')
+    case 'memory-budget': return t('player.voice.laneMemory')
+    case 'graph-budget': return t('player.voice.laneTooManyTracks')
+    case 'cancelled': return t('player.voice.laneCancelled')
+    default: return t('player.voice.laneFailed')
+  }
+}
+
+/** Semitones the offline Pitch follow effect applies: song key minus the recorded key, plus the manual offset; 0 when bypassed or no take. */
+export function pitchFollowShift(m: Pick<VoiceModel, 'take' | 'effects' | 'currentTranspose'>): number {
+  const fx = m.effects.find(effect => effect.id === 'pitch-follow')
+  if (!m.take || !fx || !fx.enabled) return 0
+  return m.currentTranspose - m.take.transpose + fx.params.manualOffsetSemitones
+}
+/** The take reads as "voice shifted" once the applied shift passes about three semitones. */
+export const VOICE_SHIFTED_ST = 3
+export const voiceIsShifted = (m: Pick<VoiceModel, 'take' | 'effects' | 'currentTranspose'>): boolean => Math.abs(pitchFollowShift(m)) > VOICE_SHIFTED_ST
+/** Only error states offer Retry. */
+export const laneCanRetry = (lane: VoiceTakeLaneState): boolean => lane.status === 'error'

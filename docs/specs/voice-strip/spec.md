@@ -567,3 +567,16 @@ non-core locale strings need native review; unpublished zCore commits (346d6a1,
 d64d1a5, 6045214, 0f66fc1 on ca8f131 in the open zCore PR), so SingZ,
 LoopZ and Box must re-pin to the same zCore. Manual checklist:
 [manual-test.md](manual-test.md).
+
+### VS-TAKE: playback lane and effects
+
+Source: ADR 0016 (WP4). A kept take is a playback lane; the strip shows what that lane is doing.
+
+- **VS-TAKE-1 Pitch follow is visible.** With a take present (not while recording) the lane header shows a chip "Pitch follow +3 st": the applied shift (song key minus the take's recorded transposition, plus the manual offset), always shown, dimmed at 0 and when bypassed ("Pitch follow off"). Click toggles bypass through `setTakeEffects`; the tooltip says "The voice follows the song key. Click to bypass." (or how to turn it back on).
+- **VS-TAKE-2 Effects list.** Track settings has an Effects section: an ordered list of effect slots (generic `OrderedEffects`; today only Pitch follow: enabled switch, manual offset -12..+12 st, Preserve formants). Help text: bypass disables the offline shift only; the song key shift still applies to every lane. Controls are disabled while recording or starting, and offset/formants while the effect is bypassed.
+- **VS-TAKE-3 Voice shifted.** The clip tag adds "Voice shifted" when the applied shift is beyond 3 semitones.
+- **VS-TAKE-4 Lane state, never blank.** conforming: subtle spinner on the clip and "Preparing take for playback"; ready: "Plays with the song"; omitted (lane/node limit) "Too many tracks for take playback", otherwise "Take playback is unavailable"; error by typed reason: take-too-long, memory-budget, graph-budget ("Too many tracks"), conform-error, cancelled, each with its own copy and the detail as tooltip. Retry (calls `retryTakeLane`, focus moves to the status text) appears for error states only.
+- **VS-TAKE-5 M / S / fader.** M and S are the take lane's native mute and solo ("Mute the take", "Solo the take (monitor is not affected)"); they are aria-disabled with the tooltip "No playable take" until the lane is ready. The fader edits the take playback level while the monitor is off (label "Take playback level") and the monitor level while it is on.
+- **VS-TAKE-6 Legacy listen back.** Listen and Listen with song stay in a secondary group labelled "Listen back (old)" until WP5 removes them.
+
+Clickable prototype: [prototype/](prototype/) (states: pitch-shifted, lane-conforming, lane-take-too-long, lane-memory-budget, lane-graph-budget, lane-conform-error, lane-cancelled).

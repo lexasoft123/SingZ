@@ -85,3 +85,11 @@ input trim down, and wear headphones that isolate you from the microphone.
 - The app log: use the Log panel's Copy or Save to file… export (see
   [DEVELOPMENT.md](../../DEVELOPMENT.md), "Diagnostic log wording"). Do not
   attach take audio.
+
+### Take playback lane
+
+1. Record a take, press normal Play: it plays with the song ("Plays with the song" in the lane header). M mutes only the take, S solos only the take (live monitor unaffected), the fader changes the take level while monitoring is off and the monitor level while it is on.
+2. Change the song key. The "Pitch follow ±N st" chip updates, is dim at 0, and the tag shows "Voice shifted" beyond 3 st. Click the chip: it reads "Pitch follow off" and the voice is no longer shifted offline (the song key still moves every lane).
+3. Track settings > Effects: toggle Pitch follow, move the manual offset, toggle Preserve formants; each change re-prepares the take ("Preparing take for playback" with a spinner on the clip). Controls are disabled while recording.
+4. Force failures (very long take, low memory, many tracks, cancel the song during preparation): each shows its own message, M and S are disabled with "No playable take", and only error states show Retry; after Retry focus lands on the status text.
+5. "Listen back (old)" group still works. Tooltips appear on every new control; Tab reaches chip, Retry, M, S in order; check at narrow and wide windows (lane header must not overflow or cover the clip).

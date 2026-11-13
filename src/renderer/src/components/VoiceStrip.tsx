@@ -3,7 +3,7 @@ import type { MultitrackEngine } from '../audio/engine'
 import type { TimeView } from '../model'
 import { meterFraction, monitorDbToFader, primaryState, recordBlock, songSpan, type VoiceController, type VoiceInputOption, type VoiceModel } from '../audio/voice-take'
 import { t, type Key } from '../i18n'
-import { blockText, clock, dbText, REASON_KEY, sgn, takeIsSilent } from './voice-format'
+import { blockText, clock, dbText, laneCanRetry, laneText, pitchFollowShift, REASON_KEY, sgn, takeIsSilent, voiceIsShifted } from './voice-format'
 import Tooltip from './Tooltip'
 import VoiceTrackSettings from './VoiceTrackSettings'
 import { useVoiceModel } from './voice-host'
@@ -289,13 +289,21 @@ export default function VoiceStrip({
   const tagParts: string[] = []
   if (take && Math.abs(take.tempo - 1) > 1e-4) tagParts.push(t('player.voice.tagTempo', { tempo: Math.round(take.tempo * 100) }))
   if (take && take.transpose !== 0) tagParts.push(t('player.voice.tagPitch', { transpose: sgn(take.transpose) }))
+  if (take && voiceIsShifted(m)) tagParts.push(t('player.voice.voiceShifted'))
   if (take?.changed) tagParts.push(t('player.voice.tagChanged'))
   const tagText = tagParts.join(' · ')
   const silent = take !== null && !rec && takeIsSilent(take.peaks)
 
   const armed = m.armed || rec
   const faderMonitor = m.monitor.on
-  const faderLabel = faderMonitor ? t('player.voice.monitorLevel') : t('player.voice.level')
+  const faderLabel = faderMonitor ? t('player.voice.monitorLevel') : t('player.voice.takeLevel')
+  const laneStateRef = useRef<HTMLSpanElement>(null)
+  const playable = !!take && m.lane.status === 'ready' && !rec
+  const pitch = m.effects.find((effect) => effect.id === 'pitch-follow')
+  const shift = pitchFollowShift(m)
+  const pitchHelp = pitch?.enabled === false ? t('player.voice.pitchFollowOffHelp') : t('player.voice.pitchFollowHelp')
+  const pitchText = pitch?.enabled === false ? t('player.voice.pitchFollowOff') : t('player.voice.pitchFollowChip', { shift: sgn(shift) })
+  const laneMessage = take && !rec ? laneText(m.lane) : ''
   const monitorWhy = monitorReasonText(m)
   const monitorUnavailable = !m.monitor.on && (m.monitor.avail !== 'ok' || m.inputMissing || m.perm === 'denied')
   const monitorLabel = m.monitor.on ? t('player.voice.monitorOn') : t('player.voice.monitorOff')
@@ -410,24 +418,26 @@ export default function VoiceStrip({
               {monitorWhy}
             </span>
           )}
-          <Tooltip label={m.takeMuted ? t('player.voice.unmute') : t('player.voice.mute')}>
+          <Tooltip label={playable ? (m.takeMuted ? t('player.voice.unmute') : t('player.voice.mute')) : t('player.voice.noPlayableTake')}>
             <button
               type="button"
               className={`vs-chip${m.takeMuted ? ' active' : ''}`}
               aria-pressed={m.takeMuted}
+              aria-disabled={!playable}
               aria-label={m.takeMuted ? t('player.voice.unmute') : t('player.voice.mute')}
-              onClick={() => controller.toggleTakeMute()}
+              onClick={() => { if (playable) controller.toggleTakeMute() }}
             >
               {t('player.voice.muteShort')}
             </button>
           </Tooltip>
-          <Tooltip label={t('player.voice.solo')}>
+          <Tooltip label={playable ? t('player.voice.solo') : t('player.voice.noPlayableTake')}>
             <button
               type="button"
               className={`vs-chip solo${m.solo ? ' active' : ''}`}
               aria-pressed={m.solo}
+              aria-disabled={!playable}
               aria-label={t('player.voice.solo')}
-              onClick={() => controller.toggleSolo()}
+              onClick={() => { if (playable) controller.toggleSolo() }}
             >
               {t('player.voice.soloShort')}
             </button>
@@ -479,6 +489,15 @@ export default function VoiceStrip({
             )}
           </span>
           {take && <span className="vs-take-info">{takeInfo}</span>}
+          {take && !rec && pitch && <Tooltip label={pitchHelp}>
+            <button type="button" className={`vs-effect-chip${!pitch.enabled || shift === 0 ? ' dim' : ''}`} aria-pressed={pitch.enabled}
+              aria-label={pitchText}
+              onClick={() => controller.setTakeEffects(m.effects.map(effect => effect.id === 'pitch-follow' ? { ...effect, enabled: !effect.enabled } : effect))}>
+              {pitchText}
+            </button>
+          </Tooltip>}
+          {take && !rec && <Tooltip label={laneMessage || t('player.voice.playsWithSong')}><span ref={laneStateRef} tabIndex={-1} className={`vs-lane-state${laneMessage && m.lane.status !== 'conforming' ? ' bad' : ''}`} role="status">{laneMessage || t('player.voice.playsWithSong')}</span></Tooltip>}
+          {take && !rec && laneCanRetry(m.lane) && <Tooltip label={laneMessage}><button type="button" className="vs-btn" onClick={() => { controller.retryTakeLane(); laneStateRef.current?.focus() }}>{t('player.voice.retry')}</button></Tooltip>}
           {take && !rec && (
             <span className="vs-take-actions" role="group" aria-label={t('player.voice.takeActions')}>
               {!listening && (
@@ -491,6 +510,7 @@ export default function VoiceStrip({
                   onClick={() => controller.keep()}
                 />
               )}
+              <span className="vs-listen-old" role="group" aria-label={t('player.voice.listenOld')}><span>{t('player.voice.listenOld')}</span>
               {m.listen !== 'with-song' && (
                 <IconButton
                   icon={m.listen === 'take' ? 'stop' : 'play'}
@@ -509,6 +529,7 @@ export default function VoiceStrip({
                   onClick={() => void (m.listen ? controller.stopListening() : controller.listen('with-song'))}
                 />
               )}
+              </span>
               {!listening && (
                 <>
                   {take.userOffsetSec !== 0 && <IconButton icon="reset" label={t('player.voice.resetPosition')} onClick={() => void controller.resetTakePosition()} />}
@@ -582,6 +603,7 @@ export default function VoiceStrip({
               }}
             >
               <ClipWave peaks={waveform?.peaks ?? take.peaks} />
+              {m.lane.status === 'conforming' && !rec && <span className="vs-preparing">{t('player.voice.preparingTake')}</span>}
               {(drag || tagText || silent) && (
                 <span className="vs-clip-tags">
                   {(drag || tagText) && (

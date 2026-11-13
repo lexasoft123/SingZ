@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Modal } from '@singz/ui'
 import { monitorDbToFader, type VoiceController, type VoiceModel } from '../audio/voice-take'
 import { t } from '../i18n'
-import { REASON_KEY } from './voice-format'
+import { pitchFollowShift, REASON_KEY, sgn } from './voice-format'
 import { useVoiceModel } from './voice-host'
 import Tooltip from './Tooltip'
 import './voice-strip.css'
@@ -16,6 +16,11 @@ function routeLine(m: VoiceModel): string {
     frames: lat.bufferFrames,
     ms: Math.round(lat.roundTripMs)
   })
+}
+
+/** Renders slots in processing order; additional effects can supply their own controls. */
+export function OrderedEffects({ slots }: { slots: { id: string; content: React.ReactNode }[] }): React.JSX.Element {
+  return <ol className="vs-effects">{slots.map(slot => <li key={slot.id}>{slot.content}</li>)}</ol>
 }
 
 /** The Voice track's full configuration (the strip fader only edits the monitor level while the speaker is on). */
@@ -90,6 +95,28 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
         {m.monitorSwitching ? t('player.voice.outputSwitching') : m.monitorOutputMissing ? t('player.voice.outputMissing') : ''}
       </p>
       <p className="vs-set-route">{routeLine(m)}</p>
+      <section className="vs-set-field" aria-labelledby="vs-effects-h">
+        <h3 id="vs-effects-h">{t('player.voice.effects')}</h3>
+        <p className="vs-set-note">{t('player.voice.pitchFollowBypassNote')}</p>
+        <OrderedEffects slots={m.effects.map((effect, index) => {
+          const locked = m.recording || m.starting
+          const patch = (next: { enabled?: boolean; params?: Partial<typeof effect.params> }): void => controller.setTakeEffects(m.effects.map((item, i) => i === index ? { ...item, enabled: next.enabled ?? item.enabled, params: { ...item.params, ...next.params } } : item))
+          const shift = effect.enabled ? pitchFollowShift(m) : 0
+          return { id: effect.id, content: <div className="vs-effect">
+            <Tooltip label={effect.enabled ? t('player.voice.pitchFollowHelp') : t('player.voice.pitchFollowOffHelp')}>
+              <label><input type="checkbox" checked={effect.enabled} disabled={locked} onChange={e => patch({ enabled: e.target.checked })} /> {effect.enabled ? t('player.voice.pitchFollowChip', { shift: sgn(shift) }) : t('player.voice.pitchFollowOff')}</label>
+            </Tooltip>
+            <Tooltip label={t('player.voice.manualOffsetHelp')}>
+              <label>{t('player.voice.manualOffset')} <input type="range" min={-12} max={12} step={1} value={effect.params.manualOffsetSemitones} disabled={locked || !effect.enabled}
+                aria-valuetext={`${sgn(effect.params.manualOffsetSemitones)} st`}
+                onChange={e => patch({ params: { manualOffsetSemitones: Number(e.target.value) } })} /> <output>{sgn(effect.params.manualOffsetSemitones)} st</output></label>
+            </Tooltip>
+            <Tooltip label={t('player.voice.preserveFormantsHelp')}>
+              <label><input type="checkbox" checked={effect.params.preserveFormants} disabled={locked || !effect.enabled} onChange={e => patch({ params: { preserveFormants: e.target.checked } })} /> {t('player.voice.preserveFormants')}</label>
+            </Tooltip>
+          </div> }
+        })} />
+      </section>
       <div className="modal-actions">
         <Tooltip label={t('player.voice.settingsDone')}>
           <button type="button" className="pill ghost" onClick={onClose}>

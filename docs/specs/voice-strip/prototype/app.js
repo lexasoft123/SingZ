@@ -4,13 +4,16 @@
 
 /* ---- strings (one object, for later i18n) ---- */
 const STR = {
-  muteAria: 'Mute voice take playback', unmuteAria: 'Unmute voice take playback',
+  muteAria: 'Mute the take', unmuteAria: 'Unmute the take', noTake: 'No playable take',
   monOnAria: 'Monitoring on. Click to turn off', monOffAria: 'Monitor my voice (monitoring is off)',
   monOffTitle: 'Monitor my voice (off)', monOnTitle: 'Monitoring on. Click to turn off',
-  soloAria: 'Solo voice', armAria: 'Arm for recording', disarmAria: 'Arm for recording',
+  soloAria: 'Solo the take (monitor is not affected)', armAria: 'Arm for recording', disarmAria: 'Arm for recording',
   recordTitle: 'Record (R)', stopTitle: 'Stop recording (R)',
   recWhy: { perm: 'Record unavailable: microphone access needed', missing: 'Record unavailable: no input found', error: 'Record unavailable: retry the input first', take: 'Record unavailable: keep or discard the current take first' },
-  voiceLevel: 'Voice level',
+  voiceLevel: 'Take playback level',
+  pitchChip: (sh) => `Pitch follow ${sh} st`, pitchOff: 'Pitch follow off', pitchHelp: 'The voice follows the song key. Click to bypass.', pitchOffHelp: 'Pitch follow is bypassed. Click to turn it on.',
+  voiceShifted: 'Voice shifted', playsWithSong: 'Plays with the song', preparing: 'Preparing take for playback', retry: 'Retry', listenOld: 'Listen back (old)',
+  laneErr: { 'take-too-long': 'Take is too long to prepare', 'memory-budget': 'Not enough memory to prepare the take', 'graph-budget': 'Too many tracks for take playback', 'conform-error': 'Take preparation failed', cancelled: 'Take preparation was cancelled' },
   monitorLevel: 'Monitor level',
   inputGroupNone: 'No input found', inputPerm: 'Mic access needed',
   msgMonitoring: 'Monitoring on',
@@ -48,7 +51,7 @@ const STR = {
     monOn: 'Monitoring on', monOff: 'Monitoring off', granted: 'Microphone allowed', found: 'Input found',
     retried: 'Input reconnected', armed: 'Armed', disarmed: 'Disarmed',
   },
-  states: ['idle', 'input-missing', 'permission-needed', 'armed', 'recording', 'take-review', 'playing-take',
+  states: ['pitch-shifted', 'lane-conforming', 'lane-take-too-long', 'lane-memory-budget', 'lane-graph-budget', 'lane-conform-error', 'lane-cancelled', 'idle', 'input-missing', 'permission-needed', 'armed', 'recording', 'take-review', 'playing-take',
     'monitoring-on', 'monitoring-unavailable-latency', 'monitoring-unavailable-route', 'error-recoverable'],
 };
 const INPUTS = [
@@ -67,7 +70,7 @@ const VOICE = '#5be3b0';
 /* ---- state ---- */
 const S = {
   perm: 'granted', inputMissing: false, phase: 'idle', listen: null, // 'alone' | 'song'
-  avail: 'ok', muted: true, takeMute: false, solo: false, level: 80, monLevel: 50, input: 'scar:1', error: null, take: null, takeN: 0,
+  avail: 'ok', muted: true, takeMute: false, solo: false, lane: 'ready', pitchOn: true, level: 80, monLevel: 50, input: 'scar:1', error: null, take: null, takeN: 0,
 };
 const song = { pos: 0, playing: false, tempo: 100, trans: 0 };
 const stems = STEMS.map((s) => ({ ...s, mute: false, solo: false, level: 80 }));
@@ -219,8 +222,10 @@ function render() {
   mon.classList.toggle('active', on); mon.setAttribute('aria-pressed', on); mon.setAttribute('aria-disabled', unav);
   setBtn(mon, unav ? (S.avail === 'latency' ? STR.latencyUnavailable : STR.routeUnavailable) : on ? STR.monOnTitle : STR.monOffTitle, 'speaker');
   if (!unav) mon.setAttribute('aria-label', on ? STR.monOnAria : STR.monOffAria);
-  const mt = $('muteBtn'); mt.classList.toggle('active', S.takeMute); mt.setAttribute('aria-pressed', S.takeMute); setBtn(mt, S.takeMute ? STR.unmuteAria : STR.muteAria);
-  $('soloBtn').classList.toggle('active', S.solo); $('soloBtn').setAttribute('aria-pressed', S.solo); setBtn($('soloBtn'), STR.soloAria);
+  const playable = !!S.take && !rec && S.lane === 'ready';
+  const mt = $('muteBtn'); mt.setAttribute('aria-disabled', String(!playable)); $('soloBtn').setAttribute('aria-disabled', String(!playable));
+  const mt0 = mt; mt.classList.toggle('active', S.takeMute); mt.setAttribute('aria-pressed', S.takeMute); setBtn(mt, S.takeMute ? STR.unmuteAria : STR.muteAria);
+  $('soloBtn').classList.toggle('active', S.solo); $('soloBtn').setAttribute('aria-pressed', S.solo); setBtn($('soloBtn'), STR.soloAria); if (!playable) { mt0.title = STR.noTake; $('soloBtn').title = STR.noTake; }
   const ab = $('armBtn'); ab.classList.toggle('active', armed || rec); ab.setAttribute('aria-pressed', armed || rec); setBtn(ab, armed ? STR.disarmAria : STR.armAria, 'rec');
   ab.disabled = !(canRecord());
   if (ab.disabled) ab.title = rec ? 'Recording. Stop first to change arm' : (S.perm !== 'granted' ? STR.recWhy.perm : S.inputMissing ? STR.recWhy.missing : S.error ? STR.recWhy.error : STR.recWhy.take);
@@ -246,9 +251,17 @@ function render() {
   if (t) {
     clip.classList.toggle('recording', rec); clip.classList.toggle('partial', t.partial); clip.classList.toggle('playing', pl);
     clip.classList.toggle('selected', !!t.selected && !rec); clip.setAttribute('aria-selected', String(!!t.selected && !rec));
-    const tag = $('clipTag'); tag.textContent = STR.tag(t.tempo, sgn(t.trans), t.changed); tag.classList.toggle('changed', t.changed || t.tempo !== 100 || t.trans !== 0);
+    const shift = S.pitchOn ? song.trans - t.trans : 0;
+    const tag = $('clipTag'); tag.textContent = STR.tag(t.tempo, sgn(t.trans), t.changed) + (Math.abs(shift) > 3 ? ` · ${STR.voiceShifted}` : ''); tag.classList.toggle('changed', t.changed || t.tempo !== 100 || t.trans !== 0);
     tag.title = t.changed ? STR.tagTitleChanged : STR.tagTitle; placeClip(); drawClip();
   }
+  // lane state, pitch follow chip, retry (WP4)
+  const shiftNow = S.take && S.pitchOn ? song.trans - S.take.trans : 0; const chip = $('pitchChip');
+  chip.hidden = !t || rec; chip.textContent = S.pitchOn ? STR.pitchChip(sgn(shiftNow)) : STR.pitchOff; chip.title = S.pitchOn ? STR.pitchHelp : STR.pitchOffHelp;
+  chip.setAttribute('aria-pressed', String(S.pitchOn)); chip.classList.toggle('dim', !S.pitchOn || shiftNow === 0);
+  const ls = $('laneState'); const bad = S.lane !== 'ready' && S.lane !== 'conforming'; ls.hidden = !t || rec;
+  ls.textContent = S.lane === 'conforming' ? STR.preparing : bad ? STR.laneErr[S.lane] : STR.playsWithSong; ls.classList.toggle('bad', bad); ls.title = ls.textContent;
+  $('retryBtn').hidden = !t || rec || !bad; $('prep').hidden = !t || rec || S.lane !== 'conforming';
   // take actions (icon buttons in the lane header)
   const tb = $('takebar'); tb.hidden = !t || rec; $('takeInfo').hidden = !t;
   if (t) {
@@ -365,7 +378,9 @@ window.addEventListener('keydown', (e) => {
 document.addEventListener('pointerdown', (e) => { if (S.take && S.take.selected && !e.target.closest('.clip, #takebar')) { S.take.selected = false; render(); } }, true);
 $('voiceTrack').onclick = (e) => { if (e.target.closest('.clip')) return; seekFrom(e, $('voiceTrack')); };
 $('monBtn').onclick = () => { if (S.avail !== 'ok') return; S.muted = !S.muted; announce(S.muted ? STR.announce.monOff : STR.announce.monOn); render(); };
-$('muteBtn').onclick = () => { S.takeMute = !S.takeMute; render(); };
+$('muteBtn').onclick = () => { if (S.lane === 'ready' && S.take && S.phase !== 'recording') { S.takeMute = !S.takeMute; render(); } };
+$('pitchChip').onclick = () => { S.pitchOn = !S.pitchOn; render(); };
+$('retryBtn').onclick = () => { S.lane = 'conforming'; render(); $('laneState').focus(); setTimeout(() => { S.lane = 'ready'; render(); }, 900); };
 $('soloBtn').onclick = () => { S.solo = !S.solo; render(); };
 // Track settings popup: Esc and Done close it and focus returns to the gear.
 const setModal = $('setModal');
@@ -400,7 +415,7 @@ $('addBtn').onclick = addAsTrack; $('discardBtn').onclick = discard;
 const proto = $('proto'), list = $('protoList'); let current = 'idle'; let opener = null;
 STR.states.forEach((id) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = id; b.dataset.state = id; b.setAttribute('aria-pressed', 'false'); b.onclick = () => forceState(id); list.append(b); });
 function reset() {
-  Object.assign(S, { takeMute: false, perm: 'granted', inputMissing: false, phase: 'idle', listen: null, avail: 'ok', muted: true, error: null, take: null });
+  Object.assign(S, { lane: 'ready', pitchOn: true, takeMute: false, perm: 'granted', inputMissing: false, phase: 'idle', listen: null, avail: 'ok', muted: true, error: null, take: null });
   Object.assign(song, { pos: 12, playing: false, tempo: 100, trans: 0 });
 }
 const sampleTake = (o) => ({ n: 1, start: 30, span: 34, real: 34, tempo: 100, trans: 0, changed: false, kept: false, partial: false, peaks: makePeaks(220, 5, 0.5), ...o });
@@ -417,6 +432,9 @@ function forceState(id) {
     case 'monitoring-unavailable-latency': S.avail = 'latency'; song.playing = true; song.pos = 24; break;
     case 'monitoring-unavailable-route': S.avail = 'route'; song.playing = true; song.pos = 24; break;
     case 'error-recoverable': S.error = true; S.phase = 'review'; S.take = sampleTake({ real: 12, span: 12, partial: true }); song.pos = 42; break;
+    case 'pitch-shifted': song.trans = 5; S.take = sampleTake({ trans: 1 }); S.phase = 'review'; break;
+    case 'lane-conforming': case 'lane-take-too-long': case 'lane-memory-budget': case 'lane-graph-budget': case 'lane-conform-error': case 'lane-cancelled':
+      S.take = sampleTake({}); S.phase = 'review'; S.lane = id === 'lane-conforming' ? 'conforming' : id.slice(5); break;
     default: break;
   }
   sel.dataset.k = ''; render(); markProto();
