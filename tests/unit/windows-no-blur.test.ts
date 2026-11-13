@@ -97,7 +97,7 @@ function splitTop(text: string, sep: string): string[] {
   return parts.map((p) => p.trim().replace(/\s+/g, ' ')).filter(Boolean)
 }
 
-/** Style rules with the @media/@supports prelude they sit under ('' when
+/** Style rules with the @media/@supports/@container prelude they sit under ('' when
  *  unconditional). @keyframes and @font-face hold no selectors and are
  *  skipped; anything else — another at-rule, a statement such as @import,
  *  nesting, a brace out of place — throws instead of being passed over,
@@ -140,7 +140,7 @@ function parseSheet(css: string, path: string): Rule[] {
       if (prelude.includes(';')) refuse(`a statement before "${prelude.replace(/\s+/g, ' ').slice(0, 60)}"`)
       if (prelude.startsWith('@')) {
         const name = /^@([\w-]+)/.exec(prelude)?.[1]
-        if (name === 'media' || name === 'supports') walk(`${media} ${prelude}`.trim(), true)
+        if (name === 'media' || name === 'supports' || name === 'container') walk(`${media} ${prelude}`.trim(), true)
         else if (name === 'keyframes' || name === 'font-face') skipBlock()
         else refuse(`@${name}, which is neither read nor skipped`)
         continue
@@ -203,6 +203,20 @@ const all = bySheet.flatMap((s) => s.rules)
 const glass = all.flatMap((rule) =>
   blurring(rule).length ? rule.selectors.map((selector) => ({ selector, rule })) : []
 )
+
+describe('the CSS walker reads @container like @media', () => {
+  it('walks rules inside @container and still catches a backdrop-filter there', () => {
+    const rules = parseSheet('.a{color:red}@container (max-width: 400px){.b{backdrop-filter:blur(8px)}}', 'x.css')
+    const b = rules.find((r) => r.selectors.includes('.b'))
+    expect(b?.media).toBe('@container (max-width: 400px)')
+    expect(blurring(b!)).toEqual(['backdrop-filter'])
+  })
+  it('passes a @container block with no blur, and still refuses unknown at-rules', () => {
+    const rules = parseSheet('@container (max-width: 400px){.b{display:none}}', 'x.css')
+    expect(rules.flatMap(blurring)).toEqual([])
+    expect(() => parseSheet('@layer x{.b{color:red}}', 'x.css')).toThrow(/@layer, which is neither read nor skipped/)
+  })
+})
 
 describe('Windows gets every blur in solid', () => {
   it('reads every sheet the renderer imports and finds the blurs it is meant to guard', () => {

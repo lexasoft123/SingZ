@@ -98,7 +98,7 @@ const GT = JSON.parse(
     const got = await win.evaluate(() => ({
       bpm: window.__beatDbg.det.bpm,
       beats: window.__beatDbg.det.beats.length,
-      inputRate: window.__beatDbg.drums.sr,
+      inputRate: window.__beatDbg.drums ? window.__beatDbg.drums.sr : null, // null on the core path: no renderer decode
       ml: window.__beatDbg.ml,
       src: window.__beatDbg.src ?? '(untagged)'
     }))
@@ -114,7 +114,7 @@ const GT = JSON.parse(
     if (got.ml) fail.push('the beat-model stub did not take — this run proves nothing about the naked path')
     // The input assertion: the samples must be the file's. 44100 is what every
     // splitter stem states; a device-rate number here IS the old path.
-    if (got.inputRate !== 44100)
+    if (got.src === 'ts' && got.inputRate !== 44100)
       fail.push(`detectBeats was fed ${got.inputRate} Hz — the playing buffer, not the stem file`)
     // The outcome assertion: the OCTAVE the ground truth established by ear
     // and score. Half or double lands far outside ±tolPct.

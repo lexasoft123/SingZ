@@ -1,4 +1,5 @@
 import { clampNativeTranspose, clampPlaybackRate } from './native-playback-limits'
+import { recordRendererDecode } from './decode-guard'
 import { VOICE_TAKE_LANE_ID, type VoiceMonitorPlaybackContext, type VoiceTakeLaneState, type VoiceTakeLaneSource, type VoiceTakeLaneControl } from '../../../shared/voice-take'
 import { sanitizeSongVolume } from './song-volume'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
@@ -1796,6 +1797,7 @@ export class MultitrackEngine {
     const path = t.path
     try {
       const decoded = await this.decode(await this.readLaneFile(path))
+      recordRendererDecode(decoded, `lane ${id}`)
       // The song may have changed while that ran; only fill the lane this
       // decode was for, and only if it is still the one holding that path.
       const live = this.tracks.find((track) => track.id === id)

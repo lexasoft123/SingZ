@@ -31,6 +31,7 @@
  * used to succeed.
  */
 import type { DesktopPlaybackLaneMeasureRequest, SingzApi } from '../../../shared/types'
+import { recordRendererDecode } from './decode-guard'
 import { LANE_ENVELOPE_BUCKETS, laneEnvelope } from './lane-envelope'
 import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './native-playback-preference'
 import {
@@ -250,7 +251,13 @@ export async function readLanes(
       .filter((lane) => !reads.has(lane.id))
       .map(async (lane) => {
         try {
-          reads.set(lane.id, laneReadFromBuffer(await decode(lane.path)))
+          const buffer = await decode(lane.path)
+          // The only legitimate whole-lane decode on an open: a lane the core
+          // refused (v1 WAV, a custom track in an unsupported format, an
+          // unreadable file). When the core DID measure other lanes the song
+          // is a native one, so this is logged — see audio/decode-guard.ts.
+          recordRendererDecode(buffer, `lane-measure fallback: ${lane.id}`, reads.size > 0)
+          reads.set(lane.id, laneReadFromBuffer(buffer))
         } catch (error) {
           errors.set(lane.id, error)
         }
