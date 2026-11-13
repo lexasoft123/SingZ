@@ -777,6 +777,12 @@ napi_value stats(napi_env env, napi_callback_info) {
   set(env, result, "inputLatencyStable", boolValue(env, inputLatencyStable));
   set(env, result, "inputLatencySource", stringValue(env,
       inputLatencyStable ? "reported" : "unknown"));
+  const auto gaps = owner.takeWriter.gapStats();
+  setU64(env, result, "gapPaddedFrames", gaps.gapPaddedFrames);
+  setU64(env, result, "gapPaddedBlocks", gaps.gapPaddedBlocks);
+  setU64(env, result, "gapUntrustedTimestampBlocks", gaps.gapUntrustedTimestampBlocks);
+  setU64(env, result, "gapRegressions", gaps.gapRegressions);
+  set(env, result, "gapOverflow", boolValue(env, gaps.gapOverflow));
   setU64(env, result, "lastSampleHostNs", owner.takeWriter.lastSampleHostNs());
   const auto firstSample = owner.takeWriter.firstSample();
   set(env, result, "firstSampleCaptured", boolValue(env, owner.takePresent && firstSample.captured));
@@ -788,6 +794,7 @@ napi_value stats(napi_env env, napi_callback_info) {
   setU64(env, result, "deliveredFrames", value.deliveredFrames);
   setU64(env, result, "overruns", value.overruns);
   setU64(env, result, "deliveryWakeups", value.deliveryWakeups);
+  setU64(env, result, "renderSliceDrops", value.renderSliceDrops);
   setU64(env, result, "droppedEvents", owner.bridge
       ? owner.bridge->dropped.load(std::memory_order_relaxed)
       : owner.lastDroppedEvents);
@@ -1155,6 +1162,11 @@ napi_value takeResult(napi_env env, const singz::TakeWriteResult& r) {
   set(env, result, "sampleRate", uintValue(env, r.sampleRate));
   set(env, result, "firstSampleQuality", stringValue(env, qualityName(r.firstSampleQuality)));
   set(env, result, "droppedBlocks", numberValue(env, static_cast<double>(r.droppedBlocks)));
+  set(env, result, "gapPaddedFrames", numberValue(env, static_cast<double>(r.gapPaddedFrames)));
+  set(env, result, "gapPaddedBlocks", numberValue(env, static_cast<double>(r.gapPaddedBlocks)));
+  set(env, result, "gapUntrustedTimestampBlocks", numberValue(env, static_cast<double>(r.gapUntrustedTimestampBlocks)));
+  set(env, result, "gapRegressions", numberValue(env, static_cast<double>(r.gapRegressions)));
+  set(env, result, "gapOverflow", boolValue(env, r.gapOverflow));
   set(env, result, "deviceLost", boolValue(env, r.deviceLost));
   if (r.deviceLost) set(env, result, "reason", stringValue(env, "device-lost"));
   if (!r.error.empty()) {

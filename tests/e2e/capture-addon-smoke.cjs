@@ -170,6 +170,7 @@ ready.then(async () => {
   assert.match(voiceMonitor.songHostRouteGeneration, /^(?:0|[1-9][0-9]*)$/)
   assert.equal(typeof voiceMonitor.songHostStateCode, 'number')
   assert.equal(typeof voiceMonitor.songProcessBufferFrames, 'number')
+  assert.equal(typeof voiceMonitor.songBufferWarnings, 'number')
   assert.equal(typeof voiceMonitor.songObservedCallbackFrames, 'number')
   assert.equal(typeof voiceMonitor.monitorObservedCallbackFrames, 'number')
   assert.equal(voiceMonitor.songOutputCurrent, false)

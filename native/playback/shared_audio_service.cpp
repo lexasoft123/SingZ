@@ -62,6 +62,7 @@ struct SharedAudioService::Impl {
   std::string preferredOutputUid;
   bool parked = false;
   bool songOutputCurrent = false;
+  bool monitorBufferHeld = false;
   OutputCallbackDiagnostics callbackDiagnostics;
   std::string provider;
   bool enumerated{false};
@@ -312,11 +313,19 @@ struct SharedAudioService::Impl {
       if (config.requestedSampleRate == 0) config.requestedSampleRate = found->nominalSampleRate;
     }
     const auto current = backend->status();
-    const bool same = route.outputDeviceUid == config.outputDeviceUid &&
-        route.outputChannels == config.outputChannels &&
-        route.inputDeviceUid == config.inputDeviceUid && route.inputChannels == config.inputChannels &&
-        route.maximumFrames == config.maximumFrames &&
-        (config.requestedSampleRate == 0 || route.requestedSampleRate == config.requestedSampleRate) &&
+    const bool samePhysical = route.outputDeviceUid == config.outputDeviceUid &&
+        route.outputChannels == config.outputChannels && route.inputDeviceUid == config.inputDeviceUid &&
+        route.inputChannels == config.inputChannels && route.exclusive == config.exclusive &&
+        (config.requestedSampleRate == 0 || route.requestedSampleRate == config.requestedSampleRate);
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (monitorBufferHeld && samePhysical && provider == "coreaudio" &&
+        (current.state == AudioHostState::Running || current.state == AudioHostState::Open)) {
+      // The physical host and its writer lease outlive graph generations.
+      // Never release/reacquire that lease for a same-route re-prepare.
+      return {true, AudioHostError::None, current.state, current.format, current.latency, {}};
+    }
+#endif
+    const bool same = samePhysical && route.maximumFrames == config.maximumFrames &&
         (config.requestedBufferFrames == 0 || route.requestedBufferFrames == config.requestedBufferFrames) &&
         route.exclusive == config.exclusive;
     if (same && (current.state == AudioHostState::Running || current.state == AudioHostState::Open))
@@ -330,6 +339,7 @@ struct SharedAudioService::Impl {
     }
     outputGeneration.fetch_add(1, std::memory_order_release);
     backend->stop();
+    monitorBufferHeld = false;
     auto result = backend->open(config, render, this);
 #if defined(__APPLE__) && TARGET_OS_OSX
     if (!result.ok && result.error == AudioHostError::InvalidConfiguration &&
@@ -569,7 +579,7 @@ AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostB
   impl_->backend->stop();
   impl_->removeListeners();
   impl_->backend = std::move(backend); impl_->provider = effectiveProvider;
-  impl_->route = {}; impl_->songOutputCurrent = false;
+  impl_->route = {}; impl_->songOutputCurrent = false; impl_->monitorBufferHeld = false;
   impl_->preferredOutputUid.clear(); impl_->enumerated = false;
   return impl_->openLocked({});
 }
@@ -645,7 +655,61 @@ bool SharedAudioService::setPlaybackOutputCurrent(bool current) {
   if (current && (impl_->provider != "coreaudio" || !impl_->playback.render ||
                   impl_->route.outputDeviceUid.empty())) return false;
   impl_->songOutputCurrent = current;
+#if defined(__APPLE__) && TARGET_OS_OSX
+  if (!current && impl_->monitorBufferHeld) {
+    // Graph unloads used for native re-prepares retain this host. Only the
+    // explicit native-session handback releases its changing buffer lease.
+    impl_->backend->stop();
+    impl_->outputGeneration.fetch_add(1,std::memory_order_release);
+    impl_->monitorBufferHeld = false;
+  }
+#endif
   return true;
+}
+uint32_t SharedAudioService::retainedPlaybackCapacity(const AudioHostConfig& config) const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  const auto& route=impl_->route;
+  const auto status=impl_->backend->status();
+  if (!impl_->monitorBufferHeld || impl_->provider!="coreaudio" || !impl_->songOutputCurrent ||
+      (status.state!=AudioHostState::Running && status.state!=AudioHostState::Open) ||
+      route.outputDeviceUid!=config.outputDeviceUid || route.outputChannels!=config.outputChannels ||
+      route.requestedSampleRate!=config.requestedSampleRate || route.exclusive!=config.exclusive)
+    return 0;
+  return status.format.maximumFrames;
+}
+AudioHostResult SharedAudioService::prepareVoiceMonitor(uint32_t target,uint32_t maximum) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  auto& self=*impl_;
+  auto status=self.backend->status();
+  if (!self.songOutputCurrent || self.provider!="coreaudio" || self.route.outputDeviceUid.empty() ||
+      (status.state!=AudioHostState::Running && status.state!=AudioHostState::Open))
+    return failure("The song needs an open native output");
+  if (target!=32 || maximum!=256)
+    return {false,AudioHostError::InvalidConfiguration,status.state,status.format,status.latency,"Invalid monitor buffer limits"};
+  const auto device=std::find_if(self.cached.devices.begin(),self.cached.devices.end(),
+      [&](const auto& d){return d.uid==self.route.outputDeviceUid;});
+  if (device==self.cached.devices.end() || !device->bufferFrames.minimumFrames)
+    return {false,AudioHostError::ProviderFailure,status.state,status.format,status.latency,"Audio buffer range is unavailable"};
+  if (!chooseMonitorBufferFrames(device->bufferFrames,device->bufferFrames,target,maximum) ||
+      !status.format.maximumFrames || status.format.maximumFrames>kAudioHostMaxFrames)
+    return {false,AudioHostError::InvalidConfiguration,status.state,status.format,status.latency,"Monitor buffer exceeds the supported limit"};
+  if (status.latency.bufferFrames && status.latency.bufferFrames<=maximum &&
+      (self.monitorBufferHeld || status.latency.bufferFrames<=target))
+    return {true,AudioHostError::None,status.state,status.format,status.latency,{}};
+  // Mark the session before attempting the first write: even failed/rounded
+  // driver writes remain the song owner's responsibility until real close.
+  self.monitorBufferHeld=true;
+  AudioHostResult result;
+  for(uint32_t frames=target;frames<=maximum;frames*=2) {
+    result=self.backend->setBufferFrames(frames,maximum);
+    status=self.backend->status();
+    if (result.ok && (status.state==AudioHostState::Running || status.state==AudioHostState::Open) &&
+        !status.bufferExceedsMaximum && status.latency.bufferFrames && status.latency.bufferFrames<=maximum &&
+        status.format.nominalBufferFrames==status.latency.bufferFrames)
+      return {true,AudioHostError::None,status.state,status.format,status.latency,{}};
+  }
+  result.message="Native song output could not prepare the monitor buffer";
+  return result;
 }
 uint64_t SharedAudioService::outputRouteGeneration() const noexcept {
   return impl_->outputGeneration.load(std::memory_order_acquire);
@@ -667,6 +731,7 @@ void SharedAudioService::shutdown() noexcept {
   drain(impl_->microphone.gate);
   impl_->microphone.render = nullptr;
   impl_->songOutputCurrent = false;
+  impl_->monitorBufferHeld = false;
   impl_->playback.render = nullptr;
   impl_->training.render = nullptr;
   impl_->removeListeners();

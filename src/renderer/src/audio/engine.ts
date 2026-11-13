@@ -294,8 +294,7 @@ export class MultitrackEngine {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
     if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead)
-      this.beginNativePlaybackUnload(detectedDesktopPlatform() === 'darwin' &&
-        desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback))
+      this.beginNativePlaybackUnload()
   }
 
   setRetainedProjectIdentity(identity: { dir: string; songPath: string } | null): void {
@@ -500,7 +499,7 @@ export class MultitrackEngine {
   /** Start or retry one client-owned unload without leaving a rejecting
    * promise unobserved. A failed promise and its typed error remain available
    * for the next deliberate load/play/teardown boundary. */
-  private beginNativePlaybackUnload(retainNativeRoute = false): Promise<void> | null {
+  private beginNativePlaybackUnload(): Promise<void> | null {
     // An ahead generation is not active — it never opened — but it holds
     // decoded lanes and the addon's playback lease, and it goes with the
     // song like an active one (the facade's unload handles the ahead-only
@@ -509,7 +508,7 @@ export class MultitrackEngine {
     if (this.nativePlaybackUnload && this.nativePlaybackUnloadError === null) {
       return this.nativePlaybackUnload
     }
-    const operation = this.nativePlayback.unload({ retainNativeRoute })
+    const operation = this.nativePlayback.unload()
     this.nativePlaybackUnload = operation
     this.nativePlaybackUnloadError = null
     void operation.then(() => {
@@ -1701,8 +1700,7 @@ export class MultitrackEngine {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
     if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead)
-      this.beginNativePlaybackUnload(detectedDesktopPlatform() === 'darwin' &&
-        desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback))
+      this.beginNativePlaybackUnload()
     this.stopSources()
     this.cancelPendingClicks()
     this.nextClickIdx = null

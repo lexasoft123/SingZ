@@ -11,6 +11,14 @@
 
 namespace singz {
 
+namespace detail {
+// Stateless writer-thread policy seam. Returns whole missing frames, or zero
+// for untrusted timestamps, rate boundaries, regressions and subthreshold gaps.
+long double takeGapFrames(const AudioInputCaptureMetadata& previous, uint32_t previousFrames,
+                          double previousRate, const AudioInputCaptureMetadata& current,
+                          double currentRate) noexcept;
+}
+
 struct TakeWriteResult {
   std::string path;
   uint64_t frames = 0;
@@ -18,8 +26,22 @@ struct TakeWriteResult {
   uint64_t firstSampleHostNs = 0;
   AudioInputTimestampQuality firstSampleQuality = AudioInputTimestampQuality::Unknown;
   uint64_t droppedBlocks = 0;
+  uint64_t gapPaddedFrames = 0;
+  uint64_t gapPaddedBlocks = 0;
+  // Input blocks whose timestamps were not trusted for gap detection (non-Hardware).
+  uint64_t gapUntrustedTimestampBlocks = 0;
+  uint64_t gapRegressions = 0;
+  bool gapOverflow = false;
   bool deviceLost = false;
   std::string error;
+};
+struct TakeGapStats {
+  uint64_t gapPaddedFrames = 0;
+  uint64_t gapPaddedBlocks = 0;
+  // Input blocks whose timestamps were not trusted for gap detection (non-Hardware).
+  uint64_t gapUntrustedTimestampBlocks = 0;
+  uint64_t gapRegressions = 0;
+  bool gapOverflow = false;
 };
 struct TakeFirstSample {
   bool captured = false;
@@ -46,6 +68,7 @@ class TakeWriter {
   bool active() const noexcept;
   bool completed() const noexcept;
   TakeInputLevel level() const noexcept;
+  TakeGapStats gapStats() const noexcept;
   TakeFirstSample firstSample() const noexcept;
   void resetLevel() noexcept;
   uint64_t lastSampleHostNs() const noexcept;
@@ -62,6 +85,10 @@ class TakeWriter {
   std::unique_ptr<Slot[]> slots_;
   std::unique_ptr<float[]> samples_;
   std::atomic<uint64_t> write_{0}, read_{0}, dropped_{0};
+  // Writer-owned updates, control-thread snapshots; append never touches these.
+  std::atomic<uint64_t> gapPaddedFrames_{0}, gapPaddedBlocks_{0};
+  std::atomic<uint64_t> gapUntrustedTimestampBlocks_{0}, gapRegressions_{0};
+  std::atomic<bool> gapOverflow_{false};
   std::atomic<uint32_t> producers_{0};
   std::atomic<bool> accepting_{false}, done_{true};
   std::atomic<float> peak_{0}, meanSquare_{0};

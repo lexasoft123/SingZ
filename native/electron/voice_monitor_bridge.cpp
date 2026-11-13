@@ -110,7 +110,7 @@ napi_value availability(napi_env env,napi_callback_info info) {
     text(env,o,"detail","Audio input is busy or unsupported");return o;
   }
   const auto route=currentRoute();
-  const auto r=host.availability(uid,channel,route.output,route.native,permissionGranted());
+  const auto r=host.availability(uid,channel,route.output,voiceMonitorSongCanBegin(route),permissionGranted());
   auto o=object(env);boolean(env,o,"available",r.available);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
   if(!r.detail.empty())text(env,o,"detail",r.detail);
@@ -128,7 +128,7 @@ napi_value begin(napi_env env,napi_callback_info info) {
   std::lock_guard lock(control);
   if(!useAllowed())return error(env,"Audio input is busy or unsupported");
   const auto route=currentRoute();
-  auto r=host.begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,-60.0,12.0)),32,256,g,route.channels);
+  auto r=host.begin(uid,channel,route.output,voiceMonitorSongCanBegin(route),permissionGranted(),static_cast<float>(std::clamp(gain,-60.0,12.0)),32,256,g,route.channels,&sharedAudioService());
   if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;}
   return result(env,r);
 }
@@ -137,10 +137,11 @@ napi_value outputCurrent(napi_env env,napi_callback_info info) {
   napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);
   if(argc!=1 || napi_get_value_bool(env,arg,&current)!=napi_ok)return error(env,"Invalid output state");
   std::lock_guard lock(control);
-  auto o=object(env);boolean(env,o,"ok",sharedAudioService().setPlaybackOutputCurrent(current));
   if(!current && !monitoredOutput.empty()) {
+    // Fade/retire the duplex client before releasing the song's writer lease.
     host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();
   }
+  auto o=object(env);boolean(env,o,"ok",sharedAudioService().setPlaybackOutputCurrent(current));
   return o;
 }
 napi_value gain(napi_env env,napi_callback_info info) {
@@ -174,6 +175,7 @@ napi_value status(napi_env env,napi_callback_info) {
   number(env,o,"songHostStateCode",static_cast<uint32_t>(route.song.state));
   number(env,o,"monitorObservedCallbackFrames",r.observedCallbackFrames);
   number(env,o,"songProcessBufferFrames",route.song.latency.bufferFrames);
+  number(env,o,"songBufferWarnings",route.song.bufferWarnings);
   number(env,o,"songObservedCallbackFrames",route.song.observedCallbackFrames);
   const auto d=sharedAudioService().callbackDiagnostics();
   auto diagnostics=object(env);

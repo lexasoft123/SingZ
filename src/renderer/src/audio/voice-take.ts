@@ -77,6 +77,8 @@ export interface VoiceEnginePort {
   readonly duration?: number
   /** The song's output route: a change re-asks monitor availability. */
   readonly outputDeviceId?: string
+  /** True while the native playback graph owns the output (the monitor needs it). */
+  readonly nativeActive?: boolean
   subscribe?(fn: () => void): () => void
   readonly tempo: number
   readonly transpose: number
@@ -264,6 +266,7 @@ const SEEK_JUMP_SEC = 0.75
 const STORAGE_KEY = 'singz.voice.input'
 const MONITOR_GAIN_KEY = 'singz.voice.monitorGain'
 const SONG_START_TIMEOUT_MS = 3000
+const AVAILABILITY_RETRY_MS = [500, 1500, 3000]
 const MONITOR_STATE_EVERY = 10 // level polls (~50 ms each) per monitor-state check
 const BRIDGE_MISSING = 'voice bridge unavailable'
 
@@ -310,6 +313,9 @@ export class VoiceController {
   private songEpoch = 0
   private disposed = false
   private startToken = 0
+  private availRetryTimers: ReturnType<typeof setTimeout>[] = []
+  /** availToken at the moment a monitor error was raised: only a later availability answer may clear it. */
+  private monitorErrorMark = -1
   /** The device and channel the running take records from. */
   private takeInput: { deviceName: string; channelIndex: number } | null = null
   private inputToken = 0
@@ -394,23 +400,32 @@ export class VoiceController {
     const md = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
     const onChange = (): void => void this.refreshInputs()
     md?.addEventListener?.('devicechange', onChange)
-    // The song's output moving (e.g. to the laptop speakers) changes what monitoring can do.
-    let route = this.deps.engine.outputDeviceId
-    const unsub = this.deps.engine.subscribe?.(() => {
-      const now = this.deps.engine.outputDeviceId
-      if (now !== route) {
-        route = now
-        void this.refreshMonitorAvailability()
-      }
+    // The song's output or native route changing (output moved, Play made the native graph current,
+    // paused, ended) changes what monitoring can do: re-ask, and for a bounded while after a Play.
+    const { engine } = this.deps
+    let route = `${engine.outputDeviceId}|${engine.nativeActive}`
+    let playing = engine.playing
+    const unsub = engine.subscribe?.(() => {
+      const nowRoute = `${engine.outputDeviceId}|${engine.nativeActive}`
+      const nowPlaying = engine.playing
+      const routeChanged = nowRoute !== route
+      const playStarted = nowPlaying && !playing
+      const playEnded = !nowPlaying && playing
+      route = nowRoute
+      playing = nowPlaying
+      if (routeChanged || playStarted || playEnded) void this.refreshMonitorAvailability()
+      if (playStarted) this.scheduleAvailabilityRetries()
     })
     return () => {
       md?.removeEventListener?.('devicechange', onChange)
       unsub?.()
+      this.cancelAvailabilityRetries()
       this.dispose()
     }
   }
 
   dispose(): void {
+    this.cancelAvailabilityRetries()
     this.clearTimers()
     void this.abortActivity()
   }
@@ -427,6 +442,7 @@ export class VoiceController {
       starting: false,
       error: null,
       stoppedBy: null,
+      monitorNote: null,
       take: null,
       elapsedSec: 0,
       listen: null,
@@ -451,6 +467,7 @@ export class VoiceController {
     this.startToken++
     this.armToken++
     this.inputToken++ // a re-arm after an input change must not land on the next song
+    this.cancelAvailabilityRetries()
     this.rearmPending = false
     this.releaseArm()
     const monitorReleased = this.releaseMonitor() // sync part now; awaited last
@@ -527,6 +544,7 @@ export class VoiceController {
   private async switchInput(): Promise<void> {
     const token = ++this.inputToken
     const stale = (): boolean => token !== this.inputToken || this.disposed
+    if (this.model.monitorNote) this.set({ monitorNote: null })
     const rearm = (this.model.armed && !this.armedByMonitor) || this.rearmPending
     // A toggleMonitor arm still opening on the OLD option must not land: bump armToken so
     // armInput discards it (it disarms main when it resolves) and release explicitly.
@@ -783,6 +801,7 @@ export class VoiceController {
     }
     // The take is over, so the input is no longer held open for it.
     this.takeInput = null
+    if (this.model.monitorNote) this.set({ monitorNote: null })
     if (this.model.monitor.on) {
       // The take held the input; monitoring now holds it, so turning monitoring off releases it.
       this.armedByMonitor = true
@@ -1085,6 +1104,40 @@ export class VoiceController {
     const st = await this.fetchMonitorAvailability()
     if (!st || token !== this.availToken || this.disposed || this.model.monitor.on || this.monitorPending) return
     this.applyMonitorState({ ...st, on: false })
+    this.clearMonitorErrorIfRecovered(token, st)
+  }
+
+  private raiseMonitorError(): void {
+    this.monitorErrorMark = this.availToken
+    this.set({ error: 'monitor' })
+  }
+
+  /** The route came back: a monitor error (device lost, start failed) clears when availability is true and monitoring is off. */
+  private clearMonitorErrorIfRecovered(token: number, st: VoiceMonitorState): void {
+    if (this.model.error === 'monitor' && st.available === true && !this.model.monitor.on && !this.monitorPending && token > this.monitorErrorMark) {
+      this.set({ error: null })
+    }
+  }
+
+  /**
+   * After a Play the native route becomes current a moment later: while availability still says
+   * 'output-not-native', ask again at +0.5 s, +1.5 s and +3 s, then stop. No timer storm.
+   */
+  private scheduleAvailabilityRetries(): void {
+    this.cancelAvailabilityRetries()
+    for (const delay of AVAILABILITY_RETRY_MS) {
+      this.availRetryTimers.push(
+        setTimeout(() => {
+          if (this.disposed || this.model.monitor.on || this.model.monitor.reason !== 'output-not-native') return
+          void this.refreshMonitorAvailability()
+        }, delay)
+      )
+    }
+  }
+
+  private cancelAvailabilityRetries(): void {
+    for (const t of this.availRetryTimers) clearTimeout(t)
+    this.availRetryTimers = []
   }
 
   private async fetchMonitorAvailability(): Promise<VoiceMonitorState | null> {
@@ -1102,6 +1155,7 @@ export class VoiceController {
       return
     }
     if (this.monitorPending || m.songId === null || m.inputMissing || m.perm === 'denied') return
+    if (m.error === 'monitor') this.set({ error: null }) // an explicit toggle starts afresh
     const token = ++this.monitorToken
     this.monitorPending = true
     let armedHere = false
@@ -1160,13 +1214,14 @@ export class VoiceController {
         this.armedByMonitor = armedHere
       } else {
         undoArm()
-        if (st.available === true) this.set({ error: 'monitor' })
+        if (st.available === true) this.raiseMonitorError()
       }
     } catch (err) {
       if (stale()) return
       this.monitorOpen = false
       undoArm()
-      this.set({ error: err instanceof Error && err.message === BRIDGE_MISSING ? 'no-bridge' : 'monitor' })
+      if (err instanceof Error && err.message === BRIDGE_MISSING) this.set({ error: 'no-bridge' })
+      else this.raiseMonitorError()
     } finally {
       if (token === this.monitorToken) this.monitorPending = false
     }
@@ -1253,7 +1308,7 @@ export class VoiceController {
       if (st.available !== true || !st.on) {
         const lost = st.available !== true && st.available.reason === 'device-lost'
         this.applyMonitorState(st)
-        if (lost) this.set({ error: 'monitor' })
+        if (lost) this.raiseMonitorError()
       } else {
         this.set({ monitor: { ...this.model.monitor, latency: st.latency, warnings: st.warnings } })
       }

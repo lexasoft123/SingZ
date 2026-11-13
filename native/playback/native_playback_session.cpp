@@ -1,4 +1,8 @@
 #include "native_playback_session.h"
+#include "shared_audio_service.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
 #include "box_routing_owner.h"
 #endif
@@ -6201,6 +6205,14 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
     return failPreparation(NativePlaybackError::InvalidConfiguration,
                            "Native playback configuration is invalid");
   }
+#if defined(__APPLE__) && TARGET_OS_OSX
+  AudioHostConfig retainedRoute;
+  retainedRoute.outputDeviceUid=config.outputDeviceUid;retainedRoute.outputChannels=config.outputChannels;
+  retainedRoute.requestedSampleRate=config.requestedSampleRate;retainedRoute.exclusive=config.exclusive;
+  // Allocate the replacement graph for the retained host BEFORE materializing
+  // DSP. Merely accepting a larger host at open would leave graph storage short.
+  config.maximumFrames=std::max(config.maximumFrames,sharedAudioService().retainedPlaybackCapacity(retainedRoute));
+#endif
   const double timePitchCorrection =
       config.transposeSemitones - 12.0 * std::log2(config.playbackRate);
   const bool needsTimePitch =

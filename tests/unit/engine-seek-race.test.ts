@@ -322,6 +322,15 @@ describe('late native control receipts across a song switch', () => {
 
   const flush = () => new Promise(resolve => setTimeout(resolve, 0))
 
+  it.each(['retire', 'load'])('ends the native song session on a real %s instead of retaining its buffer lease', async action => {
+    const { engine } = await nativeSong()
+    const unload = engine.nativePlayback.unload
+    if (action === 'retire') engine.retireForSongSwitch()
+    else engine.load([{ id: 'other', buffer: { duration: 120 }, duration: 120, path: '/other.flac' }])
+    await flush()
+    expect(unload).toHaveBeenCalledExactlyOnceWith()
+  })
+
   it('drops a master gain and lane receipt that settle after the song switched', async () => {
     const { engine, gain, lane } = await nativeSong()
     engine.setMasterVolume(0.3)

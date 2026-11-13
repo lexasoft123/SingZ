@@ -783,7 +783,7 @@ describe('desktop native playback facade', () => {
     expect(notify).toHaveBeenCalledExactlyOnceWith(false)
   })
 
-  it('retains the selected native route while changing songs, then clears it on a genuine browser handback', async () => {
+  it('retains the selected native route for an internal native handoff, then clears it on a real song close', async () => {
     const h = seamHarness(generation => playing(generation))
     const notify = vi.fn(async () => ({ ok: true }))
     h.api.setDesktopPlaybackNativeOutputCurrent = notify
@@ -793,6 +793,20 @@ describe('desktop native playback facade', () => {
     expect(await h.start()).toBe(true)
     await h.client.unload()
     expect(notify).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it('a same-route song close clears native currentness and the next song starts normally', async () => {
+    const h = seamHarness(generation => playing(generation))
+    const notify = vi.fn(async () => ({ ok: true }))
+    h.api.setDesktopPlaybackNativeOutputCurrent = notify
+    expect(await h.start()).toBe(true)
+    await h.client.unload()
+    expect(notify).toHaveBeenCalledExactlyOnceWith(false)
+    expect(await h.start()).toBe(true)
+    expect(h.calls).toContain('start:2')
+    expect(h.client.transportActive).toBe(true)
+    await h.client.unload()
+    expect(notify).toHaveBeenCalledTimes(2)
   })
 
   it('restores the signed song position on a real output move without involving monitoring', async () => {

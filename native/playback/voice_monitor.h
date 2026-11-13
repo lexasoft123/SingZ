@@ -118,6 +118,9 @@ inline VoiceMonitorSongRoute voiceMonitorSongRoute(const AudioHostConfig& config
   return {config.outputDeviceUid,currentSongOutput && provider=="coreaudio" && !config.outputDeviceUid.empty(),
       config.outputChannels,status,generation};
 }
+inline bool voiceMonitorSongCanBegin(const VoiceMonitorSongRoute& route) noexcept {
+  return route.native && (route.song.state==AudioHostState::Open || route.song.state==AudioHostState::Running);
+}
 // Host Open/Running/Stopped states and stream generations are lifecycle facts,
 // not output identity. A same-UID/pair song re-prepare must retain monitoring.
 inline bool voiceMonitorSameOutput(const std::string& uid, const std::vector<uint32_t>& channels,
@@ -126,7 +129,7 @@ inline bool voiceMonitorSameOutput(const std::string& uid, const std::vector<uin
 }
 inline constexpr uint32_t kVoiceMonitorSettleWaitMs = 25;
 inline constexpr uint32_t kVoiceMonitorMuteWaitMs = 100;
-inline constexpr uint32_t kVoiceMonitorBeginWaitBudgetMs = 4*kVoiceMonitorSettleWaitMs+kVoiceMonitorMuteWaitMs;
+inline constexpr uint32_t kVoiceMonitorBeginWaitBudgetMs = kVoiceMonitorSettleWaitMs+kVoiceMonitorMuteWaitMs;
 // Shared input capture/recording and playback/training cues are compatible.
 // Box input ownership, mic mix, and unknown future ownership modes are not.
 inline bool voiceMonitorUseAllowed(bool boxOwnsCapture, bool micMixActive, bool ownerSupported) noexcept {
@@ -142,10 +145,11 @@ class VoiceMonitorEnvironmentLifetime {
   uint32_t references_{0};
 };
 // Lifecycle/status calls must be serialized on an ordinary control worker.
-// begin() deliberately waits at most 200 ms: 4 x 25 ms callback settle plus
+// begin() deliberately waits at most 125 ms: one 25 ms callback settle plus
 // a 100 ms fade only when replacing a running host. There is no idle mute wait.
 // This bounds our wait budget, not OS scheduling, enumeration or driver calls.
 // The injected backend and platform flag are only for deterministic host tests.
+class SharedAudioService;
 class VoiceMonitorHost final {
  public:
   VoiceMonitorHost();
@@ -155,7 +159,7 @@ class VoiceMonitorHost final {
       const std::string& outputUid, bool nativeOutput, bool permission) const;
   VoiceMonitorResult begin(const std::string& inputUid, uint32_t channel, const std::string& outputUid,
       bool nativeOutput, bool permission, float gainDb, uint32_t targetFrames, uint32_t maxFrames, uint64_t generation,
-      const std::vector<uint32_t>& songOutputChannels = {});
+      const std::vector<uint32_t>& songOutputChannels = {}, SharedAudioService* songService = nullptr);
   bool setGain(float gainDb) noexcept;
   VoiceMonitorStatus status();
   VoiceMonitorResult end(uint64_t generation);

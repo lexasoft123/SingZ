@@ -1,4 +1,5 @@
 #include "voice_monitor.h"
+#include "shared_audio_service.h"
 #include <chrono>
 #include <cstddef>
 #include <thread>
@@ -109,7 +110,7 @@ VoiceMonitorAvailability VoiceMonitorHost::availability(const std::string& uid,u
 }
 VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t channel,const std::string& output,
     bool native,bool permission,float gain,uint32_t target,uint32_t maximum,uint64_t generation,
-    const std::vector<uint32_t>& songOutputChannels) {
+    const std::vector<uint32_t>& songOutputChannels, SharedAudioService* songService) {
   auto& self=*impl_;
   VoiceMonitorResult result;
   if (!generation || generation<=self.generation) {result.reason="error";result.error="Stale monitor generation";return result;}
@@ -137,13 +138,31 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
   self.render.outputMask=(uint64_t{1}<<outputs)-1;
   self.render.current=self.render.destination=self.render.step=0; self.render.remaining=0;
   self.render.target.store(0); self.render.silent.store(1); self.render.outputs=outputs;
-  for (uint32_t frames=target;frames<=maximum;frames*=2) {
+  uint32_t frames=device->bufferFrames.preferredFrames;
+  if (songService) {
+    const auto prepared=songService->prepareVoiceMonitor(target,maximum);
+    self.warningFlags |= songService->status().bufferWarnings;
+    if (!prepared.ok) {
+      result.reason=prepared.error==AudioHostError::InvalidState ? "output-not-native" :
+          (prepared.error==AudioHostError::InvalidConfiguration ? "route-latency" : "error");
+      result.error="Native song output could not prepare the monitor buffer";
+      result.warnings=warnings(self.warningFlags);return result;
+    }
+    frames=prepared.latency.bufferFrames;
+  }
+  if (!frames || frames>maximum) {
+    result.reason="route-latency";result.error="Monitor buffer exceeds the supported limit";return result;
+  }
+  {
     AudioHostConfig config;
     config.inputDeviceUid=config.outputDeviceUid=uid;
     config.inputChannels={channel}; config.outputChannels=physicalOutputs;
     config.requestedSampleRate=device->nominalSampleRate;
     config.requestedBufferFrames=frames; config.maximumFrames=kAudioHostMaxFrames;
-    config.allowSharedDeviceBufferChange=true; config.maximumAcceptableBufferFrames=maximum;
+    // Match the song's current period: this is a capacity-only lease.
+    // No ceiling is retained: song close may restore its original period,
+    // which fits our prepared8192 storage and is silenced before clean close.
+    config.allowSharedDeviceBufferChange=true; config.maximumAcceptableBufferFrames=0;
     auto opened=self.host.open(config,VoiceMonitorRender::render,&self.render);
     auto status=self.host.status(); self.warningFlags |= status.bufferWarnings;
     const auto& format=opened.format;
@@ -152,7 +171,7 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
         std::isfinite(format.sampleRate) && format.sampleRate>0 && format.maximumFrames>0 &&
         format.maximumFrames<=kAudioHostMaxFrames && format.nominalBufferFrames>0 &&
         format.nominalBufferFrames<=maximum && format.nominalBufferFrames<=format.maximumFrames &&
-        opened.latency.bufferFrames==format.nominalBufferFrames;
+        opened.latency.bufferFrames==format.nominalBufferFrames && format.nominalBufferFrames==frames;
     AudioHostResult started;
     if (valid) started=self.host.start();
     if (valid && started.ok) {
@@ -166,14 +185,14 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
           status.observedCallbackFrames==status.latency.bufferFrames && status.observedCallbackFrames<=maximum &&
           status.format.nominalBufferFrames==status.latency.bufferFrames && !status.bufferExceedsMaximum) {
         self.running=true; self.route=status.routeGeneration; self.stream=status.streamGeneration;
-        self.requested=frames; self.latency=latencyOf(status,frames);
+        self.requested=target; self.latency=latencyOf(status,target);
         setGain(gain);
         result.ok=true; result.latency=self.latency; result.warnings=warnings(self.warningFlags);return result;
       }
     }
     self.host.stop(); self.warningFlags |= self.host.status().bufferWarnings;
     if (opened.error==AudioHostError::DeviceNotFound || status.state==AudioHostState::DeviceLost) {
-      self.lost=true; result.reason="device-lost"; result.error="Monitor device disappeared";break;
+      self.lost=true; result.reason="device-lost"; result.error="Monitor device disappeared";result.warnings=warnings(self.warningFlags);return result;
     }
     const bool periodTooLarge = opened.latency.bufferFrames > maximum ||
         format.nominalBufferFrames > maximum || status.observedCallbackFrames > maximum || status.bufferExceedsMaximum;

@@ -1518,6 +1518,133 @@ describe('monitoring during a take, route changes, and the arm window (hardware 
   })
 })
 
+describe('availability follows Play, and a recovered route clears a monitor error (hardware run 4)', () => {
+  const notNative = () => monState({ available: { reason: 'output-not-native' }, on: false, latency: null })
+  /** An engine whose subscribers can be fired, with settable native/play state. */
+  async function withEngine(apiOver: Partial<VoiceTakeApi> = {}) {
+    let fire = () => undefined as void
+    const r = await setup(apiOver, (e) => {
+      const st = { native: false }
+      Object.defineProperty(e, 'nativeActive', { get: () => st.native })
+      ;(e as unknown as { native: typeof st }).native = st
+      ;(e as unknown as { subscribe: (fn: () => void) => () => void }).subscribe = (fn) => { fire = fn; return () => undefined }
+    })
+    r.c.bindSong({ path: '/a.mp3', projectDir: null, title: 'A', artist: '' })
+    await vi.waitFor(() => expect(r.c.getSnapshot().songId).not.toBeNull())
+    return { ...r, fire: () => fire(), native: (r.engine as unknown as { native: { native: boolean } }).native }
+  }
+  it('unavailable before Play; Play re-asks availability and enables the monitor', async () => {
+    const { c, api, engine, fire, native } = await withEngine({ monitorAvailability: vi.fn(async () => notNative()) })
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('output-not-native'))
+    expect(c.state).toBe('monitoring-unavailable-route')
+    api.monitorAvailability.mockClear()
+    api.monitorAvailability.mockResolvedValue(monState({ on: false }))
+    engine._playing = true
+    native.native = true
+    fire() // Play: the native route became current
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.avail).toBe('ok'))
+    expect(api.monitorAvailability).toHaveBeenCalled()
+    c.dispose()
+  })
+  it('retries at +0.5, +1.5 and +3 s while output-not-native, then stops; no storm', async () => {
+    const { c, api, engine, fire } = await withEngine({ monitorAvailability: vi.fn(async () => notNative()) })
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('output-not-native'))
+    api.monitorAvailability.mockClear()
+    engine._playing = true
+    fire()
+    for (let i = 0; i < 5; i++) fire() // more emits with no change: nothing extra
+    await vi.advanceTimersByTimeAsync(0)
+    expect(api.monitorAvailability).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(api.monitorAvailability).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(api.monitorAvailability).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(api.monitorAvailability).toHaveBeenCalledTimes(4)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(api.monitorAvailability).toHaveBeenCalledTimes(4) // stopped
+    c.dispose()
+  })
+  it('retries stop once it becomes available, and are cancelled by a song change', async () => {
+    const a = await withEngine({ monitorAvailability: vi.fn(async () => notNative()) })
+    await vi.waitFor(() => expect(a.c.getSnapshot().monitor.reason).toBe('output-not-native'))
+    a.api.monitorAvailability.mockClear()
+    a.api.monitorAvailability.mockResolvedValue(monState({ on: false }))
+    a.engine._playing = true
+    a.fire()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(a.api.monitorAvailability).toHaveBeenCalledTimes(1) // available at once: no retries needed
+    a.c.dispose()
+    const b = await withEngine({ monitorAvailability: vi.fn(async () => notNative()) })
+    await vi.waitFor(() => expect(b.c.getSnapshot().monitor.reason).toBe('output-not-native'))
+    b.engine._playing = true
+    b.fire()
+    await b.c.setSong('song-2')
+    b.api.monitorAvailability.mockClear()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(b.api.monitorAvailability).not.toHaveBeenCalled() // timers cancelled
+    b.c.dispose()
+  })
+  it('a device-lost error clears itself when the route returns; other errors are not cleared by that rule', async () => {
+    const { c, api, fire, engine } = await withEngine()
+    await c.toggleMonitor()
+    api.monitorState.mockResolvedValue(monState({ available: { reason: 'device-lost' }, on: false, latency: null }))
+    api.level.mockResolvedValue({ peakDb: -30, rmsDb: -40 })
+    for (let i = 0; i < 12; i++) await c.pollLevel()
+    await vi.waitFor(() => expect(c.state).toBe('error-recoverable'))
+    expect(c.getSnapshot().error).toBe('monitor')
+    // the route returns: availability true, monitoring off
+    api.monitorAvailability.mockResolvedValue(monState({ on: false }))
+    ;(engine as unknown as { _playing: boolean })._playing = !engine._playing
+    fire()
+    await vi.waitFor(() => expect(c.getSnapshot().error).toBeNull())
+    expect(['idle', 'armed']).toContain(c.state)
+    c.dispose()
+    for (const kind of ['busy', 'error', 'device-lost', 'no-bridge'] as const) {
+      const r = await withEngine()
+      ;(r.c as unknown as { set: (p: object) => void }).set({ error: kind })
+      await r.c.refreshMonitorAvailability()
+      expect(r.c.getSnapshot().error, kind).toBe(kind)
+      r.c.dispose()
+    }
+  })
+  it('a monitor failure is not cleared by an availability answer issued before it; an explicit toggle clears it', async () => {
+    const { c, api } = await withEngine({ monitorSet: vi.fn(async () => { throw new Error('boom') }) })
+    await c.toggleMonitor()
+    expect(c.getSnapshot().error).toBe('monitor')
+    api.monitorSet.mockImplementation(async (req: { on: boolean }) => monState({ on: req.on }))
+    await c.toggleMonitor()
+    expect(c.getSnapshot().error).toBeNull()
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    c.dispose()
+  })
+  it('clears the other-input note when the take stops, on song change and on input change', async () => {
+    const two = [{ id: 'a', label: 'Zen', deviceName: 'zen', channelIndex: 0, channels: 2 }, { id: 'b', label: 'Zen', deviceName: 'zen', channelIndex: 1, channels: 2 }]
+    const note = async () => {
+      const r = await setup({}, undefined, two)
+      r.c.selectInput('a')
+      await r.c.toggleRecord()
+      ;(r.c as unknown as { takeInput: object }).takeInput = { deviceName: 'zen', channelIndex: 1 }
+      await r.c.toggleMonitor()
+      expect(r.c.getSnapshot().monitorNote).toBe('other-input')
+      return r
+    }
+    const stop = await note()
+    await stop.c.toggleRecord()
+    expect(stop.c.getSnapshot().monitorNote).toBeNull()
+    stop.c.dispose()
+    const song = await note()
+    await song.c.setSong('song-2')
+    expect(song.c.getSnapshot().monitorNote).toBeNull()
+    song.c.dispose()
+    const inp = await note()
+    ;(inp.c as unknown as { set: (p: object) => void }).set({ recording: false, starting: false })
+    inp.c.selectInput('b')
+    expect(inp.c.getSnapshot().monitorNote).toBeNull()
+    inp.c.dispose()
+  })
+})
+
 describe('Listen with song replays the take settings and restores the singer settings (D6)', () => {
   const recordWithChange = async () => {
     const r = await setup()

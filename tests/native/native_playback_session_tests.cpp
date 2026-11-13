@@ -1,5 +1,6 @@
 #include <native/playback/native_playback_callback.h>
 #include <native/playback/native_playback_session.h>
+#include <native/playback/shared_audio_service.h>
 #include <native/playback/signalsmith_time_pitch.h>
 #include <zcore/media/flac_io.h>
 #include <zcore/media/wav.h>
@@ -328,6 +329,11 @@ public:
     return {true, singz::AudioHostError::None, state, format, latency, {}};
   }
 
+  singz::AudioHostResult setBufferFrames(uint32_t frames,uint32_t maximum=0) override {
+    if(maximum && frames>maximum)return {false,singz::AudioHostError::InvalidConfiguration,state,format,latency,{}};
+    format.nominalBufferFrames=latency.bufferFrames=frames;
+    return {true,singz::AudioHostError::None,state,format,latency,{}};
+  }
   singz::AudioHostResult start() override {
     ++starts;
     if (failStart) {
@@ -6055,6 +6061,38 @@ void aLoopArmedAheadOfTheEarIsNotHeardYet() {
    now (twoSeeksRacedAgainstTheCallbackNeverWedge, and the processor-level
    perCommandSeekPlans), so priming failure — refused at the command — is
    again the only way the arm can fail. */
+void heldSongCapacitySurvivesSmallerGraphRequest() {
+#if defined(__APPLE__)
+  auto physical=std::make_unique<ManualOutputBackend>();auto* fake=physical.get();
+  fake->actualMaximumFrames=4096;fake->actualNominalBufferFrames=512;
+  auto& service=singz::sharedAudioService();
+  CHECK(service.configureProvider(std::make_unique<ManualOutputBackend>(),"held-test-setup").ok);
+  CHECK(service.configureProvider(std::move(physical),"coreaudio").ok);
+  const auto path=writeWav("held-song-capacity.wav",1,std::vector<float>(20000,.1f));
+  auto host=service.playbackBackend(std::make_unique<ManualOutputBackend>(),"coreaudio");
+  singz::NativePlaybackSession session(std::move(host));
+  auto request=config();request.maximumFrames=4096;request.requestedBufferFrames=512;
+  std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane("song",path));
+  const auto first=session.prepare(request,std::move(lanes),701);
+  if(!first.ok)std::fprintf(stderr,"held initial prepare: %s\n",first.message.c_str());
+  CHECK(first.ok);
+  const auto firstOpen=session.openOutput(701);
+  if(!firstOpen.ok)std::fprintf(stderr,"held initial open: %s\n",firstOpen.message.c_str());
+  CHECK(firstOpen.ok);CHECK(session.start(701).ok);
+  fake->setPresentationLatency(0,512,0);
+  CHECK(service.prepareVoiceMonitor().ok && service.status().latency.bufferFrames==32);
+  const auto opens=fake->opens,stops=fake->stops;
+  CHECK(session.unload(701).ok);request.maximumFrames=2048;
+  lanes.clear();lanes.push_back(lane("song",path));
+  const auto prepared=session.prepare(request,std::move(lanes),702);
+  CHECK(prepared.ok && prepared.format.maximumFrames==4096);
+  CHECK(session.openOutput(702).ok && session.start(702).ok && fake->drive(32));
+  CHECK(fake->opens==opens && fake->stops==stops && service.status().latency.bufferFrames==32);
+  CHECK(session.status().renderedProjectFrame==32 && session.status().adapterRenderFailures==0);
+  CHECK(session.unload(702).ok);CHECK(service.setPlaybackOutputCurrent(false));
+  service.shutdown();std::remove(path.c_str());
+#endif
+}
 void callbackPeriodChangesKeepTheSourceContinuous() {
   std::vector<float> pcm(100000);
   for(size_t i=0;i<pcm.size();++i)pcm[i]=.1f+static_cast<float>(i%997)*.0003f;
@@ -8207,6 +8245,8 @@ void portableGraphDocumentMaterializesActualTopology() {
 } // namespace
 
 int main() {
+  if(std::getenv("SINGZ_HELD_CAPACITY_REGRESSION_ONLY")){heldSongCapacitySurvivesSmallerGraphRequest();return 0;}
+
   if(std::getenv("SINGZ_REANCHOR_REGRESSION_ONLY")) {
     callbackPeriodChangesKeepTheSourceContinuous();aStaleReanchorNeverRewindsTheSource();return 0;
   }
@@ -8231,6 +8271,7 @@ int main() {
     std::puts("native playback quarantined swap tests: ok");
     return 0;
   }
+  heldSongCapacitySurvivesSmallerGraphRequest();
   callbackPeriodChangesKeepTheSourceContinuous();
   aStaleReanchorNeverRewindsTheSource();
   mixerEditsWithoutCallbacksKeepTheLatestValues();

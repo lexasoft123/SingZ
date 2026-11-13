@@ -11,6 +11,7 @@ namespace singz {
 
 // Process-lifetime device owner. Client stop retires only that client's render
 // context; the output keeps the silent base route ready for the next client.
+// macOS buffer holds end on explicit native-song-session close, not graph stop.
 // Input capture is deliberately separate and inactive until explicitly begun.
 class SharedAudioService final {
  public:
@@ -50,6 +51,10 @@ class SharedAudioService final {
   bool playbackOutputCurrent() const;
   OutputCallbackDiagnosticSnapshot callbackDiagnostics() const noexcept;
   bool setPlaybackOutputCurrent(bool current);
+  // The song host owns the changing lease until the native song session ends.
+  AudioHostResult prepareVoiceMonitor(uint32_t targetFrames = 32, uint32_t maximumFrames = 256);
+  // Prepare a replacement graph for the retained physical host's capacity.
+  uint32_t retainedPlaybackCapacity(const AudioHostConfig& config) const;
   uint64_t outputRouteGeneration() const noexcept;
   // Mobile may park the shared output while another route owns the device.
   void parkOutput() noexcept;
