@@ -144,7 +144,7 @@ private:
   void *opaque{nullptr};
   float left[512]{}, right[512]{};
 };
-void realtimeSessionQuery() {
+void realtimeSessionQuery(double rate = 1, double transpose = 0) {
   static_assert(noexcept(std::declval<const NativePlaybackSession &>()
                              .presentationQueryRealtime(uint64_t{})));
   auto backend = std::make_unique<PresentationBackend>();
@@ -169,32 +169,50 @@ void realtimeSessionQuery() {
   NativePlaybackPrepareConfig config;
   config.outputDeviceUid = "presentation:output"; config.outputChannels = {0, 1};
   config.requestedSampleRate = 48000; config.maximumFrames = 512;
+  config.playbackRate = rate; config.transposeSemitones = transpose;
   CHECK(session.prepare(config, std::move(lanes), 1).ok);
   CHECK(!session.presentationQueryRealtime(origin).found);
   CHECK(session.openOutput(1).ok && session.start(1).ok);
   fake->drive();
   auto first = session.presentationQueryRealtime(origin + 5000000);
-  CHECK(first.found && first.projectFrame == 240 && first.rate == 1 && !first.paused);
+  CHECK(first.found && first.projectFrame == 240 * rate && first.rate == rate && !first.paused);
+  // The first captured block may arrive before the time/pitch pipeline has
+  // presented any song audio. The old immediate-writer path looked up this
+  // pre-history timestamp and permanently marked the take partial-error.
+  const auto latency = session.presentationQuery(origin + 5000000);
+  const auto delay = latency.outputLatencyFrames + latency.graphLatencyFrames;
+  if (rate != 1 || transpose != 0) {
+    CHECK(delay > 240);
+    CHECK(!session.presentationQuery(origin + 5000000 - delay * 1000000000ull / 48000).found);
+  }
+  // Drive past startup, then use the same wall-time latency subtraction as
+  // main. Historical rate mapping must be applied exactly once.
+  for (unsigned n = 0; n < 100; ++n) fake->drive();
+  const uint64_t capture = fake->lastHostNs + 5000000;
+  const uint64_t aligned = capture - delay * 1000000000ull / 48000;
+  const auto placed = session.presentationQuery(aligned);
+  CHECK(placed.found && !placed.paused);
+  CHECK(std::abs(placed.songSeconds - (aligned - origin) / 1.e9 * rate) < 1.e-8);
   CHECK(session.seek(1, 48000).ok); fake->drive();
-  const auto sought = session.presentationQueryRealtime(origin + 15000000);
-  CHECK(sought.found && sought.projectFrame == 48240);
+  const auto sought = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  CHECK(sought.found && sought.projectFrame == 48000 + 240 * rate);
   CHECK(sought.discontinuitySerial != first.discontinuitySerial);
   CHECK(session.pause(1).ok); fake->drive();
-  const auto paused = session.presentationQueryRealtime(origin + 25000000);
-  CHECK(paused.found && paused.paused && paused.rate == 0 && paused.projectFrame == 48480);
+  const auto paused = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  CHECK(paused.found && paused.paused && paused.rate == 0 && paused.projectFrame == 48000 + 480 * rate);
   zdsp::test::resetAllocationTrap(); zdsp::test::setAllocationTrapEnabled(true);
   for (uint32_t i = 0; i < 20000; ++i) {
-    const auto p = session.presentationQueryRealtime(origin + 25000000);
-    CHECK(p.found && p.projectFrame == 48480);
+    const auto p = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+    CHECK(p.found && p.projectFrame == 48000 + 480 * rate);
   }
   zdsp::test::setAllocationTrapEnabled(false);
   CHECK(zdsp::test::trappedAllocationCount() == 0);
   fake->reentrantSession = &session;
   CHECK(session.stop(1).ok);
   CHECK(fake->reentrantQueryReturned);
-  CHECK(!session.presentationQueryRealtime(origin + 25000000).found);
+  CHECK(!session.presentationQueryRealtime(fake->lastHostNs + 5000000).found);
   CHECK(session.unload(1).ok);
-  CHECK(!session.presentationQueryRealtime(origin + 15000000).found);
+  CHECK(!session.presentationQueryRealtime(fake->lastHostNs + 5000000).found);
   fake->reentrantSession = nullptr;
   std::remove(path.c_str());
 }
@@ -229,5 +247,7 @@ void allocationFreeAndConcurrent() {
 }
 int main() {
   affineAndEdges(); boundariesAndEviction(); allocationFreeAndConcurrent(); realtimeSessionQuery();
+  for (double rate : {.25, .5, 2.0}) realtimeSessionQuery(rate);
+  realtimeSessionQuery(1, 2);
   std::puts("playback presentation history tests passed");
 }

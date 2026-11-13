@@ -238,6 +238,14 @@
         "synchronous": true
       },
       {
+        "name": "presentationQuery",
+        "ipc": null,
+        "preload": null,
+        "internal": true,
+        "dormant": false,
+        "synchronous": true
+      },
+      {
         "name": "unloadPlayback",
         "ipc": "audio-host:playback-unload",
         "preload": "unloadDesktopPlayback",

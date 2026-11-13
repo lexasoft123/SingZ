@@ -47,15 +47,19 @@ export class VoiceMonitorStore {
   }
   private fail(reason: VoiceMonitorReason): VoiceMonitorState { this.current = { ...this.current, available: { reason }, ...(this.generation === undefined ? { on: false, latency: null } : {}) }; return this.snapshot() }
   private processFailed(): VoiceMonitorState { this.clearGeneration(); this.current.warnings = []; return this.fail('error') }
+  private activeInput?: { deviceName: string; channelIndex: number }
   private async resolve(request: VoiceMonitorAvailabilityRequest, owns = false): Promise<{ state: VoiceMonitorState; uid?: string; channel?: number; outputId?: string }> {
     if (this.platform !== 'darwin') { await this.close(); return { state: this.fail('platform') } }
     if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) { await this.close(); return { state: this.fail('no-input') } }
     const result = await this.native.inputDevices()
     const devices = result.ok ? result.devices : []
-    const name = request.input.deviceName.trim()
+    // A renderer rebuilding its input list has no new selection to report.
+    // Preserve both the selected device and channel until it has one.
+    const input = !request.input.deviceName.trim() && this.activeInput ? this.activeInput : request.input
+    const name = input.deviceName.trim()
     const unique = (items: CaptureInputDevice[]) => items.length === 1 ? items[0] : undefined
     const device = name ? unique(devices.filter(d => d.uid === name)) ?? unique(devices.filter(d => d.label === name)) ?? unique(devices.filter(d => normalize(d.label) === normalize(name))) : undefined
-    if (device && request.input.channelIndex >= device.channels) { await this.close(); return { state: this.fail('no-input') } }
+    if (device && input.channelIndex >= device.channels) { await this.close(); return { state: this.fail('no-input') } }
     if (!device) {
       this.outputs(await this.native.voiceMonitorAvailability({ inputUid: '', inputChannel: 0,
         ...(request.outputDeviceId == null ? {} : { outputDeviceId: request.outputDeviceId }) }), owns)
@@ -64,7 +68,7 @@ export class VoiceMonitorStore {
     const inventory = await this.native.hostDevices()
     const routeDevice = inventory.ok ? inventory.devices.find(d => d.uid === device.uid) : undefined
     if (!routeDevice || !['input', 'duplex'].includes(routeDevice.direction) || !routeDevice.transport || routeDevice.transport === 'unknown') { await this.close(); return { state: this.fail('error') } }
-    const channel = request.input.channelIndex
+    const channel = input.channelIndex
     const availability = await this.native.voiceMonitorAvailability({ inputUid: device.uid, inputChannel: channel,
       ...(request.outputDeviceId == null ? {} : { outputDeviceId: request.outputDeviceId }) })
     this.outputs(availability, owns) // a foreground probe never rewrites a running monitor's route; a set() owns it
@@ -103,6 +107,7 @@ export class VoiceMonitorStore {
       const result = await this.native.beginVoiceMonitor({ inputUid: selected.uid, inputChannel: selected.channel, ...(request.outputDeviceId == null ? {} : { outputDeviceId: request.outputDeviceId }), gainDb: this.current.gainDb, targetFrames: VOICE_MONITOR_TARGET_FRAMES, maxFrames: VOICE_MONITOR_MAX_FRAMES }, generation)
       this.outputs(result)
       if (!result.ok) { await this.close(); return this.fail(result.reason ?? 'error') }
+      this.activeInput = { deviceName: selected.uid, channelIndex: selected.channel }
       this.activeSelection = selection
       this.current = { ...this.current, available: true, on: true, latency: result.latency ?? null, warnings: result.warnings ?? [] }
       return this.snapshot()
@@ -113,6 +118,7 @@ export class VoiceMonitorStore {
   private clearGeneration(): void {
     this.generation = undefined
     this.activeSelection = undefined
+    this.activeInput = undefined
     this.current.on = false
     this.current.latency = null
   }

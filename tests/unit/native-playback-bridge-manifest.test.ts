@@ -41,7 +41,7 @@ describe('desktop playback addon exports', () => {
 
   it('binds each live export to the IPC channel and preload method the manifest names', () => {
     for (const method of manifest.methods.desktopAddon) {
-      if (method.dormant) continue
+      if (method.dormant || ('internal' in method && method.internal)) continue
       expect(method.ipc).not.toBeNull()
       expect(method.preload).not.toBeNull()
       expect(main).toContain(`'${method.ipc}'`)
@@ -56,6 +56,17 @@ describe('desktop playback addon exports', () => {
         )}'`
       )
       expect(preload).toMatch(wiring)
+    }
+  })
+
+  it('keeps the placement query internal to main, with no raw renderer IPC', () => {
+    const internal = manifest.methods.desktopAddon.filter(m => 'internal' in m && m.internal)
+    expect(internal.map(m => m.name)).toEqual(['presentationQuery'])
+    for (const method of internal) {
+      expect(method).toMatchObject({ dormant: false, ipc: null, preload: null, synchronous: true })
+      expect(read('src/main/voice-takes-ipc.ts')).toContain("'binding', 'presentationQuery'")
+      expect(read('src/main/audio-process-rpc.ts')).toContain("'presentationQuery'")
+      expect(preload).not.toContain(method.name)
     }
   })
 

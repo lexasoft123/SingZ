@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { VoiceTakeStore, type VoiceTakeNative } from '../../src/main/voice-takes'
 import { createVoiceTakeNative } from '../../src/main/voice-takes-ipc'
 
@@ -183,6 +183,94 @@ describe('voice take storage', () => {
     expect(await s.stop()).toMatchObject({ ok: false, reason: 'error' })
   })
 
+  it.each([.25, .5, 1, 2])('waits for audible placement before writing an armed stopped-song take at %sx', async tempo => {
+    vi.useFakeTimers()
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
+    const origin = 10_000_000_000n
+    const graphFrames = tempo === 1 ? 0 : 7200
+    const outputFrames = 480
+    const delay = BigInt((graphFrames + outputFrames) * 1e9 / 48000)
+    let elapsed = 0n, first = 0n, generation = 0n, writerStarted = false, probes = 0
+    const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
+      if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'mic', label: 'Mic', channels: 1, isDefault: true }] } as T
+      if (method === 'beginCapture') { generation = args[1] as bigint; return { ok: true } as T }
+      if (method === 'captureState') return { state: 'running', ownershipGeneration: generation.toString() } as T
+      if (method === 'captureStats') return { lastSampleHostNs: (origin + elapsed).toString(), firstSampleCaptured: writerStarted,
+        firstSampleHostNs: first.toString(), firstSampleQuality: 'hardware', sampleRate: 48000 } as T
+      if (method === 'presentationQuery') {
+        probes++
+        const at = BigInt(args[0] as string)
+        return { found: at >= origin, paused: at === origin, songSeconds: 12 + Number(at - origin) / 1e9 * tempo,
+          outputLatencyFrames: outputFrames, graphLatencyFrames: graphFrames, sampleRate: 48000 } as T
+      }
+      if (method === 'recordTake') {
+        writerStarted = true; first = origin + elapsed
+        writeFileSync(join(args[0] as string, `${args[1]}.wav`), wav(48000, 48000))
+        return { ok: true } as T
+      }
+      if (method === 'finishTake') return { ok: true, frames: 48000 * 300, sampleRate: 48000 } as T
+      return { ok: true } as T
+    } }
+    const native = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    const s = new VoiceTakeStore({ rootDir: root, native })
+    try {
+      expect((await s.arm({ input: request.input })).ok).toBe(true)
+      // Negative control: the old adapter called recordTake immediately after
+      // openCapture. Reproduce its complete store result, including the sidecar.
+      const legacy = new VoiceTakeStore({ rootDir: root, native: { ...native,
+        recordTake: args => rpc.call('binding', 'recordTake', [args.dir, args.takeId, generation]) } })
+      elapsed = 5_000_000n // raw coverage exists; latency-trimmed coverage does not
+      expect((await legacy.start({ ...request, tempo })).ok).toBe(true)
+      expect((await legacy.stop()).take).toMatchObject({ status: 'partial-error', startPositionSec: 0 })
+      writerStarted = false; first = 0n; probes = 0; elapsed = 0n
+      const pending = s.start({ ...request, tempo })
+      // Force Play-adopted but still parked: an already-armed mic has a sample
+      // immediately. Then force the graph-latency history miss before readiness.
+      await vi.waitFor(() => expect(probes).toBeGreaterThan(0))
+      expect(writerStarted).toBe(false)
+      elapsed = 5_000_000n
+      await vi.advanceTimersByTimeAsync(25)
+      expect(writerStarted).toBe(false)
+      elapsed = delay + 10_000_000n
+      await vi.advanceTimersByTimeAsync(25)
+      expect((await pending).ok).toBe(true)
+      expect(writerStarted).toBe(true)
+      const done = await s.stop()
+      expect(done.take).toMatchObject({ status: 'complete', durationSec: 300 })
+      expect(done.take?.startPositionSec).toBeCloseTo(12 + .01 * tempo, 8)
+      // Old immediate writer froze first=origin, and stop returned partial-error/start=0.
+      expect(first).toBeGreaterThan(origin + delay)
+    } finally { await s.cancel(); vi.useRealTimers() }
+  })
+
+  it.each([false, true])('times out before creating a take and retains only explicitly armed capture (%s)', async armed => {
+    vi.useFakeTimers()
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
+    let generation = 0n, probes = 0, writes = 0, closes = 0
+    const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
+      if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'mic', label: 'Mic', channels: 1, isDefault: true }] } as T
+      if (method === 'beginCapture') { generation = args[1] as bigint; return { ok: true } as T }
+      if (method === 'captureState') return { state: 'running', ownershipGeneration: generation.toString() } as T
+      if (method === 'captureStats') { probes++; return { lastSampleHostNs: '1000000000', sampleRate: 48000 } as T }
+      if (method === 'presentationQuery') return { found: false } as T
+      if (method === 'recordTake') writes++
+      if (method === 'cancelCapture') closes++
+      return { ok: true } as T
+    } }
+    const native = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    const s = new VoiceTakeStore({ rootDir: root, native })
+    try {
+      if (armed) await s.arm({ input: request.input })
+      const pending = s.start(request)
+      await vi.waitFor(() => expect(probes).toBeGreaterThan(0))
+      await vi.advanceTimersByTimeAsync(2100)
+      expect(await pending).toMatchObject({ ok: false, reason: 'error' })
+      expect(writes).toBe(0)
+      expect(closes).toBe(armed ? 0 : 1)
+      expect(readdirSync(join(root, request.songId))).toEqual([])
+    } finally { await s.disarm(); vi.useRealTimers() }
+  })
+
   it('wires the real-shaped audio-process stats into placement instead of silently defaulting to zero', async () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
     const calls: Array<{ method: string; args: unknown[] }> = []
@@ -208,6 +296,8 @@ describe('voice take storage', () => {
     const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
       if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'mic-uid', label: 'MacBook Pro Microphone', isDefault: true, sampleRate: 48000, channels: 1, channelLabels: ['Mono'] }] } as T
       if (method === 'beginCapture') return { ok: true } as T
+      if (method === 'captureStats') return { lastSampleHostNs: '1000000000', sampleRate: 48000 } as T
+      if (method === 'presentationQuery') return { found: true, songSeconds: 12, sampleRate: 48000 } as T
       return { ok: true } as T
     } }
     const native = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
@@ -224,6 +314,8 @@ describe('voice take storage', () => {
     const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
       calls.push({ method, args })
       if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'mic', label: 'Mic', isDefault: true, sampleRate: 48000, channels, channelLabels: ['1', '2'] }] } as T
+      if (method === 'captureStats') return { lastSampleHostNs: '1000000000', sampleRate: 48000 } as T
+      if (method === 'presentationQuery') return { found: true, songSeconds: 12, sampleRate: 48000 } as T
       return { ok: true } as T
     } }
     const native = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
@@ -256,7 +348,7 @@ describe('voice take storage', () => {
       if (method === 'captureState') return { state: generation ? 'running' : 'stopped', ownershipGeneration: generation.toString() } as T
       if (method === 'beginCapture') { generation = args[1] as bigint; return { ok: true } as T }
       if (method === 'cancelCapture') { if (args[0] === generation) generation = 0n; return { ok: true } as T }
-      if (method === 'captureStats') return { firstSampleCaptured: true, firstSampleHostNs: '1000000000', sampleRate: 48000 } as T
+      if (method === 'captureStats') return { firstSampleCaptured: true, firstSampleHostNs: '1000000000', lastSampleHostNs: '1000000000', sampleRate: 48000 } as T
       if (method === 'presentationQuery') return { found: true, songSeconds: 0, sampleRate: 48000 } as T
       if (method === 'finishTake') return { ok: true, frames: 48000, sampleRate: 48000 } as T
       return { ok: true } as T
@@ -316,7 +408,7 @@ describe('voice take storage', () => {
   ] as const)('uses only stable reported input latency (%s, %s)', async (source, stable, trim, expectedSource) => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
     const native = fakeNative(); const calls: Array<Parameters<VoiceTakeNative['presentationQuery']>[0]> = []
-    native.captureStats = async () => ({ firstSampleCaptured: true, firstSampleHostNs: '1000000000', sampleRate: 48000, inputLatencyFrames: 120, inputBufferFrames: 512, inputLatencySource: source, inputLatencyStable: stable })
+    native.captureStats = async () => ({ firstSampleCaptured: true, firstSampleHostNs: '1000000000', lastSampleHostNs: '1000000000', sampleRate: 48000, inputLatencyFrames: 120, inputBufferFrames: 512, inputLatencySource: source, inputLatencyStable: stable })
     native.presentationQuery = async args => { calls.push(args); return { ok: true, found: true, startPositionSec: 4, outputLatencyFrames: 20, graphLatencyFrames: 10 } }
     const s = new VoiceTakeStore({ rootDir: root, native }); const started = await s.start(request); expect(started.ok).toBe(true)
     await s.stop()
@@ -356,7 +448,7 @@ describe('voice take storage', () => {
       if (method === 'beginCapture') { generation = args[1] as bigint; opens++; return { ok: true } as T }
       if (method === 'cancelCapture') { if (generation === args[0]) generation = 0n; return { ok: true } as T }
       if (method === 'recordTake') { if (!generation || generation !== args[2]) return { ok: false, error: 'No microphone input is open' } as T; writeFileSync(join(args[0] as string, `${args[1]}.wav`), wav()); return { ok: true } as T }
-      if (method === 'captureStats') return { firstSampleCaptured: true, firstSampleHostNs: '1000', sampleRate: 22050 } as T
+      if (method === 'captureStats') return { firstSampleCaptured: true, firstSampleHostNs: '1000', lastSampleHostNs: '1000', sampleRate: 22050 } as T
       if (method === 'presentationQuery') return { found: true, songSeconds: 0 } as T
       if (method === 'finishTake') return { ok: true, sampleRate: 22050, frames: 22050 } as T
       return { ok: true } as T
@@ -374,6 +466,8 @@ describe('voice take storage', () => {
       if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'mic', label: 'Mic', channels: 1 }] } as T
       if (method === 'captureState') return { state: generation ? 'running' : 'stopped', ownershipGeneration: generation.toString() } as T
       if (method === 'beginCapture') { generation = args[1] as bigint; opens++; return { ok: true } as T }
+      if (method === 'captureStats') return { lastSampleHostNs: '1000000000', sampleRate: 48000 } as T
+      if (method === 'presentationQuery') return { found: true, songSeconds: 12, sampleRate: 48000 } as T
       return { ok: true } as T
     } }
     const native = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)

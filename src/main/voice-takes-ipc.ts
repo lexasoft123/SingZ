@@ -50,23 +50,7 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
     captureGeneration = generation; captureDeviceName = selected.device.label; captureDeviceUid = selected.device.uid; captureChannel = selected.channel
     return { ok: true, generation, deviceName: captureDeviceName }
   }
-  return {
-  armCapture: args => openCapture(args.deviceName, args.channelIndex, ++nextVoiceCaptureGeneration),
-  disarmCapture: async generation => { if (captureGeneration && (!generation || generation === captureGeneration)) { const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'cancelCapture', [captureGeneration]); if (result.ok) { captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1 } return result } return { ok: true } },
-  recordTake: async args => {
-    const generation = args.generation ?? (++nextVoiceCaptureGeneration)
-    const started = await openCapture(args.deviceName ?? '', args.channelIndex ?? 0, generation)
-    if (!started.ok) return started
-    const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'recordTake', [args.dir, args.takeId, started.generation ?? generation])
-    return { ...result, generation: started.generation ?? generation, deviceName: started.deviceName }
-  },
-  finishTake: args => desktopAudioProcess.call('binding', 'finishTake', [args.generation]),
-  cancelTake: args => desktopAudioProcess.call('binding', 'cancelTake', [args.generation]),
-  stopCapture: async generation => {
-    try { return await desktopAudioProcess.call<{ ok: boolean; cancelled?: boolean; error?: string }>('binding', 'cancelCapture', [generation]) }
-    finally { if (captureGeneration === generation) { captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1 } }
-  },
-  presentationQuery: async args => {
+  const presentationQuery: VoiceTakeNative['presentationQuery'] = async args => {
     if (!args.firstSampleHostNs || !args.sampleRate || !Number.isFinite(args.sampleRate) || args.sampleRate <= 0)
       return { ok: true, found: false, latencySource: 'measured-trim' as const }
     let hostNs: bigint
@@ -88,7 +72,44 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
       seekDuringCallback: raw.seekDuringCallback,
       latencySource: raw.found ? (args.firstSampleQuality === 'unknown' ? 'measured-trim' as const : 'reported' as const) : 'measured-trim' as const
     }
+  }
+  return {
+  armCapture: args => openCapture(args.deviceName, args.channelIndex, ++nextVoiceCaptureGeneration),
+  disarmCapture: async generation => { if (captureGeneration && (!generation || generation === captureGeneration)) { const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'cancelCapture', [captureGeneration]); if (result.ok) { captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1 } return result } return { ok: true } },
+  recordTake: async args => {
+    const generation = args.generation ?? (++nextVoiceCaptureGeneration)
+    const started = await openCapture(args.deviceName ?? '', args.channelIndex ?? 0, generation)
+    if (!started.ok) return started
+    // An armed input can deliver immediately after Play, before the song's
+    // first audible frame. At non-unity tempo (or transpose), the time/pitch
+    // latency makes this window much longer. Wait BEFORE opening the writer:
+    // retrying placement later cannot move a first sample out of old silence.
+    let ready = false
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const stats = await desktopAudioProcess.call<Awaited<ReturnType<VoiceTakeNative['captureStats']>>>('binding', 'captureStats', [])
+      if (stats.lastSampleHostNs && stats.lastSampleHostNs !== '0' && stats.sampleRate) {
+        const probe = { songId: '', firstSampleHostNs: stats.lastSampleHostNs, sampleRate: stats.sampleRate }
+        const raw = await presentationQuery(probe)
+        if (raw.ok && raw.found && !raw.paused && !raw.seekDuringCallback) {
+          const placed = await presentationQuery({ ...probe, outputSampleRate: raw.sampleRate,
+            inputLatencyFrames: stats.inputLatencySource === 'reported' && stats.inputLatencyStable !== false ? stats.inputLatencyFrames : 0,
+            outputLatencyFrames: raw.outputLatencyFrames, graphLatencyFrames: raw.graphLatencyFrames, trimInputLatency: true })
+          if (placed.ok && placed.found && !placed.paused && !placed.seekDuringCallback) { ready = true; break }
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    if (!ready) return { ok: false, generation: started.generation ?? generation, reason: 'error', error: 'The song is not ready to record. Try again after playback starts.' }
+    const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'recordTake', [args.dir, args.takeId, started.generation ?? generation])
+    return { ...result, generation: started.generation ?? generation, deviceName: started.deviceName }
   },
+  finishTake: args => desktopAudioProcess.call('binding', 'finishTake', [args.generation]),
+  cancelTake: args => desktopAudioProcess.call('binding', 'cancelTake', [args.generation]),
+  stopCapture: async generation => {
+    try { return await desktopAudioProcess.call<{ ok: boolean; cancelled?: boolean; error?: string }>('binding', 'cancelCapture', [generation]) }
+    finally { if (captureGeneration === generation) { captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1 } }
+  },
+  presentationQuery,
   playTake: args => desktopAudioProcess.call('binding', 'playTake', [{ path: args.path, mode: args.mode, startPositionSec: args.startPositionSec, ...(args.gain === undefined ? {} : { gain: args.gain }), ...(args.tempo === undefined ? {} : { tempo: args.tempo }) }, args.generation]),
   stopTake: generation => desktopAudioProcess.call('binding', 'stopTake', generation === undefined ? [] : [generation]),
   captureStats: () => desktopAudioProcess.call('binding', 'captureStats', []),

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 
 using namespace singz;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, #x); std::abort(); } } while (false)
@@ -53,6 +54,24 @@ void pauseAndRateChange() {
   // BEFORE it. Subtracting delay at today's .85 rate gives a different answer.
   CHECK(std::abs(recordPlacement(h, input(250)).startPositionSec - .1) < 1e-12);
 }
+void nonUnityStartupAndLongTake() {
+  for (double rate : {.25, .5, 2.0}) {
+    PlaybackPresentationHistory h;
+    append(h, 0, 720000, rate);
+    auto early = input(10); early.inputLatencyFrames = 0;
+    early.outputLatencyFrames = 480; early.graphLatencyFrames = 7200;
+    // Negative control: first block before graph presentation has no mapping.
+    CHECK(recordPlacement(h, early).fault == RecordPlacementFault::HistoryMiss);
+    for (unsigned ms = 100; ms <= 300000; ms += 100)
+      append(h, ms, 720000 + ms * 48 * rate, rate);
+    auto ready = early; ready.firstSampleHostNs = origin + 300050000000ull;
+    const auto placed = recordPlacement(h, ready);
+    CHECK(placed.fault == RecordPlacementFault::None);
+    CHECK(std::abs(placed.startPositionSec - (15 + 299.89 * rate)) < 1e-8);
+    // Wrong song-seconds subtraction would remove 160ms at every rate.
+    CHECK(std::abs(placed.startPositionSec - (15 + 300.05 * rate - .16)) > .07);
+  }
+}
 void missingAndSeek() {
   PlaybackPresentationHistory h;
   append(h, 100, 4800);
@@ -75,6 +94,6 @@ void missingAndSeek() {
 }
 }
 int main() {
-  steadyAndSign(); pauseAndRateChange(); missingAndSeek();
+  steadyAndSign(); pauseAndRateChange(); nonUnityStartupAndLongTake(); missingAndSeek();
   std::puts("record placement tests passed");
 }

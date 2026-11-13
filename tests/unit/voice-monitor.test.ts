@@ -54,6 +54,22 @@ describe('voice monitoring', () => {
     expect((await store.state()).on).toBe(true)
     await store.dispose()
   })
+  it('keeps the selected input and channel when song-open probes carry a blank input', async () => {
+    const { store, native } = fixture()
+    const devices = await native.inputDevices()
+    vi.mocked(native.inputDevices).mockResolvedValue({ ...devices, devices: [{ ...devices.devices[0], channels: 2 }] })
+    expect((await store.set({ input: { ...input, channelIndex: 1 }, on: true })).on).toBe(true)
+    await store.songChanged('song')
+    for (const deviceName of ['', '   ']) {
+      expect(await store.availability({ input: { deviceName, channelIndex: 0 } })).toMatchObject({ on: true, available: true })
+      expect(native.voiceMonitorAvailability).toHaveBeenLastCalledWith({ inputUid: 'mic', inputChannel: 1 })
+    }
+    // Negative control: the old empty-name lookup called close() here.
+    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
+    vi.mocked(native.voiceMonitorAvailability).mockResolvedValueOnce({ available: false, reason: 'device-lost' })
+    expect(await store.availability({ input: { deviceName: '', channelIndex: 0 } })).toMatchObject({ on: false })
+    expect(native.endVoiceMonitor).toHaveBeenCalledTimes(1)
+  })
   it('publishes idle/browser output context without input enumeration, permission or monitor teardown', async () => {
     const { store, native, permission } = fixture()
     const playbackContext = { webAudioPlaying: false, browserOutputUid: 'mic', selectedOutputUid: '' }

@@ -1076,7 +1076,11 @@ unnoticed, and each is a candidate for its own change — none should be
 6. **The iOS schema checks fewer duplicates than Android's** — no duplicate
    lane id, no duplicate graph node id. Both are caught by the core, so this
    is an error-message difference, not a safety one.
-7. **`unloadPlaybackRetainingLanes` and `playbackLanePeaks` are dormant on the
+7. **`presentationQuery` is desktop-internal**, synchronous and live: main's
+   voice-take adapter calls it through the audio-process binding RPC. Its
+   manifest entry has `internal: true` and null `ipc`/`preload`; raw host-time
+   queries are not exposed to the renderer. Mobile method sets are unchanged.
+   **`unloadPlaybackRetainingLanes` and `playbackLanePeaks` are dormant on the
    desktop** — exported, never called.
 8. **Scalar bounds are restated two to four times** — in TypeScript, in each
    bridge schema, and in the core. The agreement fixture pins the values in
