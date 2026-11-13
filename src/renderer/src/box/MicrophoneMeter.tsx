@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { PeakMeter, type PeakMeterHandle } from '@singz/ui'
 import { useMeterVisibility } from '../meter-visibility'
 import { t } from './i18n'
+import { BOX_METER_HZ } from '../../../shared/box-meter-push'
 import { microphoneLevelDb, microphoneMeterStateKey, microphoneSlotLevel, useMicrophoneSlotState, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 
 /** Mixer rows: full 40-brick meter at the kit's 16 px height. */
@@ -35,7 +36,7 @@ export function MicrophoneMeter({ source, snapshot, slot, meterId, mini = false,
   return <span className="mic-meter" data-mic-state={state} data-mic-status={live ? 'level' : state}
     data-mic-db={snapshot && live ? (Number.isFinite(staticDb) ? staticDb.toFixed(1) : '-inf') : undefined}>
     <span className="mic-meter-bar" data-mix-meter={live ? meterId : undefined} aria-hidden="true">
-      <PeakMeter ref={meter} db={staticDb} renderMode="canvas" maxFps={30} paintOnReceive attackMs={0} onPaint={source?.meterPaint} enabled={live && showing} mini={mini} clipped={state === 'loud'} size={mini ? PLAYER_METER_SIZE : MIXER_METER_SIZE} />
+      <PeakMeter ref={meter} db={staticDb} renderMode="canvas" maxFps={BOX_METER_HZ} paintOnReceive attackMs={0} onPaint={source?.meterPaint} enabled={live && showing} mini={mini} clipped={state === 'loud'} size={mini ? PLAYER_METER_SIZE : MIXER_METER_SIZE} />
     </span>
     <b className="mic-meter-state">{t(microphoneMeterStateKey(state))}</b>
   </span>

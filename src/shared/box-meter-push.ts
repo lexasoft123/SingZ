@@ -1,4 +1,6 @@
 import type { BoxMicrophoneLevels } from './box-audio'
+/** Host level pushes and meter repaints per second; matches a 60 Hz TV output. */
+export const BOX_METER_HZ = 60
 /** One bounded pending update, retaining each channel's loudest unsent peak. */
 export function coalesceMeterLevels(previous: BoxMicrophoneLevels | undefined, next: BoxMicrophoneLevels): BoxMicrophoneLevels {
   if (!previous?.levels || !next.levels || previous.epoch !== next.epoch || previous.generation !== next.generation ||

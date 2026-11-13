@@ -1,4 +1,4 @@
-import { boundedMeterSink, coalesceMeterLevels } from '../../shared/box-meter-push'
+import { BOX_METER_HZ, boundedMeterSink, coalesceMeterLevels } from '../../shared/box-meter-push'
 import { readAlsaCaptureTiming, type AlsaCaptureTiming } from './meter-trace'
 import { performance } from 'node:perf_hooks'
 import { BOX_HOST_ANALYSIS_OWNER, type BoxMicrophoneLevels, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
@@ -74,7 +74,7 @@ export class MicrophoneAnalysisSupervisor {
         const next = coalesceMeterLevels(this.pendingPush, value); this.pendingPush = undefined
         if (!this.disposed) for (const sink of this.levelListeners) sink.push(next)
       }).catch(() => {}).finally(() => { this.levelReading = false })
-      this.nextPushAt = this.now() + 1000 / 30
+      this.nextPushAt = this.now() + 1000 / BOX_METER_HZ
     }, Math.max(0, this.nextPushAt - this.now()))
     this.levelTimer.unref?.()
   }

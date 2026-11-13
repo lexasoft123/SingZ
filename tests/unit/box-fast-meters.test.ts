@@ -338,7 +338,7 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
       expect(hardware).not.toHaveBeenCalled()
     } finally { await f.supervisor.dispose(); vi.unstubAllEnvs() }
   })
-  it('pushes on analysis notifications only while subscribed, coalescing to thirty per second', async () => {
+  it('pushes on analysis notifications only while subscribed, coalescing to sixty per second', async () => {
     const f = fixture(); await f.supervisor.ready
     const listener = vi.fn()
     const stop = f.supervisor.subscribeLevels(listener)
@@ -349,8 +349,8 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
       notify({ ownershipGeneration: f.generation(), frequency: 0, clarity: 0 } as never)
       await vi.advanceTimersByTimeAsync(5)
     }
-    expect(listener.mock.calls.length).toBeGreaterThanOrEqual(28)
-    expect(listener.mock.calls.length).toBeLessThanOrEqual(31)
+    expect(listener.mock.calls.length).toBeGreaterThanOrEqual(56)
+    expect(listener.mock.calls.length).toBeLessThanOrEqual(62)
     expect(f.owner.takeMicrophoneLevels.mock.calls.length).toBe(listener.mock.calls.length)
     stop(); const count = listener.mock.calls.length
     for (let i = 0; i < 100; i++) notify({ ownershipGeneration: f.generation(), frequency: 0, clarity: 0 } as never)
