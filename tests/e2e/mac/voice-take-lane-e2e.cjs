@@ -28,7 +28,7 @@ const root = path.resolve(__dirname, '../../..'), rate = 48000
 const outputUid = process.env.E2E_OUTPUT_UID
 assert.ok(outputUid, 'E2E_OUTPUT_UID must select the output endpoint (a virtual loopback/NoMachine-type output is preferred)')
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-voice-lane-'))
-const profile = path.join(scratch, 'profile'), library = path.join(scratch, 'library'), songDir = path.join(library, 'Voice lane fixture')
+const library = path.join(scratch, 'library'), songDir = path.join(library, 'Voice lane fixture')
 const rows = []
 let app
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -127,7 +127,7 @@ function writeSidecar(dir, takeId, songId, name, bytes, extra) {
 }
 ;(async () => {
   try {
-    fs.mkdirSync(profile, { recursive: true })
+    fs.mkdirSync(scratch, { recursive: true })
     const fixture = await createProject(songDir)
     const pj = path.join(songDir, 'project.json'), doc = JSON.parse(fs.readFileSync(pj))
     delete doc.graphHash // Exercise the ordinary synthesized song bus at every key/tempo.
@@ -172,9 +172,20 @@ function writeSidecar(dir, takeId, songId, name, bytes, extra) {
       settings: [{ atSec: 0, tempo: 1, transposeSemitones: 0 }], anchors: [{ takeFrame: 0, projectFrame: start * rate }, { takeFrame: 8 * rate, projectFrame: (start + 8) * rate }] })
     // A virtual loopback makes nothing audible, so SINGZ_MUTE (which forces masterGain 0) is dropped and peaks are real.
     // A real device stays muted and is judged on lane receipts.
-    const muted = !virtual
+    let muted = !virtual
     rows.push({ test: 'output transport', value: virtual ? 'virtual' : 'physical', limit: '-', result: 'INFO', note: muted ? 'SINGZ_MUTE kept: peak not measurable under mute' : 'unmuted loopback: peak rows measured' })
     started = await startApp(profileMain, muted)
+    // Unmuted is only safe while native playback owns the output: if it declined, the engine would fall back to Web
+    // Audio and play the song and tone through a PHYSICAL sink before any alignment assert could fail. SINGZ_MUTE is
+    // fixed at launch, so relaunch muted; if native is still not in charge, abort before the first Play.
+    const nativeOwns = w => w.evaluate(() => { const e = __test.engine; return e.nativeActive === true || e.nativePlayback?.preparedAhead === true })
+    if (!muted && !(await nativeOwns(started.win))) {
+      rows.push({ test: 'native playback owns the output before Play', value: 0, limit: '-', result: 'INFO', note: 'unmuted run refused; relaunching with SINGZ_MUTE=1' })
+      await app.close().catch(() => {}); app = null
+      muted = true
+      started = await startApp(profileMain, true)
+    }
+    assert.ok(await nativeOwns(started.win), 'native playback must own the output (prepared or active) before the first Play; Web Audio fallback is not measured')
     const win = started.win
     const source = await win.evaluate(() => __test.engine.voiceTakeSource.path)
     const conformed = fs.readFileSync(source), conformedRate = conformed.readUInt32LE(24)

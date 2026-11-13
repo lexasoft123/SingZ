@@ -1048,7 +1048,7 @@ describe('live monitoring (M2)', () => {
     expect(html).toContain('id="voice-monitor-why"')
     expect(html).toContain('Monitoring needs the input and output on one device')
     // the reason is only the speaker's description: nothing is drawn as lane text (no vs-note content)
-    expect(html).toMatch(/<span class="vs-note [^"]*"[^>]*>\s*<\/span>|<span class="vs-note "><\/span>/)
+    expect(html).toMatch(/<span class="vs-note[^"]*"[^>]*><\/span>/) // exactly empty: no text, no whitespace
     expect(html.match(/on one device/g)?.length).toBeGreaterThan(0)
     expect(html).not.toMatch(/class="vs-note warn"/)
     expect(settingsHtmlOf(off.c)).toContain('Monitoring needs the input and output on one device') // route line
