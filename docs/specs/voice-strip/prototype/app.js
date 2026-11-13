@@ -11,6 +11,7 @@ const STR = {
   recordTitle: 'Record (R)', stopTitle: 'Stop recording (R)',
   recWhy: { perm: 'Record unavailable: microphone access needed', missing: 'Record unavailable: no input found', error: 'Record unavailable: retry the input first', take: 'Record unavailable: keep or discard the current take first' },
   voiceLevel: 'Voice level',
+  monitorLevel: 'Monitor level',
   inputGroupNone: 'No input found', inputPerm: 'Mic access needed',
   msgMonitoring: 'Monitoring on',
   msgArmed: 'Armed. Recording starts at the playhead.',
@@ -66,7 +67,7 @@ const VOICE = '#5be3b0';
 /* ---- state ---- */
 const S = {
   perm: 'granted', inputMissing: false, phase: 'idle', listen: null, // 'alone' | 'song'
-  avail: 'ok', muted: true, takeMute: false, solo: false, level: 80, input: 'scar:1', error: null, take: null, takeN: 0,
+  avail: 'ok', muted: true, takeMute: false, solo: false, level: 80, monLevel: 50, input: 'scar:1', error: null, take: null, takeN: 0,
 };
 const song = { pos: 0, playing: false, tempo: 100, trans: 0 };
 const stems = STEMS.map((s) => ({ ...s, mute: false, solo: false, level: 80 }));
@@ -77,7 +78,7 @@ const SV = (b) => `<svg viewBox="0 0 16 16" aria-hidden="true">${b}</svg>`;
 const ST = 'fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"';
 const ICON = {
   rec: SV('<circle cx="8" cy="8" r="4.2" fill="currentColor"/>'),
-  phones: SV(`<path ${ST} d="M3 10.5V8a5 5 0 0 1 10 0v2.5"/><rect x="1.8" y="9.5" width="3.2" height="5" rx="1.2" fill="currentColor"/><rect x="11" y="9.5" width="3.2" height="5" rx="1.2" fill="currentColor"/>`),
+  speaker: SV(`<path d="M2 6h2.6L8 3v10L4.6 10H2z" fill="currentColor"/><path ${ST} d="M10.4 5.8a3.2 3.2 0 0 1 0 4.4M12.2 4a5.6 5.6 0 0 1 0 8"/>`),
   check: SV(`<path ${ST} d="M3 8.5l3.2 3.2L13 4.5"/>`),
   play: SV('<path d="M4.5 3v10l8-5z" fill="currentColor"/>'),
   playSong: SV('<path d="M2.5 3.5v9l6-4.5z" fill="currentColor"/><rect x="10.2" y="6.5" width="1.6" height="5" rx=".6" fill="currentColor"/><rect x="13" y="4" width="1.6" height="8" rx=".6" fill="currentColor"/>'),
@@ -94,6 +95,8 @@ const sgn = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${-n}` : '0');
 const rng = (seed) => () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
 const announce = (t) => { $('live').textContent = ''; setTimeout(() => { $('live').textContent = t; }, 30); };
 const monitoring = () => S.avail === 'ok' && !S.muted;
+// Record is one press, like Play: only a real blocker (mic, input, error) disables it. A take in review is kept and a playing take stops.
+const canPressRecord = () => S.perm === 'granted' && !S.inputMissing && !S.error;
 const canRecord = () => S.perm === 'granted' && !S.inputMissing && !S.error && (S.phase === 'idle' || S.phase === 'armed');
 const makePeaks = (n, seed, base = 0.5) => {
   const r = rng(seed); const out = []; let env = 0.4;
@@ -177,7 +180,9 @@ function seekFrom(e, el) {
   const r = el.getBoundingClientRect(); song.pos = Math.max(0, Math.min(LEN, ((e.clientX - r.left) / r.width) * LEN)); render();
 }
 function startRecording() {
-  if (!canRecord()) return; setClip(false); // idle: transport Record arms Voice and records in one go
+  if (!canPressRecord()) return; setClip(false); // one press: arms the input if needed and records
+  if (S.listen) { S.listen = null; song.playing = false; }
+  if (S.take) S.take.kept = true; // the previous take stays on disk
   S.take = { n: S.takeN + 1, start: song.pos, span: 0, real: 0, tempo: song.tempo, trans: song.trans, changed: false, kept: false, partial: false, peaks: [] };
   S.phase = 'recording'; song.playing = true; announce(STR.announce.recording); render();
 }
@@ -211,17 +216,18 @@ function render() {
   // monitor / mute / solo / arm / level
   const mon = $('monBtn'); const unav = S.avail !== 'ok'; const on = monitoring();
   mon.classList.toggle('active', on); mon.setAttribute('aria-pressed', on); mon.setAttribute('aria-disabled', unav);
-  setBtn(mon, unav ? (S.avail === 'latency' ? STR.latencyUnavailable : STR.routeUnavailable) : on ? STR.monOnTitle : STR.monOffTitle, 'phones');
+  setBtn(mon, unav ? (S.avail === 'latency' ? STR.latencyUnavailable : STR.routeUnavailable) : on ? STR.monOnTitle : STR.monOffTitle, 'speaker');
   if (!unav) mon.setAttribute('aria-label', on ? STR.monOnAria : STR.monOffAria);
   const mt = $('muteBtn'); mt.classList.toggle('active', S.takeMute); mt.setAttribute('aria-pressed', S.takeMute); setBtn(mt, S.takeMute ? STR.unmuteAria : STR.muteAria);
   $('soloBtn').classList.toggle('active', S.solo); $('soloBtn').setAttribute('aria-pressed', S.solo); setBtn($('soloBtn'), STR.soloAria);
   const ab = $('armBtn'); ab.classList.toggle('active', armed || rec); ab.setAttribute('aria-pressed', armed || rec); setBtn(ab, armed ? STR.disarmAria : STR.armAria, 'rec');
   ab.disabled = !(canRecord());
   if (ab.disabled) ab.title = rec ? 'Recording. Stop first to change arm' : (S.perm !== 'granted' ? STR.recWhy.perm : S.inputMissing ? STR.recWhy.missing : S.error ? STR.recWhy.error : STR.recWhy.take);
-  $('levelRng').value = S.level; $('levelRng').setAttribute('aria-label', STR.voiceLevel);
+  // The fader edits the monitor level while the speaker is on, the take playback level otherwise.
+  $('levelRng').value = on ? S.monLevel : S.level; $('levelRng').setAttribute('aria-label', on ? STR.monitorLevel : STR.voiceLevel); $('levelRng').title = on ? STR.monitorLevel : STR.voiceLevel;
   // transport record
-  const rb = $('recBtn'); rb.disabled = !(canRecord() || rec); rb.classList.toggle('armed', armed); rb.classList.toggle('recording', rec);
-  const why = S.perm !== 'granted' ? STR.recWhy.perm : S.inputMissing ? STR.recWhy.missing : S.error ? STR.recWhy.error : (rv || pl) ? STR.recWhy.take : '';
+  const rb = $('recBtn'); rb.disabled = !(canPressRecord() || rec); rb.classList.toggle('armed', armed); rb.classList.toggle('recording', rec);
+  const why = S.perm !== 'granted' ? STR.recWhy.perm : S.inputMissing ? STR.recWhy.missing : S.error ? STR.recWhy.error : '';
   setBtn(rb, rec ? STR.stopTitle : rb.disabled ? why : STR.recordTitle); rb.setAttribute('aria-pressed', rec);
   $('recTime').textContent = rec ? fmt(S.take.real) : '';
   // latency badge
@@ -338,7 +344,7 @@ $('muteBtn').onclick = () => { S.takeMute = !S.takeMute; render(); };
 $('soloBtn').onclick = () => { S.solo = !S.solo; render(); };
 $('armBtn').onclick = () => { if (!canRecord()) return; S.phase = S.phase === 'armed' ? 'idle' : 'armed'; if (S.phase === 'armed') setClip(false); announce(S.phase === 'armed' ? STR.announce.armed : STR.announce.disarmed); render(); };
 $('clipLed').onclick = () => { setClip(false); announce('Clip indicator reset'); };
-$('levelRng').oninput = (e) => { S.level = +e.target.value; };
+$('levelRng').oninput = (e) => { if (monitoring()) S.monLevel = +e.target.value; else S.level = +e.target.value; };
 sel.onchange = () => { S.input = sel.value; };
 $('recBtn').onclick = () => (S.phase === 'recording' ? stopRecording() : startRecording());
 $('keepBtn').onclick = () => { S.take.kept = true; announce(STR.announce.kept); render(); };

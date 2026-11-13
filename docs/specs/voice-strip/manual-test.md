@@ -17,14 +17,21 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
 
 1. Open a song. In the Voice strip's input selector, pick the interface and the
    channel your mic is on. Expect every channel of the device to be listed.
-2. Arm the input (selecting an input does not arm it; press the arm button). Speak. Expect the meter
-   to move and nothing audible yet (monitoring is off by default).
-3. Optional: with monitoring off, press the "Mon" chip and hover the fader: it reads
-   "Monitor level, -12 dB" (the default, remembered). Move it if you like.
-4. Play the song. Turn monitoring on. Expect: a quiet start at -12 dB, the song
-   keeps playing, no confirmation dialog, a one-time hint "Use headphones to
-   avoid feedback", a latency badge of a few ms (an estimate, about 5 ms at the
-   smallest buffer on the verification interface).
+   The Voice lane is the bottom row of the stem stack: zoom or scroll the
+   timeline and the lane and its playhead move with the stems.
+2. Press the Record-arm button (red circle) to arm the input (selecting an input
+   does not arm it). Speak. Expect the meter to move and nothing audible yet
+   (the Speaker button is off by default). There is no "Mon" chip and no
+   headphones button.
+3. Optional: with the Speaker off, hover the fader: it reads "Voice level" (the
+   take playback level). Turn the Speaker on: the fader now reads "Monitor
+   level" and sits at the remembered monitor gain (-12 dB by default). Move it
+   if you like.
+4. Play the song. Turn the Speaker button on (it works with or without the song
+   playing). Expect: a quiet start at -12 dB, the song keeps playing, no
+   confirmation dialog, a one-time hint "Use headphones to avoid feedback", a
+   latency badge of a few ms (an estimate, about 5 ms at the smallest buffer on
+   the verification interface).
 5. Sing or speak. You should hear yourself with the song. Raise the interface
    output level slowly if too quiet. **[inferred]** (not yet verified with a real
    microphone).
@@ -33,14 +40,18 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
 7. Toggle monitoring off and on a few times. Expect one tiny click or gap at the
    first on of this song only; later toggles should be inaudible or nearly so
    (about 2.8 ms residual measured).
-8. Press record while monitoring. Sing for 30 s or more. During the take, toggle
+8. Press the transport Record button while monitoring (one press starts the take; arming first is not needed). Sing for 30 s or more. During the take, toggle
    monitoring off and on once. Expect the song never to stop and the meter to stay
    live; the input must not be released by the toggle.
-9. Stop. Play the take back with the song. Listen for the take being aligned with
+9. Press Record again to stop. Expect a waveform in the take clip (it grew while you
+   sang). Press Record once more with the take unkept: it keeps the old take and starts a new one.
+   Play the take back with the song. Listen for the take being aligned with
    the song by ear (a clap or a sung start on the beat). Note any early or late
    feel; the mid-take monitor toggle should add at most a ~30 ms silence once.
-10. Switch to another song. Expect monitoring to be off for the new song (never
-    persisted as on). Turn it on again; the first-on click may repeat.
+10. Switch to another song, then stop playback. Expect the monitor (Speaker on)
+    to keep running across the song change, unload and playback end; it stops
+    only when you turn the Speaker off, the device or route is lost, you change
+    the input, or the app quits. It is still never persisted as on across restart.
 11. Quit the app. Expect the interface's buffer to be back at its previous
     setting afterwards (check in Audio MIDI Setup or the interface's panel).
     **[inferred]** this follows from the zCore ledger restore.

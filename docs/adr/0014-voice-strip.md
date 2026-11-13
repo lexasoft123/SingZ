@@ -125,6 +125,38 @@ Consequences built:
   310.000 s elapsed); monitor on/off mid-take completes with true duration (the
   first shrink pads ~30 ms).
 
+### Idle monitoring
+
+Monitoring can start before Play, with the song stopped or unloaded. Native
+availability resolves the app-selected output UID, otherwise the current system
+default, without opening a song host. The same typed inventory, duplex-device,
+transport, channel, 32-frame target / 256-frame maximum and already-granted
+microphone-permission checks apply. No permission request is made. An additive
+playback-context update over the existing monitor availability IPC reports the
+selected native UID and the physical Web Audio output UID. `output-not-native`
+is reserved for Web Audio actually playing on a *known different* output; idle,
+paused and same-device Web Audio are compatible.
+
+The first host negotiates the small period. Both native song hosts and monitor
+hosts opt into zCore `holdSharedDeviceBuffer`; ordinary armed capture retains
+only its capacity reservation. A song joining a running monitor requests the
+current period, even when its stored preference is another legal small period.
+Each host releases its own hold: song unload does not stop the monitor, monitor
+off does not disturb the song, and the last hold restores the original buffer
+while respecting capture capacity and external changes. A weak control-domain
+monitor activity token lets the song adopt the period without tying host object
+lifetimes together. Route/device changes and quit still stop monitoring; the
+on decision is never persisted. The existing -10874 silence-block and take-gap
+padding contracts are unchanged.
+
+Portable fake-duplex regressions exercise both close orders, idle start with
+zero song-host opens, independent capture, same-route song join (including an
+open/start interleave), route stop and
+ledger restoration. Their song-join measurement is zero period writes and zero
+monitor reopen/stop calls; this does not measure HAL callback gaps. Real-device
+song start/stop, audible glitches, capture continuity and loopback remain hardware
+acceptance checks; the historical ~2.8 ms toggle residual above remains unqualified.
+
 ### Removed
 
 The ADR 0010 exclusive "Headphone monitoring preview": the Settings section, its

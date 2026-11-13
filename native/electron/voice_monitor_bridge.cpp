@@ -24,6 +24,9 @@ std::string monitoredOutput;
 std::vector<uint32_t> monitoredChannels;
 NativeAudioOwnership* ownership=nullptr;
 VoiceMonitorEnvironmentLifetime environments;
+bool browserPlaying=false;
+std::string browserOutput;
+std::optional<std::string> selectedOutput;
 bool useAllowed() {
   bool supported=false;
   if (ownership) {
@@ -57,8 +60,14 @@ bool permissionGranted() {
 VoiceMonitorSongRoute currentRoute() {
   auto& service=sharedAudioService();
   const auto status=service.status();
-  const auto config=service.activeOutputConfig();
-  return voiceMonitorSongRoute(config,service.providerId(),status,service.outputRouteGeneration(),service.playbackOutputCurrent());
+  const auto config=service.voiceMonitorOutputConfig(selectedOutput);
+  auto route=voiceMonitorSongRoute(config,service.providerId(),status,service.outputRouteGeneration(),service.playbackOutputCurrent());
+  // Unsupported providers are a platform refusal, never a browser mismatch.
+  if (service.providerId()!="coreaudio") { route.output.clear();route.channels.clear(); }
+  // With no song, opening the selected CoreAudio endpoint is sufficient.
+  route.native=!route.output.empty() &&
+      (service.playbackOutputCurrent() || voiceMonitorBrowserOutputCompatible(browserPlaying,browserOutput,route.output));
+  return route;
 }
 napi_value object(napi_env env) {napi_value o;napi_create_object(env,&o);return o;}
 void boolean(napi_env env,napi_value o,const char* key,bool b) {napi_value v;napi_get_boolean(env,b,&v);napi_set_named_property(env,o,key,v);}
@@ -101,16 +110,41 @@ napi_value result(napi_env env,const VoiceMonitorResult& r) {
 napi_value availability(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);
   std::string uid;uint32_t channel=0;
-  if(argc!=1 || !selection(env,arg,uid,channel)) {
+  bool contextOnly=false;
+  napi_value contextFlag;
+  if(argc==1 && napi_get_named_property(env,arg,"contextOnly",&contextFlag)==napi_ok)
+    napi_get_value_bool(env,contextFlag,&contextOnly);
+  if(argc!=1 || (!contextOnly && !selection(env,arg,uid,channel))) {
     auto o=object(env);boolean(env,o,"available",false);text(env,o,"reason","error");text(env,o,"detail","Invalid input selection");return o;
   }
   std::lock_guard lock(control);
+  if(contextOnly) {
+    napi_value value;size_t length=0;bool playing=false;
+    auto readUid=[&](const char* key,std::string& target) {
+      if(napi_get_named_property(env,arg,key,&value)!=napi_ok ||
+          napi_get_value_string_utf8(env,value,nullptr,0,&length)!=napi_ok || length>4096) return false;
+      target.resize(length+1);
+      if(napi_get_value_string_utf8(env,value,target.data(),target.size(),&length)!=napi_ok) return false;
+      target.resize(length);return target.find('\0')==std::string::npos;
+    };
+    std::string browser,selected;
+    if(napi_get_named_property(env,arg,"webAudioPlaying",&value)!=napi_ok ||
+        napi_get_value_bool(env,value,&playing)!=napi_ok || !readUid("browserOutputUid",browser) ||
+        !readUid("selectedOutputUid",selected)) return error(env,"Invalid playback context");
+    browserPlaying=playing;browserOutput=std::move(browser);selectedOutput=std::move(selected);
+    const auto route=currentRoute();
+    AudioHostConfig output;output.outputDeviceUid=route.output;output.outputChannels=route.channels;
+    if(!monitoredOutput.empty() && !voiceMonitorSameOutput(monitoredOutput,monitoredChannels,output,route.native)) {
+      host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();
+    }
+    auto o=object(env);boolean(env,o,"available",true);return o;
+  }
   if(!useAllowed()) {
     auto o=object(env);boolean(env,o,"available",false);text(env,o,"reason","error");
     text(env,o,"detail","Audio input is busy or unsupported");return o;
   }
   const auto route=currentRoute();
-  const auto r=host.availability(uid,channel,route.output,voiceMonitorSongCanBegin(route),permissionGranted());
+  const auto r=host.availability(uid,channel,route.output,route.native,permissionGranted());
   auto o=object(env);boolean(env,o,"available",r.available);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
   if(!r.detail.empty())text(env,o,"detail",r.detail);
@@ -128,7 +162,7 @@ napi_value begin(napi_env env,napi_callback_info info) {
   std::lock_guard lock(control);
   if(!useAllowed())return error(env,"Audio input is busy or unsupported");
   const auto route=currentRoute();
-  auto r=host.begin(uid,channel,route.output,voiceMonitorSongCanBegin(route),permissionGranted(),static_cast<float>(std::clamp(gain,-60.0,12.0)),32,256,g,route.channels,&sharedAudioService());
+  auto r=host.begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,-60.0,12.0)),32,256,g,route.channels,&sharedAudioService());
   if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;}
   return result(env,r);
 }
@@ -137,10 +171,6 @@ napi_value outputCurrent(napi_env env,napi_callback_info info) {
   napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);
   if(argc!=1 || napi_get_value_bool(env,arg,&current)!=napi_ok)return error(env,"Invalid output state");
   std::lock_guard lock(control);
-  if(!current && !monitoredOutput.empty()) {
-    // Fade/retire the duplex client before releasing the song's writer lease.
-    host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();
-  }
   auto o=object(env);boolean(env,o,"ok",sharedAudioService().setPlaybackOutputCurrent(current));
   return o;
 }
@@ -235,6 +265,7 @@ bool cleanupVoiceMonitor() noexcept {
   std::lock_guard lock(control);
   if(!environments.detach())return false;
   host.close();monitoredOutput.clear();monitoredChannels.clear();ownership=nullptr;
+  browserPlaying=false;browserOutput.clear();selectedOutput.reset();
   return true;
 }
 }

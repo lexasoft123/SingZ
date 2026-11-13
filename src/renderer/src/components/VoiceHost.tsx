@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import type { MultitrackEngine } from '../audio/engine'
 import { createVoiceController } from './voice-bootstrap'
 import { blocksSongTransportShortcut } from '../keyboard'
-import { cleanSongName } from '../model'
+import { cleanSongName, type TimeView } from '../model'
 import type { LoadedSongIdentity } from '../training-ui-state'
 import VoiceRecordButton from './voice-record-button'
 import VoiceStrip from './VoiceStrip'
@@ -20,11 +20,14 @@ import './voice-strip.css'
 export default function VoiceHost({
   e: engine,
   s: song,
-  p: projectDir
+  p: projectDir,
+  v: view
 }: {
   e: MultitrackEngine
   s: LoadedSongIdentity | null
   p: string | null
+  /** The stems' shared time view: the Voice lane draws on the same axis. */
+  v: TimeView | null
 }): React.JSX.Element | null {
   const [controller] = useState(() => createVoiceController(engine))
   // Captured when the song loads (its load token changes): later re-anchoring of
@@ -38,7 +41,7 @@ export default function VoiceHost({
     [controller, fixed, title]
   )
   const model = useVoiceModel(controller)
-  const root = useRef<HTMLDivElement>(null)
+  const root = useRef<HTMLSpanElement>(null)
   // The Record button sits right after Play, in a node this host adds there.
   // Transport can re-mount that part of its tree, so the slot is re-attached
   // whenever it falls out of place (coalesced to one check per frame).
@@ -103,9 +106,10 @@ export default function VoiceHost({
   }, [alone])
 
   return (
-    <div ref={root} className="voice-host">
-      <VoiceStrip controller={controller} engine={engine} />
+    <>
+      <span ref={root} hidden />
+      <VoiceStrip controller={controller} engine={engine} view={view} />
       {slot && createPortal(<VoiceRecordButton controller={controller} />, slot)}
-    </div>
+    </>
   )
 }

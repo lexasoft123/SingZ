@@ -63,6 +63,7 @@ struct SharedAudioService::Impl {
   bool parked = false;
   bool songOutputCurrent = false;
   bool monitorBufferHeld = false;
+  std::weak_ptr<const AudioHostConfig> monitorOutput;
   OutputCallbackDiagnostics callbackDiagnostics;
   std::string provider;
   bool enumerated{false};
@@ -293,13 +294,14 @@ struct SharedAudioService::Impl {
     return true;
   }
   AudioHostResult openLocked(AudioHostConfig config) {
+    // Provider-scoped so the same CoreAudio lifecycle is testable with a fake
+    // backend on any host. Other production platforms never select coreaudio.
 #if defined(__APPLE__) && TARGET_OS_OSX
-    // Song opens pass the current preferred period as a nonzero request.
-    // Opt in so zCore registers the capacity lease for both zero and explicit
-    // periods; unchanged requests do not write, changes use the shared ledger.
-    // Route identity below deliberately remains independent of this opt-in.
-    if (provider != "box-loopz") config.allowSharedDeviceBufferChange = true;
+    const bool sharedCoreAudio = provider != "box-loopz";
+#else
+    const bool sharedCoreAudio = provider == "coreaudio";
 #endif
+    if (sharedCoreAudio) config.allowSharedDeviceBufferChange = true;
     if (!enumerated) refreshLocked();
     startWatcherLocked();
     if (config.outputDeviceUid.empty()) config.outputDeviceUid = cached.defaultOutputUid;
@@ -317,17 +319,15 @@ struct SharedAudioService::Impl {
         route.outputChannels == config.outputChannels && route.inputDeviceUid == config.inputDeviceUid &&
         route.inputChannels == config.inputChannels && route.exclusive == config.exclusive &&
         (config.requestedSampleRate == 0 || route.requestedSampleRate == config.requestedSampleRate);
-#if defined(__APPLE__) && TARGET_OS_OSX
     if (monitorBufferHeld && samePhysical && provider == "coreaudio" &&
         (current.state == AudioHostState::Running || current.state == AudioHostState::Open)) {
       // The physical host and its writer lease outlive graph generations.
       // Never release/reacquire that lease for a same-route re-prepare.
       return {true, AudioHostError::None, current.state, current.format, current.latency, {}};
     }
-#endif
     const bool same = samePhysical && route.maximumFrames == config.maximumFrames &&
         (config.requestedBufferFrames == 0 || route.requestedBufferFrames == config.requestedBufferFrames) &&
-        route.exclusive == config.exclusive;
+        route.exclusive == config.exclusive && route.holdSharedDeviceBuffer == config.holdSharedDeviceBuffer;
     if (same && (current.state == AudioHostState::Running || current.state == AudioHostState::Open))
       return {true, AudioHostError::None, current.state, current.format, current.latency, {}};
     if (playback.render && playback.gate.accepting()) {
@@ -340,11 +340,13 @@ struct SharedAudioService::Impl {
     outputGeneration.fetch_add(1, std::memory_order_release);
     backend->stop();
     monitorBufferHeld = false;
-    auto result = backend->open(config, render, this);
-#if defined(__APPLE__) && TARGET_OS_OSX
+    auto actualConfig = config;
+    if (const auto monitor = monitorOutput.lock(); monitor && monitor->outputDeviceUid == config.outputDeviceUid)
+      actualConfig.requestedBufferFrames = 0;
+    auto result = backend->open(actualConfig, render, this);
     if (!result.ok && result.error == AudioHostError::InvalidConfiguration &&
         config.requestedBufferFrames != 0 && !config.exclusive &&
-        config.inputDeviceUid.empty() && config.inputChannels.empty() && provider != "box-loopz") {
+        config.inputDeviceUid.empty() && config.inputChannels.empty() && sharedCoreAudio) {
       // A monitor may hold a smaller buffer than the song's cached preference.
       // zCore refuses an incompatible request BEFORE writing or adding a lease.
       // Treat the song period as best effort: retry once at the current device
@@ -354,8 +356,10 @@ struct SharedAudioService::Impl {
       currentBufferConfig.requestedBufferFrames = 0;
       result = backend->open(currentBufferConfig, render, this);
     }
-#endif
     if (result.ok) {
+      if (config.holdSharedDeviceBuffer && result.latency.bufferFrames && result.latency.bufferFrames<=256 &&
+          (!monitorOutput.expired() || actualConfig.requestedBufferFrames != config.requestedBufferFrames))
+        monitorBufferHeld = true;
       route = std::move(config);
       rate.store(result.format.sampleRate, std::memory_order_release);
     }
@@ -367,6 +371,7 @@ struct SharedAudioService::Impl {
         [&](const auto& device) { return !preferredOutputUid.empty() && device.uid == preferredOutputUid && device.outputChannels != 0; });
     const std::string selected = preferred != cached.devices.end() ? preferred->uid : cached.defaultOutputUid;
     AudioHostConfig config = route;
+    config.holdSharedDeviceBuffer = songOutputCurrent && provider == "coreaudio";
     config.inputDeviceUid.clear(); config.inputChannels.clear();
     if (config.outputDeviceUid != selected) {
       config.outputChannels.clear(); config.requestedSampleRate = 0;
@@ -435,7 +440,8 @@ class SharedAudioService::Client final : public AudioHostBackend {
       self.route = {};
     }
     config_ = config;
-    auto result = self.openLocked(config);
+    config_.holdSharedDeviceBuffer = provider_ == "coreaudio";
+    auto result = self.openLocked(config_);
     if (!result.ok) return result;
     // A song selected on a non-default endpoint owns that route too. Otherwise
     // ensureOutput() would silently restore the startup default on its first cue.
@@ -537,8 +543,8 @@ SharedAudioService::SharedAudioService()
   impl_->provider = "alsa";
 #endif
 }
-SharedAudioService::SharedAudioService(std::unique_ptr<AudioHostBackend> backend)
-    : impl_(std::make_unique<Impl>(std::move(backend), false)) {}
+SharedAudioService::SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider)
+    : impl_(std::make_unique<Impl>(std::move(backend), false)) { impl_->provider = std::move(provider); }
 SharedAudioService::~SharedAudioService() { shutdown(); }
 AudioHostResult SharedAudioService::initialize(const AudioHostConfig& config) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -643,6 +649,32 @@ std::string SharedAudioService::activeOutputUid() const {
 AudioHostConfig SharedAudioService::activeOutputConfig() const {
   std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->route;
 }
+std::shared_ptr<const AudioHostConfig> SharedAudioService::retainVoiceMonitorOutput(const AudioHostConfig& config) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  auto use = std::make_shared<const AudioHostConfig>(config);
+  impl_->monitorOutput = use;
+  return use;
+}
+AudioHostConfig SharedAudioService::voiceMonitorOutputConfig(const std::optional<std::string>& selectedUid) const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->songOutputCurrent) return impl_->route;
+  if (!impl_->enumerated || impl_->dirty->load(std::memory_order_acquire)) impl_->refreshLocked();
+  auto config = impl_->preferredRouteLocked();
+  if (selectedUid) {
+    const auto uid = selectedUid->empty() ? impl_->cached.defaultOutputUid : *selectedUid;
+    if (uid != config.outputDeviceUid) config.outputChannels.clear();
+    config.outputDeviceUid = uid;
+  }
+  if (config.outputChannels.empty()) {
+    const auto device = std::find_if(impl_->cached.devices.begin(),impl_->cached.devices.end(),
+        [&](const auto& row) { return row.uid == config.outputDeviceUid; });
+    if (device != impl_->cached.devices.end() && device->outputChannels) {
+      config.outputChannels = {0};
+      if (device->outputChannels > 1) config.outputChannels.push_back(1);
+    }
+  }
+  return config;
+}
 OutputCallbackDiagnosticSnapshot SharedAudioService::callbackDiagnostics() const noexcept {
   return snapshotOutputCallbacks(impl_->callbackDiagnostics);
 }
@@ -655,15 +687,14 @@ bool SharedAudioService::setPlaybackOutputCurrent(bool current) {
   if (current && (impl_->provider != "coreaudio" || !impl_->playback.render ||
                   impl_->route.outputDeviceUid.empty())) return false;
   impl_->songOutputCurrent = current;
-#if defined(__APPLE__) && TARGET_OS_OSX
-  if (!current && impl_->monitorBufferHeld) {
+  if (!current && impl_->route.holdSharedDeviceBuffer) {
     // Graph unloads used for native re-prepares retain this host. Only the
     // explicit native-session handback releases its changing buffer lease.
     impl_->backend->stop();
     impl_->outputGeneration.fetch_add(1,std::memory_order_release);
     impl_->monitorBufferHeld = false;
+    impl_->route.holdSharedDeviceBuffer = false;
   }
-#endif
   return true;
 }
 uint32_t SharedAudioService::retainedPlaybackCapacity(const AudioHostConfig& config) const {

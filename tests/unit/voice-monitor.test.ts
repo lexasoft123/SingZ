@@ -42,15 +42,38 @@ describe('voice monitoring', () => {
     }
     expect(native.voiceMonitorAvailability).not.toHaveBeenCalled()
   })
-  it('ends the monitor when the song changes', async () => {
+  it('keeps the monitor through song changes and unloads', async () => {
     const { store, native } = fixture()
     await store.songChanged('song-a')
     await store.set({ input, on: true })
     await store.songChanged('song-a')
     expect(native.endVoiceMonitor).not.toHaveBeenCalled()
     await store.songChanged('song-b')
-    expect(native.endVoiceMonitor).toHaveBeenCalledTimes(1)
-    expect((await store.state()).on).toBe(false)
+    await store.songChanged('')
+    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
+    expect((await store.state()).on).toBe(true)
+    await store.dispose()
+  })
+  it('publishes idle/browser output context without input enumeration, permission or monitor teardown', async () => {
+    const { store, native, permission } = fixture()
+    const playbackContext = { webAudioPlaying: false, browserOutputUid: 'mic', selectedOutputUid: '' }
+    expect(await store.availability({ input: { deviceName: '', channelIndex: 0 }, contextOnly: true, playbackContext })).toMatchObject({ on: false })
+    expect(native.inputDevices).not.toHaveBeenCalled()
+    expect(native.hostDevices).not.toHaveBeenCalled()
+    expect(permission).not.toHaveBeenCalled()
+    expect(native.voiceMonitorAvailability).toHaveBeenCalledWith({ inputUid: '', inputChannel: 0, contextOnly: true, ...playbackContext })
+    expect((await store.set({ input, on: true })).on).toBe(true)
+    expect(await store.availability({ input, contextOnly: true, playbackContext: { ...playbackContext, webAudioPlaying: true } })).toMatchObject({ on: true })
+    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValueOnce({ running: false, lost: true })
+    expect(await store.availability({ input, contextOnly: true, playbackContext: { ...playbackContext, browserOutputUid: 'other', webAudioPlaying: true } })).toMatchObject({ on: false, available: { reason: 'device-lost' } })
+  })
+  it('rejects malformed playback context and context-only monitor starts at IPC', async () => {
+    registerVoiceMonitor()
+    for (const playbackContext of [null, {}, { webAudioPlaying: 'yes', browserOutputUid: '', selectedOutputUid: '' }, { webAudioPlaying: true, browserOutputUid: 'bad\0uid', selectedOutputUid: '' }]) {
+      expect(await ipc.get(VOICE_IPC.monitorAvailability)!(null, { input, contextOnly: true, playbackContext })).toMatchObject({ available: { reason: 'error' } })
+    }
+    expect(await ipc.get(VOICE_IPC.monitorSet)!(null, { input, contextOnly: true, on: true, playbackContext: { webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: '' } })).toMatchObject({ available: { reason: 'error' } })
   })
   it('never substitutes an unrecognized or ambiguous input', async () => {
     const { store, native } = fixture()

@@ -13,7 +13,8 @@ VoiceMonitorAvailability classifyVoiceMonitorRoute(const AudioHostInventory& inv
   VoiceMonitorAvailability result;
   auto refuse = [&](const char* reason, const char* detail) { result.reason=reason; result.detail=detail; return result; };
   if (!macOS) return refuse("platform", "Live monitoring is available on macOS");
-  if (!native || output.empty()) return refuse("output-not-native", "The song needs a native output");
+  if (output.empty()) return refuse("platform", "No native output device is available");
+  if (!native) return refuse("output-not-native", "Playback uses a different non-native output");
   const AudioHostDeviceInfo* input=nullptr;
   for (const auto& device : inventory.devices) if (device.uid==uid) { input=&device; break; }
   if (!input) return refuse("no-input", "Select an available microphone");
@@ -78,6 +79,7 @@ struct VoiceMonitorHost::Impl {
   uint32_t requested{32}, warningFlags{0}, observedFrames{0};
   VoiceMonitorLatency latency;
   std::string reason;
+  std::shared_ptr<const AudioHostConfig> outputUse;
   void stop(bool ramp) noexcept {
     const auto before = render.callbacks.load(std::memory_order_acquire);
     render.target.store(0,std::memory_order_release);
@@ -89,6 +91,7 @@ struct VoiceMonitorHost::Impl {
     }
     host.stop(); // zCore owns lease restoration and drains its callback.
     warningFlags |= host.status().bufferWarnings;
+    outputUse.reset();
     running=false;
   }
 };
@@ -139,30 +142,35 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
   self.render.current=self.render.destination=self.render.step=0; self.render.remaining=0;
   self.render.target.store(0); self.render.silent.store(1); self.render.outputs=outputs;
   uint32_t frames=device->bufferFrames.preferredFrames;
-  if (songService) {
+  const bool songOpen = songService && songService->playbackOutputCurrent() &&
+      (songService->status().state==AudioHostState::Open || songService->status().state==AudioHostState::Running);
+  if (songOpen) {
     const auto prepared=songService->prepareVoiceMonitor(target,maximum);
     self.warningFlags |= songService->status().bufferWarnings;
     if (!prepared.ok) {
-      result.reason=prepared.error==AudioHostError::InvalidState ? "output-not-native" :
-          (prepared.error==AudioHostError::InvalidConfiguration ? "route-latency" : "error");
+      result.reason=prepared.error==AudioHostError::InvalidConfiguration ? "route-latency" : "error";
       result.error="Native song output could not prepare the monitor buffer";
       result.warnings=warnings(self.warningFlags);return result;
     }
     frames=prepared.latency.bufferFrames;
   }
+  if (!songOpen) frames=chooseMonitorBufferFrames(device->bufferFrames,device->bufferFrames,target,maximum).value_or(0);
   if (!frames || frames>maximum) {
     result.reason="route-latency";result.error="Monitor buffer exceeds the supported limit";return result;
   }
-  {
+  for (; frames<=maximum; frames*=2) {
     AudioHostConfig config;
     config.inputDeviceUid=config.outputDeviceUid=uid;
     config.inputChannels={channel}; config.outputChannels=physicalOutputs;
     config.requestedSampleRate=device->nominalSampleRate;
     config.requestedBufferFrames=frames; config.maximumFrames=kAudioHostMaxFrames;
-    // Match the song's current period: this is a capacity-only lease.
-    // No ceiling is retained: song close may restore its original period,
-    // which fits our prepared8192 storage and is silenced before clean close.
-    config.allowSharedDeviceBufferChange=true; config.maximumAcceptableBufferFrames=0;
+    // The first host negotiates; unchanged opens retain an explicit hold.
+    // The ceiling also prevents a later song from growing our active period.
+    config.allowSharedDeviceBufferChange=true; config.maximumAcceptableBufferFrames=maximum;
+    config.holdSharedDeviceBuffer=true;
+    // Publish intent before opening: a concurrent song must adopt the device
+    // period even during our open/start/settle window. No service pointer is retained.
+    if (songService) self.outputUse=songService->retainVoiceMonitorOutput(config);
     auto opened=self.host.open(config,VoiceMonitorRender::render,&self.render);
     auto status=self.host.status(); self.warningFlags |= status.bufferWarnings;
     const auto& format=opened.format;
@@ -171,7 +179,7 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
         std::isfinite(format.sampleRate) && format.sampleRate>0 && format.maximumFrames>0 &&
         format.maximumFrames<=kAudioHostMaxFrames && format.nominalBufferFrames>0 &&
         format.nominalBufferFrames<=maximum && format.nominalBufferFrames<=format.maximumFrames &&
-        opened.latency.bufferFrames==format.nominalBufferFrames && format.nominalBufferFrames==frames;
+        opened.latency.bufferFrames==format.nominalBufferFrames && (!songOpen || format.nominalBufferFrames==frames);
     AudioHostResult started;
     if (valid) started=self.host.start();
     if (valid && started.ok) {
@@ -190,7 +198,7 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
         result.ok=true; result.latency=self.latency; result.warnings=warnings(self.warningFlags);return result;
       }
     }
-    self.host.stop(); self.warningFlags |= self.host.status().bufferWarnings;
+    self.host.stop(); self.outputUse.reset(); self.warningFlags |= self.host.status().bufferWarnings;
     if (opened.error==AudioHostError::DeviceNotFound || status.state==AudioHostState::DeviceLost) {
       self.lost=true; result.reason="device-lost"; result.error="Monitor device disappeared";result.warnings=warnings(self.warningFlags);return result;
     }
@@ -200,6 +208,7 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
     // messages cross this boundary; non-period failures are ordinary errors.
     result.reason=periodTooLarge ? "route-latency" : "error";
     result.error=periodTooLarge ? "Monitor buffer exceeds the supported limit" : "Native voice monitor could not start";
+    if (songOpen || opened.ok || opened.error!=AudioHostError::ProviderFailure) break;
   }
   if (result.reason.empty()) result.reason="error";
   result.warnings=warnings(self.warningFlags); return result;

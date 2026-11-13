@@ -1,11 +1,11 @@
-import { VOICE_MONITOR_MAX_FRAMES, VOICE_MONITOR_TARGET_FRAMES, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorState, type VoiceMonitorReason, type VoiceMonitorLatency } from '../shared/voice-take'
+import { VOICE_MONITOR_MAX_FRAMES, VOICE_MONITOR_TARGET_FRAMES, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorState, type VoiceMonitorReason, type VoiceMonitorLatency, type VoiceMonitorPlaybackContext } from '../shared/voice-take'
 import type { CaptureInputDevice, DesktopAudioHostInventoryResult } from '../shared/types'
 
 type Availability = { available: boolean; reason?: VoiceMonitorReason; detail?: string; deviceUid?: string; minBufferFrames?: number; maxBufferFrames?: number }
 export interface VoiceMonitorNative {
   hostDevices(): Promise<DesktopAudioHostInventoryResult>
   inputDevices(): Promise<{ ok: boolean; devices: CaptureInputDevice[] }>
-  voiceMonitorAvailability(args: { inputUid: string; inputChannel: number }): Promise<Availability>
+  voiceMonitorAvailability(args: { inputUid: string; inputChannel: number; contextOnly?: boolean } & Partial<VoiceMonitorPlaybackContext>): Promise<Availability>
   beginVoiceMonitor(args: { inputUid: string; inputChannel: number; gainDb: number; targetFrames: number; maxFrames: number }, generation: bigint): Promise<{ ok: boolean; reason?: VoiceMonitorReason; error?: string; latency?: VoiceMonitorLatency; warnings?: string[] }>
   setVoiceMonitorGain(gainDb: number): Promise<{ ok: boolean }>
   voiceMonitorStatus(): Promise<{ running: boolean; latency?: VoiceMonitorLatency; warnings?: string[]; lost?: boolean }>
@@ -27,7 +27,6 @@ let nextGeneration = BigInt(Date.now()) * 1000n
 export class VoiceMonitorStore {
   private current: VoiceMonitorState = { available: true, on: false, gainDb: 0, latency: null, warnings: [] }
   private generation: bigint | undefined
-  private songKey: string | undefined
   private pending: Promise<unknown> = Promise.resolve()
   constructor(private native: VoiceMonitorNative, private permission: () => boolean, private platform: NodeJS.Platform = process.platform) {}
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -56,7 +55,17 @@ export class VoiceMonitorStore {
     this.current.available = true
     return { state: this.snapshot(), uid: device.uid, channel }
   }
-  availability(request: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState> { return this.serial(async () => { try { return (await this.resolve(request)).state } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail(error instanceof MonitorCloseError ? 'error' : 'platform') } }) }
+  availability(request: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState> { return this.serial(async () => { try {
+    if (request.contextOnly && request.playbackContext) {
+      const response = await this.native.voiceMonitorAvailability({ inputUid: '', inputChannel: 0, contextOnly: true, ...request.playbackContext })
+      if (!response.available) return this.fail(response.reason ?? 'error')
+      if (this.current.on) {
+        const status = await this.native.voiceMonitorStatus()
+        if (!status.running || status.lost) { this.clearGeneration(); return this.fail(status.lost ? 'device-lost' : 'error') }
+      }
+      return this.snapshot()
+    }
+    return (await this.resolve(request)).state } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail(error instanceof MonitorCloseError ? 'error' : 'platform') } }) }
   set(request: VoiceMonitorSetRequest): Promise<VoiceMonitorState> { return this.serial(async () => {
     try {
       if (!request.on) { await this.close(); return this.snapshot() }
@@ -104,6 +113,7 @@ export class VoiceMonitorStore {
     this.current.available = { reason: 'error' }
     throw new MonitorCloseError('Monitor could not be closed')
   }
-  songChanged(key: string): Promise<void> { return this.serial(async () => { if (this.songKey !== undefined && this.songKey !== key) await this.close(); this.songKey = key }) }
+  // Monitoring belongs to the selected device, independently of song lifetime.
+  songChanged(_key: string): Promise<void> { return this.serial(async () => {}) }
   dispose(): Promise<void> { return this.serial(async () => { try { await this.close() } catch { this.fail('error') } }) }
 }

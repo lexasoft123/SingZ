@@ -13,8 +13,6 @@ const BLOCK_KEY: Record<Exclude<RecordBlock, null | 'no-song'>, Key> = {
   starting: 'player.voice.recordWhyStarting',
   perm: 'player.voice.recordWhyPerm',
   missing: 'player.voice.recordWhyMissing',
-  error: 'player.voice.recordWhyError',
-  take: 'player.voice.recordWhyTake',
-  listening: 'player.voice.recordWhyBusy'
+  error: 'player.voice.recordWhyError'
 }
 export const blockText = (b: RecordBlock): string => (b && b !== 'no-song' ? t(BLOCK_KEY[b]) : '')

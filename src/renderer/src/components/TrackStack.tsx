@@ -10,6 +10,8 @@ import { t } from '../i18n'
 
 /** Ruler row height — the grid template and the beat overlay share it. */
 const RULER_H = 30
+/** Height of the extra (Voice) lane row. */
+const EXTRA_ROW_H = 104
 
 /** When the lanes' played layer catches up with a rolling playhead: once the
  *  sliver the kit's edge layer draws behind the line is this many device
@@ -60,6 +62,12 @@ interface Props {
   onRemoveTrack: (id: string) => void
   /** Rename one of those added lanes (the label only — files stay put). */
   onRenameTrack: (id: string, label: string) => void
+  /**
+   * One extra lane in the stack's own grid, last row (the Voice strip): two grid cells, controls in
+   * column 1 and the time axis in column 2, placed with `grid-row: var(--extra-row)`. Because it is a
+   * row of this grid, the scrub overlay and the playhead run through it and it shares the lanes' view.
+   */
+  extra?: React.ReactNode
 }
 
 function SelectionRange({
@@ -131,7 +139,8 @@ export default function TrackStack({
   onVolume,
   onAddTrack,
   onRemoveTrack,
-  onRenameTrack
+  onRenameTrack,
+  extra
 }: Props): React.JSX.Element {
   const [exportOpen, setExportOpen] = useState(false)
   const stackRef = useRef<HTMLDivElement>(null)
@@ -357,7 +366,10 @@ export default function TrackStack({
     <div
       className="stack"
       ref={stackRef}
-      style={{ gridTemplateRows: `${RULER_H}px repeat(${tracks.length}, minmax(64px, 1fr))` }}
+      style={{
+        gridTemplateRows: `${RULER_H}px repeat(${tracks.length}, minmax(64px, 1fr))${extra ? ` ${EXTRA_ROW_H}px` : ''}`,
+        ['--extra-row' as string]: tracks.length + 2
+      }}
     >
       <div className="ruler-spacer" style={{ gridRow: 1 }}>
         <button
@@ -458,16 +470,18 @@ export default function TrackStack({
           viewS={viewS}
           viewE={viewE}
           rulerH={RULER_H}
-          lanes={tracks.length}
+          lanes={tracks.length + (extra ? 1 : 0)}
           onMoveBar={onMoveBar}
           onClearBar={onClearBar}
         />
       )}
 
+      {extra}
+
       <div
         className="scrub-overlay"
         ref={overlayRef}
-        style={{ gridRow: `1 / ${tracks.length + 2}` }}
+        style={{ gridRow: `1 / ${tracks.length + 2 + (extra ? 1 : 0)}` }}
         onPointerDown={(e) => {
           const t = timeFromPointer(e.clientX)
           if (t === null) return

@@ -1,30 +1,23 @@
 /* Voice strip (ADR 0014). Look and behaviour follow docs/specs/voice-strip/prototype. */
+/* The voice lane is two cells of the song stack's own grid (controls | time axis), in its last row, so it
+   shares the stems' zoom, scroll, duration, left offset and playhead (the scrub overlay spans it). */
 .voice-row {
   --voice: #5be3b0;
   --stem: var(--voice);
-  --vs-controls-w: var(--controls-w, 228px);
-  flex: none;
-  position: relative;
-  display: grid;
-  grid-template-columns: var(--vs-controls-w) minmax(0, 1fr);
-  height: 104px;
-  padding: 0 22px 0 10px;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: linear-gradient(90deg, color-mix(in srgb, var(--voice) 5%, transparent), transparent 40%);
+  display: contents;
 }
-.voice-row::before {
+.vs-controls::before {
   content: '';
   position: absolute;
-  left: 0;
+  left: -10px;
   top: 0;
   bottom: 0;
   width: 3px;
   background: var(--voice);
   opacity: 0.35;
 }
-.voice-row[data-phase='recording']::before { background: var(--danger); opacity: 1; }
-.voice-row[data-phase='armed']::before { background: var(--danger); opacity: 0.7; }
+.voice-row[data-phase='recording'] .vs-controls::before { background: var(--danger); opacity: 1; }
+.voice-row[data-phase='armed'] .vs-controls::before { background: var(--danger); opacity: 0.7; }
 
 .vs-sr-only {
   position: absolute;
@@ -36,6 +29,12 @@
 }
 
 .vs-controls {
+  grid-column: 1;
+  grid-row: var(--extra-row);
+  position: relative;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--voice) 5%, transparent), transparent 90%);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -145,7 +144,7 @@
 /* vertical peak meter on the right edge of the control box */
 .vs-vmeter {
   position: absolute;
-  left: calc(10px + var(--vs-controls-w) - 26px);
+  right: 15px;
   top: 8px;
   bottom: 8px;
   width: 11px;
@@ -169,7 +168,9 @@
 .vs-meter i.peak.peak.peak.peak { background: #f4efe6; }
 
 /* take lane */
-.vs-tl { display: flex; flex-direction: column; min-width: 0; }
+.vs-tl { grid-column: 2; grid-row: var(--extra-row); display: flex; flex-direction: column; min-width: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+/* The stack's scrub overlay (z 5) covers this lane for seeking and the playhead; real controls sit above it. */
+.vs-note .vs-btn, .vs-take-actions { position: relative; z-index: 6; }
 .vs-head { height: 30px; display: flex; align-items: center; gap: 10px; padding: 4px 0 0 12px; min-width: 0; }
 .vs-note { flex: 1; min-width: 0; font-size: 11px; color: var(--dim); display: flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; }
 .vs-note > span { overflow: hidden; text-overflow: ellipsis; }
@@ -179,7 +180,7 @@
 .vs-btn:hover { background: rgba(255, 240, 214, 0.09); }
 .vs-take-info { font-family: var(--font-mono); font-size: 10.5px; color: var(--dim); white-space: nowrap; }
 .vs-take-actions { display: inline-flex; gap: 2px; }
-.vs-track { position: relative; flex: 1; min-height: 0; }
+.vs-track { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 .vs-track::before { content: ''; position: absolute; left: 0; right: 0; top: calc(50% + 8px); border-top: 1px dashed var(--line); }
 .vs-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 11.5px; text-align: center; padding: 0 20px; }
 .vs-clip {
@@ -193,9 +194,12 @@
     repeating-linear-gradient(90deg, color-mix(in srgb, var(--voice) 38%, transparent) 0 2px, transparent 2px 5px),
     color-mix(in srgb, var(--voice) 12%, var(--panel));
 }
+.vs-clip.has-wave { background: color-mix(in srgb, var(--voice) 10%, var(--panel)); }
 .vs-clip.recording { border-color: var(--danger); background: rgba(255, 122, 92, 0.1); }
 .vs-clip.partial { border-style: dashed; }
 .vs-clip.playing { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--voice) 30%, transparent); }
+.vs-wave { position: absolute; inset: 2px 0; width: 100%; height: calc(100% - 4px); fill: color-mix(in srgb, var(--voice) 70%, transparent); pointer-events: none; }
+.vs-clip.recording .vs-wave { fill: color-mix(in srgb, var(--danger) 75%, transparent); }
 .vs-clip-tag { position: absolute; left: -1px; top: -19px; font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }
 .vs-clip-tag.changed { color: var(--accent); border-color: var(--accent); }
 
@@ -226,7 +230,6 @@ body.modal-open .vs-rec-t.armed .vs-rec-core,
 body.modal-open .vs-rec-t.recording .vs-rec-core { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) { .vs-rec-t, .vs-rec-t * { animation: none !important; transition: none !important; } }
 .vs-rec-t:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.voice-host { display: contents; }
 .voice-record-slot { display: contents; }
 .vs-ib.vs-mon.active { color: #12100d; background: var(--voice); }
 .vs-badge { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--voice) 45%, transparent); color: var(--voice); background: color-mix(in srgb, var(--voice) 10%, transparent); white-space: nowrap; }

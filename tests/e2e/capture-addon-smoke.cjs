@@ -185,6 +185,24 @@ ready.then(async () => {
   const voiceAvailability = addon.voiceMonitorAvailability(voiceInput)
   assert.equal(voiceAvailability.available, false)
   assert.ok(['platform', 'output-not-native', 'no-input', 'permission'].includes(voiceAvailability.reason))
+  const idleContext = { contextOnly: true, webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: '' }
+  assert.equal(addon.voiceMonitorAvailability(idleContext).available, true)
+  for (const invalid of [
+    { ...idleContext, webAudioPlaying: 'true' },
+    { ...idleContext, browserOutputUid: 'bad\0uid' },
+    { ...idleContext, selectedOutputUid: 7 }
+  ]) assert.equal(addon.voiceMonitorAvailability(invalid).reason, 'error')
+  if (process.platform === 'darwin') {
+    // Known different browser/native UIDs are a refusal even with no song.
+    // Both are synthetic and these calls only enumerate; hardware never opens.
+    assert.equal(addon.voiceMonitorAvailability({ ...idleContext, webAudioPlaying: true,
+      browserOutputUid: 'smoke:browser-output', selectedOutputUid: 'smoke:monitor-output' }).available, true)
+    assert.equal(addon.voiceMonitorAvailability(voiceInput).reason, 'output-not-native')
+    addon.voiceMonitorAvailability({ ...idleContext, webAudioPlaying: false,
+      browserOutputUid: 'smoke:browser-output', selectedOutputUid: 'smoke:monitor-output' })
+    assert.equal(addon.voiceMonitorAvailability(voiceInput).reason, 'no-input')
+  }
+  assert.equal(addon.voiceMonitorAvailability(idleContext).available, true)
   for (const inputChannel of [-1, 0.5, 64, Infinity, NaN]) {
     const invalid = addon.voiceMonitorAvailability({ ...voiceInput, inputChannel })
     assert.equal(invalid.available, false)
@@ -327,6 +345,11 @@ ready.then(async () => {
   // like, and skipping on it would turn that regression green on the very
   // machines that could catch it (line 93 only asserts the field is a string,
   // and '' is one).
+  if (process.argv.includes('--no-hardware-open')) {
+    console.log('PASS ABI and rejected-admission checks; hardware output open explicitly skipped')
+    finish()
+    return
+  }
   const outputs = hostDevices.devices.filter((device) => device.outputChannels > 0)
   if (outputs.length === 0) {
     console.log(

@@ -1135,11 +1135,11 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     localStorage.setItem('singz.audio', JSON.stringify(audioPrefs))
     localStorage.setItem('singz.desktop.native-playback', audioPrefs.nativePlayback ? '1' : '0')
-    if (detectedDesktopPlatform() === 'darwin' && audioPrefs.nativePlayback === false)
+    if (detectedDesktopPlatform() === 'darwin' && audioPrefs.nativePlayback === false && !engine.nativeActive)
       void window.singz?.setDesktopPlaybackNativeOutputCurrent?.(false).catch(() => {
         console.error('Native output state update failed')
       })
-  }, [audioPrefs])
+  }, [audioPrefs, engine])
 
   // AudioPrefs is the provider source of truth. Inject it before browser
   // events can start playback; the engine never restores a parallel mirror.
@@ -1365,6 +1365,35 @@ export default function App(): React.JSX.Element {
     }, 800)
     return () => clearTimeout(timer)
   }, [])
+
+  // The monitor can run with no song host. Publish only output/transport context;
+  // availability remains a native inventory decision and never opens capture.
+  useEffect(() => {
+    if (detectedDesktopPlatform() !== 'darwin') return
+    let revision = 0
+    let last = ''
+    let source = ''
+    const publish = (force = false): void => {
+      const next = JSON.stringify([engine.playing, engine.nativeActive, engine.outputDeviceId, engine.context.sinkId])
+      if (!force && source === next) return
+      source = next
+      const token = ++revision
+      void engine.voiceMonitorPlaybackContext().then(playbackContext => {
+        if (token !== revision) return
+        const key = JSON.stringify(playbackContext)
+        if (key === last) return
+        last = key
+        return window.singz.voiceTakes.monitorAvailability({
+          input: { deviceName: '', channelIndex: 0 }, contextOnly: true, playbackContext
+        })
+      }).catch(() => { if (token === revision) { last = ''; source = '' } })
+    }
+    const refresh = (): void => publish(true)
+    publish()
+    const unsubscribe = engine.subscribe(publish)
+    navigator.mediaDevices.addEventListener('devicechange', refresh)
+    return () => { ++revision; unsubscribe(); navigator.mediaDevices.removeEventListener('devicechange', refresh) }
+  }, [engine, audioPrefs.outputId])
 
   useEffect(() => engine.subscribe(() => {
     setPlaying(engine.playing)
@@ -4057,12 +4086,14 @@ export default function App(): React.JSX.Element {
                 onAddTrack={openTrackPicker}
                 onRemoveTrack={removeTrack}
                 onRenameTrack={renameTrack}
+                extra={
+                  <VoiceBoundary>
+                    <Suspense fallback={null}>
+                      <VH e={engine} s={song} p={projectDir} v={view} />
+                    </Suspense>
+                  </VoiceBoundary>
+                }
               />
-              <VoiceBoundary>
-                <Suspense fallback={null}>
-                  <VH e={engine} s={song} p={projectDir} />
-                </Suspense>
-              </VoiceBoundary>
               {karaoke && (
                 <PitchStrip
                   engine={engine}

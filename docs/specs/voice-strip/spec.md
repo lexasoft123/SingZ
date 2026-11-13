@@ -20,8 +20,13 @@ along in the song player, not the Train tab) hear themselves, record a take and
 play it back against the song. It is the first step toward the DAW session engine
 (the destination); it is not that engine.
 
-Controls on the strip: input selector (device and mono channel), mute (which is
-monitoring off, the default), solo, level, record, and the take clip.
+Controls on the strip follow the Reaper track model: input selector (device and
+mono channel); a Record-arm button (red circle) that arms or disarms recording; a
+Speaker button that turns input monitoring on or off (off by default); mute and
+solo for take playback; one fader; record; and the take clip. There is no separate
+"Mon" chip and no headphones button. The fader edits the monitor level while the
+Speaker is on and the take playback level otherwise; its tooltip and label say
+which. Whether monitoring is available does not depend on song playback.
 
 ### Product rules carried from the ADR (owner decisions 2026-11-12)
 
@@ -107,7 +112,7 @@ stage; no phone behavior is specified beyond placement.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | J1 | Discover | Learn that the player can record and monitor | Opens a song, sees a Voice row under the stems | Strip appears in `idle` with mute on, no sound, record button, empty clip area; no modal, no onboarding gate | Curious. Fears accidentally making noise | One row, consistent with stems; nothing starts on its own | M1 |
 | J2 | Set up input | Pick the right mic and channel | Opens the input selector; chooses device and channel; grants OS permission if asked | Lists devices with a mono channel choice; remembers the choice; shows `permission-needed` or `input-missing` with a next step; shows a live level meter once armed | Anxious about permission prompts; confused by multi-channel interfaces | Default to the system input; show a meter so success is visible before recording | M1 |
-| J3 | Sing with monitor | Hear own voice with the song | Turns mute off (monitoring on); sets level; sings | Voice joins the output mix within latency; song keeps playing (R5); `monitoring-on`. If route cannot meet 256 frames the control is disabled with a reason | Delighted if natural; irritated by echo or delay; blocked if disabled | Latency shown as a reason only when it matters; no headphone nag (R2) | M2 |
+| J3 | Sing with monitor | Hear own voice with the song | Turns the Speaker (monitor) button on; sets the monitor level; sings | Voice joins the output mix within latency; song keeps playing (R5); `monitoring-on`. If route cannot meet 256 frames the control is disabled with a reason | Delighted if natural; irritated by echo or delay; blocked if disabled | Latency shown as a reason only when it matters; no headphone nag (R2) | M2 |
 | J3a | Monitoring unavailable | Understand why no live monitoring | Sees disabled monitor control | `monitoring-unavailable-latency` or `monitoring-unavailable-route` with the reason; record and playback remain | Disappointed but informed | Suggest a wired or lower-latency route; link to input selector | M2 |
 | J4 | Record a take | Capture a performance against the song | Presses record (song playing or starts it); sings; stops | Take placed by capture time minus input, output and graph latency; clip grows on the strip; `recording`; stop yields `take-review` | Focused, slightly exposed. Pain: fear of losing a take on a hiccup | Recording never interrupts the song; crash-safe journal; clear device-loss behaviour | M1 |
 | J5 | Listen back | Hear the take against the song | Presses play on the take clip or the song | `playing-take`: take joins the output mix at rate 1 as recorded, with its recorded tempo and transpose; seek and loop work | Self-critical. Pain: take sounds early or late | Verified alignment; take level separate from live level | M1 |
@@ -158,7 +163,7 @@ monitor availability is also a flag shown on the monitor control in every state.
 | `recording` | Capturing a take against the playing song. | enabled; toggling changes monitoring only, not capture | enabled | enabled; level does not change captured audio **[inferred]** | shows stop | growing clip with elapsed time |
 | `take-review` | Take finished, not playing. | enabled | enabled | enabled | enabled (new take) | take selected; play, keep, discard, rename (M3 add as track) |
 | `playing-take` | Take joined at output mix, rate 1. | enabled | enabled | enabled; take level separate from live level **[inferred]** | enabled; recording while a take plays is allowed **[inferred]** | playing, with position |
-| `monitoring-on` | Mute off, route within 256 frames, voice audible; input armed (meter live). | unmuted | enabled | the fader edits the monitor level (default -12 dB, remembered) | enabled | as before |
+| `monitoring-on` | Speaker on, route within 256 frames, voice audible; input armed (meter live). | unmuted | enabled | the fader edits the monitor level (default -12 dB, remembered) | enabled | as before |
 | `monitoring-unavailable-latency` | Route cannot stay within 256 frames (device minimum above 256: reason `route-latency`). | disabled, reason visible | enabled | enabled for take level | enabled | as before |
 | `monitoring-unavailable-route` | Typed reason from the device inventory (direction and transport): separate input and output devices, Bluetooth or wireless, no native song output, or `platform` (non-macOS in v1). | disabled, reason visible | enabled | enabled for take level | enabled | as before |
 | `error-recoverable` | Capture, device or storage fault that the user can recover from. | per cause | per cause | per cause | retry or choose another input | salvaged take if any |
@@ -239,7 +244,10 @@ M1, M2, M3. Every requirement is intended to be testable; the test column in sec
 
 | ID | Requirement | Pri | M |
 | --- | --- | --- | --- |
-| VS-REC-001 | WHEN the user presses record in `armed`, `idle` or `monitoring-on`, THE SYSTEM SHALL start capturing mono audio from the selected input and enter `recording` within 250 ms **[inferred threshold]**. | MUST | M1 |
+| VS-REC-001 | WHEN the user presses record in `armed`, `idle`, `monitoring-on` or `take-review`, THE SYSTEM SHALL start capturing mono audio from the selected input and enter `recording` within 250 ms **[inferred threshold]**. | MUST | M1 |
+| VS-REC-014 | **New (one-press Record).** The transport Record button (next to Play) SHALL always be available except for a real blocker (no microphone access, no input, an error, no song), and SHALL name the blocker in its tooltip. ONE press SHALL start recording from any state, including idle and not armed: it opens the selected input if needed and starts the take; pressing again stops and keeps the take for review. A take under review SHALL be kept and a take playing back SHALL be stopped by that press. The red-circle arm button is only an arm/disarm toggle (input ready, meter live) and is not needed to record. | MUST | M2 |
+| VS-REC-015 | **New (one time axis).** The Voice lane SHALL be a row of the song stack's own grid, so it uses the stems' exact time axis (zoom, horizontal scroll, duration, left offset, tempo and transpose handling) and the same playhead and seek overlay. A take clip SHALL sit at its capture offset on that axis and be hidden when scrolled out of view. | MUST | M2 |
+| VS-REC-016 | **New (take waveform).** WHILE recording, the clip SHALL draw a growing waveform from the live input level (loudest reading per 50 ms), and the finished take SHALL keep it. A take loaded from disk (recovered, or after a restart) has no peaks until main provides them (needs a take-peaks reply from the voice-takes list; not built). | MUST | M2 |
 | VS-REC-002 | THE SYSTEM SHALL record on the capture delivery sink with raw timestamps; the only real-time side effect of recording SHALL be one lock-free journal append (ADR M1). | MUST | M1 |
 | VS-REC-003 | THE SYSTEM SHALL place a take at capture time minus input latency, output latency and graph latency. | MUST | M1 |
 | VS-REC-004 | GIVEN a loopback test with a known pulse, WHEN a take is recorded and played back, THEN the pulse in the take aligns with the song's pulse within 10 ms **[inferred threshold; set from the spike]** on every supported desktop route. A deliberate offset control SHALL fail this test. | MUST | M1 |
@@ -257,8 +265,8 @@ M1, M2, M3. Every requirement is intended to be testable; the test column in sec
 
 | ID | Requirement | Pri | M |
 | --- | --- | --- | --- |
-| VS-MON-001 | The Voice strip SHALL start with monitoring off (mute on) on every song open and every app launch; the enable decision SHALL NOT persist across restart (carried from ADR 0010). | MUST | M1 |
-| VS-MON-002 | **Changed (M2).** WHEN the user turns mute off and the route can monitor within 256 frames, THE SYSTEM SHALL open a second small duplex host on the song's output device (selected mic channel in, mono voice, song output pair L/R only), enter `monitoring-on` and arm the input, without pausing the song. The song host is never reopened or drained; toggle-off closes the monitor host. | MUST | M2 |
+| VS-MON-001 | The Voice strip SHALL start with monitoring off (Speaker off) on every app launch (a monitor already running when a song is opened or changed stays on, VS-MON-023); the enable decision SHALL NOT persist across restart (carried from ADR 0010). | MUST | M1 |
+| VS-MON-002 | **Changed (M2).** WHEN the user turns the Speaker (monitor) button on and the route can monitor within 256 frames, THE SYSTEM SHALL open a second small duplex host on the song's output device (selected mic channel in, mono voice, song output pair L/R only), enter `monitoring-on` and arm the input, without pausing the song. The song host is never reopened or drained; toggle-off closes the monitor host. | MUST | M2 |
 | VS-MON-003 | **Changed.** THE SYSTEM SHALL target an IO buffer of 32 frames, step 32, 64, 128, 256 on refusal, and SHALL refuse as `route-latency` when the device minimum exceeds 256. The badge shows an estimated round trip (2 x buffer + input and output latency + safety offset; about 5 ms at 32 on the verification interface, an estimate, not measured). | MUST | M2 |
 | VS-MON-004 | IF the route cannot stay within 256 frames, THEN THE SYSTEM SHALL disable the monitor control, enter `monitoring-unavailable-latency` and show a reason; recording and take playback SHALL remain available. | MUST | M2 |
 | VS-MON-005 | IF the route class cannot monitor, THEN THE SYSTEM SHALL enter `monitoring-unavailable-route` with a typed reason from the device inventory (direction and transport) and SHALL NOT guess the route from device labels or UIDs (carried from ADR 0010). **Changed:** unavailable in v1: separate input and output devices, Bluetooth or wireless, no native song output, non-macOS (`platform`). | MUST | M2 |
@@ -274,9 +282,11 @@ M1, M2, M3. Every requirement is intended to be testable; the test column in sec
 | VS-MON-015 | **New.** Monitoring SHALL be supported on macOS only in v1; other platforms report `platform` and every other strip function works. | MUST | M2 |
 | VS-MON-016 | **New (hold for session).** The song host SHALL change the device buffer once, at the first monitor-on, through the zCore ledger (`setBufferFrames`, opt-in `allowSharedDeviceBufferChange`); the monitor host SHALL open non-writing at the current buffer; monitor off SHALL restore nothing. The ledger SHALL restore the buffer when the song session ends (real song change or switch, route change, unload, app quit). Same-route graph re-prepares (tempo, transpose, seek) SHALL keep the physical host and its lease. | MUST | M2 |
 | VS-MON-017 | **New (channel picker).** The strip SHALL list every input channel of each device and record or monitor exactly the chosen one. | MUST | M2 |
-| VS-MON-018 | **New (gain preset).** Monitor gain SHALL default to -12 dB and be remembered. A "Mon" chip SHALL preset it while monitoring is off. The fader SHALL edit the monitor level while monitoring (or in Mon mode) and the take level otherwise. | MUST | M2 |
+| VS-MON-018 | **New (gain preset).** Monitor gain SHALL default to -12 dB and be remembered. The fader SHALL edit the monitor level exactly while the Speaker button is on and the take playback level otherwise; its tooltip and aria-label SHALL name which. There SHALL be no "Mon" chip and no other control that shows monitoring; the Speaker button SHALL be lit when on and dimmed, with the reason as its tooltip, when unavailable. | MUST | M2 |
 | VS-MON-019 | **New.** Turning monitoring on SHALL arm the input (meter live). | MUST | M2 |
+| VS-MON-023 | **New (independent of the song).** A running monitor SHALL keep running across song change, song unload and playback end. It SHALL stop only on Speaker off, device or route loss, input change, or app quit (the controller being torn down). Song change still resets arm and take state. | MUST | M2 |
 | VS-MON-020 | **New.** The monitoring decision SHALL never be persisted as on (restates VS-MON-001 for M2). | MUST | M2 |
+| VS-MON-022 | **New (availability).** Monitor availability SHALL NOT depend on song playback: the strip SHALL NOT show or retry `output-not-native` as a play-state problem and SHALL NOT re-ask availability on play or pause. It SHALL re-ask on route, output or input change, with a bounded retry (+0.5, +1.5, +3 s) only for a transient `error`. | MUST | M2 |
 | VS-MON-021 | **New (mid-take rules).** Toggling monitoring during a take SHALL NOT arm the input (the take holds it); turning monitor off mid-take SHALL release only the monitor; the take SHALL complete with its true duration. | MUST | M2 |
 | VS-MON-022 | **New (capture-gap contract, input).** WHEN the device buffer grows and one render fails with -10874 (`kAudioUnitErr_TooManyFramesToProcess`), THE capture SHALL replace that block with silence of the same length using the callback's own timestamps and count it (`renderSliceDrops`); IF it persists for more than 64 consecutive callbacks or ~250 ms, THEN it SHALL fail. | MUST | M2 |
 | VS-MON-023 | **New (padding contract, take writer).** THE take writer SHALL pad forward host-time gaps with silence on the writer thread, only for Hardware-quality timestamps (macOS), comparing each block with the previous one (never a cumulative baseline, which drifts with the sample clock). Caps: 2 s per gap, 10 s per take, then `gapOverflow` and status `partial-error`. Stats SHALL include `gapPaddedFrames`, `gapPaddedBlocks`, `gapUntrustedTimestampBlocks`, `gapRegressions`, `gapOverflow`. A healthy take SHALL pad 0 frames. | MUST | M2 |
@@ -340,7 +350,8 @@ D = design review. Journey stages from section 3.
 
 | Requirement | Journey stage | Test type | M |
 | --- | --- | --- | --- |
-| VS-REC-001, 010, 012 | J4 | I, C | M1 |
+| VS-REC-001, 010, 012, 014 | J4 | I, C | M1 |
+| VS-REC-015, 016 | J4 | I (live app), U | M2 |
 | VS-REC-002, 003, 004, 005 | J4, J5 | C (offset control), E (loopback) | M1 |
 | VS-REC-006, 007 | J4 | U (settings timeline), I | M1 |
 | VS-REC-008, 013 | J4 | I (fault injection) | M1 |
@@ -373,7 +384,7 @@ D = design review. Journey stages from section 3.
 | AC-3 | GIVEN `recording` at 0.85x tempo and +2 semitones, WHEN the user stops and plays the take, THEN the take sounds as sung, not stretched, the take shows 0.85x and +2, and changing the song to 1.0x does not alter the take. | VS-PLAY-002/003, VS-REC-006 |
 | AC-4 | GIVEN `recording`, WHEN the USB input is unplugged, THEN the song keeps playing, captured audio is kept as a take with its true length, and the strip shows `error-recoverable` with a reconnect action. | VS-REC-008, 4.4 |
 | AC-5 | GIVEN a Bluetooth output route with latency above 256 frames, WHEN the user opens the strip, THEN the monitor control is disabled with a visible reason, record and take playback work. | VS-MON-004 |
-| AC-6 | GIVEN a supported macOS route, WHEN the user turns mute off while the song plays, THEN the voice is audible within 256 frames (target 32), the song does not pause, and no confirmation dialog appears. | VS-MON-002/006/007 |
+| AC-6 | GIVEN a supported macOS route, WHEN the user turns the Speaker (monitor) button on while the song plays, THEN the voice is audible within 256 frames (target 32), the song does not pause, and no confirmation dialog appears. | VS-MON-002/006/007 |
 | AC-7 | GIVEN microphone permission is denied, WHEN the user presses record, THEN the strip shows `permission-needed` with the next step; the song is unaffected; granting access returns to `armed` without reopening the song. | J2 |
 | AC-8 | GIVEN a deletion of a take, WHEN confirmed, THEN its audio, sidecar and journal files are gone and nothing remained in the project folder or Drive sync. | VS-STORE-003/005 |
 

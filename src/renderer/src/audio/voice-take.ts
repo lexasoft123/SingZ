@@ -137,6 +137,8 @@ export interface VoiceTake {
   kept: boolean
   partial: boolean
   recovered: boolean
+  /** Linear peak (0..1) per PEAK_STEP_SEC of take time, captured from the live level while recording; absent for a take loaded from disk. */
+  peaks?: number[]
 }
 
 export interface VoiceModel {
@@ -158,8 +160,6 @@ export interface VoiceModel {
   }
   /** Monitor level in dB (-60..+12). The take level is `level`; the fader edits one or the other. */
   monitorGainDb: number
-  /** What the fader edits while monitoring is off: the take ('voice') or the monitor level (a preset). */
-  faderMode: 'voice' | 'monitor'
   /** True during the first monitoring episode of the session: shows the quiet headphones hint. */
   monitorHint: boolean
   /** A quiet, non-error note about monitoring (never an error state). */
@@ -208,7 +208,6 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   // Monitoring is never persisted as on: every controller starts off.
   monitor: { avail: 'ok', reason: null, on: false, latency: null, warnings: [] },
   monitorGainDb: MONITOR_GAIN_DEFAULT_DB,
-  faderMode: 'voice',
   monitorHint: false,
   monitorNote: null,
   error: null,
@@ -244,17 +243,19 @@ export function primaryState(m: VoiceModel): VoiceState {
   return 'idle'
 }
 
-export type RecordBlock = 'starting' | 'perm' | 'missing' | 'error' | 'take' | 'listening' | 'no-song' | null
+export type RecordBlock = 'starting' | 'perm' | 'missing' | 'error' | 'no-song' | null
 
-/** Why Record is unavailable right now, or null when it is available. */
+/**
+ * Why Record is unavailable right now, or null when it is available. Record is one press, like Play: it
+ * does not need the input armed, and an unkept take or a take playing back does not block it (starting
+ * keeps the old take and stops the playback).
+ */
 export function recordBlock(m: VoiceModel): RecordBlock {
   if (m.songId === null) return 'no-song'
   if (m.starting) return 'starting'
   if (m.error) return 'error'
   if (m.perm === 'denied') return 'perm'
   if (m.inputMissing) return 'missing'
-  if (m.listen) return 'listening'
-  if (m.take && !m.take.kept) return 'take'
   return null
 }
 
@@ -262,6 +263,8 @@ export function recordBlock(m: VoiceModel): RecordBlock {
 export const canPressRecord = (m: VoiceModel): boolean => m.recording || recordBlock(m) === null
 
 export const CLIP_DB = -0.1
+/** One live-waveform bucket spans this much take time. */
+export const PEAK_STEP_SEC = 0.05
 const SEEK_JUMP_SEC = 0.75
 const STORAGE_KEY = 'singz.voice.input'
 const MONITOR_GAIN_KEY = 'singz.voice.monitorGain'
@@ -313,6 +316,8 @@ export class VoiceController {
   private songEpoch = 0
   private disposed = false
   private startToken = 0
+  /** Peak per PEAK_STEP_SEC of the take being recorded (see VoiceTake.peaks). */
+  private livePeaks: number[] = []
   private availRetryTimers: ReturnType<typeof setTimeout>[] = []
   /** availToken at the moment a monitor error was raised: only a later availability answer may clear it. */
   private monitorErrorMark = -1
@@ -400,21 +405,16 @@ export class VoiceController {
     const md = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
     const onChange = (): void => void this.refreshInputs()
     md?.addEventListener?.('devicechange', onChange)
-    // The song's output or native route changing (output moved, Play made the native graph current,
-    // paused, ended) changes what monitoring can do: re-ask, and for a bounded while after a Play.
+    // The song's output or native route changing changes what monitoring can do: re-ask. Availability
+    // does not depend on song playback, so play/pause alone never re-asks.
     const { engine } = this.deps
     let route = `${engine.outputDeviceId}|${engine.nativeActive}`
-    let playing = engine.playing
     const unsub = engine.subscribe?.(() => {
       const nowRoute = `${engine.outputDeviceId}|${engine.nativeActive}`
-      const nowPlaying = engine.playing
-      const routeChanged = nowRoute !== route
-      const playStarted = nowPlaying && !playing
-      const playEnded = !nowPlaying && playing
+      if (nowRoute === route) return
       route = nowRoute
-      playing = nowPlaying
-      if (routeChanged || playStarted || playEnded) void this.refreshMonitorAvailability()
-      if (playStarted) this.scheduleAvailabilityRetries()
+      void this.refreshMonitorAvailability()
+      this.scheduleAvailabilityRetries()
     })
     return () => {
       md?.removeEventListener?.('devicechange', onChange)
@@ -427,7 +427,7 @@ export class VoiceController {
   dispose(): void {
     this.cancelAvailabilityRetries()
     this.clearTimers()
-    void this.abortActivity()
+    void this.abortActivity(true)
   }
 
   /** A song was opened (id) or closed (null): live capture and playback end,
@@ -435,7 +435,8 @@ export class VoiceController {
   async setSong(songId: string | null): Promise<void> {
     if (songId === this.model.songId) return
     const epoch = ++this.songEpoch
-    await this.abortActivity()
+    // A running monitor outlives the song: it stops on speaker-off, device or route loss, input change or quit.
+    await this.abortActivity(false)
     this.set({
       songId,
       armed: false,
@@ -462,7 +463,8 @@ export class VoiceController {
     }
   }
 
-  private async abortActivity(): Promise<void> {
+  /** `releaseMon` is true only when the controller itself is torn down (host unmount or quit), never for a song change. */
+  private async abortActivity(releaseMon: boolean): Promise<void> {
     // An in-flight start undoes itself when it resolves (see startRecording).
     this.startToken++
     this.armToken++
@@ -470,7 +472,7 @@ export class VoiceController {
     this.cancelAvailabilityRetries()
     this.rearmPending = false
     this.releaseArm()
-    const monitorReleased = this.releaseMonitor() // sync part now; awaited last
+    const monitorReleased = releaseMon ? this.releaseMonitor() : Promise.resolve() // sync part now; awaited last
     // A listen ends synchronously here, before any await: stems restored, song
     // paused, listen state cleared (stopListening does all three).
     if (this.pendingListen) await this.cancelPendingListen()
@@ -661,6 +663,10 @@ export class VoiceController {
   async startRecording(): Promise<void> {
     const block = recordBlock(this.model)
     if (block !== null) return
+    // One press records: a take still being played back stops, and a take under review is kept (its file stays).
+    if (this.model.listen) await this.stopListening()
+    if (this.model.take && !this.model.take.kept) this.keep()
+    if (recordBlock(this.model) !== null || this.model.recording) return
     const { engine, api } = this.deps
     this.set({ starting: true, clipped: false })
     if (this.model.perm !== 'granted') {
@@ -739,6 +745,7 @@ export class VoiceController {
     this.lastTickMs = this.startedAtMs
     this.lastPos = engine.position
     this.takeCount += 1
+    this.livePeaks = []
     this.set({
       starting: false,
       recording: true,
@@ -831,7 +838,8 @@ export class VoiceController {
 
   /** The stored take with the settings changes seen while recording appended after its start state. */
   private withTimeline(base: VoiceTake, cur: VoiceTake | null): VoiceTake {
-    return cur && cur.timeline.length > 1 ? { ...base, timeline: [base.timeline[0]!, ...cur.timeline.slice(1)] } : base
+    const withPeaks = cur?.peaks ? { ...base, peaks: cur.peaks } : base
+    return cur && cur.timeline.length > 1 ? { ...withPeaks, timeline: [base.timeline[0]!, ...cur.timeline.slice(1)] } : withPeaks
   }
 
   keep(): void {
@@ -1046,7 +1054,7 @@ export class VoiceController {
           })
         ).catch(() => undefined)
       }
-      this.set({ elapsedSec: (nowMs - this.startedAtMs) / 1000, take })
+      this.set({ elapsedSec: (nowMs - this.startedAtMs) / 1000, take: take ? { ...take, peaks: this.livePeaks.slice() } : take })
       return
     }
     if (m.listen && m.take) {
@@ -1120,15 +1128,15 @@ export class VoiceController {
   }
 
   /**
-   * After a Play the native route becomes current a moment later: while availability still says
-   * 'output-not-native', ask again at +0.5 s, +1.5 s and +3 s, then stop. No timer storm.
+   * After a route change the answer can lag a moment: while availability still reports the transient
+   * 'error' reason, ask again at +0.5 s, +1.5 s and +3 s, then stop. No timer storm.
    */
   private scheduleAvailabilityRetries(): void {
     this.cancelAvailabilityRetries()
     for (const delay of AVAILABILITY_RETRY_MS) {
       this.availRetryTimers.push(
         setTimeout(() => {
-          if (this.disposed || this.model.monitor.on || this.model.monitor.reason !== 'output-not-native') return
+          if (this.disposed || this.model.monitor.on || this.model.monitor.reason !== 'error') return
           void this.refreshMonitorAvailability()
         }, delay)
       )
@@ -1254,17 +1262,12 @@ export class VoiceController {
     if (disarm) await this.forceDisarm()
   }
 
-  /** True when the fader edits the monitor level: while monitoring, or when the singer chose Monitor mode. */
+  /** True when the fader edits the monitor level: exactly while the speaker (monitor) is on. */
   get faderEditsMonitor(): boolean {
-    return this.model.monitor.on || this.model.faderMode === 'monitor'
+    return this.model.monitor.on
   }
 
-  toggleFaderMode(): void {
-    if (this.model.monitor.on) return // monitoring locks the fader to the monitor level
-    this.set({ faderMode: this.model.faderMode === 'monitor' ? 'voice' : 'monitor' })
-  }
-
-  /** The strip fader: the monitor level (preset or live) or the take level, per mode. */
+  /** The strip fader: the live monitor level while the speaker is on, the take playback level otherwise. */
   setFader(v: number): void {
     if (this.faderEditsMonitor) this.setMonitorFader(v)
     else this.setLevel(v)
@@ -1330,12 +1333,21 @@ export class VoiceController {
     }
     if (this.disposed) return
     this.setLevelDb(lv ? lv.peakDb : null)
+    if (this.model.recording && this.recordingId && issuedMs >= this.startedAtMs) this.pushPeak(lv ? lv.peakDb : -120)
     // Main ended the take on its own (device lost, song end, storage): run the
     // normal stop path; main's recordStop is idempotent and returns the take.
     // A reading issued before this take began says nothing about it.
     if (lv?.takeActive === false && this.model.recording && this.recordingId && issuedMs >= this.startedAtMs) {
       void this.stopRecording('auto')
     }
+  }
+
+  /** Fold one level reading into the live waveform: the loudest reading per PEAK_STEP_SEC bucket; silent gaps stay 0. */
+  private pushPeak(db: number): void {
+    const idx = Math.max(0, Math.floor((this.now() - this.startedAtMs) / 1000 / PEAK_STEP_SEC))
+    if (idx > 100_000) return
+    while (this.livePeaks.length <= idx) this.livePeaks.push(0)
+    this.livePeaks[idx] = Math.max(this.livePeaks[idx]!, Math.min(1, Math.pow(10, Math.max(-120, db) / 20)))
   }
 
   /** Feed a peak reading (dBFS) or null for "no signal". Latches the clip LED. */

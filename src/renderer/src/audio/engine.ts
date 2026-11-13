@@ -1,3 +1,4 @@
+import type { VoiceMonitorPlaybackContext } from '../../../shared/voice-take'
 import { sanitizeSongVolume } from './song-volume'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
 import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
@@ -757,6 +758,24 @@ export class MultitrackEngine {
     const result = await window.singz.configureDesktopTrainingOutput(uid, provider)
     if (!result.ok) throw new Error(result.error || 'The training output could not open.')
     if (requested === this.desiredOutputId) this.trainingConfiguredOutputId = routeKey
+  }
+
+  /** Physical output context for the independent live monitor. No capture or permission request. */
+  async voiceMonitorPlaybackContext(): Promise<VoiceMonitorPlaybackContext> {
+    const inventory = await window.singz.audioHostDevices('coreaudio')
+    if (!inventory.ok) throw new Error(inventory.error)
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    const uidFor = (id: string): string => {
+      if (!id || id === 'default') return inventory.defaultOutputUid
+      const device = devices.find(row => row.kind === 'audiooutput' && row.deviceId === id)
+      return device ? nativeOutputForBrowserLabel(device.label, inventory.devices).uid : ''
+    }
+    const sink = this.ctx.sinkId
+    return {
+      webAudioPlaying: this.playing && !this.nativeActive,
+      browserOutputUid: typeof sink === 'string' ? uidFor(sink) : '',
+      selectedOutputUid: !this.desiredOutputId || this.desiredOutputId === 'default' ? '' : uidFor(this.desiredOutputId)
+    }
   }
 
   /** Current output device id ('' = system default). */

@@ -4237,20 +4237,20 @@ describe('Linux ALSA output ownership', () => {
 })
 
 
-it('clears cached native-route intent when Settings disables CoreAudio, without touching other platforms', () => {
+it('clears disabled CoreAudio intent only after native playback releases its output', () => {
   const source = readFileSync('src/renderer/src/App.tsx', 'utf8')
   const start = source.indexOf("    localStorage.setItem('singz.audio'")
-  const end = source.indexOf('\n  }, [audioPrefs])', start)
+  const end = source.indexOf('\n  }, [audioPrefs, engine])', start)
   expect(start).toBeGreaterThan(0)
   expect(end).toBeGreaterThan(start)
   // Execute the actual preference-effect body with injected platform/API.
-  const apply = new Function('localStorage', 'audioPrefs', 'detectedDesktopPlatform', 'window', source.slice(start, end))
+  const apply = new Function('localStorage', 'audioPrefs', 'detectedDesktopPlatform', 'window', 'engine', source.slice(start, end))
   for (const platform of ['darwin', 'win32', 'linux']) {
-    for (const enabled of [true, false]) {
+    for (const enabled of [true, false]) for (const nativeActive of [true, false]) {
       const notify = vi.fn(async () => ({ ok: true }))
       apply({ setItem: vi.fn() }, { nativePlayback: enabled }, () => platform,
-        { singz: { setDesktopPlaybackNativeOutputCurrent: notify } })
-      if (platform === 'darwin' && !enabled) expect(notify).toHaveBeenCalledExactlyOnceWith(false)
+        { singz: { setDesktopPlaybackNativeOutputCurrent: notify } }, { nativeActive })
+      if (platform === 'darwin' && !enabled && !nativeActive) expect(notify).toHaveBeenCalledExactlyOnceWith(false)
       else expect(notify).not.toHaveBeenCalled()
     }
   }

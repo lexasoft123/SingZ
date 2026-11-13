@@ -2,6 +2,7 @@
 
 #include "output_callback_diagnostics.h"
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <zcore/device/audio_host.h>
@@ -11,12 +12,12 @@ namespace singz {
 
 // Process-lifetime device owner. Client stop retires only that client's render
 // context; the output keeps the silent base route ready for the next client.
-// macOS buffer holds end on explicit native-song-session close, not graph stop.
+// Song and monitor buffer holds release independently; graph stop retains the song hold.
 // Input capture is deliberately separate and inactive until explicitly begun.
 class SharedAudioService final {
  public:
   SharedAudioService();
-  explicit SharedAudioService(std::unique_ptr<AudioHostBackend> backend);
+  explicit SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider = {});
   ~SharedAudioService();
   SharedAudioService(const SharedAudioService&) = delete;
   SharedAudioService& operator=(const SharedAudioService&) = delete;
@@ -46,12 +47,16 @@ class SharedAudioService final {
   std::string activeOutputUid() const;
   // UID and physical output channel map copied together under the route lock.
   AudioHostConfig activeOutputConfig() const;
+  // Selected output (or current system default), without opening a song host.
+  AudioHostConfig voiceMonitorOutputConfig(const std::optional<std::string>& selectedUid = {}) const;
+  // Weakly tracked activity: a joining song adopts the monitor period without writing.
+  std::shared_ptr<const AudioHostConfig> retainVoiceMonitorOutput(const AudioHostConfig& config);
   // Current song output intent, independent of transient client/host stop.
   // A completed browser handback clears it; a native client open sets it.
   bool playbackOutputCurrent() const;
   OutputCallbackDiagnosticSnapshot callbackDiagnostics() const noexcept;
   bool setPlaybackOutputCurrent(bool current);
-  // The song host owns the changing lease until the native song session ends.
+  // An existing song host negotiates once and holds until its session ends.
   AudioHostResult prepareVoiceMonitor(uint32_t targetFrames = 32, uint32_t maximumFrames = 256);
   // Prepare a replacement graph for the retained physical host's capacity.
   uint32_t retainedPlaybackCapacity(const AudioHostConfig& config) const;

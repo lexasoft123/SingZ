@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
+import type { TimeView } from '../model'
 import { meterFraction, monitorDbToFader, primaryState, recordBlock, type VoiceController, type VoiceInputOption, type VoiceModel } from '../audio/voice-take'
 import type { VoiceMonitorReason } from '../../../shared/voice-take'
 import { t, type Key } from '../i18n'
@@ -53,11 +54,10 @@ const SvgIcon = ({ children }: { children: React.ReactNode }): React.JSX.Element
 const STROKE = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' } as const
 const ICON = {
   rec: <circle cx="8" cy="8" r="4.2" fill="currentColor" />,
-  phones: (
+  speaker: (
     <>
-      <path {...STROKE} d="M3 10.5V8a5 5 0 0 1 10 0v2.5" />
-      <rect x="1.8" y="9.5" width="3.2" height="5" rx="1.2" fill="currentColor" />
-      <rect x="11" y="9.5" width="3.2" height="5" rx="1.2" fill="currentColor" />
+      <path d="M2 6h2.6L8 3v10L4.6 10H2z" fill="currentColor" />
+      <path {...STROKE} d="M10.4 5.8a3.2 3.2 0 0 1 0 4.4M12.2 4a5.6 5.6 0 0 1 0 8" />
     </>
   ),
   check: <path {...STROKE} d="M3 8.5l3.2 3.2L13 4.5" />,
@@ -94,6 +94,29 @@ function IconButton({
     <button type="button" className={`vs-ib ${className}`.trim()} title={label} aria-label={label} {...rest}>
       <SvgIcon>{ICON[icon]}</SvgIcon>
     </button>
+  )
+}
+
+/** The take's waveform: the loudest reading per slice, mirrored about the middle (live while recording). */
+const WAVE_BINS = 320
+function ClipWave({ peaks }: { peaks: number[] | undefined }): React.JSX.Element | null {
+  if (!peaks || peaks.length === 0) return null
+  const n = Math.min(WAVE_BINS, peaks.length)
+  const top: string[] = []
+  const bottom: string[] = []
+  for (let i = 0; i < n; i++) {
+    const from = Math.floor((i * peaks.length) / n)
+    const to = Math.max(from + 1, Math.floor(((i + 1) * peaks.length) / n))
+    let a = 0
+    for (let j = from; j < to; j++) a = Math.max(a, peaks[j]!)
+    const h = Math.max(0.04, Math.min(1, Math.sqrt(a))) // sqrt: quiet singing still shows
+    top.push(`${i},${(1 - h).toFixed(3)}`)
+    bottom.push(`${i},${(1 + h).toFixed(3)}`)
+  }
+  return (
+    <svg className="vs-wave" viewBox={`0 0 ${n} 2`} preserveAspectRatio="none" aria-hidden="true" focusable="false">
+      <polygon points={`${top.join(' ')} ${bottom.reverse().join(' ')}`} />
+    </svg>
   )
 }
 
@@ -184,10 +207,13 @@ function statusLine(
 
 export default function VoiceStrip({
   controller,
-  engine
+  engine,
+  view
 }: {
   controller: VoiceController
   engine: MultitrackEngine
+  /** The stems' shared time view (null = whole song): the take clip sits on exactly this axis. */
+  view: TimeView | null
 }): React.JSX.Element {
   useVoiceStrings()
   const m = useVoiceModel(controller)
@@ -210,8 +236,13 @@ export default function VoiceStrip({
   }, [announceKey, m.announce.seq])
 
   const spanSec = take ? (rec ? m.elapsedSec * take.tempo : take.durationSec * take.tempo) : 0
-  const left = duration > 0 && take ? Math.min(100, (take.startSec / duration) * 100) : 0
-  const width = duration > 0 ? Math.max(0.3, Math.min(100 - left, (spanSec / duration) * 100)) : 0
+  // The same time axis as the stems: the shared view (or the whole song), in song seconds.
+  const viewS = view?.s ?? 0
+  const viewE = view?.e ?? duration
+  const viewSpan = viewE - viewS
+  const left = viewSpan > 0 && take ? ((take.startSec - viewS) / viewSpan) * 100 : 0
+  const width = viewSpan > 0 ? Math.max(0.3, (spanSec / viewSpan) * 100) : 0
+  const clipVisible = take !== null && viewSpan > 0 && left < 100 && left + width > 0
   const changedTag = take ? take.changed : false
   const tagText = take
     ? t(changedTag ? 'player.voice.tagChanged' : 'player.voice.tag', {
@@ -230,7 +261,8 @@ export default function VoiceStrip({
         : 'player.voice.emptyIdle'
 
   const armed = m.armed || rec
-  const faderMonitor = m.monitor.on || m.faderMode === 'monitor'
+  const faderMonitor = m.monitor.on
+  const faderLabel = faderMonitor ? t('player.voice.monitorLevel') : t('player.voice.level')
   const monitorWhy = monitorReasonText(m)
   const monitorUnavailable = !m.monitor.on && (m.monitor.avail !== 'ok' || m.inputMissing || m.perm === 'denied')
   const monitorLabel = m.monitor.on ? t('player.voice.monitorOn') : t('player.voice.monitorOff')
@@ -244,7 +276,7 @@ export default function VoiceStrip({
         })
 
   return (
-    <section className="voice-row" data-phase={state} aria-label={t('player.voice.stripLabel')}>
+    <section className="voice-row" data-phase={state} aria-label={t('player.voice.stripLabel')} role="group">
       <div className="vs-controls">
         <div className="vs-top">
           <h2 className="vs-name">{t('player.voice.name')}</h2>
@@ -256,23 +288,6 @@ export default function VoiceStrip({
               })}
             >
               {t('player.voice.monitorBadge', { ms: Math.round(m.monitor.latency.roundTripMs) })}
-            </span>
-          )}
-          <button
-            type="button"
-            className={`vs-ib vs-mon${m.monitor.on ? ' active' : ''}`}
-            aria-pressed={m.monitor.on}
-            aria-disabled={monitorUnavailable}
-            aria-label={monitorLabel}
-            aria-describedby={monitorUnavailable ? 'voice-monitor-why' : undefined}
-            title={monitorUnavailable ? monitorWhy : monitorLabel}
-            onClick={() => void controller.toggleMonitor()}
-          >
-            <SvgIcon>{ICON.phones}</SvgIcon>
-          </button>
-          {monitorUnavailable && (
-            <span id="voice-monitor-why" className="vs-sr-only">
-              {monitorWhy}
             </span>
           )}
         </div>
@@ -321,6 +336,23 @@ export default function VoiceStrip({
           </button>
           <button
             type="button"
+            className={`vs-ib vs-mon${m.monitor.on ? ' active' : ''}`}
+            aria-pressed={m.monitor.on}
+            aria-disabled={monitorUnavailable}
+            aria-label={monitorLabel}
+            aria-describedby={monitorUnavailable ? 'voice-monitor-why' : undefined}
+            title={monitorUnavailable ? monitorWhy : monitorLabel}
+            onClick={() => void controller.toggleMonitor()}
+          >
+            <SvgIcon>{ICON.speaker}</SvgIcon>
+          </button>
+          {monitorUnavailable && (
+            <span id="voice-monitor-why" className="vs-sr-only">
+              {monitorWhy}
+            </span>
+          )}
+          <button
+            type="button"
             className={`vs-chip${m.takeMuted ? ' active' : ''}`}
             aria-pressed={m.takeMuted}
             aria-label={m.takeMuted ? t('player.voice.unmute') : t('player.voice.mute')}
@@ -339,17 +371,6 @@ export default function VoiceStrip({
           >
             {t('player.voice.soloShort')}
           </button>
-          <button
-            type="button"
-            className={`vs-chip${faderMonitor ? ' active' : ''}`}
-            aria-pressed={faderMonitor}
-            aria-disabled={m.monitor.on}
-            aria-label={t('player.voice.monitorLevel')}
-            title={faderMonitor ? t('player.voice.faderToVoice') : t('player.voice.faderToMonitor')}
-            onClick={() => controller.toggleFaderMode()}
-          >
-            {t('player.voice.faderMonitorShort')}
-          </button>
           <div className="vs-fader">
             <input
               className="vs-vol"
@@ -357,16 +378,14 @@ export default function VoiceStrip({
               min={0}
               max={100}
               value={faderMonitor ? monitorDbToFader(m.monitorGainDb) : m.level}
-              aria-label={faderMonitor ? t('player.voice.monitorLevel') : t('player.voice.level')}
-              title={faderMonitor ? t('player.voice.monitorLevel') : t('player.voice.level')}
+              aria-label={faderLabel}
+              title={faderLabel}
               aria-valuetext={faderMonitor ? `${m.monitorGainDb} dB` : `${m.level}%`}
               onChange={(e) => controller.setFader(Number(e.target.value))}
             />
           </div>
         </div>
-      </div>
-
-      <div className="vs-vmeter">
+        <div className="vs-vmeter">
         <button
           type="button"
           className={`vs-clip-led${m.clipped ? ' on' : ''}`}
@@ -377,6 +396,7 @@ export default function VoiceStrip({
         <div className="vs-mwrap">
           <Meter controller={controller} live={m.armed || rec || m.monitor.on} />
         </div>
+      </div>
       </div>
 
       <div className={`vs-tl${listening ? ' listening' : ''}`}>
@@ -431,8 +451,9 @@ export default function VoiceStrip({
         </div>
         <div className="vs-track">
           {!take && <div className="vs-empty">{t(emptyKey)}</div>}
-          {take && (
-            <div className={`vs-clip${rec ? ' recording' : ''}${take.partial ? ' partial' : ''}${listening ? ' playing' : ''}`} style={{ left: `${left}%`, width: `${width}%` }}>
+          {take && clipVisible && (
+            <div className={`vs-clip${rec ? ' recording' : ''}${take.peaks?.length ? ' has-wave' : ''}${take.partial ? ' partial' : ''}${listening ? ' playing' : ''}`} style={{ left: `${left}%`, width: `${width}%` }}>
+              <ClipWave peaks={take.peaks} />
               <span className={`vs-clip-tag${unusual ? ' changed' : ''}`} title={take.changed ? t('player.voice.tagTitleChanged') : t('player.voice.tagTitle')}>
                 {tagText}
               </span>

@@ -140,7 +140,7 @@ export type VoiceMonitorReason =
   | 'route-wireless'
   | 'no-input'
   | 'permission'
-  | 'output-not-native' // the song does not play through the native output
+  | 'output-not-native' // Web Audio is playing on a different physical output
   | 'platform' // not supported on this platform yet
   | 'device-lost'
   | 'error'
@@ -168,7 +168,16 @@ export interface VoiceMonitorState {
   warnings: string[]
 }
 
+/** Output UIDs come from the native inventory; an empty selection follows the system default. */
+export interface VoiceMonitorPlaybackContext {
+  webAudioPlaying: boolean
+  browserOutputUid: string
+  selectedOutputUid: string
+}
 export interface VoiceMonitorAvailabilityRequest {
+  /** Publish route context through the existing serialized monitor IPC without selecting/arming input. */
+  contextOnly?: boolean
+  playbackContext?: VoiceMonitorPlaybackContext
   input: { deviceName: string; channelIndex: number }
 }
 

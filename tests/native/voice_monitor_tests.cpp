@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <functional>
 #include <memory>
 #include <new>
 #include <vector>
@@ -87,6 +88,7 @@ struct Record {
       status.state=AudioHostState::Error;status.terminalReason=AudioHostTerminalReason::RouteChanged;
     }
   }
+  std::function<void()> afterOpen;
   AudioHostRender render=nullptr;void* context=nullptr;
   std::vector<uint32_t> requests,liveRequests;
   unsigned liveWrites=0;
@@ -142,7 +144,8 @@ class FakeHost final:public AudioHostBackend {
     uint32_t negotiated=0;
     if(r->ledgerPath) {
       const auto transaction=detail::requestMacAudioBuffer(r->deviceProperties(),c.requestedBufferFrames,c.maximumFrames,
-          r->lease,c.maximumAcceptableBufferFrames,r->deviceLedger());
+          r->lease,c.maximumAcceptableBufferFrames,r->deviceLedger(),
+          true,detail::MacAudioBufferFixedCapacity{},c.holdSharedDeviceBuffer);
       if(!transaction.ok())return {false,transaction.error,AudioHostState::Error,{},{},transaction.message};
       negotiated=transaction.frames;r->writes=r->deviceProperties().writes;
     } else if(c.requestedBufferFrames && c.allowSharedDeviceBufferChange && c.requestedBufferFrames!=r->device.bufferFrames.preferredFrames)++r->writes;
@@ -157,6 +160,7 @@ class FakeHost final:public AudioHostBackend {
     r->outputFrame=0;r->previousDelivered=0;r->lastPropertyWrites=r->deviceProperties().writes;
     r->openedFacts={};r->openedFacts.identity=1;r->openedFacts.rate=48000;
     r->openedFacts.inputChannels={r->device.inputChannels};r->openedFacts.outputChannels={r->device.outputChannels};
+    if (auto action=std::move(r->afterOpen)) action();
     return {true,AudioHostError::None,s.state,s.format,s.latency,{}};
   }
   AudioHostResult setBufferFrames(uint32_t frames,uint32_t maximum=0)override {
@@ -262,7 +266,7 @@ void hostTests() {
   CHECK(!host.status().running);CHECK(!host.setGain(0));
   auto started=begin(host);CHECK(started.ok);CHECK(host.status().running);CHECK(r->enumerations==1);
   CHECK((r->config.inputChannels==std::vector<uint32_t>{2}));CHECK((r->config.outputChannels==std::vector<uint32_t>{0,1}));
-  CHECK(r->config.allowSharedDeviceBufferChange && r->config.maximumAcceptableBufferFrames==0 && r->config.maximumFrames==8192);
+  CHECK(r->config.allowSharedDeviceBufferChange && r->config.maximumAcceptableBufferFrames==256 && r->config.maximumFrames==8192 && r->config.holdSharedDeviceBuffer);
   CHECK(started.latency.bufferFrames==32 && started.latency.roundTripFrames==92);CHECK(near(started.latency.roundTripMs,92*1000./48000));
   CHECK(host.setGain(100));for(int i=0;i<4;++i)r->callback();CHECK(near(r->lastVoice.load(),.1*std::pow(10.,.6)));CHECK(!host.setGain(std::numeric_limits<float>::quiet_NaN()));
   CHECK(begin(host,2).ok);const auto stopped=r->stops;
@@ -314,7 +318,7 @@ void hostTests() {
   CHECK(!voiceMonitorUseAllowed(false,false,false));
   {
     auto f=std::make_shared<Record>();f->device.bufferFrames.preferredFrames=64;VoiceMonitorHost h(std::make_unique<FakeHost>(f));
-    auto result=begin(h);CHECK(result.ok && result.latency.bufferFrames==64);CHECK(f->opens==1 && f->writes==0);
+    auto result=begin(h);CHECK(result.ok && result.latency.bufferFrames==32);CHECK(f->opens==1 && f->writes==1);
   }
   {
     auto f=std::make_shared<Record>();f->device.bufferFrames.minimumFrames=257;VoiceMonitorHost h(std::make_unique<FakeHost>(f));
@@ -408,6 +412,85 @@ void channelTests() {
   }
 }
 bool songRender(void* ctx,const AudioHostRenderBlock& b)noexcept{++*static_cast<unsigned*>(ctx);for(uint32_t c=0;c<b.outputChannels;++c)for(uint32_t i=0;i<b.frames;++i)b.output[c][i]=.4f;return true;}
+void idleMonitorTests() {
+  CHECK(voiceMonitorBrowserOutputCompatible(false,"other","usb"));
+  CHECK(voiceMonitorBrowserOutputCompatible(true,"usb","usb"));
+  CHECK(voiceMonitorBrowserOutputCompatible(true,"","usb"));
+  CHECK(!voiceMonitorBrowserOutputCompatible(true,"other","usb"));
+  for(const bool songEndsFirst:{false,true}) {
+    auto song=std::make_shared<Record>();song->ledgerPath=true;
+    SharedAudioService service(std::make_unique<FakeHost>(song),"coreaudio");
+    auto input=std::make_shared<Record>();input->ledgerPath=true;input->automatic=true;
+    input->sharedProperties=&song->properties;input->sharedLedger=&song->ledger;
+    VoiceMonitorHost monitor(std::make_unique<FakeHost>(input));
+    const auto route=service.voiceMonitorOutputConfig();
+    CHECK(route.outputDeviceUid=="usb" && route.outputChannels==std::vector<uint32_t>({0,1}));
+    CHECK(song->opens==0 && !service.playbackOutputCurrent());
+    CHECK(monitor.availability("usb",2,route.outputDeviceUid,true,true).available);
+    CHECK(monitor.begin("usb",2,route.outputDeviceUid,true,true,0,32,256,1,route.outputChannels,&service).ok);
+    CHECK(song->opens==0 && monitor.status().running && song->properties.frames==32 && song->properties.writes==1);
+    CHECK(song->ledger.devices.at("usb").owners.at(input->lease.token).hold);
+    // An armed, independent capture is capacity-only and must not delay restore.
+    detail::MacAudioBufferOwnership capture;
+    CHECK(detail::requestMacAudioBuffer(song->properties,0,8192,capture,0,song->ledger).ok());
+    CHECK(!song->ledger.devices.at("usb").owners.at(capture.token).hold);
+    AudioHostConfig config;config.outputDeviceUid="usb";config.outputChannels={0,1};
+    config.requestedSampleRate=48000;config.requestedBufferFrames=128;config.maximumFrames=4096;
+    unsigned callbacks=0;auto client=service.playbackBackend(std::make_unique<FakeHost>(song),"coreaudio");
+    const auto inputOpens=input->opens,inputStops=input->stops;
+    CHECK(client->open(config,songRender,&callbacks).ok && client->start().ok);
+    CHECK(song->requests==std::vector<uint32_t>{0}); // even a legal128 preference never disturbs monitor32
+    CHECK(song->ledger.devices.at("usb").owners.at(song->lease.token).hold);
+    CHECK(monitor.status().running && input->opens==inputOpens && input->stops==inputStops);
+    CHECK(song->properties.frames==32 && song->properties.writes==1 && callbacks>0);
+    if(songEndsFirst) {
+      client->stop();client.reset();CHECK(service.setPlaybackOutputCurrent(false));
+      CHECK(monitor.status().running && song->properties.frames==32 && song->properties.writes==1);
+      CHECK(service.voiceMonitorOutputConfig().outputDeviceUid=="usb");
+      CHECK(monitor.end(1).ok);
+    } else {
+      CHECK(monitor.end(1).ok && song->properties.frames==32 && song->properties.writes==1);
+      CHECK(client->status().state==AudioHostState::Running);
+      client->stop();client.reset();CHECK(service.setPlaybackOutputCurrent(false));
+    }
+    CHECK(song->properties.frames==512 && song->properties.writes==2);
+    const auto& remaining=song->ledger.devices.at("usb").owners;
+    CHECK(remaining.size()==1 && remaining.contains(capture.token));
+    CHECK(detail::restoreMacAudioBuffer(song->properties,capture,song->ledger)==0 && song->ledger.devices.empty());
+    CHECK(input->opens==1 && input->starts==1);
+    std::printf("idle monitor/song join: no monitor reopen/stop; one shrink, one last-user restore; songEndsFirst=%d\n",songEndsFirst);
+  }
+  {
+    // Interleave song open after the monitor writes, before monitor start/settle.
+    // A late activity registration would let the legal128 preference grow it.
+    auto song=std::make_shared<Record>();song->ledgerPath=true;
+    SharedAudioService service(std::make_unique<FakeHost>(song),"coreaudio");
+    auto input=std::make_shared<Record>();input->ledgerPath=true;input->automatic=true;
+    input->sharedProperties=&song->properties;input->sharedLedger=&song->ledger;
+    auto client=service.playbackBackend(std::make_unique<FakeHost>(song),"coreaudio");
+    AudioHostConfig config;config.outputDeviceUid="usb";config.outputChannels={0,1};
+    config.requestedBufferFrames=128;config.maximumFrames=4096;unsigned callbacks=0;bool joined=false;
+    input->afterOpen=[&] { joined=client->open(config,songRender,&callbacks).ok && client->start().ok; };
+    VoiceMonitorHost monitor(std::make_unique<FakeHost>(input));
+    CHECK(monitor.begin("usb",2,"usb",true,true,0,32,256,1,{},&service).ok && joined);
+    CHECK(song->requests==std::vector<uint32_t>{0} && song->properties.writes==1 && song->properties.frames==32);
+    CHECK(monitor.status().running && monitor.end(1).ok && song->properties.frames==32);
+    client->stop();client.reset();CHECK(service.setPlaybackOutputCurrent(false));
+    CHECK(song->properties.frames==512 && song->properties.writes==2 && song->ledger.devices.empty());
+  }
+  {
+    auto song=std::make_shared<Record>();song->ledgerPath=true;song->secondaryRoute=true;
+    SharedAudioService service(std::make_unique<FakeHost>(song),"coreaudio");
+    CHECK(service.voiceMonitorOutputConfig(std::string("other")).outputDeviceUid=="other");
+    CHECK(service.voiceMonitorOutputConfig(std::string{}).outputDeviceUid=="usb");
+    auto input=std::make_shared<Record>();input->ledgerPath=true;input->automatic=true;
+    input->sharedProperties=&song->properties;input->sharedLedger=&song->ledger;
+    VoiceMonitorHost monitor(std::make_unique<FakeHost>(input));
+    CHECK(monitor.begin("usb",2,"usb",true,true,0,32,256,1,{},&service).ok);
+    monitor.routeChanged();CHECK(!monitor.status().running && monitor.status().lost);
+    CHECK(song->properties.frames==512 && song->ledger.devices.empty());
+  }
+}
 void sharedMonitorLeaseTests() {
 #if defined(__APPLE__)
   for(const uint32_t threshold:{32u,64u,128u,256u}) {
@@ -492,7 +575,7 @@ void repeatedSharedBufferTests() {
       CHECK(song->properties.frames==32 && song->properties.writes==1 && song->liveWrites==1);
       const auto& entry=song->ledger.devices.at("usb");
       CHECK(entry.owners.at(song->lease.token).changed && !entry.owners.at(input->lease.token).changed);
-      CHECK(input->config.requestedBufferFrames==32 && input->config.maximumAcceptableBufferFrames==0);
+      CHECK(input->config.requestedBufferFrames==32 && input->config.maximumAcceptableBufferFrames==256);
       CHECK(input->config.maximumFrames>=512 && song->opens==opens && song->stops==stops);
       song->notify(song->openedFacts);CHECK(service.ensureOutput().ok);
       auto state=client->status();CHECK(state.state==AudioHostState::Running && state.format.nominalBufferFrames==32);
@@ -527,13 +610,13 @@ void repeatedSharedBufferTests() {
         baseline=client->status();generation=service.outputRouteGeneration();
       }
     }
-    // A real song close while monitor ON may restore512. Its lease is
-    // capacity-only with prepared8192 and no ceiling; callback stays bounded.
+    // Song close releases its hold; the monitor retains the small period.
     CHECK(monitor.begin("usb",2,"usb",true,true,0,32,256,51,{},&service).ok);
     client->stop();client.reset();CHECK(service.setPlaybackOutputCurrent(false));
-    CHECK(song->properties.frames==512 && song->properties.writes==2);
-    CHECK(!monitor.status().running);CHECK(input->render==nullptr); // soft close after restore
-    CHECK(song->ledger.devices.empty());
+    CHECK(song->properties.frames==32 && song->properties.writes==1);
+    CHECK(monitor.status().running && input->render!=nullptr);
+    CHECK(monitor.end(51).ok);
+    CHECK(song->properties.frames==512 && song->properties.writes==2 && song->ledger.devices.empty());
     CHECK(!service.prepareVoiceMonitor().ok);
     // Real same-route song switch/close ends the session. A new native song
     // opens at its original period and its next first monitor-on shrinks once.
@@ -558,9 +641,10 @@ void repeatedSharedBufferTests() {
     VoiceMonitorHost monitor(std::make_unique<FakeHost>(input));CHECK(monitor.begin("usb",2,"usb",true,true,0,32,256,1,{},&service).ok);
     client->stop();client.reset();c.outputDeviceUid="other";
     client=service.playbackBackend(std::make_unique<FakeHost>(song),"coreaudio");CHECK(client->open(c,songRender,&callbacks).ok && client->start().ok);
-    CHECK(song->properties.frames==512 && song->properties.writes==2 && song->secondaryProperties.frames==512 && song->secondaryProperties.writes==0);
+    CHECK(song->properties.frames==32 && song->properties.writes==1 && song->secondaryProperties.frames==512 && song->secondaryProperties.writes==0);
     CHECK(!voiceMonitorSameOutput("usb",{0,1},service.activeOutputConfig(),true));
     monitor.routeChanged();CHECK(!monitor.status().running && monitor.status().lost);
+    CHECK(song->properties.frames==512 && song->properties.writes==2);
     CHECK(client->status().state==AudioHostState::Running);
     client->stop();service.shutdown();CHECK(song->ledger.devices.empty());
   }
@@ -665,4 +749,4 @@ void songTests() {
   globalClient->stop();shared.shutdown();client->stop();
 }
 }
-int main(){renderTests();routeTests();hostTests();channelTests();sharedMonitorLeaseTests();externalLeaseTests();repeatedSharedBufferTests();currentOutputAndGapTests();songTests();std::printf("voice_monitor_tests: %d failures\n",failures);return failures?1:0;}
+int main(){renderTests();routeTests();hostTests();channelTests();idleMonitorTests();sharedMonitorLeaseTests();externalLeaseTests();repeatedSharedBufferTests();currentOutputAndGapTests();songTests();std::printf("voice_monitor_tests: %d failures\n",failures);return failures?1:0;}

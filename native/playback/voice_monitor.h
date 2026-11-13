@@ -118,6 +118,12 @@ inline VoiceMonitorSongRoute voiceMonitorSongRoute(const AudioHostConfig& config
   return {config.outputDeviceUid,currentSongOutput && provider=="coreaudio" && !config.outputDeviceUid.empty(),
       config.outputChannels,status,generation};
 }
+// Reject only a proven cross-device Web Audio route. Idle and an unknown
+// browser endpoint do not imply that the selected native device is unusable.
+inline bool voiceMonitorBrowserOutputCompatible(bool playing, const std::string& browserUid,
+    const std::string& monitorUid) noexcept {
+  return !playing || browserUid.empty() || browserUid==monitorUid;
+}
 inline bool voiceMonitorSongCanBegin(const VoiceMonitorSongRoute& route) noexcept {
   return route.native && (route.song.state==AudioHostState::Open || route.song.state==AudioHostState::Running);
 }
