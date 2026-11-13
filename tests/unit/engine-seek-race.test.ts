@@ -111,37 +111,71 @@ describe('startup output ownership', () => {
     vi.resetModules()
   })
 
-  it.each(['MacIntel', 'Win32'])('maps native output to the browser sink on %s for fallback', async (platform) => {
+  const REAL_LABELS: readonly [string, string][] = [
+    ['NoMachine Audio Adapter', 'NoMachine Audio Adapter (Virtual)'],
+    ['Zen Quadro SC Playback', 'Zen Quadro SC Playback (23e5:a2f9)'],
+    ['MacBook Pro Speakers', 'MacBook Pro Speakers (Built-in)']
+  ]
+
+  async function engineWith(platform: string, native: { uid: string; label: string; outputChannels: number }[],
+    browser: { kind: string; deviceId: string; label: string }[], policy: { playback?: boolean } = {}) {
     vi.stubGlobal('AudioContext', StartupAudioContext)
-    const enumerateDevices = vi.fn(async () => [{ kind: 'audiooutput', deviceId: 'browser-id', label: 'Interface' }])
+    const enumerateDevices = vi.fn(async () => browser)
     vi.stubGlobal('navigator', { platform, mediaDevices: { enumerateDevices } })
     vi.stubGlobal('window', { singz: {
-      audioHostDevices: vi.fn(async () => ({ ok: true, devices: [{ uid: 'native-id', label: 'Interface', outputChannels: 2 }] })),
+      audioHostDevices: vi.fn(async () => ({ ok: true, devices: native })),
       configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true }))
     } })
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-    const engine = new MultitrackEngine()
-    await engine.setOutput('native:native-id')
-    expect(StartupAudioContext.last?.sinkId).toBe('browser-id')
-    expect(engine.outputDeviceId).toBe('native:native-id')
-    expect(enumerateDevices).toHaveBeenCalled()
+    return { engine: new MultitrackEngine(policy), enumerateDevices }
+  }
+
+  it.each(['MacIntel', 'Win32'])('selecting a native output never needs a Chromium sink while native owns playback (%s)', async (platform) => {
+    const all = REAL_LABELS.flatMap(([bare, decorated], i) => [
+      { native: { uid: `uid${i}`, label: bare, outputChannels: 2 }, browser: { kind: 'audiooutput', deviceId: `b${i}`, label: decorated } }])
+    // Even an ambiguous pair and an unmatched label must select cleanly.
+    const { engine, enumerateDevices } = await engineWith(platform,
+      [...all.map(r => r.native), { uid: 'dup1', label: 'Dup (Built-in)', outputChannels: 2 }, { uid: 'dup2', label: 'Dup (Virtual)', outputChannels: 2 }],
+      all.map(r => r.browser))
+    for (const uid of ['uid0', 'uid1', 'uid2', 'dup1']) {
+      await engine.setOutput(`native:${uid}`)
+      expect(engine.outputDeviceId).toBe(`native:${uid}`)
+    }
+    expect(StartupAudioContext.last?.sinkId).toEqual({ type: 'none' })
+    expect(enumerateDevices).not.toHaveBeenCalled()
   })
 
-  it.each([[[]], [[{ kind: 'audiooutput', deviceId: 'a', label: 'Interface' }, { kind: 'audiooutput', deviceId: 'b', label: 'Interface' }]]])(
-    'rejects an unmatchable native label and restores the previous sink', async (outputs) => {
-      vi.stubGlobal('AudioContext', StartupAudioContext)
-      vi.stubGlobal('navigator', { platform: 'Win32', mediaDevices: { enumerateDevices: async () => outputs } })
-      vi.stubGlobal('window', { singz: {
-        audioHostDevices: vi.fn(async () => ({ ok: true, devices: [{ uid: 'native-id', label: 'Interface', outputChannels: 2 }] })),
-        configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true }))
-      } })
-      const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-      const engine = new MultitrackEngine()
-      await expect(engine.setOutput('native:native-id')).rejects.toThrow('uniquely')
-      expect(engine.outputDeviceId).toBe('')
-      expect(StartupAudioContext.last?.sinkId).toBe('')
-    }
-  )
+  it.each(REAL_LABELS)('fallback playback resolves %s to its decorated Chromium sink', async (bare, decorated) => {
+    const { engine } = await engineWith('MacIntel', [{ uid: 'u', label: bare, outputChannels: 2 }, { uid: 'o', label: 'Other', outputChannels: 2 }],
+      [{ kind: 'audiooutput', deviceId: 'default', label: `Default - ${decorated}` },
+        { kind: 'audiooutput', deviceId: 'sink-1', label: decorated }, { kind: 'audiooutput', deviceId: 'sink-2', label: 'Other (Built-in)' }])
+    await engine.setOutput('native:u')
+    await (engine as unknown as { applyFallbackSink(id: string): Promise<void> }).applyFallbackSink('u')
+    expect(StartupAudioContext.last?.sinkId).toBe('sink-1')
+  })
+
+  it('without native playback the sink is resolved at selection (decorated label) and a missing one rolls back', async () => {
+    const { engine } = await engineWith('Win32', [{ uid: 'u', label: 'NoMachine Audio Adapter', outputChannels: 2 }],
+      [{ kind: 'audiooutput', deviceId: 'b', label: 'NoMachine Audio Adapter (Virtual)' }], { playback: false })
+    await engine.setOutput('native:u')
+    expect(StartupAudioContext.last?.sinkId).toBe('b')
+  })
+
+  it.each([
+    ['no browser row', []],
+    ['an ambiguous browser pair', [{ kind: 'audiooutput', deviceId: 'a', label: 'Interface (Built-in)' }, { kind: 'audiooutput', deviceId: 'b', label: 'Interface (Virtual)' }]]
+  ])('only the fallback path throws on %s; a non-native selection stays usable', async (_name, outputs) => {
+    const { engine } = await engineWith('Win32', [{ uid: 'native-id', label: 'Interface', outputChannels: 2 }], outputs as never)
+    await engine.setOutput('native:native-id')
+    await expect((engine as unknown as { applyFallbackSink(id: string): Promise<void> }).applyFallbackSink('native-id')).rejects.toThrow('uniquely')
+  })
+
+  it('native-side ambiguity rejects the fallback sink (negative control)', async () => {
+    const { engine } = await engineWith('Win32', [{ uid: 'a', label: 'Interface (Built-in)', outputChannels: 2 }, { uid: 'b', label: 'Interface (Virtual)', outputChannels: 2 }],
+      [{ kind: 'audiooutput', deviceId: 'x', label: 'Interface' }], { playback: false })
+    await expect(engine.setOutput('native:a')).rejects.toThrow('uniquely')
+    expect(engine.outputDeviceId).toBe('')
+  })
 
   it('does not make the initial default sink hide a saved native endpoint from inventory', async () => {
     const outputId = 'native:alsa:sysfs:/sys/devices/platform/usb/5-1:pcm:0'

@@ -34,7 +34,24 @@ async function until(label, read, accept, timeout = 20000) {
   do { value = await read(); if (accept(value)) return value; await delay(10) } while (Date.now() < deadline)
   throw new Error(`${label}: ${JSON.stringify(value)}`)
 }
-const row = (name, value, limit) => { const pass = value <= limit; rows.push({ test: name, value, limit, result: pass ? 'PASS' : 'FAIL' }); assert.ok(pass, name) }
+// Every row, the negative control included, lands in the printed table with PASS/FAIL before any assertion throws.
+const row = (name, value, limit) => { const pass = value <= limit; rows.push({ test: name, value, limit: `<= ${limit}`, result: pass ? 'PASS' : 'FAIL' }); assert.ok(pass, name) }
+const rowAtLeast = (name, value, limit) => { const pass = value > limit; rows.push({ test: name, value, limit: `> ${limit}`, result: pass ? 'PASS' : 'FAIL' }); assert.ok(pass, name) }
+// First launch shows the quick-start welcome and the 'Setting up SingZ' model wizard (the scratch SINGZ_MODELS_DIR has
+// no models); their scrims block .lib-card clicks. Seed the seen flag (the app's own key) and press the wizard's
+// own Skip, as a singer would.
+async function clearFirstRun(win) {
+  await win.evaluate(() => localStorage.setItem('singz.quick-start.v1', 'seen'))
+  await win.reload()
+  const deadline = Date.now() + 60000
+  while (Date.now() < deadline) {
+    const skip = win.getByRole('button', { name: 'Skip for now' })
+    if (await skip.count()) await skip.first().click().catch(() => {})
+    else if (await win.locator('.lib-card').count() && !(await win.locator('.wizard, .quick-start-overlay').count())) return
+    await delay(200)
+  }
+  throw new Error('first-run quick-start/model wizard did not clear')
+}
 function writeTone(file) {
   const frames = rate * 8, b = Buffer.alloc(44 + frames * 2)
   b.write('RIFF'); b.writeUInt32LE(b.length - 8, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16)
@@ -70,6 +87,7 @@ function writeTone(file) {
       SINGZ_NO_SYNC: '1', SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en' } })
     await quietLaunch(app)
     const win = await app.firstWindow()
+    await clearFirstRun(win)
     await win.waitForSelector('.lib-card', { timeout: 60000 })
     await win.locator('.lib-card').filter({ hasText: 'Voice lane fixture' }).first().click()
     await win.waitForFunction(() => window.__test?.phase === 'ready' && __test.engine.duration > 0, null, { timeout: 60000 })
@@ -84,10 +102,17 @@ function writeTone(file) {
     for (let i = 44; i < conformed.length; i += 2) if (Math.abs(conformed.readInt16LE(i)) > 100) { first = (i - 44) / 2; break }
     assert.ok(first >= 0, 'the conformed voice contains signal')
     row('PCM startPosition + userOffset placement (ms)', Math.abs(first / conformedRate - placed) * 1000, 5)
-    assert.ok(Math.abs(first / conformedRate - (placed + .030)) * 1000 > 5, 'negative control: a deliberate 30ms offset is rejected')
+    rowAtLeast('negative control: a deliberate 30 ms offset is rejected (ms off)', Math.abs(first / conformedRate - (placed + .030)) * 1000, 5)
     const status = () => win.evaluate(() => window.singz.desktopPlaybackStatus())
+    // The strip's VoiceTakeController owns the lane control and re-asserts its model (solo/mute/level) on every lane
+    // or recording state change, so a direct engine.setVoiceTakeControl is overwritten by it. Drive the same chips a
+    // singer presses, then wait for the native receipt, which exists only while a generation is open (after Play).
     async function controls(muted, solo) {
-      await win.evaluate(({ muted, solo }) => __test.engine.setVoiceTakeControl({ gain: .891, muted, solo, suppressed: false }), { muted, solo })
+      for (const [selector, want] of [['.vs-chip:not(.solo)', muted], ['.vs-chip.solo', solo]]) {
+        const chip = win.locator(selector).first()
+        await chip.waitFor({ timeout: 20000 })
+        if ((await chip.getAttribute('aria-pressed') === 'true') !== want) await chip.click()
+      }
       return until('native M/S receipt', status, s => s.lanes.some(l => l.id === 'voice:take' && l.muted === muted && l.solo === solo))
     }
     async function alignment(label) {
@@ -100,11 +125,11 @@ function writeTone(file) {
       assert.equal(s.renderFailures, '0'); assert.equal(s.timePitchAnchorMisses, '0'); assert.equal(voice.starvedBlocks, '0')
       return s
     }
-    await controls(false, true)
     for (const [tempo, transpose] of [[1, 0], [.5, 0], [.5, 3], [1.5, 3]]) {
       await win.evaluate(async ({ tempo, transpose, placed }) => { const e = __test.engine; e.pause(); await e.setTempo(tempo); await e.setTranspose(transpose); e.seek(placed + 1) }, { tempo, transpose, placed })
       await win.locator('body').click({ position: { x: 5, y: 5 } }); await win.keyboard.press('Space')
       await alignment(`native source anchor ${tempo}x / ${transpose}st (ms)`)
+      await controls(false, true) // after Play: the receipt needs an open generation; a stopped control is replayed at Play
       const audible = await until('Solo voice has native signal', status, s => Number(s.outputPeak) > .005)
       row(`Solo voice signal ${tempo}x / ${transpose}st`, Number(audible.outputPeak) > .005 ? 0 : 1, 0)
       await controls(true, true)

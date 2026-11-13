@@ -2,7 +2,7 @@ import { clampNativeTranspose, clampPlaybackRate } from './native-playback-limit
 import { VOICE_TAKE_LANE_ID, type VoiceMonitorPlaybackContext, type VoiceTakeLaneState, type VoiceTakeLaneSource, type VoiceTakeLaneControl } from '../../../shared/voice-take'
 import { sanitizeSongVolume } from './song-volume'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
-import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
+import { nativeOutputForBrowserLabel, outputLabelKey } from '../../../shared/output-device-policy'
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch'
 import {
   accentIndex,
@@ -896,6 +896,26 @@ export class MultitrackEngine {
     if (this._playing && this.ctx.state !== 'running') await this.ctx.resume()
   }
 
+  /** Native playback owns a native: output; Chromium only needs a physical sink for the Web Audio fallback.
+   * While native is the path the browser stays on the silent sink and nothing is matched, so decorated or
+   * duplicated Chromium labels cannot block selecting the output. */
+  private nativePathOwnsOutput(): boolean {
+    return desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback)
+  }
+
+  private async browserSinkForRoute(nativeId: string): Promise<string | { type: 'none' }> {
+    if (this.nativePathOwnsOutput()) return { type: 'none' }
+    return (await this.chromiumSinkForNative(nativeId)) ?? { type: 'none' }
+  }
+
+  /** Web Audio is about to play a native: output: only now is a unique browser sink required. */
+  private async applyFallbackSink(nativeId: string): Promise<void> {
+    await this.outputRouteApplyPending?.catch(() => undefined)
+    const sink = await this.chromiumSinkForNative(nativeId)
+    if (!sink) throw new Error('The selected output is unavailable for fallback playback.')
+    await (this.ctx.setSinkId as unknown as (sink: string) => Promise<void>)(sink)
+  }
+
   private async chromiumSinkForNative(uid: string): Promise<string | null> {
     const platform = detectedDesktopPlatform()
     if (platform === 'linux') return null
@@ -904,10 +924,10 @@ export class MultitrackEngine {
     if (!inventory.ok) throw new Error(inventory.error)
     const native = inventory.devices.filter(row => row.uid === uid && row.outputChannels > 0)
     if (native.length !== 1) throw new Error('The selected output is no longer connected.')
-    const label = native[0].label.trim().toLocaleLowerCase()
-    const nativeMatches = inventory.devices.filter(row => row.outputChannels > 0 && row.label.trim().toLocaleLowerCase() === label)
-    const browser = (await navigator.mediaDevices.enumerateDevices()).filter(row => row.kind === 'audiooutput' && row.deviceId !== 'default' && row.deviceId !== 'communications' && row.label.trim().toLocaleLowerCase() === label)
+    const label = outputLabelKey(native[0].label)
     if (!label) return null
+    const nativeMatches = inventory.devices.filter(row => row.outputChannels > 0 && outputLabelKey(row.label) === label)
+    const browser = (await navigator.mediaDevices.enumerateDevices()).filter(row => row.kind === 'audiooutput' && row.deviceId !== 'default' && row.deviceId !== 'communications' && outputLabelKey(row.label) === label)
     if (nativeMatches.length !== 1 || browser.length !== 1) throw new Error('The selected output cannot be uniquely matched to a browser device.')
     return browser[0].deviceId
   }
@@ -922,9 +942,9 @@ export class MultitrackEngine {
         const target = this.desiredOutputId
         try {
           if (target.startsWith('native:')) {
-            const sink = await this.chromiumSinkForNative(target.slice(7))
+            const sink = await this.browserSinkForRoute(target.slice(7))
             if (version !== this.outputRouteVersion) continue
-            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(sink ?? { type: 'none' })
+            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(sink)
           } else if (this.ctx.sinkId !== target) await this.ctx.setSinkId(target)
         } catch (error) {
           if (version !== this.outputRouteVersion) continue
@@ -933,7 +953,7 @@ export class MultitrackEngine {
           const fallbackVersion = this.outputRouteVersion
           if (this.ctx.sinkId !== this.confirmedOutputId) {
             const rollback = this.confirmedOutputId.startsWith('native:')
-              ? await this.chromiumSinkForNative(this.confirmedOutputId.slice(7)) ?? { type: 'none' as const }
+              ? await this.browserSinkForRoute(this.confirmedOutputId.slice(7)).catch(() => ({ type: 'none' as const }))
               : this.confirmedOutputId
             await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(rollback)
           }
@@ -2026,9 +2046,7 @@ export class MultitrackEngine {
     if (this.nativePlaybackPolicy.requireNative) {
       throw new Error(t('box.nativeRequired'))
     }
-    if (this.desiredOutputId.startsWith('native:') && !(await this.chromiumSinkForNative(this.desiredOutputId.slice(7)))) {
-      throw new Error('The selected output is unavailable for fallback playback.')
-    }
+    if (this.desiredOutputId.startsWith('native:')) await this.applyFallbackSink(this.desiredOutputId.slice(7))
 
     if (detectedDesktopPlatform() === 'darwin')
       await (typeof window === 'undefined' ? undefined : window.singz?.setDesktopPlaybackNativeOutputCurrent)?.(false)

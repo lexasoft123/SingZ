@@ -394,6 +394,13 @@ describe('legacy output migration', () => {
     expect(nativeOutputUidForBrowser('sink', browser, [...native, { uid: 'other', label: 'Interface', outputChannels: 2 }])).toBeUndefined()
     expect(nativeOutputUidForBrowser('sink', [...browser, { id: 'other', label: 'Interface' }], native)).toBeUndefined()
   })
+  it('maps decorated Chromium labels to bare native names; an ambiguous decorated pair stays unmapped', () => {
+    const decorated = [{ id: 'z', label: 'Zen Quadro SC Playback (23e5:a2f9)' }, { id: 'n', label: 'NoMachine Audio Adapter (Virtual)' }, { id: 'm', label: 'MacBook Pro Speakers (Built-in)' }]
+    const bare = [{ uid: 'zu', label: 'Zen Quadro SC Playback', outputChannels: 2 }, { uid: 'nu', label: 'NoMachine Audio Adapter', outputChannels: 2 }, { uid: 'mu', label: 'MacBook Pro Speakers', outputChannels: 2 }]
+    expect(['z', 'n', 'm'].map(id => nativeOutputUidForBrowser(id, decorated, bare))).toEqual(['zu', 'nu', 'mu'])
+    expect(nativeOutputUidForBrowser('m', decorated, [...bare, { uid: 'dup', label: 'MacBook Pro Speakers (Virtual)', outputChannels: 2 }])).toBeUndefined()
+    expect(remapNativeOutputUid('zu', bare, [{ uid: 'zasio', label: 'Zen Quadro SC Playback (ASIO)', outputChannels: 2 }])).toBe('zasio')
+  })
   it.each([['sink', 'uid', 'migrated', 'native:uid'], ['sink', undefined, 'missing', ''], ['native:uid', 'uid', 'migrated', 'native:uid']] as const)(
     'commits the migration for %s', async (legacy, uid, expected, route) => {
       const commit = vi.fn()

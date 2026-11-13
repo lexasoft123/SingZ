@@ -53,6 +53,29 @@ describe('real engine transient take ownership', () => {
     expect(native.reconfigure).toHaveBeenCalledTimes(1)
     expect(native.reconfigure).toHaveBeenLastCalledWith(expect.objectContaining({ lanes: expect.arrayContaining([expect.objectContaining({ path: '/cache/finalized.wav' })]) }))
   })
+  it('a control set while nothing is prepared is kept and applied when the lane is next prepared (not lost)', async () => {
+    const { engine, native } = setup()
+    Object.assign(native, { active: false, preparedAhead: false })
+    await engine.setVoiceTakeControl({ gain: .5, muted: true, solo: true, suppressed: false })
+    expect(native.updateLane).not.toHaveBeenCalled() // no generation to command yet
+    Object.assign(native, { active: true })
+    await engine.setVoiceTakeLane({ path: '/cache/placed.wav' })
+    expect(native.reconfigure).toHaveBeenLastCalledWith(expect.objectContaining({ lanes: expect.arrayContaining([
+      expect.objectContaining({ id: 'voice:take', muted: true, solo: true })]) }))
+  })
+  it('negative control: a lane prepared without a prior control starts unmuted and not solo', async () => {
+    const { engine, native } = setup()
+    await engine.setVoiceTakeLane({ path: '/cache/placed.wav' })
+    expect(native.reconfigure).toHaveBeenLastCalledWith(expect.objectContaining({ lanes: expect.arrayContaining([
+      expect.objectContaining({ id: 'voice:take', muted: false, solo: false })]) }))
+  })
+  it('a control set while stopped with a generation prepared ahead is sent to that generation', async () => {
+    const { engine, native } = setup()
+    await engine.setVoiceTakeLane({ path: '/cache/placed.wav' })
+    Object.assign(native, { active: false, preparedAhead: true })
+    await engine.setVoiceTakeControl({ gain: .5, muted: false, solo: true, suppressed: false })
+    expect(native.updateLane).toHaveBeenLastCalledWith('voice:take', { gain: .5, muted: false, solo: true })
+  })
   it.each([false, true])('cancels an admission still pending when recording starts (existing lane: %s)', async existing => {
     const { engine, native } = setup()
     if (existing) await engine.setVoiceTakeLane({ path: '/cache/old.wav' })

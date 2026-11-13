@@ -1,4 +1,5 @@
 import { t } from '../i18n'
+import { outputLabelKey } from '../../../shared/output-device-policy'
 
 export type PlaybackOutputId = string | undefined
 
@@ -304,9 +305,9 @@ export function nativeOutputUidForBrowser(
   const direct = native.filter(row => row.uid === id && row.outputChannels > 0)
   if (direct.length === 1) return direct[0].uid
   const selected = browser.find(row => row.id === id)
-  const label = selected?.label.trim().toLocaleLowerCase()
-  if (!label || browser.filter(row => row.label.trim().toLocaleLowerCase() === label).length !== 1) return undefined
-  const matches = native.filter(row => row.outputChannels > 0 && row.label.trim().toLocaleLowerCase() === label)
+  const label = selected ? outputLabelKey(selected.label) : ''
+  if (!label || browser.filter(row => outputLabelKey(row.label) === label).length !== 1) return undefined
+  const matches = native.filter(row => row.outputChannels > 0 && outputLabelKey(row.label) === label)
   return matches.length === 1 ? matches[0].uid : undefined
 }
 
@@ -319,9 +320,9 @@ export function remapNativeOutputUid(
 ): string | undefined {
   const source = from.filter(row => row.uid === uid && row.outputChannels > 0)
   if (source.length !== 1) return undefined
-  const label = source[0].label.trim().toLocaleLowerCase()
-  if (!label || from.filter(row => row.outputChannels > 0 && row.label.trim().toLocaleLowerCase() === label).length !== 1) return undefined
-  const matches = to.filter(row => row.outputChannels > 0 && row.label.trim().toLocaleLowerCase() === label)
+  const label = outputLabelKey(source[0].label)
+  if (!label || from.filter(row => row.outputChannels > 0 && outputLabelKey(row.label) === label).length !== 1) return undefined
+  const matches = to.filter(row => row.outputChannels > 0 && outputLabelKey(row.label) === label)
   return matches.length === 1 ? matches[0].uid : undefined
 }
 
