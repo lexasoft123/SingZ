@@ -17,6 +17,9 @@ export interface SharedMicLevel {
 
 type Listener = () => void
 
+/** How long the strip waits for the Settings preview to release the native microphone. */
+export const PREVIEW_YIELD_TIMEOUT_MS = 2000
+
 let voiceHeld = false
 let levelReader: (() => SharedMicLevel) | null = null
 let previewYield: (() => Promise<void>) | null = null
@@ -53,6 +56,16 @@ export const micOwnership = {
   /** Before the strip opens the native input: claim it, and let a running preview release it first. */
   async acquireForVoice(): Promise<void> {
     micOwnership.setVoiceHold(true)
-    if (previewYield) await previewYield().catch(() => undefined)
+    if (!previewYield) return
+    // Bounded: a preview whose native stop never settles must not hang arm/record. After the timeout the strip
+    // goes on and main's own busy answer reports a real conflict.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      previewYield().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, PREVIEW_YIELD_TIMEOUT_MS)
+      })
+    ])
+    if (timer !== undefined) clearTimeout(timer)
   }
 }

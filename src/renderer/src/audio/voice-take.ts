@@ -408,7 +408,7 @@ export class VoiceController {
   private publishHold(): void {
     const m = this.model
     micOwnership.setVoiceHold(
-      this.armOpen || this.opening !== null || this.armPending > 0 || m.recording || m.starting || this.monitorPending
+      this.armOpen || this.disarming > 0 || this.opening !== null || this.armPending > 0 || m.recording || m.starting || m.monitor.on || this.monitorPending
     )
   }
 
@@ -834,8 +834,22 @@ export class VoiceController {
   private releaseArm(): void {
     if (!this.armOpen) return
     this.armOpen = false
+    void this.disarmMain()
+  }
+
+  /** Disarms in flight: the native input is still ours until main has answered, so the Settings preview must not start yet. */
+  private disarming = 0
+  private async disarmMain(): Promise<void> {
+    this.disarming++
     this.publishHold()
-    void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
+    try {
+      await Promise.resolve(this.deps.api.disarm())
+    } catch {
+      /* idempotent in main */
+    } finally {
+      this.disarming--
+      this.publishHold()
+    }
   }
 
   /** The Record button, the R key and the strip all end up here. */
@@ -975,9 +989,7 @@ export class VoiceController {
   private async forceDisarm(): Promise<void> {
     this.armToken++
     this.armOpen = false
-    this.publishHold()
-    await Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
-    this.publishHold()
+    await this.disarmMain()
   }
 
   private failStart(reason: 'permission' | 'no-input' | 'busy' | 'error'): void {

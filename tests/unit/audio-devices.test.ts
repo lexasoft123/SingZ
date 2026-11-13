@@ -156,12 +156,23 @@ describe('native and Chromium names of one interface', () => {
     const chromium = [{ id: 'c-zen', label: 'Zen Quadro SC (0a12:34bc)' }, { id: 'c-mic', label: 'MacBook Pro Microphone' }]
     expect(chromiumInputIdForNative(native('Zen Quadro SC'), chromium)).toBe('c-zen')
     expect(nativeInputUidForChromium('c-zen', chromium, [native('zen quadro sc'), native('MacBook Pro Microphone', 'uid-mic')])).toBe('uid-zen')
-    // a longer native name extends the Chromium one: still one unambiguous device
-    expect(nativeInputUidForChromium('c-zen', chromium, [native('Zen Quadro SC Playback')])).toBe('uid-zen')
   })
   it('refuses an ambiguous match instead of picking the wrong interface', () => {
     const chromium = [{ id: 'c-zen', label: 'Zen Quadro SC' }]
     expect(nativeInputUidForChromium('c-zen', chromium, [native('Zen Quadro SC A', 'a'), native('Zen Quadro SC B', 'b')])).toBeUndefined()
     expect(nativeInputUidForChromium('c-zen', chromium, [native('Other interface', 'o')])).toBeUndefined()
+  })
+})
+
+describe('no prefix guessing between different devices', () => {
+  const native = (label: string, uid: string) => ({ uid, label, channels: 2, isDefault: false }) as never
+  it.each([
+    ['Microphone', 'Microphone Array (Realtek)'],
+    ['USB Audio', 'USB Audio CODEC'],
+    ['Zen Quadro SC', 'Zen Quadro SC Playback']
+  ])('%s does not match %s either way', (short, long) => {
+    expect(nativeInputUidForChromium('c', [{ id: 'c', label: short }], [native(long, 'long')])).toBeUndefined()
+    expect(chromiumInputIdForNative(native(short, 's'), [{ id: 'c', label: long }])).toBeUndefined()
+    expect(nativeInputUidForChromium('c', [{ id: 'c', label: short }], [native(short, 's')])).toBe('s') // negative control: exact still matches
   })
 })

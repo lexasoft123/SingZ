@@ -30,19 +30,13 @@ export function inputLabelKey(label: string): string {
     .replace(/\s+/g, ' ')
 }
 
-/** The one native/Chromium candidate whose label matches: exact on the normalized name, else a unique one whose
- * name extends the other ("zen quadro sc" vs "zen quadro sc playback"). Ambiguous or empty: undefined. */
+/** The one native/Chromium candidate whose normalized label equals this one. No prefix or substring rule: 'Microphone'
+ * must never match 'Microphone Array (Realtek)' or 'USB Audio' 'USB Audio CODEC'. Ambiguous or empty: undefined. */
 function uniqueLabelMatch<T extends { label: string }>(label: string, candidates: readonly T[]): T | undefined {
   const key = inputLabelKey(label)
   if (!key) return undefined
   const exact = candidates.filter((c) => inputLabelKey(c.label) === key)
-  if (exact.length === 1) return exact[0]
-  if (exact.length > 1) return undefined
-  const loose = candidates.filter((c) => {
-    const other = inputLabelKey(c.label)
-    return other.length > 0 && (other.startsWith(key) || key.startsWith(other))
-  })
-  return loose.length === 1 ? loose[0] : undefined
+  return exact.length === 1 ? exact[0] : undefined
 }
 
 /** A native uid is always the training identity. This label match is only a

@@ -33,7 +33,7 @@ import {
 import VoiceStrip from '../../src/renderer/src/components/VoiceStrip'
 import { MonitorChipView } from '../../src/renderer/src/components/VoiceMonitorChip'
 import Tooltip, { placeTip, TipController, TIP_DELAY_MS } from '../../src/renderer/src/components/Tooltip'
-import { micOwnership } from '../../src/renderer/src/audio/mic-ownership'
+import { micOwnership, PREVIEW_YIELD_TIMEOUT_MS } from '../../src/renderer/src/audio/mic-ownership'
 import { micPreviewErrorCopy, micPreviewErrorKind } from '../../src/renderer/src/audio/mic-preview'
 import { takeIsSilent } from '../../src/renderer/src/components/voice-format'
 import VoiceTrackSettings from '../../src/renderer/src/components/VoiceTrackSettings'
@@ -2705,6 +2705,29 @@ describe('one native microphone owner: the Voice strip and the Settings preview'
     expect(c.getSnapshot().armed).toBe(true)
     expect(c.getSnapshot().error).toBeNull()
     expect(api.arm).toHaveBeenCalledTimes(1)
+    c.dispose()
+  })
+  it('a preview whose native stop never settles does not hang arm: it proceeds after the bounded wait (negative control: before the timeout it has not)', async () => {
+    micOwnership.setPreviewYield(() => new Promise<void>(() => undefined))
+    const { c, api } = await setup()
+    const arming = c.arm()
+    await vi.advanceTimersByTimeAsync(PREVIEW_YIELD_TIMEOUT_MS - 100)
+    expect(api.arm).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(200)
+    await arming
+    expect(api.arm).toHaveBeenCalledTimes(1)
+    expect(c.getSnapshot().armed).toBe(true)
+    c.dispose()
+  })
+  it('the hold lasts until main has answered the disarm, so a preview cannot start under an in-flight disarm', async () => {
+    let answer!: () => void
+    const { c } = await setup({ disarm: vi.fn(() => new Promise((r) => { answer = () => r({ ok: true }) })) as never })
+    await c.arm()
+    const disarming = c.arm()
+    await disarming
+    expect(micOwnership.voiceHolds()).toBe(true) // negative control: it used to drop here
+    answer()
+    await vi.waitFor(() => expect(micOwnership.voiceHolds()).toBe(false))
     c.dispose()
   })
   it('without the yield the same arm would fail (control for the test above)', async () => {
