@@ -76,7 +76,6 @@ export const voice: Translation<typeof en> = {
   'player.voice.clipOn': '输入已削波。点击重置削波指示',
   'player.voice.clipOff': '没有削波。削波指示灯',
 
-  'player.voice.msgArmed': '已准备。将从播放位置开始录音。',
   'player.voice.msgRecording': '正在跟着歌曲录音',
   'player.voice.msgReview': '保留这段录音，或删除后重新录制。',
   'player.voice.msgListenAlone': '正在单独试听录音，歌曲已静音。',
@@ -92,10 +91,6 @@ export const voice: Translation<typeof en> = {
   'player.voice.errNoBridge': '此版本不支持录音。',
   'player.voice.retry': '重试',
 
-  'player.voice.emptyIdle': '你的录音会出现在这里，从播放位置开始',
-  'player.voice.emptyArmed': '已准备。按“录音”（R）从播放位置开始',
-  'player.voice.emptyPerm': '允许麦克风权限后即可录音',
-  'player.voice.emptyMissing': '连接麦克风后即可录音',
   'player.voice.takeActions': '录音操作',
   'player.voice.keep': '保留录音',
   'player.voice.kept': '录音已保留',
@@ -109,8 +104,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.takeInfoPartial': '录音 {n} · {time} · 不完整',
   'player.voice.takeInfoRecovered': '录音 {n} · {time} · 已恢复',
   'player.voice.recordingInfo': '录音中 · {time}',
-  'player.voice.tag': '录制时 {tempo}% · {transpose}',
-  'player.voice.tagChanged': '录制时 {tempo}% · {transpose} · 录制中有改动',
+  'player.voice.tagTempo': '速度 {tempo}%',
+  'player.voice.tagPitch': '音高 {transpose} st',
+  'player.voice.tagChanged': '录制中已更改',
+  'player.voice.takeSilent': '未录到信号',
   'player.voice.tagTitle': '这段录音是按这些设置跟着歌曲录制的。',
   'player.voice.tagTitleChanged': '录音期间速度或移调有改动。回放时保持演唱时的原样。',
 

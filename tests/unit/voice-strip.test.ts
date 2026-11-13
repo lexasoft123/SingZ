@@ -2,6 +2,7 @@
  * Voice strip (ADR 0014, spec §4): the state machine over fake engine / bridge
  * ports, the three-language key set, and the strip's accessible markup.
  */
+import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -30,6 +31,8 @@ import {
   type VoiceTakeApi
 } from '../../src/renderer/src/audio/voice-take'
 import VoiceStrip from '../../src/renderer/src/components/VoiceStrip'
+import Tooltip, { placeTip, TipController, TIP_DELAY_MS } from '../../src/renderer/src/components/Tooltip'
+import { takeIsSilent } from '../../src/renderer/src/components/voice-format'
 import VoiceTrackSettings from '../../src/renderer/src/components/VoiceTrackSettings'
 import { VoiceRecordButton } from '../../src/renderer/src/components/voice-record-button'
 import type { VoiceMonitorState, VoiceTakeSummary } from '../../src/shared/voice-take'
@@ -1043,15 +1046,55 @@ describe('monitoring owns an armed input (meter live) and an availability refres
     expect(c.getSnapshot().error).toBeNull()
     c.dispose()
   })
-  it('turning monitoring on arms the input and off releases it', async () => {
+  it('monitoring opens the input without arming; off releases it (monitor without arm)', async () => {
     const { c, api } = await setup()
     await c.toggleMonitor()
     expect(api.arm).toHaveBeenCalledTimes(1)
-    expect(c.getSnapshot().armed).toBe(true)
+    expect(c.getSnapshot().armed).toBe(false) // negative control: it used to light the arm button
+    expect(c.getSnapshot().monitor.on).toBe(true)
     expect(api.arm.mock.invocationCallOrder[0]).toBeLessThan(api.monitorSet.mock.invocationCallOrder.at(-1)!)
     await c.toggleMonitor()
     expect(api.disarm).toHaveBeenCalled()
     expect(c.getSnapshot().armed).toBe(false)
+    c.dispose()
+  })
+  it('arm without monitor: the input opens, monitoring stays off, disarm releases it', async () => {
+    const { c, api } = await setup()
+    await c.arm()
+    expect(c.getSnapshot().armed).toBe(true)
+    expect(c.getSnapshot().monitor.on).toBe(false)
+    expect(api.monitorSet).not.toHaveBeenCalled()
+    await c.arm()
+    expect(c.getSnapshot().armed).toBe(false)
+    expect(api.disarm).toHaveBeenCalledTimes(1)
+    c.dispose()
+  })
+  it('monitor off while armed keeps the arm and the open input', async () => {
+    const { c, api } = await setup()
+    await c.arm()
+    await c.toggleMonitor()
+    expect(api.arm).toHaveBeenCalledTimes(1) // the open input is shared
+    await c.toggleMonitor()
+    expect(c.getSnapshot().monitor.on).toBe(false)
+    expect(c.getSnapshot().armed).toBe(true) // negative control: it used to disarm when monitoring had armed
+    expect(api.disarm).not.toHaveBeenCalled()
+    c.dispose()
+  })
+  it('monitoring works with no song open', async () => {
+    const { c, api } = await setup()
+    await c.setSong(null)
+    await c.toggleMonitor()
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    expect(api.monitorSet).toHaveBeenCalledWith(expect.objectContaining({ on: true }))
+    c.dispose()
+  })
+  it('record from idle in one press leaves the monitor state alone', async () => {
+    const { c, api } = await setup()
+    await c.toggleRecord()
+    expect(c.getSnapshot().recording).toBe(true)
+    expect(c.getSnapshot().armed).toBe(false)
+    expect(c.getSnapshot().monitor.on).toBe(false)
+    expect(api.monitorSet).not.toHaveBeenCalled()
     c.dispose()
   })
   it('an explicit arm is preserved when monitoring is turned off', async () => {
@@ -1086,14 +1129,16 @@ describe('monitoring owns an armed input (meter live) and an availability refres
     expect(api.disarm).toHaveBeenCalled()
     c.dispose()
   })
-  it('an explicit disarm while monitoring turns monitoring off too', async () => {
+  it('disarming while monitoring keeps monitoring and the open input', async () => {
     const { c, api } = await setup()
+    await c.arm()
     await c.toggleMonitor()
     await c.arm() // the singer clicks the lit arm button
-    expect(c.getSnapshot().monitor.on).toBe(false)
     expect(c.getSnapshot().armed).toBe(false)
-    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: false }))
-    expect(api.disarm).toHaveBeenCalled()
+    expect(c.getSnapshot().monitor.on).toBe(true) // negative control: it used to end monitoring
+    expect(api.disarm).not.toHaveBeenCalled()
+    await c.toggleMonitor() // the last holder out closes the input
+    expect(api.disarm).toHaveBeenCalledTimes(1)
     c.dispose()
   })
   it('an arm failure leaves monitoring off in the existing recoverable states', async () => {
@@ -1588,7 +1633,7 @@ describe('monitoring during a take, route changes, and the arm window (hardware 
     const { c, api } = await setup({}, undefined, inputs2)
     api.monitorSet.mockImplementationOnce(() => new Promise<VoiceMonitorState>((r) => { reply = r }))
     const toggling = c.toggleMonitor()
-    await vi.waitFor(() => expect(c.getSnapshot().armed).toBe(true)) // the arm landed, monitorSet is in flight
+    await vi.waitFor(() => expect(api.arm).toHaveBeenCalled()) // the input opened, monitorSet is in flight
     api.arm.mockClear()
     c.selectInput('z3')
     reply(monState({ on: true }))
@@ -1912,7 +1957,7 @@ describe('markup', () => {
     expect(html).toMatch(/aria-pressed="false"[^>]*aria-label="Monitor my voice \(off\)"|aria-label="Monitor my voice \(off\)"[^>]*aria-pressed="false"/)
     expect(html).toContain('aria-live="polite"')
     expect(html).toContain('aria-label="Record (R)"')
-    expect(html).toContain('title="Record (R)"')
+    expect(html).not.toContain('title="Record (R)"') // the in-app Tooltip replaces the native title
   })
   it('recording: Record becomes a pressed Stop button', async () => {
     const html = await render((c) => c.toggleRecord())
@@ -1929,7 +1974,8 @@ describe('markup', () => {
     expect(html).toContain('aria-label="Discard take (Delete)"')
     expect(html).toContain('aria-label="Record (R)"')
     expect(html).not.toContain('Record unavailable')
-    expect(html).toContain('recorded at 100% · 0')
+    expect(html).not.toContain('recorded at') // a take at 100% and 0 shows no tag: nothing to explain
+    expect(html).not.toContain('100% · 0')
   })
   it('the take clip sits on the stems\' time axis: the shared view, not the whole song', async () => {
     const { c, engine } = await setup()
@@ -1943,6 +1989,18 @@ describe('markup', () => {
     const v = { s: take.startSec - 5, e: take.startSec + 45 }
     expect(at(v)).toContain('left:10%') // (start - (start-5)) / 50
     expect(at({ s: take.startSec + 100, e: take.startSec + 150 })).not.toContain('vs-clip ') // scrolled out of view
+    c.dispose()
+  })
+})
+
+describe('voice lane without a take', () => {
+  it('keeps the lane clear after arming while retaining the arm control state', async () => {
+    const { c, engine } = await setup()
+    await c.arm()
+    const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never, view: null }))
+    expect(html).toContain('aria-label="Disarm recording"')
+    expect(html).not.toContain('Recording starts at the playhead')
+    expect(html).not.toContain('Press Record (R)')
     c.dispose()
   })
 })
@@ -2134,11 +2192,11 @@ describe('monitor output: back-to-back picks, refusals and unusable remembered d
     expect(outputsOf(api)).toEqual(['a-uid'])
     c.dispose()
   })
-  it('a refused switch releases the arm the monitor made', async () => {
+  it('a refused switch releases the input the monitor held', async () => {
     const { c, api } = await setup(apiOver())
     await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
     await c.toggleMonitor()
-    expect(c.getSnapshot().armed).toBe(true) // monitoring armed the input
+    expect(c.getSnapshot().armed).toBe(false) // monitoring holds the input, the arm button is untouched
     api.disarm.mockClear()
     api.monitorSet.mockResolvedValueOnce(monState({ available: { reason: 'route-separate-devices' }, on: false, latency: null, outputCandidates: cands }))
     await c.setMonitorOutput('a-uid')
@@ -2185,7 +2243,7 @@ describe('voice lane: tooltips, waveform, selection, move and delete', () => {
   const strip = (c: VoiceController, engine: unknown, view: { s: number; e: number } | null = null): string =>
     renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never, view }))
 
-  it('every button of the strip, the take actions and the popup has an accessible name and the app\'s title tooltip', async () => {
+  it('every button of the strip, the take actions and the popup has an accessible name and the in-app Tooltip around it', async () => {
     const { c, engine } = await recorded()
     const pages = [
       strip(c, engine),
@@ -2202,14 +2260,15 @@ describe('voice lane: tooltips, waveform, selection, move and delete', () => {
         const attrs = m[1]!
         const name = /aria-label="([^"]+)"/.exec(attrs)?.[1] ?? m[2]!.replace(/<[^>]*>/g, '').trim()
         expect(name, attrs).not.toBe('')
-        expect(/\btitle="([^"]+)"/.exec(attrs)?.[1] ?? '', `tooltip for ${name}`).not.toBe('') // the same title mechanism as the transport buttons
+        expect(attrs, `native title on ${name}`).not.toContain('title=') // native title tooltips do not show: the in-app Tooltip owns it
+        expect(html.slice(Math.max(0, m.index! - 80), m.index!), `Tooltip around ${name}`).toMatch(/<span class="sz-tip-wrap[^"]*">$/)
       }
     }
     expect(buttons).toBeGreaterThan(10)
     expect(pages[3]).toContain('aria-label="Reset position"')
     // shortcut hints ride in the tooltip text
-    expect(pages[1]).toContain('title="Record (R)"')
-    expect(pages[3]).toContain('title="Discard take (Delete)"')
+    expect(pages[1]).toContain('aria-label="Record (R)"')
+    expect(pages[3]).toContain('aria-label="Discard take (Delete)"')
     c.dispose()
   })
   it('a just-finished take gets real peaks from main and draws a waveform, not a grid', async () => {
@@ -2317,5 +2376,235 @@ describe('voice lane: tooltips, waveform, selection, move and delete', () => {
     expect(c.getSnapshot().take).toBeNull()
     expect(c.getSnapshot().takeSelected).toBe(false)
     c.dispose()
+  })
+})
+
+describe('in-app Tooltip', () => {
+  const make = () => {
+    const seen: boolean[] = []
+    const ctl = new TipController((v) => seen.push(v))
+    return { ctl, seen }
+  }
+  it('shows after the hover delay, not before; leaving first cancels it', () => {
+    vi.useFakeTimers()
+    const { ctl, seen } = make()
+    ctl.pointerEnter()
+    vi.advanceTimersByTime(TIP_DELAY_MS - 1)
+    expect(ctl.visible).toBe(false) // negative control: a native title would also wait, nothing earlier shows
+    vi.advanceTimersByTime(1)
+    expect(ctl.visible).toBe(true)
+    ctl.pointerLeave()
+    expect(ctl.visible).toBe(false)
+    ctl.pointerEnter()
+    vi.advanceTimersByTime(TIP_DELAY_MS - 10)
+    ctl.pointerLeave()
+    vi.advanceTimersByTime(1000)
+    expect(seen).toEqual([true, false])
+    vi.useRealTimers()
+  })
+  it('keyboard focus shows at once; a mouse-press focus does not; blur hides', () => {
+    const { ctl } = make()
+    ctl.focus(false)
+    expect(ctl.visible).toBe(false)
+    ctl.focus(true)
+    expect(ctl.visible).toBe(true)
+    ctl.blur()
+    expect(ctl.visible).toBe(false)
+  })
+  it('a press, Esc or a scroll (dismiss) hides it and cancels a pending show', () => {
+    vi.useFakeTimers()
+    const { ctl } = make()
+    ctl.pointerEnter()
+    vi.advanceTimersByTime(TIP_DELAY_MS)
+    expect(ctl.visible).toBe(true)
+    ctl.dismiss()
+    expect(ctl.visible).toBe(false)
+    ctl.pointerEnter() // still hovering after the press: one more rest shows it again
+    ctl.pointerLeave()
+    ctl.pointerEnter()
+    ctl.dismiss()
+    vi.advanceTimersByTime(1000)
+    expect(ctl.visible).toBe(false)
+    vi.useRealTimers()
+  })
+  it('keeps the tip inside the viewport: above when there is room, below when not, clamped sideways', () => {
+    const vp = { width: 400, height: 300 }
+    const tip = { width: 120, height: 24 }
+    expect(placeTip({ left: 100, top: 150, width: 24, height: 24 }, tip, vp)).toMatchObject({ side: 'above', top: 150 - 24 - 8 })
+    expect(placeTip({ left: 100, top: 10, width: 24, height: 24 }, tip, vp)).toMatchObject({ side: 'below', top: 42 })
+    expect(placeTip({ left: 0, top: 150, width: 10, height: 24 }, tip, vp).left).toBe(6)
+    expect(placeTip({ left: 395, top: 150, width: 10, height: 24 }, tip, vp).left).toBe(400 - 120 - 6)
+  })
+  it('wraps the control (a disabled one too) in a pointer-receiving wrapper and leaves aria-label and no title on it', () => {
+    const html = renderToStaticMarkup(
+      createElement(Tooltip, { label: 'Why not' }, createElement('button', { type: 'button', disabled: true, 'aria-label': 'Do it' }, 'x'))
+    )
+    expect(html).toMatch(/^<span class="sz-tip-wrap"><button[^>]*aria-label="Do it"/)
+    expect(html).not.toContain('title=')
+    expect(html).not.toContain('role="tooltip"') // only while shown
+  })
+})
+
+describe('take clip tag and silent take note', () => {
+  const stripHtml = (c: VoiceController, engine: unknown): string =>
+    renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never, view: null }))
+  it('names tempo and pitch with units only when they differ from the song', async () => {
+    const r = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary({ tempo: 0.8, transposeSemitones: 2 } as never) })) })
+    await r.c.toggleRecord()
+    await r.c.toggleRecord()
+    const html = stripHtml(r.c, r.engine)
+    expect(html).toContain('Tempo 80%')
+    expect(html).toContain('Pitch +2 st')
+    expect(html).not.toContain('Tempo 100%')
+    r.c.dispose()
+  })
+  it('a silent take says so; a take with signal or unknown peaks does not', () => {
+    expect(takeIsSilent([0, 0.0001, 0])).toBe(true)
+    expect(takeIsSilent([0, 0.2, 0])).toBe(false) // negative control
+    expect(takeIsSilent([])).toBe(false)
+    expect(takeIsSilent(undefined)).toBe(false)
+  })
+  it('renders the note on a silent take only', async () => {
+    const silent = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary() })), peaks: vi.fn(async () => ({ ok: true as const, stepSec: 0.05, durationSec: 10, peaks: [0, 0, 0] })) })
+    await silent.c.toggleRecord()
+    await silent.c.toggleRecord()
+    await vi.waitFor(() => expect(silent.c.getSnapshot().take?.peaks).toEqual([0, 0, 0]))
+    expect(stripHtml(silent.c, silent.engine)).toContain('No signal recorded')
+    silent.c.dispose()
+    const loud = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary() })), peaks: vi.fn(async () => ({ ok: true as const, stepSec: 0.05, durationSec: 10, peaks: [0.4, 0.6] })) })
+    await loud.c.toggleRecord()
+    await loud.c.toggleRecord()
+    await vi.waitFor(() => expect(loud.c.getSnapshot().take?.peaks).toEqual([0.4, 0.6]))
+    expect(stripHtml(loud.c, loud.engine)).not.toContain('No signal recorded')
+    loud.c.dispose()
+  })
+})
+
+describe('input ownership interleavings', () => {
+  const deferred = <T,>() => {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>((r) => { resolve = r })
+    return { promise, resolve }
+  }
+  it('arm clicked while the monitor is opening shares ONE api.arm and never disarms (negative control: two arms and a disarm)', async () => {
+    const gate = deferred<{ ok: true }>()
+    const { c, api } = await setup({ arm: vi.fn(() => gate.promise) as never })
+    const monitoring = c.toggleMonitor()
+    await vi.waitFor(() => expect(api.arm).toHaveBeenCalledTimes(1))
+    const arming = c.arm()
+    await Promise.resolve()
+    gate.resolve({ ok: true })
+    await Promise.all([monitoring, arming])
+    expect(api.arm).toHaveBeenCalledTimes(1)
+    expect(api.disarm).not.toHaveBeenCalled()
+    expect(c.getSnapshot().armed).toBe(true)
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    c.dispose()
+  })
+  it('monitor toggled while the arm is opening shares the same open', async () => {
+    const gate = deferred<{ ok: true }>()
+    const { c, api } = await setup({ arm: vi.fn(() => gate.promise) as never })
+    const arming = c.arm()
+    await vi.waitFor(() => expect(api.arm).toHaveBeenCalledTimes(1))
+    const monitoring = c.toggleMonitor()
+    await Promise.resolve()
+    gate.resolve({ ok: true })
+    await Promise.all([arming, monitoring])
+    expect(api.arm).toHaveBeenCalledTimes(1)
+    expect(api.disarm).not.toHaveBeenCalled()
+    expect(c.getSnapshot().armed).toBe(true)
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    // the last holder out closes it
+    await c.toggleMonitor()
+    expect(api.disarm).not.toHaveBeenCalled()
+    await c.arm()
+    expect(api.disarm).toHaveBeenCalledTimes(1)
+    c.dispose()
+  })
+  it('arm then monitor then disarm then monitor off closes the input exactly once, at the end', async () => {
+    const { c, api } = await setup()
+    await c.arm()
+    await c.toggleMonitor()
+    await c.arm()
+    expect(api.disarm).not.toHaveBeenCalled()
+    await c.toggleMonitor()
+    expect(api.disarm).toHaveBeenCalledTimes(1)
+    c.dispose()
+  })
+  it('monitor then record: the take reuses the input, stopping it hands the input back to the monitor', async () => {
+    const { c, api } = await setup()
+    await c.toggleMonitor()
+    await c.toggleRecord()
+    await c.toggleRecord()
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    expect(api.disarm).not.toHaveBeenCalled() // negative control: stop used to disarm under a live monitor
+    await c.toggleMonitor()
+    expect(api.disarm).toHaveBeenCalledTimes(1)
+    c.dispose()
+  })
+  it('a record start that fails busy leaves the live monitor input open; without a monitor it closes it', async () => {
+    const busy = { recordStart: vi.fn(async () => ({ ok: false as const, reason: 'busy' as const, message: '' })) }
+    const live = await setup(busy)
+    await live.c.toggleMonitor()
+    await live.c.toggleRecord()
+    expect(live.c.getSnapshot().error).toBe('busy')
+    expect(live.c.getSnapshot().monitor.on).toBe(true)
+    expect(live.api.disarm).not.toHaveBeenCalled()
+    live.c.dispose()
+    const alone = await setup(busy)
+    await alone.c.toggleRecord()
+    expect(alone.api.disarm).toHaveBeenCalled() // negative control: nothing holds the input
+    alone.c.dispose()
+  })
+  it('a start undone because the song changed keeps a live monitor\'s input', async () => {
+    const gate = deferred<{ ok: true; takeId: string }>()
+    const { c, api } = await setup({ recordStart: vi.fn(() => gate.promise) as never })
+    await c.toggleMonitor()
+    const rec = c.toggleRecord()
+    await vi.waitFor(() => expect(api.recordStart).toHaveBeenCalled())
+    await c.setSong('song-2')
+    gate.resolve({ ok: true, takeId: 'take-9' })
+    await rec
+    expect(api.remove).toHaveBeenCalled() // the start was undone
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    expect(api.disarm).not.toHaveBeenCalled()
+    c.dispose()
+  })
+  it('unplug during a monitor-only session closes the input; an armed one stays open', async () => {
+    const lost = () => monState({ available: { reason: 'device-lost' }, on: false, latency: null })
+    const only = await setup()
+    await only.c.toggleMonitor()
+    only.api.monitorState.mockResolvedValue(lost())
+    for (let i = 0; i < 12; i++) await only.c.pollLevel()
+    await vi.waitFor(() => expect(only.c.getSnapshot().monitor.on).toBe(false))
+    expect(only.api.disarm).toHaveBeenCalledTimes(1) // negative control: it stayed open with no owner
+    only.c.dispose()
+    const armed = await setup()
+    await armed.c.arm()
+    await armed.c.toggleMonitor()
+    armed.api.monitorState.mockResolvedValue(lost())
+    for (let i = 0; i < 12; i++) await armed.c.pollLevel()
+    await vi.waitFor(() => expect(armed.c.getSnapshot().monitor.on).toBe(false))
+    expect(armed.c.getSnapshot().armed).toBe(true)
+    expect(armed.api.disarm).not.toHaveBeenCalled()
+    armed.c.dispose()
+  })
+})
+
+describe('Tooltip styles', () => {
+  const css = readFileSync(new URL('../../src/renderer/src/components/voice-strip.css', import.meta.url), 'utf8')
+  const src = readFileSync(new URL('../../src/renderer/src/components/Tooltip.tsx', import.meta.url), 'utf8')
+  const rendered = [...new Set([...src.matchAll(/sz-tip[\w-]*/g)].map((m) => m[0]))].filter((n) => n !== 'sz-tip-wrap' ? true : true)
+  it('every class the component renders has a CSS rule, and the tip is a fixed, topmost, click-through surface', () => {
+    expect(rendered).toEqual(expect.arrayContaining(['sz-tip', 'sz-tip-wrap']))
+    for (const name of rendered) expect(css, `.${name} has no rule`).toMatch(new RegExp(`\\.${name}[\\s{.:,>]`))
+    const tip = /\.sz-tip \{([^}]*)\}/.exec(css)![1]!
+    expect(tip).toMatch(/position:\s*fixed/)
+    expect(tip).toMatch(/pointer-events:\s*none/)
+    expect(tip).toMatch(/background:/)
+    expect(Number(/z-index:\s*(\d+)/.exec(tip)![1])).toBeGreaterThan(1000)
+    expect(css).toMatch(/prefers-reduced-motion: no-preference\)\s*\{\s*\.sz-tip \{ animation/)
+    expect(css).toMatch(/\.sz-tip\.above::after/)
+    expect(css).toMatch(/\.sz-tip\.below::after/)
   })
 })

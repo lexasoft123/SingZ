@@ -76,7 +76,6 @@ export const voice: Translation<typeof en> = {
   'player.voice.clipOn': 'Вход перегружен. Нажмите, чтобы сбросить индикатор',
   'player.voice.clipOff': 'Перегрузки нет. Индикатор перегрузки',
 
-  'player.voice.msgArmed': 'Готово. Запись начнётся с позиции воспроизведения.',
   'player.voice.msgRecording': 'Идёт запись поверх песни',
   'player.voice.msgReview': 'Оставьте дубль или удалите его, чтобы записать заново.',
   'player.voice.msgListenAlone': 'Слушаете только дубль. Песня выключена.',
@@ -92,10 +91,6 @@ export const voice: Translation<typeof en> = {
   'player.voice.errNoBridge': 'В этой сборке запись недоступна.',
   'player.voice.retry': 'Повторить',
 
-  'player.voice.emptyIdle': 'Здесь появится ваш дубль — с позиции воспроизведения',
-  'player.voice.emptyArmed': 'Готово. Нажмите «Запись» (R), чтобы начать с этой позиции',
-  'player.voice.emptyPerm': 'Разрешите доступ к микрофону, чтобы записывать',
-  'player.voice.emptyMissing': 'Подключите микрофон, чтобы записывать',
   'player.voice.takeActions': 'Действия с дублем',
   'player.voice.keep': 'Оставить дубль',
   'player.voice.kept': 'Дубль сохранён',
@@ -109,8 +104,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.takeInfoPartial': 'Дубль {n} · {time} · неполный',
   'player.voice.takeInfoRecovered': 'Дубль {n} · {time} · восстановлен',
   'player.voice.recordingInfo': 'Запись · {time}',
-  'player.voice.tag': 'записано на {tempo}% · {transpose}',
-  'player.voice.tagChanged': 'записано на {tempo}% · {transpose} · менялось во время записи',
+  'player.voice.tagTempo': 'Темп {tempo}%',
+  'player.voice.tagPitch': 'Высота {transpose} пт',
+  'player.voice.tagChanged': 'Менялось во время записи',
+  'player.voice.takeSilent': 'Сигнал не записан',
   'player.voice.tagTitle': 'Дубль записан под песню с этими настройками.',
   'player.voice.tagTitleChanged': 'Темп или высота менялись во время записи. Дубль звучит так, как был спет.',
 

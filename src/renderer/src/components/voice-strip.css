@@ -17,7 +17,8 @@
   opacity: 0.35;
 }
 .voice-row[data-phase='recording'] .vs-controls::before { background: var(--danger); opacity: 1; }
-.voice-row[data-phase='armed'] .vs-controls::before { background: var(--danger); opacity: 0.7; }
+.voice-row[data-phase='armed'] .vs-controls::before, .voice-row[data-armed='true'] .vs-controls::before { background: var(--danger); opacity: 0.7; }
+.voice-row[data-phase='recording'] .vs-controls::before { opacity: 1; }
 
 .vs-sr-only {
   position: absolute;
@@ -199,13 +200,16 @@
 .vs-clip.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
 .vs-clip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .vs-clip-ghost { z-index: 5; pointer-events: none; opacity: 0.35; border-style: dashed; background: none; }
-.vs-wave-mid { stroke: color-mix(in srgb, var(--voice) 55%, transparent); stroke-width: 1; }
+.vs-wave-mid { stroke: color-mix(in srgb, var(--voice) 80%, transparent); stroke-width: 1.5; }
+.vs-clip.recording .vs-wave-mid { stroke: color-mix(in srgb, var(--danger) 85%, transparent); }
 .vs-clip.recording { border-color: var(--danger); background: rgba(255, 122, 92, 0.1); }
 .vs-clip.partial { border-style: dashed; }
 .vs-clip.playing { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--voice) 30%, transparent); }
 .vs-wave { position: absolute; inset: 2px 0; width: 100%; height: calc(100% - 4px); fill: color-mix(in srgb, var(--voice) 70%, transparent); pointer-events: none; }
 .vs-clip.recording .vs-wave { fill: color-mix(in srgb, var(--danger) 75%, transparent); }
-.vs-clip-tag { position: absolute; left: -1px; top: -19px; font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }
+.vs-clip-tags { position: absolute; left: -1px; top: -19px; display: flex; gap: 4px; white-space: nowrap; }
+.vs-clip-tag { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }
+.vs-clip-tag.silent { color: var(--danger); border-color: var(--danger); }
 .vs-clip-tag.changed { color: var(--accent); border-color: var(--accent); }
 
 /* a take playing alone: the stems are not playing, so they read as off */
@@ -239,11 +243,55 @@ body.modal-open .vs-rec-t.recording .vs-rec-core { animation-play-state: paused;
 .vs-ib.vs-mon.active { color: #12100d; background: var(--voice); }
 .vs-badge { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--voice) 45%, transparent); color: var(--voice); background: color-mix(in srgb, var(--voice) 10%, transparent); white-space: nowrap; }
 
-/* Track settings popup (kit Modal card). */
-.vs-settings { width: min(460px, 92vw); }
-.vs-set-row { display: grid; grid-template-columns: 9.5em 1fr 4.5em; align-items: center; gap: 10px; margin: 10px 0; }
-.vs-set-row select { grid-column: 2 / 4; min-width: 0; }
-.vs-set-row output { font-family: var(--font-mono); font-size: 11px; color: var(--dim); text-align: right; }
-.vs-set-note { min-height: 1.3em; font-size: 12px; color: var(--accent); }
-.vs-set-route { font-family: var(--font-mono); font-size: 11px; color: var(--dim); }
-.vs-set-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+/* Track settings popup: the kit Modal card with the app's own label, slider and select styles. */
+.vs-settings { width: min(440px, 92vw); }
+.vs-set-field { display: flex; flex-direction: column; margin: 0 0 4px; min-width: 0; }
+.vs-set-field .sz-tip-wrap { width: 100%; }
+.vs-set-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.vs-set-head output { font: 600 12px var(--font-mono); color: var(--accent); }
+.vs-vol-accent { --voice: var(--accent); height: 4px; margin: 6px 0 8px; }
+.vs-vol-accent::-webkit-slider-thumb { width: 14px; height: 14px; }
+.vs-set-select { min-width: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.vs-set-select:focus-visible, .vs-vol-accent:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.vs-set-select option { background: #1b1814; color: var(--text); }
+.vs-set-note { min-height: 1.3em; font-size: 12px; color: var(--accent); margin: 10px 0 0; }
+.vs-set-route { font-family: var(--font-mono); font-size: 11px; color: var(--dim); margin: 4px 0 0; overflow-wrap: anywhere; }
+
+/* In-app tooltip (Tooltip.tsx): the app's popover surface, small. The wrapper is a flex item of the
+   toolbars (inline-flex keeps their gap and sizing); .contents wraps absolutely placed or inline children. */
+.sz-tip-wrap { display: inline-flex; min-width: 0; }
+.sz-tip-wrap.grow { flex: 1; }
+.sz-tip-wrap.contents { display: contents; }
+/* a disabled control swallows pointer events: the wrapper takes them so its reason still shows */
+.sz-tip-wrap > :disabled { pointer-events: none; }
+.sz-tip {
+  position: fixed;
+  z-index: 2147483000; /* above the Modal overlay, a body sibling */
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 5px 9px;
+  background: #1d1915;
+  color: var(--text, #f4efe6);
+  border: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2));
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 11.5px;
+  line-height: 1.4;
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+.sz-tip::after {
+  content: '';
+  position: absolute;
+  left: var(--tip-arrow, 50%);
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  background: #1d1915;
+  transform: rotate(45deg);
+}
+.sz-tip.above::after { bottom: -5px; border-right: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2)); border-bottom: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2)); }
+.sz-tip.below::after { top: -5px; border-left: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2)); border-top: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2)); }
+@media (prefers-reduced-motion: no-preference) {
+  .sz-tip { animation: sz-tip-in 0.12s ease-out; }
+}
+@keyframes sz-tip-in { from { opacity: 0; } }

@@ -4,6 +4,7 @@ import { monitorDbToFader, type VoiceController, type VoiceModel } from '../audi
 import { t } from '../i18n'
 import { REASON_KEY } from './voice-format'
 import { useVoiceModel } from './voice-host'
+import Tooltip from './Tooltip'
 import './voice-strip.css'
 
 /** The route line: resolved output device, buffer and delay while monitoring. */
@@ -26,55 +27,75 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
     m.monitorOutput === null && m.monitorOutputDevice
       ? t('player.voice.outputSameNamed', { name: m.monitorOutputDevice.name })
       : t('player.voice.outputSame')
+  const outTitle = m.monitorOutputs.find((c) => c.id === m.monitorOutput)?.name ?? sameLabel
   return (
     <Modal cardClassName="vs-settings" aria-label={t('player.voice.settingsTitle')} onClose={onClose}>
       <h2>{t('player.voice.settingsTitle')}</h2>
-      <div className="vs-set-row">
-        <label htmlFor="vs-set-mon">{t('player.voice.monitorLevel')}</label>
-        <input
-          ref={first}
-          id="vs-set-mon"
-          type="range"
-          min={0}
-          max={100}
-          value={monitorDbToFader(m.monitorGainDb)}
-          aria-valuetext={`${m.monitorGainDb} dB`}
-          onChange={(e) => controller.setMonitorFader(Number(e.target.value))}
-        />
-        <output htmlFor="vs-set-mon">{`${m.monitorGainDb} dB`}</output>
+      <div className="vs-set-field">
+        <div className="vs-set-head">
+          <label className="settings-label" htmlFor="vs-set-mon">{t('player.voice.monitorLevel')}</label>
+          <output htmlFor="vs-set-mon">{`${m.monitorGainDb} dB`}</output>
+        </div>
+        <Tooltip label={t('player.voice.monitorLevel')} className="grow">
+          <input
+            ref={first}
+            id="vs-set-mon"
+            className="vs-vol vs-vol-accent"
+            type="range"
+            min={0}
+            max={100}
+            value={monitorDbToFader(m.monitorGainDb)}
+            aria-valuetext={`${m.monitorGainDb} dB`}
+            onChange={(e) => controller.setMonitorFader(Number(e.target.value))}
+          />
+        </Tooltip>
       </div>
-      <div className="vs-set-row">
-        <label htmlFor="vs-set-take">{t('player.voice.takeLevel')}</label>
-        <input
-          id="vs-set-take"
-          type="range"
-          min={0}
-          max={100}
-          value={m.level}
-          aria-valuetext={`${m.level}%`}
-          onChange={(e) => controller.setLevel(Number(e.target.value))}
-        />
-        <output htmlFor="vs-set-take">{`${m.level}%`}</output>
+      <div className="vs-set-field">
+        <div className="vs-set-head">
+          <label className="settings-label" htmlFor="vs-set-take">{t('player.voice.takeLevel')}</label>
+          <output htmlFor="vs-set-take">{`${m.level}%`}</output>
+        </div>
+        <Tooltip label={t('player.voice.takeLevel')} className="grow">
+          <input
+            id="vs-set-take"
+            className="vs-vol vs-vol-accent"
+            type="range"
+            min={0}
+            max={100}
+            value={m.level}
+            aria-valuetext={`${m.level}%`}
+            onChange={(e) => controller.setLevel(Number(e.target.value))}
+          />
+        </Tooltip>
       </div>
-      <div className="vs-set-row">
-        <label htmlFor="vs-set-out">{t('player.voice.outputLabel')}</label>
-        <select id="vs-set-out" value={m.monitorOutput ?? ''} onChange={(e) => void controller.setMonitorOutput(e.target.value === '' ? null : e.target.value)}>
-          <option value="">{sameLabel}</option>
-          {m.monitorOutputs.map((c) => (
-            <option key={c.id} value={c.id} disabled={!c.usable}>
-              {c.usable ? c.name : t('player.voice.outputOption', { name: c.name, reason: t(REASON_KEY[c.reason ?? 'error']) })}
-            </option>
-          ))}
-        </select>
+      <div className="vs-set-field">
+        <label className="settings-label" htmlFor="vs-set-out">{t('player.voice.outputLabel')}</label>
+        <Tooltip label={outTitle} className="grow">
+          <select
+            id="vs-set-out"
+            className="settings-select vs-set-select"
+            value={m.monitorOutput ?? ''}
+            onChange={(e) => void controller.setMonitorOutput(e.target.value === '' ? null : e.target.value)}
+          >
+            <option value="">{sameLabel}</option>
+            {m.monitorOutputs.map((c) => (
+              <option key={c.id} value={c.id} disabled={!c.usable}>
+                {c.usable ? c.name : t('player.voice.outputOption', { name: c.name, reason: t(REASON_KEY[c.reason ?? 'error']) })}
+              </option>
+            ))}
+          </select>
+        </Tooltip>
       </div>
       <p className="vs-set-note" role="status">
         {m.monitorSwitching ? t('player.voice.outputSwitching') : m.monitorOutputMissing ? t('player.voice.outputMissing') : ''}
       </p>
       <p className="vs-set-route">{routeLine(m)}</p>
-      <div className="vs-set-actions">
-        <button type="button" className="vs-btn" title={t('player.voice.settingsDone')} onClick={onClose}>
-          {t('player.voice.settingsDone')}
-        </button>
+      <div className="modal-actions">
+        <Tooltip label={t('player.voice.settingsDone')}>
+          <button type="button" className="pill ghost" onClick={onClose}>
+            {t('player.voice.settingsDone')}
+          </button>
+        </Tooltip>
       </div>
     </Modal>
   )

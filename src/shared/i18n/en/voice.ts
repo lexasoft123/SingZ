@@ -78,7 +78,6 @@ export const voice = {
   'player.voice.clipOff': 'No clipping. Clip indicator',
 
   // ── status line ──
-  'player.voice.msgArmed': 'Armed. Recording starts at the playhead.',
   'player.voice.msgRecording': 'Recording over the song',
   'player.voice.msgReview': 'Keep the take, or discard it. Record starts a new one.',
   'player.voice.msgListenAlone': 'Listening to the take alone. The song is muted.',
@@ -95,10 +94,6 @@ export const voice = {
   'player.voice.retry': 'Retry',
 
   // ── take lane ──
-  'player.voice.emptyIdle': 'Your take appears here, at the playhead',
-  'player.voice.emptyArmed': 'Armed. Press Record (R) to start at the playhead',
-  'player.voice.emptyPerm': 'Allow microphone access to record',
-  'player.voice.emptyMissing': 'Connect a microphone to record',
   'player.voice.takeActions': 'Take actions',
   'player.voice.keep': 'Keep take',
   'player.voice.kept': 'Take kept',
@@ -112,8 +107,10 @@ export const voice = {
   'player.voice.takeInfoPartial': 'Take {n} · {time} · partial',
   'player.voice.takeInfoRecovered': 'Take {n} · {time} · recovered',
   'player.voice.recordingInfo': 'Recording · {time}',
-  'player.voice.tag': 'recorded at {tempo}% · {transpose}',
-  'player.voice.tagChanged': 'recorded at {tempo}% · {transpose} · changed mid-take',
+  'player.voice.tagTempo': 'Tempo {tempo}%',
+  'player.voice.tagPitch': 'Pitch {transpose} st',
+  'player.voice.tagChanged': 'Changed mid-take',
+  'player.voice.takeSilent': 'No signal recorded',
   'player.voice.tagTitle': 'The take was recorded against the song at these settings.',
   'player.voice.tagTitleChanged': 'Tempo or transpose changed while recording. The take plays back as sung.',
 

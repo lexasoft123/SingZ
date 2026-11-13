@@ -10,8 +10,8 @@ import { t } from '../i18n'
 
 /** Ruler row height — the grid template and the beat overlay share it. */
 const RULER_H = 30
-/** Height of the extra (Voice) lane row. */
-const EXTRA_ROW_H = 104
+/** The extra (Voice) lane row is as tall as a stem lane (same 1fr share); never below this, so the take's waveform reads. */
+const EXTRA_ROW_MIN_H = 104
 
 /** When the lanes' played layer catches up with a rolling playhead: once the
  *  sliver the kit's edge layer draws behind the line is this many device
@@ -367,7 +367,7 @@ export default function TrackStack({
       className="stack"
       ref={stackRef}
       style={{
-        gridTemplateRows: `${RULER_H}px repeat(${tracks.length}, minmax(64px, 1fr))${extra ? ` ${EXTRA_ROW_H}px` : ''}`,
+        gridTemplateRows: `${RULER_H}px repeat(${tracks.length}, minmax(64px, 1fr))${extra ? ` minmax(${EXTRA_ROW_MIN_H}px, 1fr)` : ''}`,
         ['--extra-row' as string]: tracks.length + 2
       }}
     >

@@ -3,7 +3,8 @@ import type { MultitrackEngine } from '../audio/engine'
 import type { TimeView } from '../model'
 import { meterFraction, monitorDbToFader, primaryState, recordBlock, songSpan, type VoiceController, type VoiceInputOption, type VoiceModel } from '../audio/voice-take'
 import { t, type Key } from '../i18n'
-import { blockText, clock, dbText, REASON_KEY, sgn } from './voice-format'
+import { blockText, clock, dbText, REASON_KEY, sgn, takeIsSilent } from './voice-format'
+import Tooltip from './Tooltip'
 import VoiceTrackSettings from './VoiceTrackSettings'
 import { useVoiceModel } from './voice-host'
 import { useVoiceStrings } from './voice-strings'
@@ -50,8 +51,8 @@ const ICON = {
   ),
   gear: (
     <>
-      <circle cx="8" cy="8" r="2.2" {...STROKE} />
-      <path {...STROKE} d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2" />
+      <path {...STROKE} d="M4 2v12M8 2v12M12 2v12" />
+      <path {...STROKE} d="M2.5 5h3M6.5 10h3M10.5 6h3" />
     </>
   ),
   reset: <path {...STROKE} d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5M3 2.8v2.4h2.4" />,
@@ -86,9 +87,11 @@ function IconButton({
   ref?: React.Ref<HTMLButtonElement>
 } & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'title'>): React.JSX.Element {
   return (
-    <button type="button" className={`vs-ib ${className}`.trim()} title={label} aria-label={label} {...rest}>
-      <SvgIcon>{ICON[icon]}</SvgIcon>
-    </button>
+    <Tooltip label={label}>
+      <button type="button" className={`vs-ib ${className}`.trim()} aria-label={label} {...rest}>
+        <SvgIcon>{ICON[icon]}</SvgIcon>
+      </button>
+    </Tooltip>
   )
 }
 
@@ -133,6 +136,7 @@ function Meter({ controller, live }: { controller: VoiceController; live: boolea
   const silent = !live || db <= -59
   const tip = silent ? t('player.voice.meterNone') : t('player.voice.meterTip', { db: dbText(db), peak: dbText(peak) })
   return (
+    <Tooltip label={tip} className="contents">
     <div
       className={`vs-meter${live ? ' live' : ''}`}
       role="meter"
@@ -141,7 +145,6 @@ function Meter({ controller, live }: { controller: VoiceController; live: boolea
       aria-valuemax={0}
       aria-valuenow={Math.round(Math.max(-60, db))}
       aria-valuetext={silent ? t('player.voice.meterNoSignal') : tip}
-      title={tip}
     >
       {Array.from({ length: METER_SEGS }, (_, i) => (
         <i
@@ -150,6 +153,7 @@ function Meter({ controller, live }: { controller: VoiceController; live: boolea
         />
       ))}
     </div>
+    </Tooltip>
   )
 }
 
@@ -195,7 +199,6 @@ function statusLine(
   }
   if (m.monitor.on && m.monitorHint) return { cls: '', text: t('player.voice.monitorHint') }
   if (m.monitor.on) return { cls: '', text: t('player.voice.msgMonitoring') }
-  if (state === 'armed') return { cls: '', text: t('player.voice.msgArmed') }
   if (m.monitor.avail !== 'ok') return { cls: 'warn', text: monitorReasonText(m) }
   return null
 }
@@ -277,22 +280,13 @@ export default function VoiceStrip({
   const left = viewSpan > 0 && take ? ((shownStart - viewS) / viewSpan) * 100 : 0
   const width = viewSpan > 0 ? Math.max(0.3, (spanSec / viewSpan) * 100) : 0
   const clipVisible = take !== null && viewSpan > 0 && left < 100 && left + width > 0
-  const changedTag = take ? take.changed : false
-  const tagText = take
-    ? t(changedTag ? 'player.voice.tagChanged' : 'player.voice.tag', {
-        tempo: Math.round(take.tempo * 100),
-        transpose: sgn(take.transpose)
-      })
-    : ''
-  const unusual = take ? take.changed || Math.abs(take.tempo - 1) > 1e-4 || take.transpose !== 0 : false
-
-  const emptyKey: Key = m.perm === 'denied'
-    ? 'player.voice.emptyPerm'
-    : m.inputMissing
-      ? 'player.voice.emptyMissing'
-      : m.armed
-        ? 'player.voice.emptyArmed'
-        : 'player.voice.emptyIdle'
+  // Only what differs from the song is named, with units: tempo in %, pitch in semitones.
+  const tagParts: string[] = []
+  if (take && Math.abs(take.tempo - 1) > 1e-4) tagParts.push(t('player.voice.tagTempo', { tempo: Math.round(take.tempo * 100) }))
+  if (take && take.transpose !== 0) tagParts.push(t('player.voice.tagPitch', { transpose: sgn(take.transpose) }))
+  if (take?.changed) tagParts.push(t('player.voice.tagChanged'))
+  const tagText = tagParts.join(' · ')
+  const silent = take !== null && !rec && takeIsSilent(take.peaks)
 
   const armed = m.armed || rec
   const faderMonitor = m.monitor.on
@@ -300,6 +294,7 @@ export default function VoiceStrip({
   const monitorWhy = monitorReasonText(m)
   const monitorUnavailable = !m.monitor.on && (m.monitor.avail !== 'ok' || m.inputMissing || m.perm === 'denied')
   const monitorLabel = m.monitor.on ? t('player.voice.monitorOn') : t('player.voice.monitorOff')
+  const inputTip = m.inputs.find((i) => i.id === m.input) ? inputOptionText(m.inputs.find((i) => i.id === m.input)!) : t('player.voice.input')
   const takeInfo = !take
     ? ''
     : rec
@@ -310,37 +305,46 @@ export default function VoiceStrip({
         })
 
   return (
-    <section className="voice-row" data-phase={state} aria-label={t('player.voice.stripLabel')} role="group">
+    <section className="voice-row" data-phase={state} data-armed={m.armed} aria-label={t('player.voice.stripLabel')} role="group">
       <div className="vs-controls">
         <div className="vs-top">
           <h2 className="vs-name">{t('player.voice.name')}</h2>
-          <button
-            ref={gearRef}
-            type="button"
-            className="vs-ib vs-gear"
-            aria-haspopup="dialog"
-            aria-expanded={settingsOpen}
-            aria-label={t('player.voice.settings')}
-            title={t('player.voice.settings')}
-            onClick={() => setSettingsOpen(true)}
-          >
-            <SvgIcon>{ICON.gear}</SvgIcon>
-          </button>
+          <Tooltip label={t('player.voice.settings')}>
+            <button
+              ref={gearRef}
+              type="button"
+              className="vs-ib vs-gear"
+              aria-haspopup="dialog"
+              aria-expanded={settingsOpen}
+              aria-label={t('player.voice.settings')}
+              onClick={() => setSettingsOpen(true)}
+            >
+              <SvgIcon>{ICON.gear}</SvgIcon>
+            </button>
+          </Tooltip>
           {settingsOpen && <VoiceTrackSettings controller={controller} onClose={closeSettings} />}
           {m.monitor.on && m.monitor.latency && (
-            <span
-              className="vs-badge"
-              title={t(m.monitor.latency.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', {
+            <Tooltip
+              label={t(m.monitor.latency.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', {
                 frames: m.monitor.latency.bufferFrames
               })}
             >
-              {t('player.voice.monitorBadge', { ms: Math.round(m.monitor.latency.roundTripMs) })}
-            </span>
+              <span
+                className="vs-badge"
+                tabIndex={0}
+                aria-label={t(m.monitor.latency.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', {
+                  frames: m.monitor.latency.bufferFrames
+                })}
+              >
+                {t('player.voice.monitorBadge', { ms: Math.round(m.monitor.latency.roundTripMs) })}
+              </span>
+            </Tooltip>
           )}
         </div>
         <label className="vs-sr-only" htmlFor="voice-input">
           {t('player.voice.input')}
         </label>
+        <Tooltip label={inputTip} className="grow">
         <div className="vs-select">
           <select
             id="voice-input"
@@ -369,77 +373,84 @@ export default function VoiceStrip({
             )}
           </select>
         </div>
+        </Tooltip>
         <div className="vs-btns">
-          <button
-            type="button"
-            className={`vs-ib vs-arm${armed ? ' active' : ''}`}
-            aria-pressed={armed}
-            aria-label={m.armed ? t('player.voice.disarm') : t('player.voice.arm')}
-            title={block !== null && block !== 'no-song' && !rec ? blockText(block) : m.armed ? t('player.voice.disarm') : t('player.voice.arm')}
-            disabled={rec || (block !== null && !m.armed)}
-            onClick={() => void controller.arm()}
-          >
-            <SvgIcon>{ICON.rec}</SvgIcon>
-          </button>
-          <button
-            type="button"
-            className={`vs-ib vs-mon${m.monitor.on ? ' active' : ''}`}
-            aria-pressed={m.monitor.on}
-            aria-disabled={monitorUnavailable}
-            aria-label={monitorLabel}
-            aria-describedby={monitorUnavailable ? 'voice-monitor-why' : undefined}
-            title={monitorUnavailable ? monitorWhy : monitorLabel}
-            onClick={() => void controller.toggleMonitor()}
-          >
-            <SvgIcon>{ICON.speaker}</SvgIcon>
-          </button>
+          <Tooltip label={block !== null && block !== 'no-song' && !rec ? blockText(block) : m.armed ? t('player.voice.disarm') : t('player.voice.arm')}>
+            <button
+              type="button"
+              className={`vs-ib vs-arm${armed ? ' active' : ''}`}
+              aria-pressed={armed}
+              aria-label={m.armed ? t('player.voice.disarm') : t('player.voice.arm')}
+              disabled={rec || (block !== null && !m.armed)}
+              onClick={() => void controller.arm()}
+            >
+              <SvgIcon>{ICON.rec}</SvgIcon>
+            </button>
+          </Tooltip>
+          <Tooltip label={monitorUnavailable ? monitorWhy : monitorLabel}>
+            <button
+              type="button"
+              className={`vs-ib vs-mon${m.monitor.on ? ' active' : ''}`}
+              aria-pressed={m.monitor.on}
+              aria-disabled={monitorUnavailable}
+              aria-label={monitorLabel}
+              aria-describedby={monitorUnavailable ? 'voice-monitor-why' : undefined}
+              onClick={() => void controller.toggleMonitor()}
+            >
+              <SvgIcon>{ICON.speaker}</SvgIcon>
+            </button>
+          </Tooltip>
           {monitorUnavailable && (
             <span id="voice-monitor-why" className="vs-sr-only">
               {monitorWhy}
             </span>
           )}
-          <button
-            type="button"
-            className={`vs-chip${m.takeMuted ? ' active' : ''}`}
-            aria-pressed={m.takeMuted}
-            aria-label={m.takeMuted ? t('player.voice.unmute') : t('player.voice.mute')}
-            title={m.takeMuted ? t('player.voice.unmute') : t('player.voice.mute')}
-            onClick={() => controller.toggleTakeMute()}
-          >
-            {t('player.voice.muteShort')}
-          </button>
-          <button
-            type="button"
-            className={`vs-chip solo${m.solo ? ' active' : ''}`}
-            aria-pressed={m.solo}
-            aria-label={t('player.voice.solo')}
-            title={t('player.voice.solo')}
-            onClick={() => controller.toggleSolo()}
-          >
-            {t('player.voice.soloShort')}
-          </button>
-          <div className="vs-fader">
-            <input
-              className="vs-vol"
-              type="range"
-              min={0}
-              max={100}
-              value={faderMonitor ? monitorDbToFader(m.monitorGainDb) : m.level}
-              aria-label={faderLabel}
-              title={faderLabel}
-              aria-valuetext={faderMonitor ? `${m.monitorGainDb} dB` : `${m.level}%`}
-              onChange={(e) => controller.setFader(Number(e.target.value))}
-            />
-          </div>
+          <Tooltip label={m.takeMuted ? t('player.voice.unmute') : t('player.voice.mute')}>
+            <button
+              type="button"
+              className={`vs-chip${m.takeMuted ? ' active' : ''}`}
+              aria-pressed={m.takeMuted}
+              aria-label={m.takeMuted ? t('player.voice.unmute') : t('player.voice.mute')}
+              onClick={() => controller.toggleTakeMute()}
+            >
+              {t('player.voice.muteShort')}
+            </button>
+          </Tooltip>
+          <Tooltip label={t('player.voice.solo')}>
+            <button
+              type="button"
+              className={`vs-chip solo${m.solo ? ' active' : ''}`}
+              aria-pressed={m.solo}
+              aria-label={t('player.voice.solo')}
+              onClick={() => controller.toggleSolo()}
+            >
+              {t('player.voice.soloShort')}
+            </button>
+          </Tooltip>
+          <Tooltip label={faderLabel} className="grow">
+            <div className="vs-fader">
+              <input
+                className="vs-vol"
+                type="range"
+                min={0}
+                max={100}
+                value={faderMonitor ? monitorDbToFader(m.monitorGainDb) : m.level}
+                aria-label={faderLabel}
+                aria-valuetext={faderMonitor ? `${m.monitorGainDb} dB` : `${m.level}%`}
+                onChange={(e) => controller.setFader(Number(e.target.value))}
+              />
+            </div>
+          </Tooltip>
         </div>
         <div className="vs-vmeter">
-        <button
-          type="button"
-          className={`vs-clip-led${m.clipped ? ' on' : ''}`}
-          aria-label={m.clipped ? t('player.voice.clipOn') : t('player.voice.clipOff')}
-          title={m.clipped ? t('player.voice.clipOn') : t('player.voice.clipOff')}
-          onClick={() => controller.resetClip()}
-        />
+        <Tooltip label={m.clipped ? t('player.voice.clipOn') : t('player.voice.clipOff')}>
+          <button
+            type="button"
+            className={`vs-clip-led${m.clipped ? ' on' : ''}`}
+            aria-label={m.clipped ? t('player.voice.clipOn') : t('player.voice.clipOff')}
+            onClick={() => controller.resetClip()}
+          />
+        </Tooltip>
         <div className="vs-mwrap">
           <Meter controller={controller} live={m.armed || rec || m.monitor.on} />
         </div>
@@ -449,11 +460,17 @@ export default function VoiceStrip({
       <div className={`vs-tl${listening ? ' listening' : ''}`}>
         <div className="vs-head">
           <span className={`vs-note ${status?.cls ?? ''}`}>
-            {status && <span title={status.text}>{status.text}</span>}
+            {status && (
+              <Tooltip label={status.text} className="contents">
+                <span>{status.text}</span>
+              </Tooltip>
+            )}
             {status?.action && (
-              <button type="button" className="vs-btn" title={status.action.label} onClick={status.action.run}>
-                {status.action.label}
-              </button>
+              <Tooltip label={status.action.label}>
+                <button type="button" className="vs-btn" onClick={status.action.run}>
+                  {status.action.label}
+                </button>
+              </Tooltip>
             )}
           </span>
           {take && <span className="vs-take-info">{takeInfo}</span>}
@@ -498,11 +515,11 @@ export default function VoiceStrip({
           )}
         </div>
         <div className="vs-track" ref={trackRef} role="listbox" aria-label={t('player.voice.takesLane')}>
-          {!take && <div className="vs-empty">{t(emptyKey)}</div>}
           {take && clipVisible && drag && (
             <div className="vs-clip vs-clip-ghost" aria-hidden="true" style={{ left: `${((take.startSec - viewS) / viewSpan) * 100}%`, width: `${width}%` }} />
           )}
           {take && clipVisible && (
+            <Tooltip label={rec ? t('player.voice.clipRecording') : t('player.voice.clipHint')} className="contents">
             <div
               role="option"
               aria-selected={selected}
@@ -510,7 +527,6 @@ export default function VoiceStrip({
               className={`vs-clip${rec ? ' recording' : ''}${take.peaks?.length ? ' has-wave' : ''}${take.partial ? ' partial' : ''}${listening ? ' playing' : ''}${selected ? ' selected' : ''}${drag ? ' dragging' : ''}${rec ? '' : ' selectable'}`}
               style={{ left: `${left}%`, width: `${width}%` }}
               aria-label={t('player.voice.clipLabel', { n: take.n, time: clock(shownStart) })}
-              title={rec ? t('player.voice.clipRecording') : t('player.voice.clipHint')}
               onPointerDown={(e) => {
                 if (rec || e.button !== 0) return
                 e.stopPropagation() // only the clip itself captures the click: empty lane still seeks
@@ -561,10 +577,20 @@ export default function VoiceStrip({
               }}
             >
               <ClipWave peaks={take.peaks} />
-              <span className={`vs-clip-tag${unusual ? ' changed' : ''}`} title={take.changed ? t('player.voice.tagTitleChanged') : t('player.voice.tagTitle')}>
-                {drag ? t('player.voice.positionAt', { time: clock(shownStart) }) : tagText}
-              </span>
+              {(drag || tagText || silent) && (
+                <span className="vs-clip-tags">
+                  {(drag || tagText) && (
+                    <Tooltip label={take.changed ? t('player.voice.tagTitleChanged') : t('player.voice.tagTitle')}>
+                      <span className={`vs-clip-tag${take.changed || (tagText && !drag) ? ' changed' : ''}`}>
+                        {drag ? t('player.voice.positionAt', { time: clock(shownStart) }) : tagText}
+                      </span>
+                    </Tooltip>
+                  )}
+                  {silent && !drag && <span className="vs-clip-tag silent">{t('player.voice.takeSilent')}</span>}
+                </span>
+              )}
             </div>
+            </Tooltip>
           )}
         </div>
       </div>

@@ -18,6 +18,9 @@ Later decisions:
 - [0015: Native-only song playback on desktop and Box](0015-native-only-desktop-playback.md).
   Desktop and Box no longer play songs through Web Audio; the opening sentence
   above still describes iOS and Android (`react-native-audio-api`).
+- [0016: The recorded take is a playback lane](0016-take-as-playback-lane.md)
+  (proposed). The take is conformed offline to the song timeline and played as
+  an ordinary lane; the separate listen-back path is removed.
 
 Any incompatible interface or persistence change supersedes the relevant ADR rather
 than silently changing version 1.

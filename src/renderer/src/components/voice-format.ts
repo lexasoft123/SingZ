@@ -30,3 +30,12 @@ const BLOCK_KEY: Record<Exclude<RecordBlock, null | 'no-song'>, Key> = {
   error: 'player.voice.recordWhyError'
 }
 export const blockText = (b: RecordBlock): string => (b && b !== 'no-song' ? t(BLOCK_KEY[b]) : '')
+
+/** Loudest reading (linear) below which a take counts as silent: about -50 dBFS. */
+export const SILENT_PEAK = 0.003
+/** A finished take whose peaks are known and all but zero recorded no signal (unknown peaks are not silence). */
+export function takeIsSilent(peaks: number[] | undefined): boolean {
+  if (!peaks || peaks.length === 0) return false
+  for (const p of peaks) if (p >= SILENT_PEAK) return false
+  return true
+}
