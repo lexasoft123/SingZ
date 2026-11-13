@@ -510,7 +510,8 @@ bool objectWithOnlyKeys(napi_env env, napi_value value,
   return true;
 }
 
-bool exactU64(napi_env env, napi_value value, uint64_t *result) {
+bool exactU64(napi_env env, napi_value value, uint64_t *result,
+              bool allowZero = false) {
   napi_valuetype type{};
   if (result == nullptr || napi_typeof(env, value, &type) != napi_ok)
     return false;
@@ -518,12 +519,12 @@ bool exactU64(napi_env env, napi_value value, uint64_t *result) {
     bool lossless = false;
     return napi_get_value_bigint_uint64(env, value, result, &lossless) ==
                napi_ok &&
-           lossless && *result != 0;
+           lossless && (allowZero || *result != 0);
   }
   double number = 0.0;
   if (type != napi_number ||
       napi_get_value_double(env, value, &number) != napi_ok ||
-      !std::isfinite(number) || std::floor(number) != number || number < 1.0 ||
+      !std::isfinite(number) || std::floor(number) != number || number < (allowZero ? 0.0 : 1.0) ||
       number > static_cast<double>(kNativePlaybackMaximumJsSafeInteger))
     return false;
   *result = static_cast<uint64_t>(number);
@@ -1325,6 +1326,7 @@ bool parseConfig(napi_env env, napi_value value,
         return false;
   config.requestedSampleRate = sampleRate;
   config.masterGain = static_cast<float>(masterGain);
+  config.serviceOwnsMasterGain = true;
   config.decodeOptions.requiredSampleRate = sampleRate;
 
   napi_value playbackValue{};
@@ -1817,7 +1819,7 @@ napi_value setPlaybackMasterGain(napi_env env, napi_callback_info info) {
   uint64_t generation = 0;
   napi_valuetype type{};
   double gain = 0.0;
-  if (argc != 2 || !exactU64(env, argv[0], &generation) ||
+  if (argc != 2 || !exactU64(env, argv[0], &generation, true) ||
       napi_typeof(env, argv[1], &type) != napi_ok || type != napi_number ||
       napi_get_value_double(env, argv[1], &gain) != napi_ok ||
       !std::isfinite(gain) || gain < 0 ||
@@ -1826,6 +1828,15 @@ napi_value setPlaybackMasterGain(napi_env env, napi_callback_info info) {
         env, simpleFailure(NativePlaybackError::InvalidConfiguration,
                            generation, "Playback master gain is invalid"));
   std::lock_guard<std::mutex> lock(playback.mutex);
+  // Generation zero is the process master control, also with no song loaded.
+  // It never creates a host or alters song ownership/presentation state.
+  if (generation == 0) {
+    NativePlaybackResult result;
+    result.ok = sharedAudioService().setMasterGain(static_cast<float>(gain));
+    result.error = result.ok ? NativePlaybackError::None
+                            : NativePlaybackError::InvalidConfiguration;
+    return resultValue(env, result);
+  }
   return resultValue(env, playback.session.setMasterGain(
                               generation, static_cast<float>(gain)));
 }
@@ -2228,7 +2239,13 @@ napi_value presentationQuery(napi_env env, napi_callback_info info) {
 
 napi_value playbackStatus(napi_env env, napi_callback_info) {
   std::lock_guard<std::mutex> lock(playback.mutex);
-  const NativePlaybackStatus source = playback.session.status();
+  NativePlaybackStatus source = playback.session.status();
+  // The desktop shared bus can render training/voice before the first song.
+  if (source.generation == 0) {
+    const auto meter = sharedAudioService().outputMeter();
+    source.outputPeak = meter.peak;
+    source.outputClippedBlocks = static_cast<uint32_t>(std::min<uint64_t>(meter.clippedBlocks, UINT32_MAX));
+  }
   napi_value result{};
   napi_create_object(env, &result);
   setCounter(env, result, "generation", source.generation);

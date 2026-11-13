@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { ipcMain, type WebContents } from 'electron'
 import { allowFile } from './media'
 import { computeWavPeaks } from './voice-takes'
 import { conformTake, invalidateConformedTake, releaseConformedTake, isConformTakeError } from './voice-take-conform'
@@ -146,6 +146,39 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   const leases = new Map<string, { owner: number; songId: string; takeId: string; path: string }>()
   const watched = new Set<number>()
   const waveCache = new Map<string, import('../shared/voice-take').VoiceTakeConformedWaveform>()
+  let recordingOwner: number | undefined
+  let recordingCleanup: Promise<void> | undefined
+  const pendingStarts = new Set<{ owner: number; detached: boolean }>()
+  const stopLostRecording = (): Promise<void> => {
+    if (recordingCleanup) return recordingCleanup
+    const cleanup = (async () => {
+      try { await store.stop('error') }
+      finally { await store.disarm() } // An armed take otherwise retains its input lease.
+    })()
+    recordingCleanup = cleanup
+    void cleanup.finally(() => { if (recordingCleanup === cleanup) recordingCleanup = undefined }).catch(() => {})
+    return cleanup
+  }
+  const watchOwner = (sender: WebContents): void => {
+    const owner = sender.id
+    if (watched.has(owner)) return
+    watched.add(owner)
+    const releaseOwner = () => {
+      for (const start of pendingStarts) if (start.owner === owner) start.detached = true
+      if (recordingOwner === owner) {
+        recordingOwner = undefined // Repeated crash/navigation/destroy signals are idempotent.
+        void stopLostRecording().catch(() => log('voice-take', 'renderer-loss cleanup failed', 'warn'))
+      }
+      for (const [id, job] of jobs) if (id.startsWith(`${owner}:`)) job.abort()
+      for (const [id, lease] of leases) if (lease.owner === owner) {
+        leases.delete(id)
+        void releaseConformedTake(lease.path).then(() => invalidateConformedTake(lease.songId, lease.takeId, { cancelActive: false })).catch(() => {})
+      }
+    }
+    sender.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => { if (isMainFrame && !inPlace) releaseOwner() })
+    sender.on('render-process-gone', releaseOwner)
+    sender.once('destroyed', () => { releaseOwner(); watched.delete(owner) })
+  }
   const validId = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(v)
   const key = (owner: number, id: string): string => `${owner}:${id}`
   ipcMain.handle(VOICE_IPC.conform, async (event, raw: VoiceTakeConformRequest): Promise<VoiceTakeConformResult> => {
@@ -155,19 +188,7 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
         (raw.effects !== undefined && !isVoiceTakeEffects(raw.effects))) return { ok: false, reason: 'conform-failed' }
     const owner = event.sender.id, id = key(owner, raw.requestId)
     if (jobs.has(id) || leases.has(id)) return { ok: false, reason: 'conform-failed' }
-    if (!watched.has(owner)) {
-      watched.add(owner)
-      const releaseOwner = () => {
-        for (const [id, job] of jobs) if (id.startsWith(`${owner}:`)) job.abort()
-        for (const [id, lease] of leases) if (lease.owner === owner) {
-          leases.delete(id)
-          void releaseConformedTake(lease.path).then(() => invalidateConformedTake(lease.songId, lease.takeId, { cancelActive: false })).catch(() => {})
-        }
-      }
-      event.sender.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame && !_inPlace) releaseOwner() })
-      event.sender.on('render-process-gone', releaseOwner)
-      event.sender.once('destroyed', () => { releaseOwner(); watched.delete(owner) })
-    }
+    watchOwner(event.sender)
     const controller = new AbortController()
     jobs.set(id, controller)
     latestBySong.get(raw.songId)?.abort()
@@ -255,8 +276,37 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   }
   ipcMain.handle(VOICE_IPC.arm, async (_event, request: unknown) => { try { return armValid(request) ? await store.arm(request) : { ok: false, reason: 'error' as const, message: 'Invalid arm request.' } } catch { return { ok: false, reason: 'error' as const, message: 'Microphone could not be armed.' } } })
   ipcMain.handle(VOICE_IPC.disarm, async () => { try { return await store.disarm() } catch { return { ok: false, error: 'Microphone could not be disarmed.' } } })
-  ipcMain.handle(VOICE_IPC.recordStart, async (_event, request: unknown) => { try { return startValid(request) ? await store.start(request) : { ok: false, reason: 'error' as const, message: 'Invalid recording request.' } } catch { return { ok: false, reason: 'error' as const, message: 'Recording could not start.' } } })
-  ipcMain.handle(VOICE_IPC.recordStop, async (_event, reason?: 'device-lost' | 'error') => { try { return await store.stop(reason) } catch { return { ok: false, reason: 'error' as const, message: 'The take could not be finalized.' } } })
+  ipcMain.handle(VOICE_IPC.recordStart, async (event, request: unknown) => {
+    if (!startValid(request)) return { ok: false, reason: 'error' as const, message: 'Invalid recording request.' }
+    if (event.sender.isDestroyed()) return { ok: false, reason: 'error' as const, message: 'Recording owner is unavailable.' }
+    watchOwner(event.sender)
+    const start = { owner: event.sender.id, detached: false }
+    pendingStarts.add(start)
+    try {
+      // Do not let the previous owner's finalizer release a capture generation
+      // that a replacement window has already reused for its own take.
+      await recordingCleanup
+      if (start.detached || event.sender.isDestroyed())
+        return { ok: false, reason: 'error' as const, message: 'Recording owner is unavailable.' }
+      const result = await store.start(request)
+      if (result.ok) {
+        if (start.detached || event.sender.isDestroyed()) {
+          await stopLostRecording()
+          return { ok: false, reason: 'error' as const, message: 'Recording owner is unavailable.' }
+        }
+        recordingOwner = start.owner
+      }
+      return result
+    } catch { return { ok: false, reason: 'error' as const, message: 'Recording could not start.' } }
+    finally { pendingStarts.delete(start) }
+  })
+  ipcMain.handle(VOICE_IPC.recordStop, async (event, reason?: 'device-lost' | 'error') => {
+    if (recordingOwner !== undefined && recordingOwner !== event.sender.id)
+      return { ok: false, reason: 'error' as const, message: 'Another renderer owns the recording.' }
+    try { return await store.stop(reason) }
+    catch { return { ok: false, reason: 'error' as const, message: 'The take could not be finalized.' } }
+    finally { if (recordingOwner === event.sender.id) recordingOwner = undefined }
+  })
   ipcMain.handle(VOICE_IPC.recordSettings, async (_event, change: unknown) => { try { return settingsValid(change) ? await store.settings(change) : { ok: false, error: 'Invalid recording settings.' } } catch { return { ok: false, error: 'Recording settings could not be applied.' } } })
   ipcMain.handle(VOICE_IPC.list, async (_event, songId: unknown) => { try { return typeof songId === 'string' ? await store.list(songId) : [] } catch { return [] } })
   ipcMain.handle(VOICE_IPC.play, async (_event, request: unknown) => { try { return playValid(request) ? await store.play(request) : { ok: false, error: 'Invalid take playback request.' } } catch { return { ok: false, error: 'Take playback is unavailable.' } } })

@@ -63,6 +63,15 @@ bool renderGeneration(NativePlaybackCallbackState* state,
                   NativePlaybackCallbackTerminalReason::RenderUnavailable);
     return false;
   }
+  if (state->serviceMeterClips != nullptr &&
+      !state->serviceMeterStarted.load(std::memory_order_relaxed)) {
+    state->serviceMeterClipBaseline.store(
+        state->serviceMeterClips->load(std::memory_order_relaxed), std::memory_order_relaxed);
+    state->serviceMeterCallbackBaseline.store(
+        state->serviceMeterCallbacks->load(std::memory_order_acquire), std::memory_order_relaxed);
+    state->serviceMeterResetEpoch->fetch_add(1, std::memory_order_release);
+    state->serviceMeterStarted.store(true, std::memory_order_release);
+  }
   if (state->outputLimiter.state != nullptr) {
     const auto meter = zdsp::builtinMeter(state->outputLimiter);
     // 20 dB/s release keeps short peaks visible between status polls.

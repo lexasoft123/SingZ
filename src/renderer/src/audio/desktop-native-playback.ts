@@ -49,6 +49,11 @@ import {
 export const POLL_FAST_MS = 50
 export const POLL_STEADY_MS = 200
 export const POLL_BURST_MS = 2000
+
+/** Process master, including idle training/monitoring; never opens output. */
+export async function setDesktopServiceMasterGain(gain: number): Promise<void> {
+  ensure(await window.singz.setDesktopPlaybackMasterGain('0', gain), 'Native service master gain failed')
+}
 /** The cadence right after a start, a resume or a seek while the song plays
  *  (see `edgeAtMs`), until a status shows the transport running with a
  *  current audible frame, and for a seek its receipt as well. The
@@ -2481,6 +2486,7 @@ export class DesktopNativePlaybackClient {
       this.assertCommandableGeneration()
       if (!this.generation) {
         if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
+        await setDesktopServiceMasterGain(gain)
         return
       }
       ensure(

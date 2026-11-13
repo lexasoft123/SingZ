@@ -2821,6 +2821,32 @@ struct PreparedPlaybackGraph {
   uint32_t outputChannels{0};
   uint32_t maximumFrames{0};
   float masterGain{1.0F};
+  bool serviceOwnsMasterGain{false};
+  NativePlaybackSession::OutputMeter serviceOutputMeter() const noexcept {
+    NativePlaybackSession::OutputMeter result{true, transportGeneration, 0, 0, 0};
+    if (!callback.serviceMeterStarted.load(std::memory_order_acquire)) return result;
+    const auto meter = sharedAudioService().outputMeter();
+    if (meter.callbacks <= callback.serviceMeterCallbackBaseline.load(std::memory_order_relaxed))
+      return result;
+    const auto baseline = callback.serviceMeterClipBaseline.load(std::memory_order_relaxed);
+    result.peak = meter.peak;
+    result.rms = meter.rms;
+    result.clippedBlocks = static_cast<uint32_t>(std::min<uint64_t>(
+        meter.clippedBlocks >= baseline ? meter.clippedBlocks - baseline : 0, UINT32_MAX));
+    return result;
+  }
+  float graphMasterGain() const noexcept {
+    return serviceOwnsMasterGain ? 1.0F : masterGain;
+  }
+  bool bypassGraphOutputLimiter() const noexcept {
+    // App attenuation must precede the one final safety ceiling.
+    return serviceOwnsMasterGain;
+  }
+  zdsp::BuiltinNodeKind graphOutputLimiterKind() const noexcept {
+    // Meter-only processing bypasses the ceiling without silencing telemetry.
+    return bypassGraphOutputLimiter() ? zdsp::BuiltinNodeKind::PeakRms
+                                      : zdsp::BuiltinNodeKind::SafetyLimiter;
+  }
   float masterGraphTrim{1.0F};
   uint64_t masterGainNodeId{0};
   std::shared_ptr<const PlaybackCuePlan> cuePlan;
@@ -2983,7 +3009,7 @@ struct PreparedPlaybackGraph {
                 : lane.gain *
                       lane.graphGainTrim *
                       (lane.trainingSelected ? trainingGain : 1.0F) *
-                      masterGain * masterGraphTrim;
+                      graphMasterGain() * masterGraphTrim;
         if (laneGain == 0.0F)
           continue;
         const uint64_t elapsed = static_cast<uint64_t>(projectFrame);
@@ -3120,7 +3146,7 @@ struct PreparedPlaybackGraph {
     graphContext.hasReference = cuePlan != nullptr;
     graphContext.hasTraining = training.has_value();
     graphContext.needsTimePitch = hasTimePitch;
-    graphContext.masterGain = masterGain;
+    graphContext.masterGain = graphMasterGain();
     graphContext.referenceGain = cuePlan == nullptr ? 0.0F : cuePlan->volume;
     graphContext.lanes.reserve(lanes.size());
     for (const Lane &lane : lanes)
@@ -3465,7 +3491,7 @@ struct PreparedPlaybackGraph {
                      value.binding->kind == "song-master") {
             masterGainNodeId = value.id;
             masterGraphTrim = trim;
-            value0 = masterGain * trim;
+            value0 = graphMasterGain() * trim;
           } else if (value.binding.has_value() &&
                      value.binding->kind == "reference-gain") {
             value0 = (cuePlan == nullptr ? 0.0F : cuePlan->volume) * trim;
@@ -3498,6 +3524,20 @@ struct PreparedPlaybackGraph {
           kind = zdsp::BuiltinNodeKind::SafetyLimiter;
           value0 = static_cast<float>(parameter(value, "ceiling", 1.0));
           flags = zdsp::GraphNodeFlagMayProcessInPlace;
+          // Only the limiter feeding physical output is replaced by the
+          // service ceiling; authored internal limiter effects stay active.
+          if (std::any_of(materialized.graph.connections.begin(),
+                          materialized.graph.connections.end(),
+                          [&](const auto& edge) {
+                            if (edge.sourceNode.value != value.id) return false;
+                            return std::any_of(materialized.graph.nodes.begin(),
+                                               materialized.graph.nodes.end(),
+                                [&](const auto& destination) {
+                                  return destination.document.id == edge.destinationNode.value &&
+                                      destination.kind == NativePlaybackGraphMaterializedKind::PhysicalOutput;
+                                });
+                          }))
+            kind = graphOutputLimiterKind();
           break;
         case NativePlaybackGraphMaterializedKind::PlaceholderBypass:
           kind = zdsp::BuiltinNodeKind::Gain;
@@ -3938,7 +3978,7 @@ struct PreparedPlaybackGraph {
     addConfig(zdsp::BuiltinNodeKind::Mix, kSongMixNode, outputChannels,
               static_cast<uint32_t>(lanes.size()), 0.0F);
     addConfig(zdsp::BuiltinNodeKind::Gain, kSongGainNode, outputChannels, 1,
-              masterGain);
+              graphMasterGain());
     if (hasReference) {
       addConfig(zdsp::BuiltinNodeKind::ChannelMap, kCueMapNode, 1, 1, 0.0F);
       finalConfigs[2].channelMatrix = cueMatrix.data();
@@ -3949,7 +3989,7 @@ struct PreparedPlaybackGraph {
       addConfig(zdsp::BuiltinNodeKind::Gain, kOutputGainNode, outputChannels, 1,
                 1.0F);
     }
-    addConfig(zdsp::BuiltinNodeKind::SafetyLimiter, kLimiterNode,
+    addConfig(graphOutputLimiterKind(), kLimiterNode,
               outputChannels, 1, kNativePlaybackLimiterCeiling);
 
     std::array<zdsp::ProcessorHandle, 7> finalProcessors{};
@@ -4295,6 +4335,7 @@ struct PreparedPlaybackGraph {
   }
 
   bool enqueueMaster(float value) noexcept {
+    if (serviceOwnsMasterGain) return true;
     return masterGainNodeId != 0 &&
            enqueueGain({masterGainNodeId}, value * masterGraphTrim);
   }
@@ -5087,6 +5128,7 @@ struct NativePlaybackSession::Impl {
   std::atomic<uint64_t> cancelledThrough{0};
   NativePlaybackState state{NativePlaybackState::Unloaded};
   NativePlaybackPrepareConfig preparedConfig{};
+  bool serviceMasterMeterUsed{false};
   AudioHostStatus lastHost{};
   AudioHostTerminalCause lastTerminal{};
   std::string lastError;
@@ -6736,6 +6778,13 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       config.masterGain, config.playbackRate, config.transposeSemitones,
       preparedStartProjectFrame,
       config.initialTransport, generation, impl_->testHooks);
+  prepared->serviceOwnsMasterGain = config.serviceOwnsMasterGain;
+  if (config.serviceOwnsMasterGain) {
+    auto& meter = sharedAudioService().masterMeterState();
+    prepared->callback.serviceMeterClips = &meter.clippedBlocks;
+    prepared->callback.serviceMeterCallbacks = &meter.callbacks;
+    prepared->callback.serviceMeterResetEpoch = &meter.resetEpoch;
+  }
   prepared->laneDecodeFallback = laneDecodeFallback;
   // Handed over BEFORE prepare(): the source nodes built there point into this
   // group's windows, so the graph must already own it. Starting the feeder
@@ -6871,6 +6920,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       impl_->prepared->router = impl_->router;
       publishPlaybackQuarantineRetainedBytes(impl_->prepared->retainedBytes);
       impl_->preparedConfig = std::move(config);
+      impl_->serviceMasterMeterUsed = impl_->prepared->serviceOwnsMasterGain;
       impl_->state = NativePlaybackState::Prepared;
       // Preparing a new generation has not touched AudioHost. Publish a fresh
       // per-generation baseline rather than the provider's previous stopped
@@ -7132,6 +7182,7 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
       impl_->activeGeneration.store(generation, std::memory_order_release);
       impl_->liveBehindLatest = 0;
       impl_->preparedConfig = std::move(config);
+      impl_->serviceMasterMeterUsed = impl_->prepared->serviceOwnsMasterGain;
       // The stream is this generation's now: every physical-ownership marker
       // names it, so stop and cleanup prove quiescence against the right one.
       impl_->openInvocationGeneration = generation;
@@ -7328,6 +7379,8 @@ NativePlaybackResult NativePlaybackSession::openOutput(
                                  : NativePlaybackError::HostFailure,
                    generation, impl_->state, impl_->lastError);
   }
+  if (impl_->prepared->serviceOwnsMasterGain)
+    sharedAudioService().setMasterGain(impl_->prepared->masterGain);
   impl_->state = NativePlaybackState::OutputOpen;
   impl_->lastHost = impl_->host.status();
   impl_->lastTerminal = {};
@@ -8354,6 +8407,8 @@ NativePlaybackResult NativePlaybackSession::setMasterGain(uint64_t generation,
                    "The bounded playback parameter queue is full");
   }
   impl_->prepared->masterGain = gain;
+  if (impl_->prepared->serviceOwnsMasterGain)
+    sharedAudioService().setMasterGain(gain);
   return impl_->success(generation);
 }
 
@@ -8656,8 +8711,14 @@ NativePlaybackStatus NativePlaybackSession::status() const {
         impl_->prepared->preparedStartProjectFrame;
     result.retainedBytes += impl_->prepared->retainedBytes;
     result.graphArenaBytes = impl_->prepared->graphArenaBytes;
-    result.outputPeak = rendering->callback.outputPeak.load(std::memory_order_relaxed);
-    result.outputClippedBlocks = rendering->callback.outputClippedBlocks.load(std::memory_order_relaxed);
+    if (rendering->serviceOwnsMasterGain) {
+      const auto meter = rendering->serviceOutputMeter();
+      result.outputPeak = meter.peak;
+      result.outputClippedBlocks = meter.clippedBlocks;
+    } else {
+      result.outputPeak = rendering->callback.outputPeak.load(std::memory_order_relaxed);
+      result.outputClippedBlocks = rendering->callback.outputClippedBlocks.load(std::memory_order_relaxed);
+    }
     result.masterGain = impl_->prepared->masterGain;
     result.referenceGain = impl_->prepared->referenceGain;
     result.trainingEnabled = impl_->prepared->trainingEnabled;
@@ -8725,6 +8786,11 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       }
       result.lanes.push_back(std::move(laneStatus));
     }
+  }
+  if (rendering == nullptr && impl_->serviceMasterMeterUsed) {
+    const auto meter = sharedAudioService().outputMeter();
+    result.outputPeak = meter.peak;
+    result.outputClippedBlocks = static_cast<uint32_t>(std::min<uint64_t>(meter.clippedBlocks, UINT32_MAX));
   }
   return result;
 }
@@ -8853,6 +8919,13 @@ NativePlaybackSession::OutputMeter NativePlaybackSession::outputMeter() const no
     std::unique_lock<std::mutex> lock(impl_->mutex, std::try_to_lock);
     if (!lock.owns_lock()) return {};
     const auto *graph = impl_->renderingGraph();
+    if (graph != nullptr && graph->serviceOwnsMasterGain)
+      return graph->serviceOutputMeter();
+    if (graph == nullptr && impl_->serviceMasterMeterUsed) {
+      const auto meter = sharedAudioService().outputMeter();
+      return {true, 0, meter.peak,
+              static_cast<uint32_t>(std::min<uint64_t>(meter.clippedBlocks, UINT32_MAX)), meter.rms};
+    }
     if (graph == nullptr || graph->callback.outputLimiter.state == nullptr) return {};
     return {true, graph->transportGeneration,
             graph->callback.outputPeak.load(std::memory_order_relaxed),

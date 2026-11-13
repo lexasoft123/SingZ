@@ -55,6 +55,7 @@ struct SharedAudioService::Impl {
     std::atomic<uint64_t> callbacks{0};
     std::atomic<uint64_t> frames{0};
   } playback, training, microphone;
+  ServiceMasterStage master;
   mutable std::mutex mutex;
   std::unique_ptr<AudioHostBackend> backend;
   AudioHostInventory cached;
@@ -290,6 +291,7 @@ struct SharedAudioService::Impl {
           !self.microphone.render(self.microphone.context, block))
         self.microphone.failed.store(true, std::memory_order_release);
     }
+    self.master.process(block);
     self.frames.fetch_add(block.frames, std::memory_order_relaxed);
     return true;
   }
@@ -631,6 +633,17 @@ void SharedAudioService::setMicrophoneRenderer(AudioHostRender render, void* con
   else impl_->retireIdleBoxProducerLocked();
 }
 void SharedAudioService::clearMicrophoneRenderer() { setMicrophoneRenderer(nullptr, nullptr); }
+bool SharedAudioService::setMasterGain(float gain) noexcept {
+  if (!std::isfinite(gain) || gain < 0.0F || gain > 4.0F) return false;
+  impl_->master.target.store(gain, std::memory_order_release);
+  return true;
+}
+ServiceMasterMeterSnapshot SharedAudioService::outputMeter() const noexcept {
+  return impl_->master.meter.snapshot();
+}
+ServiceMasterMeter& SharedAudioService::masterMeterState() noexcept {
+  return impl_->master.meter;
+}
 AudioHostStatus SharedAudioService::status() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->backend->status();

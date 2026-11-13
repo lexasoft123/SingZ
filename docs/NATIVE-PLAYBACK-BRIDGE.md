@@ -310,6 +310,37 @@ once a sample rate is fixed.
 | `streamLanes` | bool | play the lanes straight out of their FLAC instead of decoding first (`config.streamLanes` in the core); absent = decode. A `parseBool` on iOS, a `jboolean` on Android, an optional bool config key on the desktop — the desktop bridge did not accept it until 0.21.1, which is why the desktop decoded six lanes for seconds on a Play the graph prepared ahead could not serve. The desktop sends it by default on macOS and Windows (`desktopStreamLanesPreferred`); Windows joined once the streaming source's `readAt` became a positioned `ReadFile` — the prepare dups a second descriptor per lane for the waveform pass, and seek+read on the shared file position was a race between the two threads | no |
 | `graphDocument` | — | `{format: 1, engine: "singz-dsp", nodes, connections}` | no |
 
+Desktop `setPlaybackMasterGain(0, gain)` updates the process-wide shared-service
+master even without a song and never opens a device. Positive generations keep
+the song ownership and stale-generation checks, update its reported master value,
+and publish that value to the same service master. Main applies `SINGZ_MUTE` to
+both forms. The desktop bridge sets the internal `serviceOwnsMasterGain` prepare
+flag: the graph's app gain stays unity and its final output limiter uses
+meter-only processing, so app attenuation happens before the safety ceiling. Graph-authored trim and internal
+limiter effects stay active. Other products retain their in-graph gain and
+output limiter. The service's -1 dBFS ceiling is final for every service-owned
+master, including custom documents whose output limiter authors a higher
+ceiling (such as 1.0); that final authored ceiling is replaced by the service's.
+Training PCM carries only its reference/client level, with no second app-volume
+factor. After song, training and microphone clients sum, the service applies a
+128-frame linear master ramp followed by an in-place -1 dBFS hard ceiling.
+For service-owned masters, `outputPeak`, `outputClippedBlocks` and output RMS
+come from this final shared bus, including cues and microphone clients: peak
+and RMS are post-ceiling, and a callback counts as clipped only if its post-gain
+signal exceeds the ceiling. Peak keeps the existing 20 dB/s release. Polling
+never consumes the saturating clip count; each graph starts a fresh count on
+its first rendered block (including a swap landing), while pause, seek and
+reopening that same graph retain it. Preparing a candidate does not reset the
+active meter. With no song, the desktop status reports the service peak and
+its lifetime clip count. Non-service products retain their graph meter.
+This stage has no lookahead, storage delay or effect on graph/output latency,
+callback timestamps, presentation history or take placement. The legacy second
+monitor host remains outside this stage until the common-host migration lands.
+The device-free Node-API regression can be run against a current addon with
+`node tests/e2e/service-master-addon-smoke.cjs <path-to-singz-capture.node>`;
+it proves both zero generation encodings reach the service and invalid values
+and stale positive generations remain refused.
+
 `playback.transport` is `{entrySeconds, durationSeconds, playbackRate,
 transposeSemitones, countInAnchorSeconds?}` — seconds, a ratio, semitones, and
 an optional anchor. `entrySeconds` is 0..43200; `playbackRate` 0.25..4.0;
@@ -1229,3 +1260,45 @@ return typed `path-too-long` with diagnostic detail through IPC. See Microsoft's
 
 Take deletion/move callers may
 call `invalidate` for immediate reclamation. Cached PCM never crosses RPC.
+
+### Shared voice capture publication (ADR 0017 WP1)
+
+`sharedVoiceMonitorCapture()` owns the Desktop input backend used by ordinary
+capture. `VoiceMonitorCapture::retain`/`retainExisting` and `release` count arm,
+take and monitor users independently. Matching users share one physical open;
+a different retained route is refused. Releasing one user never stops another.
+The monitor client can retain `Monitor` with no delivery sink, independently of
+a take or song. The Box capture adapter keeps its existing path.
+
+The backend callback sends the original mono samples, first-sample timestamp,
+callback timestamp, quality and optional hardware `sourcePosition` to the
+preallocated take-delivery ring, then independently publishes the monitor
+`AudioHistory`. A full delivery ring still permits history publication. Neither
+publication allocates, locks, wakes a thread or calls the OS. Rejected monitor
+blocks/frames and delivery overruns have separate counters. The delivery thread
+polls at 1 ms; take writing and analysis remain delivery-thread consumers.
+Arm detach replaces the analysis sink behind a delivery barrier; an active take
+retains its capture and take-only sink until finish/cancel. Capture opening does
+not request microphone permission; Speaker-on must use the existing main mic
+access gesture before retaining the monitor.
+
+The service client borrows `capture.source()` and owns a `VoiceMonitorReader`
+per serial output callback. `source.render(block, mono, capacity, queueFrames,
+reader)` reads at output presentation time minus the explicit source-frame
+queue, using the measured output clock and slices of at most 256 frames. Zero
+queue selects the current floor; smaller explicit queues are rejected as counted
+silence. Missing history is counted zero output, never a host failure. The caller
+adds this mono signal through the monitor gain/ramp leaf to the common service.
+The source does not depend on a song graph, and starting it does not open output.
+
+The floor is `max(lookback, ceil(2*outputPeriod*sourceRate/outputRate)+256,
+inputPeriod+jitterMargin)` in source frames. The reader derives FIR lookback
+from the rate ratio; the default jitter margin is 128 source frames. The opening
+input period is retained and raised when a larger capture block is observed;
+providers omitting that metadata establish an observed period on the first
+block. A provider concealing extra buffering still needs route qualification.
+Only this monitor history opts into `SampleClockPhaseConfig{2,8}`. Raw delivery
+and take timestamps are unchanged; transport frame counts never substitute for
+an authoritative hardware position. Source statistics are cumulative, and
+control must join capture before `prepare`/`stop`; output readers may continue
+reading counted silence while capture is stopped.

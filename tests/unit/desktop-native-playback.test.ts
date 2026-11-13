@@ -405,6 +405,16 @@ describe('desktop native playback facade', () => {
     vi.unstubAllGlobals()
   })
 
+  it('publishes master volume to the idle service without preparing a song', async () => {
+    const api = asioPollingApi(async () => status('0'), async () => result('0'))
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => {}, restoreLegacyOutput: async () => {} }, () => {})
+    await client.setMasterGain(0.25)
+    expect(api.setDesktopPlaybackMasterGain).toHaveBeenCalledExactlyOnceWith('0', 0.25)
+    expect(api.prepareDesktopPlayback).not.toHaveBeenCalled()
+    expect(api.openDesktopPlayback).not.toHaveBeenCalled()
+  })
+
   it('prepares every native feature and hot-swaps at the exact signed frame without legacy overlap', async () => {
     let generation = '1'
     let nextGeneration = 0

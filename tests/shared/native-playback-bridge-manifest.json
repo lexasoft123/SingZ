@@ -230,6 +230,7 @@
       },
       {
         "name": "setPlaybackMasterGain",
+        "note": "Generation 0 sets the shared service master without a song; positive generations retain owner and stale-generation checks. Desktop graph app gain is unity; all service clients share the ramp and ceiling.",
         "ipc": "audio-host:playback-master",
         "preload": "setDesktopPlaybackMasterGain",
         "dormant": false,

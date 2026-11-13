@@ -35,6 +35,19 @@ const preload = read('src/preload/index.ts')
 const capture = read('src/main/capture.ts')
 
 describe('desktop playback addon exports', () => {
+  it('keeps desktop app volume in the service without changing serialized graph controls', () => {
+    const parse = functionBody(addon, 'bool parseConfig(')
+    expect(parse).toContain('config.serviceOwnsMasterGain = true')
+    const master = functionBody(addon, 'napi_value setPlaybackMasterGain(')
+    expect(master).toContain('exactU64(env, argv[0], &generation, true)')
+    expect(master).toContain('if (generation == 0)')
+    expect(master).toContain('sharedAudioService().setMasterGain')
+    expect(master).toContain('playback.session.setMasterGain(')
+    const idleMeter = functionBody(functionBody(addon, 'napi_value playbackStatus('), 'if (source.generation == 0)')
+    expect(idleMeter).toContain('sharedAudioService().outputMeter()')
+    expect(idleMeter).toContain('source.outputPeak = meter.peak')
+    expect(idleMeter).toContain('source.outputClippedBlocks =')
+  })
   it('exports exactly the manifest names, in order', () => {
     expect(addonExportNames(addon)).toEqual(manifest.methods.desktopAddon.map(m => m.name))
   })

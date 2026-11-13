@@ -817,8 +817,8 @@ export class MultitrackEngine {
         await this.nativePlayback.pause()
       this.pause()
       await this.configureTrainingOutput()
+      await this.publishServiceMasterGain(this.masterVol)
     })
-    this.trainingCues.setOutputGain(this.masterVol)
     return this.trainingCues
   }
 
@@ -1183,7 +1183,6 @@ export class MultitrackEngine {
       void this.nativePlayback.setMasterGain(target).then(() => {
         if (epoch !== this._songEpoch) return
         this.masterVol = target
-        this.trainingCues?.setOutputGain(target)
         this.master.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
         this.clickGain.gain.setTargetAtTime(this.met.volume * target, this.ctx.currentTime, 0.02)
         this.trainingGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
@@ -1192,7 +1191,7 @@ export class MultitrackEngine {
       return
     }
     this.masterVol = target
-    this.trainingCues?.setOutputGain(target)
+    void this.publishServiceMasterGain(target).catch(error => console.error('Native master-gain update failed:', error))
     this.master.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)
     this.clickGain.gain.setTargetAtTime(this.met.volume * this.masterVol, this.ctx.currentTime, 0.02)
     this.trainingGain.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)
@@ -1200,8 +1199,18 @@ export class MultitrackEngine {
   }
 
   async setMasterVolumeAccepted(v: number): Promise<void> {
+    if (!this.nativePlayback?.active) {
+      const epoch = this._songEpoch
+      await this.publishServiceMasterGain(sanitizeSongVolume(v))
+      if (epoch !== this._songEpoch) throw new Error('The song changed before master gain was accepted.')
+    }
     const { setMasterVolumeAccepted } = await import('./accepted-controls')
     return setMasterVolumeAccepted(this.acceptedControlHost(), sanitizeSongVolume(v))
+  }
+
+  private async publishServiceMasterGain(gain: number): Promise<void> {
+    const { setDesktopServiceMasterGain } = await import('./desktop-native-playback')
+    await setDesktopServiceMasterGain(gain)
   }
 
   async setMetronome(m: MetronomeConfig): Promise<void> {
@@ -2378,7 +2387,6 @@ export class MultitrackEngine {
       },
       applyMaster: target => {
         this.masterVol = target
-        this.trainingCues?.setOutputGain(target)
         this.master.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
         this.clickGain.gain.setTargetAtTime(this.met.volume * target, this.ctx.currentTime, 0.02)
         this.trainingGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)

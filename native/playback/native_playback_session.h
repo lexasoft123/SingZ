@@ -219,6 +219,9 @@ struct NativePlaybackPrepareConfig {
   uint32_t requestedBufferFrames{0};
   uint32_t maximumFrames{4096};
   float masterGain{1.0F};
+  // Internal host composition flag (not a serialized graph parameter).
+  // Shared service owns app volume; other products retain in-graph control.
+  bool serviceOwnsMasterGain{false};
   // Structural tempo. Sources, transport schedules and reference cues share
   // one prepared Q32 rate; non-unity tempo also inserts the phase-coherent
   // song-bus Signalsmith correction processor. Runtime changes rebuild the

@@ -462,6 +462,32 @@ describe('CaptureOwner', () => {
     expect(stalePrepares).toBe(0)
   })
 
+  it('publishes idle service master gain with validation, mute policy and renderer ownership', async () => {
+    const binding = fakeBinding()
+    const master = vi.fn((generation: bigint, _gain: number) => playbackResult(generation.toString()))
+    binding.setPlaybackMasterGain = master
+    binding.preparePlayback = async (_config, _lanes, generation) => ({ ...playbackResult(generation.toString()), ownershipRetained: true })
+    const owner = new CaptureOwner(binding)
+    const before = process.env.SINGZ_MUTE
+    try {
+      delete process.env.SINGZ_MUTE
+      expect(owner.setPlaybackMasterGain(7, '0', 0.25).ok).toBe(true)
+      expect(master).toHaveBeenLastCalledWith(0n, 0.25)
+      for (const invalid of [-1, 5, NaN, Infinity])
+        expect(owner.setPlaybackMasterGain(7, '0', invalid).ok).toBe(false)
+      expect(master).toHaveBeenCalledTimes(1)
+      process.env.SINGZ_MUTE = '1'
+      expect(owner.setPlaybackMasterGain(7, '0', 1).ok).toBe(true)
+      expect(master).toHaveBeenLastCalledWith(0n, 0)
+      expect((await owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).ok).toBe(true)
+      expect(owner.setPlaybackMasterGain(8, '0', 1).ok).toBe(false)
+      expect(owner.setPlaybackMasterGain(7, '2', 1).ok).toBe(false)
+    } finally {
+      if (before === undefined) delete process.env.SINGZ_MUTE
+      else process.env.SINGZ_MUTE = before
+    }
+  })
+
   it('mutes the native master gain under SINGZ_MUTE, at prepare and on every later set', async () => {
     // Automated runs are silent; Chromium's mute-audio never covered the
     // native graph, and a driver's one-second Play came out of the speakers

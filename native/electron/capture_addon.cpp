@@ -11,6 +11,7 @@
 #include "native_audio_ownership.h"
 #include "playback_addon_bridge.h"
 #include "../playback/shared_audio_service.h"
+#include "../playback/voice_monitor_source.h"
 #include "training_audio_session.h"
 #include "voice_monitor_bridge.h"
 #include "take_writer.h"
@@ -77,14 +78,40 @@ class CaptureInput {
       return box_->start(config, std::move(sink), inventory, enabledChannels);
     }
 #endif
-    if (!normal_) normal_ = std::make_unique<singz::AudioInput>();
-    return normal_->start(config, std::move(sink), inventory);
+    auto result = singz::sharedVoiceMonitorCapture().retain(
+        singz::VoiceCaptureUser::Arm, config, std::move(sink), inventory);
+    armHeld_ = result.ok;
+    return result;
+  }
+  bool retainTake() {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (box_) return true;
+#endif
+    takeHeld_ = singz::sharedVoiceMonitorCapture().retainExisting(singz::VoiceCaptureUser::Take);
+    return takeHeld_;
+  }
+  void releaseTake() {
+    if (takeHeld_) {
+      singz::sharedVoiceMonitorCapture().release(singz::VoiceCaptureUser::Take);
+      takeHeld_ = false;
+    }
+  }
+  void detachAnalysis(singz::AudioInputSink takeOnly) {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (box_) return;
+#endif
+    singz::sharedVoiceMonitorCapture().setDeliverySink(std::move(takeOnly));
   }
   void stop(bool retain = false) {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (box_) box_->stop(retain);
 #endif
-    if (normal_) normal_->stop(retain);
+    if (armHeld_) {
+      singz::sharedVoiceMonitorCapture().release(singz::VoiceCaptureUser::Arm, retain);
+      armHeld_ = false;
+    } else if (!retain) {
+      singz::sharedVoiceMonitorCapture().releasePrepared();
+    }
   }
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   singz::BoxInputMeter meter() const { return box_ ? box_->meter() : singz::BoxInputMeter{}; }
@@ -93,22 +120,23 @@ class CaptureInput {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (box_) return box_->stats();
 #endif
-    return normal_ ? normal_->stats() : singz::AudioInputStats{};
+    return singz::sharedVoiceMonitorCapture().stats();
   }
   singz::AudioInputState state() const {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (box_) return box_->state();
 #endif
-    return normal_ ? normal_->state() : singz::AudioInputState::Idle;
+    return singz::sharedVoiceMonitorCapture().state();
   }
   std::string lastError() const {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (box_) return box_->lastError();
 #endif
-    return normal_ ? normal_->lastError() : std::string{};
+    return singz::sharedVoiceMonitorCapture().lastError();
   }
  private:
-  std::unique_ptr<singz::AudioInput> normal_;
+  bool armHeld_ = false;
+  bool takeHeld_ = false;
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   std::unique_ptr<singz::BoxInputCapture> box_;
 #endif
@@ -480,15 +508,25 @@ bool getExactU32Array(napi_env env, napi_value object, const char* name,
 
 void stopLocked(uint64_t generation, bool force) {
   if (!force && generation != owner.generation) return;
-  const uint64_t releasedGeneration = owner.generation;
+  const uint64_t releasedGeneration = owner.generation ? owner.generation : owner.takeGeneration;
+  if (owner.input) owner.input->detachAnalysis([](const singz::AudioInputBlockView& block) {
+    owner.takeWriter.append(block);
+  });
   if (owner.analyzer) owner.analyzer->cancel(owner.generation);
+  if (owner.input) owner.input->stop(!force);
+  bool finishCaptureTake = force;
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  finishCaptureTake = finishCaptureTake || singz::boxRoutingOwnsCapture();
+#endif
+  if (finishCaptureTake && owner.takePresent) {
+    owner.takeWriter.finish();
+    if (owner.input) owner.input->releaseTake();
+  }
   if (owner.input) {
-    owner.input->stop(!force);
     owner.lastStats = owner.input->stats();
     owner.lastState = owner.input->state();
     owner.lastError = owner.input->lastError();
   }
-  if (owner.takePresent) owner.takeWriter.finish();
   owner.takeWriter.resetLevel();
   if (owner.bridge) {
     owner.lastDroppedEvents = owner.bridge->dropped.load(std::memory_order_relaxed);
@@ -502,7 +540,9 @@ void stopLocked(uint64_t generation, bool force) {
     owner.bridge = nullptr;
   }
   owner.generation = 0;
-  if (releasedGeneration != 0) {
+  // A disarmed take still owns the physical input and its arbitration lease.
+  // Forced environment cleanup must also release a previously disarmed take.
+  if (releasedGeneration != 0 && (force || !owner.takePresent)) {
     (void)nativeAudioOwnership.release(
         singz::NativeAudioOwnerKind::Capture, releasedGeneration);
   }
@@ -608,6 +648,11 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
       return undefined(env);
     }
   }
+  {
+    std::lock_guard<std::mutex> lock(owner.mutex);
+    if (owner.takeWriter.active() && generation != owner.generation)
+      return captureBusyResult(env, generation);
+  }
   const singz::NativeAudioAcquireResult acquired =
       nativeAudioOwnership.acquire(singz::NativeAudioOwnerKind::Capture,
                                    generation);
@@ -635,7 +680,9 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
   owner.lastOverwrittenWindows = 0;
   owner.sampleRate = 0;
   owner.inputResult = {};
-  owner.takeWriter.resetCaptureTelemetry();
+  singz::sharedVoiceMonitorCapture().synchronizeDelivery([] {
+    if (!owner.takeWriter.active()) owner.takeWriter.resetCaptureTelemetry();
+  });
   const auto modelPath = getString(env, argv[0], "crepeModelPath");
   try {
     owner.analyzer = std::make_unique<zdsp::analysis::PitchAnalysisModule>(
@@ -1201,6 +1248,7 @@ napi_value recordTake(napi_env env, napi_callback_info info) {
   if (owner.takePresent) return takeError(env, "busy", "A voice take is already active or awaiting finish");
   try {
     auto* input = owner.input.get();
+    if (!input->retainTake()) return takeError(env, "no-input", "No microphone input is open");
     owner.takeWriter.start(getStringValue(env, argv[0], 32768), getStringValue(env, argv[1], 128), owner.sampleRate,
         [input] { return input->state() != singz::AudioInputState::Running; });
     owner.takePresent = true; owner.takeGeneration = generation;
@@ -1208,7 +1256,10 @@ napi_value recordTake(napi_env env, napi_callback_info info) {
     napi_create_object(env, &result);
     set(env, result, "ok", boolValue(env, true));
     return result;
-  } catch (const std::exception& e) { return takeError(env, "error", e.what()); }
+  } catch (const std::exception& e) {
+    if (owner.input) owner.input->releaseTake();
+    return takeError(env, "error", e.what());
+  }
 }
 napi_value finishTake(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value argv[1]{};
@@ -1219,7 +1270,10 @@ napi_value finishTake(napi_env env, napi_callback_info info) {
       !owner.takePresent || generation != owner.takeGeneration)
     return takeError(env, "error", "No voice take exists for this microphone session");
   const auto result = owner.takeWriter.finish();
+  if (owner.input) owner.input->releaseTake();
   owner.takePresent = false; owner.takeGeneration = 0;
+  if (owner.generation == 0)
+    (void)nativeAudioOwnership.release(singz::NativeAudioOwnerKind::Capture, generation);
   return takeResult(env, result);
 }
 napi_value cancelTake(napi_env env, napi_callback_info info) {
@@ -1230,7 +1284,13 @@ napi_value cancelTake(napi_env env, napi_callback_info info) {
   const bool matched = argc == 1 && getExactU64(env, argv[0], &generation) &&
       owner.takePresent && generation == owner.takeGeneration;
   try {
-    if (matched) { owner.takeWriter.cancel(); owner.takePresent = false; owner.takeGeneration = 0; }
+    if (matched) {
+      owner.takeWriter.cancel();
+      if (owner.input) owner.input->releaseTake();
+      owner.takePresent = false; owner.takeGeneration = 0;
+      if (owner.generation == 0)
+        (void)nativeAudioOwnership.release(singz::NativeAudioOwnerKind::Capture, generation);
+    }
     napi_value result;
     napi_create_object(env, &result);
     set(env, result, "ok", boolValue(env, true));

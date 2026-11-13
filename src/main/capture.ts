@@ -1940,6 +1940,15 @@ export class CaptureOwner {
   }
 
   setPlaybackMasterGain(rendererId: number, generation: string, gain: number): DesktopPlaybackResult {
+    if (generation === '0') {
+      if (!Number.isFinite(gain) || gain < 0 || gain > 4 ||
+          (this.playbackRendererId !== null && this.playbackRendererId !== rendererId))
+        return failedPlayback('Invalid service master gain or renderer owner.', 'invalid-configuration', '0')
+      const binding = this.native()
+      if (!binding) return failedPlayback('Native output is unavailable.', 'host-failure', '0')
+      try { return binding.setPlaybackMasterGain(0n, mutedMasterGain(gain)) }
+      catch { return failedPlayback('Service master gain could not be updated.', 'host-failure', '0') }
+    }
     return this.playbackCommand(rendererId, generation, (binding, value) =>
       binding.setPlaybackMasterGain(value, mutedMasterGain(gain)), 'master gain')
   }

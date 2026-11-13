@@ -1511,6 +1511,7 @@ export interface SingzApi {
     muted: boolean,
     solo: boolean
   ): Promise<DesktopPlaybackResult>
+  /** Generation '0' targets the shared service even with no song loaded. */
   setDesktopPlaybackMasterGain(
     generation: string,
     gain: number

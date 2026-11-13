@@ -954,6 +954,128 @@ describe('ADR 0016 persisted take effect slots', () => {
 })
 
 
+describe('recording IPC renderer lifetime', () => {
+  const sender = (id: number) => Object.assign(new EventEmitter(), { id, isDestroyed: () => false })
+  const fixture = () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-record-owner-')); roots.push(root)
+    const native = fakeNative()
+    native.finishTake = vi.fn(native.finishTake)
+    native.stopCapture = vi.fn(async () => ({ ok: true }))
+    native.disarmCapture = vi.fn(async () => ({ ok: true }))
+    let query = native.presentationQuery
+    native.presentationQuery = args => query(args)
+    const store = new VoiceTakeStore({ rootDir: root, native })
+    registerVoiceTakeIpc(store)
+    const call = (channel: string, owner: ReturnType<typeof sender>, value?: unknown) => voiceIpc.handlers.get(channel)!({ sender: owner }, value)
+    return { root, native, store, call, setQuery: (value: VoiceTakeNative['presentationQuery']) => { query = value } }
+  }
+
+  it.each(['render-process-gone', 'destroyed', 'did-start-navigation'])('finalizes and releases an armed take on %s, once', async event => {
+    const { root, native, store, call } = fixture(), owner = sender(71)
+    await call('voice:arm', owner, { input: request.input })
+    const started = await call('voice:record-start', owner, request)
+    expect(started.ok).toBe(true)
+    owner.emit(event, {}, 'reload', false, true)
+    owner.emit('render-process-gone', {})
+    await vi.waitFor(() => expect(native.disarmCapture).toHaveBeenCalledTimes(1))
+    expect(native.finishTake).toHaveBeenCalledTimes(1)
+    expect((await store.level()).takeActive).toBe(false)
+    const sidecar = JSON.parse(readFileSync(join(root, request.songId, `${started.takeId}.json`), 'utf8'))
+    expect(sidecar.status).toBe('partial-error')
+    // The next window can record; the old owner no longer holds a busy take.
+    const next = sender(72)
+    expect((await call('voice:record-start', next, request)).ok).toBe(true)
+    await call('voice:record-stop', next)
+  })
+
+  it('does not stop another webContents take or same-document/subframe navigation', async () => {
+    const { native, store, call } = fixture(), owner = sender(81), other = sender(82)
+    await call('voice:record-start', owner, request)
+    expect(await call('voice:record-start', other, request)).toMatchObject({ ok: false, reason: 'busy' })
+    other.emit('render-process-gone', {}); other.emit('destroyed')
+    owner.emit('did-start-navigation', {}, '#fragment', true, true)
+    owner.emit('did-start-navigation', {}, 'iframe', false, false)
+    expect((await store.level()).takeActive).toBe(true)
+    expect(native.finishTake).not.toHaveBeenCalled()
+    expect(await call('voice:record-stop', other)).toMatchObject({ ok: false })
+    await call('voice:record-stop', owner)
+  })
+
+  it('cleans up a renderer lost while recordStart is still opening capture', async () => {
+    const { root, native, call } = fixture(), owner = sender(91)
+    const record = native.recordTake
+    let release!: () => void
+    native.recordTake = async args => { await new Promise<void>(resolve => { release = resolve }); return record(args) }
+    const starting = call('voice:record-start', owner, request)
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    owner.emit('did-start-navigation', {}, 'reload', false, true)
+    release()
+    expect(await starting).toMatchObject({ ok: false, message: 'Recording owner is unavailable.' })
+    expect(native.finishTake).toHaveBeenCalledTimes(1)
+    expect(native.stopCapture).toHaveBeenCalledTimes(1)
+    const take = (await new VoiceTakeStore({ rootDir: root, native }).list(request.songId))[0]
+    expect(take.status).toBe('partial-error')
+  })
+
+  it('reproduces the missing-handler negative control: renderer loss leaves an unbound store recording', async () => {
+    const { native, store } = fixture(), unwatched = sender(101)
+    await store.start(request) // Deliberately bypass the IPC lifetime binding.
+    unwatched.emit('render-process-gone', {})
+    expect((await store.level()).takeActive).toBe(true)
+    expect(native.finishTake).not.toHaveBeenCalled()
+    await store.stop('error')
+  })
+
+  it('waits for lost-owner capture release before opening a replacement renderer take', async () => {
+    const { native, call } = fixture(), owner = sender(121), next = sender(122)
+    native.recordTake = vi.fn(native.recordTake)
+    const finish = native.finishTake
+    let release!: () => void
+    native.finishTake = vi.fn(async args => { await new Promise<void>(resolve => { release = resolve }); return finish(args) })
+    await call('voice:record-start', owner, request)
+    owner.emit('render-process-gone', {})
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    const replacement = call('voice:record-start', next, request)
+    await Promise.resolve()
+    expect(native.recordTake).toHaveBeenCalledTimes(1)
+    release()
+    expect((await replacement).ok).toBe(true)
+    expect(native.stopCapture).toHaveBeenCalledTimes(1)
+    native.finishTake = finish
+    await call('voice:record-stop', next)
+  })
+
+  it('keeps renderer-loss partial-error when a pending poll is also ending the take', async () => {
+    const { native, store, call, setQuery } = fixture(), owner = sender(131)
+    await call('voice:record-start', owner, request)
+    let resolveStats!: (value: Awaited<ReturnType<VoiceTakeNative['captureStats']>>) => void
+    native.captureStats = () => new Promise(resolve => { resolveStats = resolve })
+    const internal = store as unknown as { active: object; checkDiscontinuity(active: object): Promise<void> }
+    const poll = internal.checkDiscontinuity(internal.active)
+    owner.emit('render-process-gone', {})
+    native.captureStats = async () => ({ lastSampleHostNs: '2000000000', sampleRate: 44100 })
+    setQuery(async () => ({ ok: true, found: false }))
+    resolveStats({ lastSampleHostNs: '2000000000', sampleRate: 44100 })
+    await poll
+    await vi.waitFor(() => expect(native.disarmCapture).toHaveBeenCalledTimes(1))
+    expect(native.finishTake).toHaveBeenCalledTimes(1)
+    expect((await store.stop()).take?.status).toBe('partial-error')
+  })
+
+  it('the existing 250 ms poll ends capture on audio-process RPC failure without a renderer', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const { native, store, call } = fixture(), owner = sender(111)
+    try {
+      await call('voice:record-start', owner, request)
+      native.captureStats = async () => { throw new Error('Audio process stopped') }
+      await vi.advanceTimersByTimeAsync(250)
+      await vi.waitFor(() => expect(native.stopCapture).toHaveBeenCalledTimes(1))
+      expect(native.finishTake).toHaveBeenCalledTimes(1)
+      expect((await store.stop()).take?.status).toBe('partial-error')
+    } finally { vi.useRealTimers() }
+  })
+})
+
 describe('ADR 0016 conform IPC leases and cancellation', () => {
   const req = { songId: 'song', takeId: 'take', requestId: 'job-1', outputRate: 48000, songDurationProjectFrames: 480000 }
   function register() {

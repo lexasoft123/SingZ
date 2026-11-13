@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -8267,9 +8268,220 @@ void portableGraphDocumentMaterializesActualTopology() {
             .ok());
 }
 
+void serviceMasterPinsOnlyTheAppGainAndPreservesTiming() {
+  const std::string wav = writeWav("service-master.wav", 1, std::vector<float>(65536, 0.125F));
+  for (double rate : {1.0, 1.25}) {
+    uint64_t expectedGraphLatency = 0, expectedPresentation = 0;
+    int64_t expectedAudible = 0;
+    for (bool serviceMaster : {false, true}) {
+      auto backend = std::make_unique<ManualOutputBackend>();
+      auto* fake = backend.get();
+      singz::NativePlaybackSession session(std::move(backend));
+      auto request = config(); request.masterGain = 0.25F;
+      request.serviceOwnsMasterGain = serviceMaster; request.playbackRate = rate;
+      std::vector<singz::NativePlaybackLaneSource> lanes;
+      lanes.push_back(lane("song", wav));
+      CHECK(session.prepare(std::move(request), std::move(lanes), 1).ok);
+      CHECK(session.openOutput(1).ok && session.start(1).ok);
+      for (unsigned i = 0; i < 24; ++i) CHECK(fake->drive(256));
+      const auto status = session.status();
+      if (rate == 1.0) CHECK(near(fake->left[255], pcm16(0.125F) * (serviceMaster ? 1.0F : 0.25F), 1e-6F));
+      CHECK(status.masterGain == 0.25F);
+      if (!serviceMaster) {
+        expectedGraphLatency = status.graphLatencyFrames;
+        expectedPresentation = status.presentationLatencyFrames;
+        expectedAudible = status.audibleProjectFrame;
+      } else {
+        CHECK(status.graphLatencyFrames == expectedGraphLatency);
+        CHECK(status.presentationLatencyFrames == expectedPresentation);
+        CHECK(status.audibleProjectFrame == expectedAudible);
+      }
+      CHECK(session.setMasterGain(1, 2.0F).ok);
+      CHECK(fake->drive(256));
+      if (rate == 1.0) CHECK(near(fake->left[255], pcm16(0.125F) * (serviceMaster ? 1.0F : 2.0F), 1e-6F));
+      CHECK(session.status().masterGain == 2.0F);
+      CHECK(session.unload(1).ok);
+    }
+  }
+  std::remove(wav.c_str());
+}
+
+void songVolumeIsAppliedOnceThroughTheSharedService() {
+  auto physical = std::make_unique<ManualOutputBackend>();
+  auto* fake = physical.get();
+  auto& service = singz::sharedAudioService();
+  CHECK(service.configureProvider(std::move(physical), "service-master-test").ok);
+  const std::string wav = writeWav("service-master-integration.wav", 1, std::vector<float>(4096, 0.125F));
+  auto host = service.playbackBackend(std::make_unique<ManualOutputBackend>(), "service-master-test");
+  singz::NativePlaybackSession session(std::move(host));
+  uint64_t generation = 0;
+  for (float gain : {0.25F, 1.0F, 2.0F}) {
+    auto request = config(); request.masterGain = gain; request.serviceOwnsMasterGain = true;
+    std::vector<singz::NativePlaybackLaneSource> lanes; lanes.push_back(lane("song", wav));
+    CHECK(session.prepare(std::move(request), std::move(lanes), ++generation).ok);
+    CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+    CHECK(fake->drive(256));
+    for (unsigned frame = 128; frame < 256; ++frame) {
+      CHECK(near(fake->left[frame], pcm16(0.125F) * gain, 1e-6F));
+      CHECK(fake->left[frame] == fake->right[frame]);
+    }
+    CHECK(session.setMasterGain(generation, 0.5F).ok && fake->drive(256));
+    CHECK(near(fake->left[255], pcm16(0.125F) * 0.5F, 1e-6F));
+    CHECK(session.unload(generation).ok);
+  }
+  CHECK(service.setMasterGain(1));
+  std::remove(wav.c_str());
+}
+
+void hotSongIsLimitedAfterTheServiceMaster() {
+  const std::string wav = writeWav("hot-service-master.wav", 1, std::vector<float>(4096, 0.95F));
+  unsigned route = 0;
+  const auto render = [&](bool serviceMaster, float gain,
+                          std::optional<float> authoredCeiling = {},
+                          unsigned laneCount = 1) {
+    auto physical = std::make_unique<ManualOutputBackend>();
+    auto* fake = physical.get();
+    std::unique_ptr<singz::AudioHostBackend> host;
+    if (serviceMaster) {
+      auto& service = singz::sharedAudioService();
+      const std::string provider = "hot-master-" + std::to_string(++route);
+      CHECK(service.configureProvider(std::move(physical), provider).ok);
+      host = service.playbackBackend(std::make_unique<ManualOutputBackend>(), provider);
+    } else {
+      host = std::move(physical);
+    }
+    singz::NativePlaybackSession session(std::move(host));
+    auto request = config();
+    request.masterGain = gain; request.serviceOwnsMasterGain = serviceMaster;
+    std::vector<singz::NativePlaybackLaneSource> lanes;
+    singz::NativePlaybackGraphContext context;
+    context.outputChannels = 2;
+    for (unsigned i = 0; i < laneCount; ++i) {
+      const std::string name = "hot-" + std::to_string(i);
+      lanes.push_back(lane(name.c_str(), wav));
+      context.lanes.push_back({name, 1, false});
+    }
+    if (authoredCeiling) {
+      auto document = singz::synthesizeNativePlaybackGraphDocument(context);
+      // The synthesized output limiter is immediately before physical output.
+      document.nodes[document.nodes.size() - 2].parameters = {{"ceiling", *authoredCeiling}};
+      request.graphDocument = std::move(document);
+    }
+    CHECK(session.prepare(std::move(request), std::move(lanes), 1).ok);
+    CHECK(session.openOutput(1).ok && session.start(1).ok && fake->drive(256));
+    // The service meter must remain available after graph-ceiling bypass.
+    CHECK(session.outputMeter().available && session.outputMeter().peak > 0.4F);
+    std::array<float, 128> output{};
+    std::copy_n(fake->left.begin() + 128, output.size(), output.begin());
+    CHECK(session.unload(1).ok);
+    return output;
+  };
+  const auto reduced = render(true, 0.5F);
+  CHECK(near(reduced[0], pcm16(0.95F) * 0.5F, 1e-6F) && "hot master attenuation");
+  for (float sample : reduced) CHECK(near(sample, 0.475F, 2e-5F));
+  CHECK(reduced == render(false, 0.5F));
+  // Unity is bit-identical even when the raw song exceeds the old ceiling.
+  CHECK(render(true, 1.0F) == render(false, 1.0F));
+  // A sum above unity must also survive until attenuation (not clamp at 1).
+  CHECK(render(true, 0.25F, {}, 2) == reduced);
+  // The service ceiling is final, including documents authoring 0 dBFS.
+  const auto authoredUnity = render(true, 1.0F, 1.0F);
+  for (float sample : authoredUnity) CHECK(sample == singz::kServiceMasterCeiling);
+  CHECK(render(true, 0.5F, 1.0F) == reduced);
+  const auto nonServiceAuthored = render(false, 1.0F, 1.0F);
+  for (float sample : nonServiceAuthored) CHECK(sample == pcm16(0.95F));
+  CHECK(singz::sharedAudioService().setMasterGain(1));
+  std::remove(wav.c_str());
+}
+
+void serviceMasterMeterReportsDeviceOutput() {
+  const auto hot = writeWav("service-meter-hot.wav", 1, std::vector<float>(4096, 0.95F));
+  const auto quiet = writeWav("service-meter-quiet.wav", 1, std::vector<float>(4096, 0.4F));
+  unsigned route = 0;
+  for (const auto& [gain, path, expected, clips] : {
+           std::tuple{0.5F, hot, pcm16(0.95F) * 0.5F, 0u},
+           std::tuple{4.0F, quiet, singz::kServiceMasterCeiling, 1u},
+           std::tuple{1.0F, quiet, pcm16(0.4F), 0u},
+           std::tuple{1.0F, hot, singz::kServiceMasterCeiling, 1u}}) {
+    auto physical = std::make_unique<ManualOutputBackend>(); auto* fake = physical.get();
+    auto& service = singz::sharedAudioService();
+    const std::string provider = "service-meter-" + std::to_string(++route);
+    CHECK(service.configureProvider(std::move(physical), provider).ok);
+    CHECK(service.setMasterGain(gain) && service.ensureOutput().ok);
+    CHECK(fake->drive(256)); // Settle the volume ramp while the bus is silent.
+    auto host = service.playbackBackend(std::make_unique<ManualOutputBackend>(), provider);
+    singz::NativePlaybackSession session(std::move(host));
+    const auto prepare = [&](uint64_t generation) {
+      auto request = config(); request.masterGain = gain; request.serviceOwnsMasterGain = true;
+      std::vector<singz::NativePlaybackLaneSource> lanes; lanes.push_back(lane("song", path));
+      CHECK(session.prepare(std::move(request), std::move(lanes), generation).ok);
+      CHECK(session.status().outputPeak == 0 && session.status().outputClippedBlocks == 0);
+      CHECK(session.outputMeter().clippedBlocks == 0);
+      CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+    };
+    prepare(1);
+    CHECK(fake->drive(256));
+    const auto meter = session.outputMeter(); const auto status = session.status();
+    CHECK(meter.available && near(meter.peak, expected, 1e-6F) && "service output meter peak");
+    CHECK(meter.clippedBlocks == clips && "service output meter clip count");
+    CHECK(status.outputPeak == meter.peak && status.outputClippedBlocks == clips);
+    CHECK(near(meter.rms, expected, 1e-6F));
+    CHECK(session.pause(1).ok && session.resume(1).ok);
+    CHECK(session.status().outputClippedBlocks == clips); // Observations/transport never consume/reset.
+    CHECK(session.outputMeter().clippedBlocks == clips);
+    CHECK(fake->drive(256));
+    CHECK(session.status().outputClippedBlocks == 2 * clips);
+    uint64_t generation = 1;
+    if (clips) {
+      auto replacement = config(); replacement.masterGain = gain;
+      replacement.serviceOwnsMasterGain = true; replacement.swapFromGeneration = 1;
+      replacement.preparedStartProjectFrame = 512;
+      std::vector<singz::NativePlaybackLaneSource> lanes; lanes.push_back(lane("song", path));
+      CHECK(session.prepare(std::move(replacement), std::move(lanes), 2).ok);
+      CHECK(session.status().outputClippedBlocks == 2); // Armed candidate did not reset the old meter.
+      CHECK(fake->drive(256));
+      CHECK(session.status().outputClippedBlocks == 1); // Reset belongs to the first incoming block.
+      generation = 2;
+    }
+    CHECK(session.unload(generation).ok);
+    CHECK(session.outputMeter().available && session.outputMeter().generation == 0);
+    CHECK(session.status().outputPeak == service.outputMeter().peak);
+    prepare(++generation); // A new graph starts a new counter, despite the live shared bus.
+    CHECK(fake->drive(256));
+    CHECK(session.status().outputClippedBlocks == clips);
+    // Publications retain the graph counter's uint32 saturation semantics.
+    service.masterMeterState().clippedBlocks.fetch_add(UINT32_MAX, std::memory_order_relaxed);
+    CHECK(session.status().outputClippedBlocks == UINT32_MAX);
+    CHECK(session.outputMeter().clippedBlocks == UINT32_MAX);
+    CHECK(session.unload(generation).ok);
+    const auto idle = [](void*, const singz::AudioHostRenderBlock& block) noexcept {
+      for (uint32_t channel = 0; channel < block.outputChannels; ++channel)
+        for (uint32_t frame = 0; frame < block.frames; ++frame)
+          block.output[channel][frame] += 0.4F;
+      return true;
+    };
+    service.setTrainingRenderer(idle, nullptr);
+    CHECK(service.ensureOutput().ok && fake->drive(256));
+    CHECK(near(session.outputMeter().peak, service.outputMeter().peak, 1e-6F));
+    CHECK(session.status().outputClippedBlocks == std::min<uint64_t>(service.outputMeter().clippedBlocks, UINT32_MAX));
+    service.clearTrainingRenderer();
+  }
+  CHECK(singz::sharedAudioService().setMasterGain(1));
+  std::remove(hot.c_str()); std::remove(quiet.c_str());
+}
+
 } // namespace
 
 int main() {
+  if (std::getenv("SINGZ_SERVICE_MASTER_METER_REGRESSION_ONLY")) {
+    serviceMasterMeterReportsDeviceOutput(); return 0;
+  }
+  if (std::getenv("SINGZ_SERVICE_MASTER_HOT_REGRESSION_ONLY")) {
+    hotSongIsLimitedAfterTheServiceMaster(); return 0;
+  }
+  if (std::getenv("SINGZ_SERVICE_MASTER_REGRESSION_ONLY")) {
+    serviceMasterPinsOnlyTheAppGainAndPreservesTiming(); songVolumeIsAppliedOnceThroughTheSharedService(); return 0;
+  }
   if(std::getenv("SINGZ_MONO_PARITY_REGRESSION_ONLY")){monoStemAndVoiceTakeHaveIdenticalChannelLevels();return 0;}
   monoStemAndVoiceTakeHaveIdenticalChannelLevels();
   if(std::getenv("SINGZ_HELD_CAPACITY_REGRESSION_ONLY")){heldSongCapacitySurvivesSmallerGraphRequest();return 0;}
@@ -8298,6 +8510,10 @@ int main() {
     std::puts("native playback quarantined swap tests: ok");
     return 0;
   }
+  serviceMasterMeterReportsDeviceOutput();
+  hotSongIsLimitedAfterTheServiceMaster();
+  serviceMasterPinsOnlyTheAppGainAndPreservesTiming();
+  songVolumeIsAppliedOnceThroughTheSharedService();
   heldSongCapacitySurvivesSmallerGraphRequest();
   callbackPeriodChangesKeepTheSourceContinuous();
   aStaleReanchorNeverRewindsTheSource();

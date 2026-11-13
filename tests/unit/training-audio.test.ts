@@ -165,6 +165,7 @@ beforeEach(() => {
   vi.stubGlobal('OfflineAudioContext', FakeOfflineAudioContext)
   vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => ['route-a', 'route-b', 'confirmed-output'].map(id => ({ kind: 'audiooutput', deviceId: id, label: id })) } })
   vi.stubGlobal('window', { singz: { scheduleDesktopTrainingCue: nativeSchedule, cancelDesktopTrainingCues: nativeCancel, setDesktopTrainingCueGain: vi.fn(async () => ({ ok: true })), configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })), audioHostDevices: async () => ({ ok: true, devices: ['route-a', 'route-b', 'confirmed-output'].map(uid => ({ uid, label: uid, outputChannels: 2 })) }) } })
+  window.singz.setDesktopPlaybackMasterGain = vi.fn(async () => ({ ok: true }) as never)
 })
 
 describe('shared native training cues', () => {
@@ -186,7 +187,7 @@ describe('shared native training cues', () => {
       const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
       controller.latch()
       controller.cancel()
-      controller.setOutputGain(0.5)
+      controller.setReferenceVolume(0.5)
       await flushPlaybackRequest()
       const detail = mode === 'refused' ? error.message : error
       expect(report).toHaveBeenCalledWith('Training latch failed:', detail)
@@ -276,6 +277,23 @@ describe('shared native training cues', () => {
 })
 
 describe('engine-owned training audio', () => {
+  it('publishes idle master volume once and keeps native cue gain relative to the service master', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    engine.setNativeAheadAllowed(false)
+    await engine.setMasterVolumeAccepted(0.25)
+    expect(window.singz.setDesktopPlaybackMasterGain).toHaveBeenLastCalledWith('0', 0.25)
+    const controller = engine.createTrainingCueController()
+    controller.setSound('organ')
+    controller.setReferenceVolume(0.6)
+    await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [60] }])
+    expect(nativeSchedule.mock.calls[0][0]).toMatchObject({ gain: 0.6 })
+    await engine.setMasterVolumeAccepted(0.5)
+    expect(window.singz.setDesktopPlaybackMasterGain).toHaveBeenLastCalledWith('0', 0.5)
+    expect(window.singz.setDesktopTrainingCueGain).toHaveBeenLastCalledWith(expect.any(String), 0.6)
+    controller.dispose()
+  })
   it('keeps a paused native song graph and its output lease for training cues', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext)
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')

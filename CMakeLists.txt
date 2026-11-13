@@ -295,6 +295,34 @@ target_compile_features(singz_output_callback_diagnostics_render PRIVATE cxx_std
 target_link_libraries(singz_output_callback_diagnostics_render PRIVATE SingZ::zcore_device)
 singz_configure_realtime_target(singz_output_callback_diagnostics_render)
 add_dependencies(singz_voice_monitor_render singz_output_callback_diagnostics_render)
+
+# The complete service master leaf and the final callback ordering are checked
+# independently of the control-domain service (which owns device locks).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/shared_audio_service.h)
+file(READ "${SINGZ_REPO_ROOT}/native/playback/shared_audio_service.h" _service_header)
+string(REGEX MATCH "// SINGZ_SERVICE_MASTER_RT_BEGIN[^@]*// SINGZ_SERVICE_MASTER_RT_END" _service_master_rt "${_service_header}")
+if(NOT _service_master_rt)
+  message(FATAL_ERROR "Service master realtime leaf markers are missing")
+endif()
+set(_master_rt_source "${CMAKE_CURRENT_BINARY_DIR}/service-master-render.cpp")
+file(WRITE "${_master_rt_source}" "#include <algorithm>\n#include <atomic>\n#include <cmath>\n#include <zcore/device/audio_host_render.h>\nnamespace singz {\n${_service_master_rt}\n}\n")
+file(READ "${SINGZ_REPO_ROOT}/native/playback/shared_audio_service.cpp" _master_service_text)
+string(REGEX MATCH "static bool render[^@]*AudioHostResult openLocked" _service_callback "${_master_service_text}")
+if(NOT _service_callback)
+  message(FATAL_ERROR "Service mix callback RT extraction needs updating")
+endif()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/service-mix-callback-rt.txt" "${_service_callback}")
+set(SINGZ_SERVICE_MASTER_RT_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/service-master-realtime.cmake")
+file(WRITE "${SINGZ_SERVICE_MASTER_RT_MANIFEST}" "set(SINGZ_ZDSP_RT_FILES [==[${_master_rt_source}]==] [==[${CMAKE_CURRENT_BINARY_DIR}/service-mix-callback-rt.txt]==])\n")
+add_library(singz_service_master_render OBJECT "${_master_rt_source}")
+target_compile_features(singz_service_master_render PRIVATE cxx_std_20)
+target_link_libraries(singz_service_master_render PRIVATE SingZ::zcore_device)
+singz_configure_realtime_target(singz_service_master_render)
+add_custom_target(singz_check_service_master_realtime ALL
+  COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_SERVICE_MASTER_RT_MANIFEST}"
+    -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake"
+  VERBATIM)
+add_dependencies(singz_native_playback_callback singz_check_service_master_realtime singz_service_master_render)
 add_custom_target(singz_check_voice_monitor_realtime ALL
   COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_VOICE_MONITOR_RT_MANIFEST}"
     -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake"
@@ -305,6 +333,42 @@ target_include_directories(singz_voice_monitor PUBLIC "${SINGZ_REPO_ROOT}")
 target_link_libraries(singz_voice_monitor PUBLIC SingZ::zcore_device Threads::Threads)
 set_target_properties(singz_voice_monitor PROPERTIES POSITION_INDEPENDENT_CODE YES)
 add_dependencies(singz_voice_monitor singz_check_voice_monitor_realtime singz_voice_monitor_render)
+
+# WP1 capture/history publication: owning control code and a separately strict
+# compiled/scanned callback leaf. The marker extraction tracks both inputs.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  native/playback/voice_monitor_source.h native/playback/voice_monitor_source.cpp)
+file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor_source.h" _monitor_source_header)
+file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor_source.cpp" _monitor_source_cpp)
+foreach(_part IN ITEMS header cpp)
+  string(REGEX MATCH "// SINGZ_MONITOR_SOURCE_RT_BEGIN[^@]*// SINGZ_MONITOR_SOURCE_RT_END"
+    _monitor_source_rt_${_part} "${_monitor_source_${_part}}")
+  if(NOT _monitor_source_rt_${_part})
+    message(FATAL_ERROR "Monitor source RT ${_part} markers missing")
+  endif()
+  string(REGEX REPLACE "//[^\n]*" "" _monitor_source_rt_${_part} "${_monitor_source_rt_${_part}}")
+endforeach()
+set(_monitor_source_leaf "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-source-rt.cpp")
+set(_monitor_source_api "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-source-rt-api.h")
+file(WRITE "${_monitor_source_leaf}"
+  "#include <algorithm>\n#include <cmath>\n#include \"${SINGZ_REPO_ROOT}/native/playback/voice_monitor_source.h\"\nnamespace singz {\n${_monitor_source_rt_cpp}\n}\n")
+file(WRITE "${_monitor_source_api}" "${_monitor_source_rt_header}")
+set(_monitor_source_manifest "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-source-realtime.cmake")
+file(WRITE "${_monitor_source_manifest}"
+  "set(SINGZ_ZDSP_RT_FILES [==[${_monitor_source_leaf}]==] [==[${_monitor_source_api}]==])\n")
+add_library(singz_voice_monitor_source_rt OBJECT "${_monitor_source_leaf}")
+target_compile_features(singz_voice_monitor_source_rt PRIVATE cxx_std_20)
+target_link_libraries(singz_voice_monitor_source_rt PRIVATE zCore::routing SingZ::zcore_device)
+singz_configure_realtime_target(singz_voice_monitor_source_rt)
+add_custom_target(singz_check_voice_monitor_source_realtime
+  COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${_monitor_source_manifest}"
+    -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake" VERBATIM)
+add_library(singz_voice_monitor_source STATIC native/playback/voice_monitor_source.cpp)
+target_compile_features(singz_voice_monitor_source PUBLIC cxx_std_20)
+target_include_directories(singz_voice_monitor_source PUBLIC "${SINGZ_REPO_ROOT}")
+target_link_libraries(singz_voice_monitor_source PUBLIC zCore::routing SingZ::zcore_device Threads::Threads)
+set_target_properties(singz_voice_monitor_source PROPERTIES POSITION_INDEPENDENT_CODE YES)
+add_dependencies(singz_voice_monitor_source singz_check_voice_monitor_source_realtime singz_voice_monitor_source_rt)
 
 add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/record_placement.cpp
@@ -400,6 +464,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     SingZ::zdsp_analysis
     SingZ::zcore_audio_export
     singz_microphone_mix
+    singz_voice_monitor_source
     singz_voice_monitor
     SingZ::native_playback_session
     singz_native_audio_ownership)
@@ -448,6 +513,57 @@ option(SINGZ_MONITOR_SPIKE "Build the isolated monitor measurement harness" OFF)
 if(SINGZ_MONITOR_SPIKE AND NOT ANDROID AND NOT IOS)
   enable_testing()
   add_subdirectory(tools/monitor-spike)
+endif()
+
+
+if(SINGZ_CORE_TESTS)
+  enable_testing()
+  add_executable(voice_monitor_source_tests tests/native/voice_monitor_source_tests.cpp
+    native/electron/take_writer.cpp "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(voice_monitor_source_tests PRIVATE cxx_std_20)
+  target_include_directories(voice_monitor_source_tests PRIVATE "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(voice_monitor_source_tests PRIVATE singz_voice_monitor_source)
+  add_test(NAME voice_monitor_source_tests COMMAND voice_monitor_source_tests)
+  add_test(NAME voice_monitor_source_realtime_source_policy
+    COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${_monitor_source_manifest}"
+      -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-source-blocking.cpp"
+    "${_monitor_source_rt_cpp}\nvoid blockingTap() { sleep(1); }\n")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-source-blocking.cmake"
+    "set(SINGZ_ZDSP_RT_FILES [==[${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-source-blocking.cpp]==])\n")
+  add_test(NAME voice_monitor_source_negative_blocking
+    COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-source-blocking.cmake"
+      -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
+  set_tests_properties(voice_monitor_source_negative_blocking PROPERTIES WILL_FAIL TRUE)
+  foreach(_mutation IN ITEMS floor delivery)
+    if(_mutation STREQUAL "floor")
+      set(_old "static_cast<double>(inputFloor)")
+      set(_new "0.0 * static_cast<double>(inputFloor) /* deliberately omit the input-period floor */")
+      set(_expected "missing==0")
+    else()
+      set(_old "const bool delivered = tap.delivery.pushWithPosition")
+      set(_new "if (tap.monitor && input && frames) const_cast<float*>(input)[0] = -.75f;\n  const bool delivered = tap.delivery.pushWithPosition")
+      set(_expected "off.bytes==on.bytes")
+    endif()
+    string(REPLACE "${_old}" "${_new}" _mutated "${_monitor_source_cpp}")
+    if(_mutated STREQUAL _monitor_source_cpp)
+      message(FATAL_ERROR "Monitor source ${_mutation} mutation did not hit")
+    endif()
+    set(_mutant_file "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-source-negative-${_mutation}.cpp")
+    file(WRITE "${_mutant_file}" "${_mutated}")
+    add_executable(voice_monitor_source_negative_${_mutation} tests/native/voice_monitor_source_tests.cpp
+      "${_mutant_file}" native/electron/take_writer.cpp "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+    target_compile_features(voice_monitor_source_negative_${_mutation} PRIVATE cxx_std_20)
+    target_include_directories(voice_monitor_source_negative_${_mutation} PRIVATE
+      "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback" "${ZCORE_ROOT}/zdsp/tests")
+    target_link_libraries(voice_monitor_source_negative_${_mutation} PRIVATE zCore::routing SingZ::zcore_device Threads::Threads)
+    add_dependencies(voice_monitor_source_tests voice_monitor_source_negative_${_mutation})
+    add_test(NAME voice_monitor_source_negative_${_mutation}
+      COMMAND "${Python3_EXECUTABLE}" "${SINGZ_REPO_ROOT}/tools/monitor-spike/expect_failure.py"
+        "$<TARGET_FILE:voice_monitor_source_negative_${_mutation}>" "${_mutation}" "${_expected}")
+  endforeach()
+  set_tests_properties(voice_monitor_source_tests voice_monitor_source_negative_floor
+    voice_monitor_source_negative_delivery PROPERTIES TIMEOUT 120)
 endif()
 
 if(NOT SINGZ_BUILD_HOST_TOOLS)
@@ -987,6 +1103,56 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(shared_audio_service_tests PRIVATE SingZ::zcore_device Threads::Threads)
   add_test(NAME shared_audio_service_tests COMMAND shared_audio_service_tests)
 
+  foreach(_master_variant IN ITEMS tests negative_bypass negative_limiter negative_latency)
+    set(_master_source "${SINGZ_REPO_ROOT}/native/playback/shared_audio_service.cpp")
+    if(NOT _master_variant STREQUAL "tests")
+      set(_master_mutant "${_master_service_text}")
+      if(_master_variant STREQUAL "negative_bypass")
+        string(REPLACE "    {\n      AudioInputCallbackScope scope(self.microphone.gate);"
+          "    self.master.process(block);\n    {\n      AudioInputCallbackScope scope(self.microphone.gate);" _master_mutant "${_master_mutant}")
+        string(REPLACE "    self.master.process(block);\n    self.frames.fetch_add" "    self.frames.fetch_add" _master_mutant "${_master_mutant}")
+      elseif(_master_variant STREQUAL "negative_limiter")
+        # Compile a mutated copy of the complete actual leaf, not a fake DSP.
+        string(REPLACE "std::clamp(\n            scaled, -double(kServiceMasterCeiling), double(kServiceMasterCeiling))" "scaled" _master_header "${_service_header}")
+        if(_master_header STREQUAL _service_header)
+          message(FATAL_ERROR "Service master limiter negative control needs updating")
+        endif()
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/service-master-negative-limiter")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/service-master-negative-limiter/shared_audio_service.h" "${_master_header}")
+      else()
+        string(REPLACE "    auto result = service_.status();" "    auto result = service_.status();\n    result.latency.outputDeviceFrames += 128;" _master_mutant "${_master_mutant}")
+      endif()
+      if(NOT _master_variant STREQUAL "negative_limiter" AND _master_mutant STREQUAL _master_service_text)
+        message(FATAL_ERROR "Service master ${_master_variant} negative control needs updating")
+      endif()
+      set(_master_dir "${CMAKE_CURRENT_BINARY_DIR}/service-master-${_master_variant}")
+      file(MAKE_DIRECTORY "${_master_dir}")
+      set(_master_source "${_master_dir}/shared_audio_service.cpp")
+      file(WRITE "${_master_source}" "${_master_mutant}")
+      if(_master_variant STREQUAL "negative_limiter")
+        file(COPY "${CMAKE_CURRENT_BINARY_DIR}/service-master-negative-limiter/shared_audio_service.h" DESTINATION "${_master_dir}")
+      endif()
+    endif()
+    add_executable(service_master_${_master_variant} "${_master_source}" tests/native/service_master_stage_tests.cpp "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+    target_compile_features(service_master_${_master_variant} PRIVATE cxx_std_20)
+    target_include_directories(service_master_${_master_variant} PRIVATE "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback" "${ZCORE_ROOT}/zdsp/tests")
+    target_link_libraries(service_master_${_master_variant} PRIVATE SingZ::zcore_device Threads::Threads)
+    add_test(NAME service_master_${_master_variant} COMMAND service_master_${_master_variant})
+    if(NOT _master_variant STREQUAL "tests")
+      set_tests_properties(service_master_${_master_variant} PROPERTIES WILL_FAIL TRUE)
+      add_dependencies(service_master_tests service_master_${_master_variant})
+    endif()
+  endforeach()
+  add_test(NAME service_master_realtime_source_policy COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_SERVICE_MASTER_RT_MANIFEST}" -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/service-master-rt-negative.cpp" "#include <algorithm>\n#include <atomic>\n#include <cmath>\n#include <mutex>\n#include <zcore/device/audio_host_render.h>\nnamespace singz {\n${_service_master_rt}\nstd::mutex forbidden;\n}\n")
+  add_library(service_master_rt_negative_fixture OBJECT EXCLUDE_FROM_ALL "${CMAKE_CURRENT_BINARY_DIR}/service-master-rt-negative.cpp")
+  target_compile_features(service_master_rt_negative_fixture PRIVATE cxx_std_20)
+  target_link_libraries(service_master_rt_negative_fixture PRIVATE SingZ::zcore_device)
+  add_dependencies(service_master_tests service_master_rt_negative_fixture)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/service-master-rt-negative.cmake" "set(SINGZ_ZDSP_RT_FILES [==[${CMAKE_CURRENT_BINARY_DIR}/service-master-rt-negative.cpp]==])\n")
+  add_test(NAME service_master_realtime_policy_negative COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/service-master-rt-negative.cmake" -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
+  set_tests_properties(service_master_realtime_policy_negative PROPERTIES WILL_FAIL TRUE)
+
   add_executable(native_playback_session_tests
     ${SINGZ_REPO_ROOT}/tests/native/native_playback_session_tests.cpp
     ${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp
@@ -1006,6 +1172,48 @@ if(SINGZ_CORE_TESTS)
     COMMAND native_playback_session_tests)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/native_playback_session.cpp)
   file(READ "${SINGZ_REPO_ROOT}/native/playback/native_playback_session.cpp" _reanchor_source)
+  string(REPLACE "if (rendering->serviceOwnsMasterGain) {" "if (false && rendering->serviceOwnsMasterGain) {"
+    _master_meter_mutant "${_reanchor_source}")
+  string(REPLACE "if (graph != nullptr && graph->serviceOwnsMasterGain)"
+    "if (false && graph != nullptr && graph->serviceOwnsMasterGain)"
+    _master_meter_mutant "${_master_meter_mutant}")
+  if(_master_meter_mutant STREQUAL _reanchor_source)
+    message(FATAL_ERROR "Service master meter negative control needs updating")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/native-playback-graph-meter.cpp" "${_master_meter_mutant}")
+  add_executable(service_master_negative_graph_meter tests/native/native_playback_session_tests.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/native-playback-graph-meter.cpp" "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(service_master_negative_graph_meter PRIVATE cxx_std_20)
+  target_include_directories(service_master_negative_graph_meter PRIVATE
+    "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback" "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(service_master_negative_graph_meter PRIVATE SingZ::native_playback_session)
+  add_dependencies(native_playback_session_tests service_master_negative_graph_meter)
+  add_test(NAME service_master_meter COMMAND "${CMAKE_COMMAND}" -E env
+    SINGZ_SERVICE_MASTER_METER_REGRESSION_ONLY=1 $<TARGET_FILE:native_playback_session_tests>)
+  add_test(NAME service_master_negative_graph_meter COMMAND "${Python3_EXECUTABLE}" -c
+    "import os,subprocess,sys; p=subprocess.run([r'$<TARGET_FILE:service_master_negative_graph_meter>'],env=dict(os.environ,SINGZ_SERVICE_MASTER_METER_REGRESSION_ONLY='1'),capture_output=True,text=True); print(p.stdout+p.stderr); sys.exit(1 if p.returncode != 0 and 'service output meter peak' in p.stderr else 0)")
+  set_tests_properties(service_master_negative_graph_meter PROPERTIES WILL_FAIL TRUE)
+  string(REPLACE "return serviceOwnsMasterGain;"
+    "return false; // negative: retain the pre-master graph ceiling"
+    _master_preclip_mutant "${_reanchor_source}")
+  if(_master_preclip_mutant STREQUAL _reanchor_source)
+    message(FATAL_ERROR "Service master preclip negative control needs updating")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/native-playback-master-preclip.cpp" "${_master_preclip_mutant}")
+  add_executable(service_master_negative_preclip
+    tests/native/native_playback_session_tests.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/native-playback-master-preclip.cpp"
+    "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(service_master_negative_preclip PRIVATE cxx_std_20)
+  target_include_directories(service_master_negative_preclip PRIVATE
+    "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback" "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(service_master_negative_preclip PRIVATE SingZ::native_playback_session)
+  add_dependencies(native_playback_session_tests service_master_negative_preclip)
+  add_test(NAME service_master_hot_song COMMAND "${CMAKE_COMMAND}" -E env
+    SINGZ_SERVICE_MASTER_HOT_REGRESSION_ONLY=1 $<TARGET_FILE:native_playback_session_tests>)
+  add_test(NAME service_master_negative_preclip COMMAND "${Python3_EXECUTABLE}" -c
+    "import os,subprocess,sys; p=subprocess.run([r'$<TARGET_FILE:service_master_negative_preclip>'],env=dict(os.environ,SINGZ_SERVICE_MASTER_HOT_REGRESSION_ONLY='1'),capture_output=True,text=True); print(p.stdout+p.stderr); sys.exit(1 if p.returncode != 0 and 'hot master attenuation' in p.stderr else 0)")
+  set_tests_properties(service_master_negative_preclip PROPERTIES WILL_FAIL TRUE)
   string(REPLACE "if (command.reanchorPlan.valid() &&\n            (callbackProjectFrame"
     "if (false && command.reanchorPlan.valid() &&\n            (callbackProjectFrame" _stale_reanchor "${_reanchor_source}")
   if(_stale_reanchor STREQUAL _reanchor_source)
@@ -1507,4 +1715,8 @@ if(SINGZ_CORE_TESTS AND SINGZ_BUILD_HOST_TOOLS)
       set_tests_properties(take_writer_negative_concatenate_long PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
     endif()
   endforeach()
+endif()
+
+if(TARGET voice_monitor_tests AND TARGET voice_monitor_source_tests)
+  add_dependencies(voice_monitor_tests voice_monitor_source_tests)
 endif()

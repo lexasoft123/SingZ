@@ -74,6 +74,7 @@ type Active = {
   lastRate?: number
   sampling?: Promise<void>
   placementFault?: boolean
+  finalizationError?: boolean
   timelineEnded?: boolean
   monitor?: ReturnType<typeof setInterval>
   lastSampleHostNs?: string
@@ -343,7 +344,7 @@ export class VoiceTakeStore {
         active.monitor = setInterval(() => { void this.checkDiscontinuity(active).catch(error => {
           log('voice-take', 'sampling failed ' + JSON.stringify({ takeId: active.takeId, phase: 'poll',
             error: safeVoiceTakeMessage(error instanceof Error ? error.message : undefined, 'capture-sampling-failed') }), 'warn')
-          this.endTimeline(active); void this.stop(undefined, 'seek')
+          this.endTimeline(active); void this.stop('error')
         }) }, 250)
         active.monitor.unref()
       }
@@ -494,6 +495,9 @@ export class VoiceTakeStore {
   async stop(reason?: 'device-lost' | 'error', note?: 'seek'): Promise<VoiceRecordStopResult> {
     const active = this.active
     if (!active) return this.finalizedTake ? { ok: true, take: this.finalizedTake, ...(this.finalizedNote ? { note: this.finalizedNote } : {}) } : { ok: false, reason: 'error', message: 'No recording is active.' }
+    // Renderer/audio loss may race a poll already ending the same take. Latch
+    // the error before awaiting that poll so its finalizer retains the failure.
+    if (reason === 'error') active.finalizationError = true
     log('voice-take', 'stop requested ' + JSON.stringify({ takeId: active.takeId, reason: reason ?? 'normal', note: note ?? null,
       timelineEnded: active.timelineEnded === true, placementFault: active.placementFault === true,
       discontinuitySerial: active.discontinuitySerial, faultSerial: active.faultSerial, lastAnchor: active.anchors.at(-1) }))
@@ -538,7 +542,7 @@ export class VoiceTakeStore {
         inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
         graphLatencyFrames: active.graphLatencyFrames, latencySource: placementMiss ? 'measured-trim' : active.latencySource, input: { ...active.request.input, deviceName: active.actualDeviceName ?? active.request.input.deviceName },
         settings: active.settings, ...(active.anchors.length ? { anchors: active.anchors } : {}), effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate, matchPercent: null, monitoring: false,
-        status: finished.deviceLost || reason === 'device-lost' ? 'partial-device-lost' : !finished.ok || reason === 'error' || placementMiss ? 'partial-error' : 'complete',
+        status: finished.deviceLost || reason === 'device-lost' ? 'partial-device-lost' : !finished.ok || reason === 'error' || active.finalizationError || placementMiss ? 'partial-error' : 'complete',
         name: null, audio: { fileName: basename(wavPath), format: 'wav-pcm16', byteSize: file.size, checksum: null }
       }
       await this.writeSidecar(active.dir, active.takeId, sidecar)
