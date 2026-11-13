@@ -241,6 +241,11 @@ export interface DesktopNativePlaybackEngineRequest {
   streamLanes?: boolean
 }
 
+function platformProvider(preferred: DesktopPlaybackProvider): DesktopPlaybackProvider {
+  const platform = detectedDesktopPlatform()
+  return platform === 'win32' ? preferred : platform === 'linux' ? 'alsa' : 'coreaudio'
+}
+
 /** Renderer-engine adapter kept in this lazy chunk so the ordinary Web Audio
  * entry does not pay for native provider selection or DTO composition. */
 /** The decision and the prepare request for an engine request, or null when
@@ -1247,7 +1252,9 @@ export class DesktopNativePlaybackClient {
           muted: lane.muted,
           solo: lane.solo
         })),
-        provider: this.request?.provider ?? request.nativeAudioProvider
+        // No active request yet (fresh song): the provider is the platform's,
+        // not the Windows-only default pref (wasapi on macOS threw here).
+        provider: this.request?.provider ?? platformProvider(request.nativeAudioProvider)
       }
       const generation = this.generation
       const provider = this.request?.provider ?? preparedRequest.provider
