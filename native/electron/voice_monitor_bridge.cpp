@@ -21,6 +21,7 @@ namespace {
 std::mutex control;
 VoiceMonitorHost host;
 std::string monitoredOutput;
+std::vector<uint32_t> monitoredChannels;
 NativeAudioOwnership* ownership=nullptr;
 VoiceMonitorEnvironmentLifetime environments;
 bool useAllowed() {
@@ -53,12 +54,13 @@ bool permissionGranted() {
   return false;
 #endif
 }
-struct Route { std::string output; bool native{false}; };
+struct Route { std::string output; bool native{false}; std::vector<uint32_t> channels; };
 Route currentRoute() {
   auto& service=sharedAudioService();
   const auto status=service.status();
-  return {service.activeOutputUid(),service.providerId()=="coreaudio" &&
-      (status.state==AudioHostState::Open || status.state==AudioHostState::Running || status.state==AudioHostState::Suspended)};
+  const auto config=service.activeOutputConfig();
+  return {config.outputDeviceUid,service.providerId()=="coreaudio" &&
+      (status.state==AudioHostState::Open || status.state==AudioHostState::Running || status.state==AudioHostState::Suspended),config.outputChannels};
 }
 napi_value object(napi_env env) {napi_value o;napi_create_object(env,&o);return o;}
 void boolean(napi_env env,napi_value o,const char* key,bool b) {napi_value v;napi_get_boolean(env,b,&v);napi_set_named_property(env,o,key,v);}
@@ -128,8 +130,8 @@ napi_value begin(napi_env env,napi_callback_info info) {
   std::lock_guard lock(control);
   if(!useAllowed())return error(env,"Audio input is busy or unsupported");
   const auto route=currentRoute();
-  auto r=host.begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,-60.0,12.0)),32,256,g);
-  if(r.ok)monitoredOutput=route.output;
+  auto r=host.begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,-60.0,12.0)),32,256,g,route.channels);
+  if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;}
   return result(env,r);
 }
 napi_value gain(napi_env env,napi_callback_info info) {
@@ -141,7 +143,7 @@ napi_value gain(napi_env env,napi_callback_info info) {
 napi_value status(napi_env env,napi_callback_info) {
   std::lock_guard lock(control);
   const auto route=currentRoute();
-  if(!monitoredOutput.empty() && (!route.native || route.output!=monitoredOutput || !useAllowed())) {host.routeChanged();monitoredOutput.clear();}
+  if(!monitoredOutput.empty() && (!route.native || route.output!=monitoredOutput || route.channels!=monitoredChannels || !useAllowed())) {host.routeChanged();monitoredOutput.clear();monitoredChannels.clear();}
   const auto r=host.status();auto o=object(env);boolean(env,o,"running",r.running);boolean(env,o,"lost",r.lost);
   if(r.running)latency(env,o,r.latency);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
@@ -150,12 +152,12 @@ napi_value status(napi_env env,napi_callback_info) {
 napi_value end(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);uint64_t g=0;
   if(argc!=1 || !generation(env,arg,g)){auto o=object(env);boolean(env,o,"ok",false);return o;}
-  std::lock_guard lock(control);auto r=host.end(g);if(r.ok)monitoredOutput.clear();
+  std::lock_guard lock(control);auto r=host.end(g);if(r.ok){monitoredOutput.clear();monitoredChannels.clear();}
   auto o=object(env);boolean(env,o,"ok",r.ok);warnings(env,o,r.warnings);return o;
 }
 template<napi_callback Callback> napi_value exceptionResult(napi_env env,const char* message) {
   if constexpr(Callback==begin || Callback==status) {
-    std::lock_guard lock(control);host.close();monitoredOutput.clear();
+    std::lock_guard lock(control);host.close();monitoredOutput.clear();monitoredChannels.clear();
   }
   auto o=object(env);
   if constexpr(Callback==availability) {
@@ -191,7 +193,7 @@ void defineVoiceMonitorExports(napi_env env,napi_value exports,NativeAudioOwners
 bool cleanupVoiceMonitor() noexcept {
   std::lock_guard lock(control);
   if(!environments.detach())return false;
-  host.close();monitoredOutput.clear();ownership=nullptr;
+  host.close();monitoredOutput.clear();monitoredChannels.clear();ownership=nullptr;
   return true;
 }
 }

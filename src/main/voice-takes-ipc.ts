@@ -5,10 +5,14 @@ import { VoiceTakeStore, createUnavailableVoiceNative, type VoiceTakeNative } fr
 
 const normalizeDeviceLabel = (value: string): string => value.trim().replace(/\s+\([^()]*\)\s*$/, '').trim().toLocaleLowerCase()
 
+let nextVoiceCaptureGeneration = BigInt(Date.now()) * 1000n
+
 export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess = desktopAudioProcess): VoiceTakeNative => {
   const desktopAudioProcess = audioProcess
   let captureGeneration: bigint | undefined
   let captureDeviceName = ''
+  let captureDeviceUid = ''
+  let captureChannel = -1
   const chooseDevice = async (deviceName: string, channelIndex: number): Promise<{ ok: true; device: import('../shared/types').CaptureInputDevice; channel: number } | { ok: false; reason: 'no-input'; error: string }> => {
     const devices = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['inputDevices']>>>('binding', 'inputDevices', [])
     if (!devices.ok) return { ok: false, reason: 'no-input', error: devices.error }
@@ -19,27 +23,38 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
         unique(devices.devices.filter(device => device.label === requested)) ??
         unique(devices.devices.filter(device => normalizeDeviceLabel(device.label) === normalizeDeviceLabel(requested)))
       : devices.devices.find(device => device.isDefault) ?? devices.devices[0]
-    if (!chosen) return { ok: false, reason: 'no-input', error: 'The selected microphone is unavailable.' }
-    return { ok: true, device: chosen, channel: Math.min(channelIndex, chosen.channels - 1) }
+    if (!chosen || !Number.isInteger(channelIndex) || channelIndex < 0 || channelIndex >= chosen.channels) return { ok: false, reason: 'no-input', error: 'The selected microphone is unavailable.' }
+    return { ok: true, device: chosen, channel: channelIndex }
   }
   const openCapture = async (deviceName: string, channelIndex: number, generation: bigint): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; deviceName?: string; generation?: bigint }> => {
-    if (captureGeneration !== undefined) {
-      const state = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['captureState']>>>('binding', 'captureState', [])
-      if (state.state === 'running' && state.ownershipGeneration === captureGeneration.toString()) return { ok: true, generation: captureGeneration, deviceName: captureDeviceName }
-      captureGeneration = undefined; captureDeviceName = ''
-    }
     const selected = await chooseDevice(deviceName, channelIndex)
     if (!selected.ok) return selected
-    const started = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['beginCapture']>>>('binding', 'beginCapture', [{ deviceUid: selected.device.uid, inputChannel: selected.channel }, generation, () => undefined])
+    if (captureGeneration !== undefined) {
+      const state = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['captureState']>>>('binding', 'captureState', [])
+      if (state.state === 'running' && state.ownershipGeneration === captureGeneration.toString()) {
+        if (selected.device.uid === captureDeviceUid && selected.channel === captureChannel) return { ok: true, generation: captureGeneration, deviceName: captureDeviceName }
+        const stopped = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'cancelCapture', [captureGeneration])
+        if (!stopped.ok) return { ok: false, reason: 'error', error: 'The microphone could not be released.' }
+      }
+      captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1
+    }
+    let started: Awaited<ReturnType<import('./capture').NativeCaptureBinding['beginCapture']>>
+    try {
+      started = await desktopAudioProcess.call('binding', 'beginCapture', [{ deviceUid: selected.device.uid, inputChannel: selected.channel }, generation, () => undefined])
+    } catch (error) {
+      // The begin may have succeeded despite a lost reply; release that generation.
+      await desktopAudioProcess.call('binding', 'cancelCapture', [generation]).catch(() => undefined)
+      throw error
+    }
     if (!started.ok) return { ok: false, reason: 'error', error: started.error }
-    captureGeneration = generation; captureDeviceName = selected.device.label
+    captureGeneration = generation; captureDeviceName = selected.device.label; captureDeviceUid = selected.device.uid; captureChannel = selected.channel
     return { ok: true, generation, deviceName: captureDeviceName }
   }
   return {
-  armCapture: args => openCapture(args.deviceName, args.channelIndex, BigInt(Date.now()) * 1000n + 1n),
-  disarmCapture: async generation => { if (captureGeneration && (!generation || generation === captureGeneration)) { const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'cancelCapture', [captureGeneration]); captureGeneration = undefined; captureDeviceName = ''; return result } return { ok: true } },
+  armCapture: args => openCapture(args.deviceName, args.channelIndex, ++nextVoiceCaptureGeneration),
+  disarmCapture: async generation => { if (captureGeneration && (!generation || generation === captureGeneration)) { const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'cancelCapture', [captureGeneration]); if (result.ok) { captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1 } return result } return { ok: true } },
   recordTake: async args => {
-    const generation = args.generation ?? (BigInt(Date.now()) * 1000n + 1n)
+    const generation = args.generation ?? (++nextVoiceCaptureGeneration)
     const started = await openCapture(args.deviceName ?? '', args.channelIndex ?? 0, generation)
     if (!started.ok) return started
     const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'recordTake', [args.dir, args.takeId, started.generation ?? generation])
@@ -49,7 +64,7 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
   cancelTake: args => desktopAudioProcess.call('binding', 'cancelTake', [args.generation]),
   stopCapture: async generation => {
     try { return await desktopAudioProcess.call<{ ok: boolean; cancelled?: boolean; error?: string }>('binding', 'cancelCapture', [generation]) }
-    finally { if (captureGeneration === generation) { captureGeneration = undefined; captureDeviceName = '' } }
+    finally { if (captureGeneration === generation) { captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1 } }
   },
   presentationQuery: async args => {
     if (!args.firstSampleHostNs || !args.sampleRate || !Number.isFinite(args.sampleRate) || args.sampleRate <= 0)
@@ -99,7 +114,7 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   }
   const armValid = (value: unknown): value is VoiceArmRequest => {
     const arm = value as VoiceArmRequest
-    return Boolean(arm && typeof arm === 'object' && arm.input && typeof arm.input.deviceName === 'string' && Number.isFinite(arm.input.channelIndex) && arm.input.channelIndex >= 0)
+    return Boolean(arm && typeof arm === 'object' && arm.input && typeof arm.input.deviceName === 'string' && Number.isFinite(arm.input.channelIndex))
   }
   ipcMain.handle(VOICE_IPC.arm, async (_event, request: unknown) => { try { return armValid(request) ? await store.arm(request) : { ok: false, reason: 'error' as const, message: 'Invalid arm request.' } } catch { return { ok: false, reason: 'error' as const, message: 'Microphone could not be armed.' } } })
   ipcMain.handle(VOICE_IPC.disarm, async () => { try { return await store.disarm() } catch { return { ok: false, error: 'Microphone could not be disarmed.' } } })

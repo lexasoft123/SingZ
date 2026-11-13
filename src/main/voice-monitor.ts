@@ -34,16 +34,17 @@ export class VoiceMonitorStore {
   private fail(reason: VoiceMonitorReason): VoiceMonitorState { this.current = { ...this.current, available: { reason }, ...(this.generation === undefined ? { on: false, latency: null } : {}) }; return this.snapshot() }
   private async resolve(request: VoiceMonitorAvailabilityRequest): Promise<{ state: VoiceMonitorState; uid?: string; channel?: number }> {
     if (this.platform !== 'darwin') { await this.close(); return { state: this.fail('platform') } }
+    if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) { await this.close(); return { state: this.fail('no-input') } }
     const result = await this.native.inputDevices()
     const devices = result.ok ? result.devices : []
     const name = request.input.deviceName.trim()
     const unique = (items: CaptureInputDevice[]) => items.length === 1 ? items[0] : undefined
     const device = name ? unique(devices.filter(d => d.uid === name)) ?? unique(devices.filter(d => d.label === name)) ?? unique(devices.filter(d => normalize(d.label) === normalize(name))) : undefined
-    if (!device || device.channels < 1) { await this.close(); return { state: this.fail('no-input') } }
+    if (!device || !Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0 || request.input.channelIndex >= device.channels) { await this.close(); return { state: this.fail('no-input') } }
     const inventory = await this.native.hostDevices()
     const routeDevice = inventory.ok ? inventory.devices.find(d => d.uid === device.uid) : undefined
     if (!routeDevice || !['input', 'duplex'].includes(routeDevice.direction) || !routeDevice.transport || routeDevice.transport === 'unknown') { await this.close(); return { state: this.fail('error') } }
-    const channel = Math.min(request.input.channelIndex, device.channels - 1)
+    const channel = request.input.channelIndex
     const availability = await this.native.voiceMonitorAvailability({ inputUid: device.uid, inputChannel: channel })
     if (!availability.available) { await this.close(); return { state: this.fail(availability.reason ?? 'error') } }
     this.current.available = true
@@ -59,7 +60,7 @@ export class VoiceMonitorStore {
         if (!status.running || status.lost) this.clearGeneration()
         else if (this.current.on) return this.snapshot()
       }
-      if (this.current.on) return this.snapshot()
+      if (this.current.on) return (await this.resolve(request)).state
       if (this.generation !== undefined) await this.close()
       const selected = await this.resolve(request)
       if (!selected.uid || selected.channel === undefined) return selected.state

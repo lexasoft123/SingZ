@@ -87,10 +87,25 @@ export interface VoiceEnginePort {
   setMuted?(id: string, muted: boolean): void
 }
 
+/** One selectable input CHANNEL of a device (a mono device has a single option). */
 export interface VoiceInputOption {
   id: string
+  /** The device's display name. */
   label: string
+  /** What main matches the device by (native uid); defaults to `label`. */
+  deviceName?: string
+  channelIndex?: number
+  /** How many channels the device has; undefined when only a name is known. */
+  channels?: number
+  /** The device's own name for this channel, when its inventory provides one. */
+  channelLabel?: string | null
 }
+
+/** The {deviceName, channelIndex} an option stands for in arm, record and monitor requests. */
+export const inputRequest = (o: VoiceInputOption | undefined): { deviceName: string; channelIndex: number } => ({
+  deviceName: o?.deviceName ?? o?.label ?? '',
+  channelIndex: o?.channelIndex ?? 0
+})
 
 export interface VoiceControllerDeps {
   api: VoiceTakeApi
@@ -254,6 +269,12 @@ interface ListenSettings {
   done: boolean
 }
 
+/** What the singer last chose: the device, and the channel remembered for each device. */
+interface SavedInput {
+  device: string | null
+  channels: Record<string, number>
+}
+
 export class VoiceController {
   private model: VoiceModel = INITIAL_VOICE_MODEL
   private readonly listeners = new Set<() => void>()
@@ -272,6 +293,10 @@ export class VoiceController {
   private songEpoch = 0
   private disposed = false
   private startToken = 0
+  private inputToken = 0
+  /** A re-arm after an input change is under way (a quicker second selection inherits it). */
+  private rearmPending = false
+  private saved: SavedInput = { device: null, channels: {} }
   private monitorToken = 0
   private availToken = 0
   private monitorPending = false
@@ -293,8 +318,7 @@ export class VoiceController {
   constructor(private readonly deps: VoiceControllerDeps) {
     this.now = deps.now ?? (() => Date.now())
     this.restoreStems(MUTED_BY_SOLO.get(deps.engine) ?? null)
-    const saved = this.readStored()
-    if (saved) this.model = { ...this.model, input: saved }
+    this.saved = this.readStored()
   }
 
   // ── external store ──
@@ -403,7 +427,7 @@ export class VoiceController {
       const keep = inputs.some((i) => i.id === this.model.input)
       this.set({
         inputs,
-        input: keep ? this.model.input : (inputs[0]?.id ?? null),
+        input: keep ? this.model.input : this.pickInput(inputs),
         inputMissing: inputs.length === 0 && !labelsHidden,
         perm: labelsHidden && this.model.perm === 'unknown' ? 'unknown' : this.model.perm
       })
@@ -419,18 +443,56 @@ export class VoiceController {
     if (ok) await this.refreshInputs()
   }
 
+  /** The remembered device and its remembered channel; a vanished channel falls back to 0, a vanished device to the first. */
+  private pickInput(inputs: VoiceInputOption[]): string | null {
+    const key = (o: VoiceInputOption): string => o.deviceName ?? o.label
+    const device = this.saved.device !== null && inputs.some((o) => key(o) === this.saved.device) ? this.saved.device : inputs[0] ? key(inputs[0]) : null
+    if (device === null) return null
+    const want = this.saved.channels[device] ?? 0
+    const mine = inputs.filter((o) => key(o) === device)
+    return (mine.find((o) => (o.channelIndex ?? 0) === want) ?? mine.find((o) => (o.channelIndex ?? 0) === 0) ?? mine[0])?.id ?? null
+  }
+
   selectInput(id: string): void {
+    // The select is disabled while a take records; a stray call must not move the input under it.
+    if (this.model.recording) return
     const changed = id !== this.model.input
+    const opt = this.model.inputs.find((o) => o.id === id)
     this.set({ input: id })
-    // A different input is a different route: monitoring stops, availability is re-asked.
-    if (changed) {
-      void this.releaseMonitor().then(() => this.refreshMonitorAvailability())
+    if (opt) {
+      const req = inputRequest(opt)
+      this.saved = { device: req.deviceName, channels: { ...this.saved.channels, [req.deviceName]: req.channelIndex } }
+      try {
+        this.deps.storage?.setItem(STORAGE_KEY, JSON.stringify(this.saved))
+      } catch {
+        /* private mode */
+      }
     }
-    try {
-      this.deps.storage?.setItem(STORAGE_KEY, id)
-    } catch {
-      /* private mode */
+    if (changed) void this.switchInput()
+  }
+
+  /**
+   * A different input or channel is a different route. Monitoring stops; an input the
+   * singer had armed is released and armed again on the new option (main refuses a take
+   * whose channel differs from the armed one); an input monitoring had armed is just
+   * released; nothing is armed that was not. Token-guarded: the last selection wins.
+   */
+  private async switchInput(): Promise<void> {
+    const token = ++this.inputToken
+    const stale = (): boolean => token !== this.inputToken || this.disposed
+    const rearm = (this.model.armed && !this.armedByMonitor) || this.rearmPending
+    await this.releaseMonitor() // also releases an arm that monitoring made
+    if (stale()) return
+    if (rearm) {
+      this.rearmPending = true
+      this.set({ armed: false })
+      await this.forceDisarm()
+      if (stale()) return
+      await this.armInput(false)
+      if (stale()) return
+      this.rearmPending = false
     }
+    await this.refreshMonitorAvailability()
   }
 
   // ── strip controls ──
@@ -451,6 +513,8 @@ export class VoiceController {
 
   async arm(): Promise<void> {
     const m = this.model
+    this.inputToken++ // an explicit arm or disarm overrides a re-arm still under way
+    this.rearmPending = false
     if (m.armed) {
       // An explicit disarm also ends monitoring (the input is being released), and
       // takes over an arm that monitoring had made.
@@ -488,7 +552,7 @@ export class VoiceController {
     const input = this.model.inputs.find((i) => i.id === this.model.input)
     let res: VoiceArmResult
     try {
-      res = await this.deps.api.arm({ input: { deviceName: input?.label ?? '', channelIndex: 0 } })
+      res = await this.deps.api.arm({ input: inputRequest(input) })
     } catch (err) {
       if (token !== this.armToken) return false
       this.set(err instanceof Error && err.message === BRIDGE_MISSING ? { error: 'no-bridge' } : { error: 'error' })
@@ -573,7 +637,7 @@ export class VoiceController {
         songId: songIdAtStart,
         songTitle: this.songMeta.title,
         songArtist: this.songMeta.artist,
-        input: { deviceName: input?.label ?? '', channelIndex: 0 },
+        input: inputRequest(input),
         tempo: engine.tempo,
         transposeSemitones: engine.transpose
       })
@@ -936,8 +1000,7 @@ export class VoiceController {
 
   // ── live monitoring (M2) ──
   private monitorRequestInput(): { deviceName: string; channelIndex: number } {
-    const input = this.model.inputs.find((i) => i.id === this.model.input)
-    return { deviceName: input?.label ?? '', channelIndex: 0 }
+    return inputRequest(this.model.inputs.find((i) => i.id === this.model.input))
   }
 
   /** Fold main's answer into the model: availability, on, latency, warnings. */
@@ -1138,12 +1201,18 @@ export class VoiceController {
     }
   }
 
-  private readStored(): string | null {
+  private readStored(): SavedInput {
     try {
-      return this.deps.storage?.getItem(STORAGE_KEY) ?? null
+      const raw = this.deps.storage?.getItem(STORAGE_KEY)
+      const v: unknown = raw ? JSON.parse(raw) : null
+      if (v && typeof v === 'object' && 'channels' in v) {
+        const { device, channels } = v as SavedInput
+        if (channels && typeof channels === 'object') return { device: typeof device === 'string' ? device : null, channels }
+      }
     } catch {
-      return null
+      /* unreadable or an older format: start fresh */
     }
+    return { device: null, channels: {} }
   }
 
   private syncTimers(): void {

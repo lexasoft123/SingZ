@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+const ipc = vi.hoisted(() => new Map<string, (event: unknown, request?: unknown) => unknown>())
+vi.mock('electron', async (importOriginal) => { const actual = await importOriginal<Record<string, unknown>>(); return { ...actual, ipcMain: { handle: (channel: string, fn: (event: unknown, request?: unknown) => unknown) => ipc.set(channel, fn) } } })
+import { registerVoiceMonitor } from '../../src/main/voice-monitor-ipc'
+import { VOICE_IPC } from '../../src/shared/voice-take'
 import { VoiceMonitorStore, microphonePermission, type VoiceMonitorNative } from '../../src/main/voice-monitor'
 import { disposeWithin } from '../../src/main/box-audio/microphones'
 
@@ -52,6 +56,36 @@ describe('voice monitoring', () => {
     const { store, native } = fixture()
     expect((await store.availability({ input: { ...input, deviceName: 'missing' } })).available).toEqual({ reason: 'no-input' })
     expect(native.voiceMonitorAvailability).not.toHaveBeenCalled()
+  })
+  it('returns no-input for invalid channel indexes at the IPC boundary', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' })
+    try {
+    registerVoiceMonitor()
+    for (const channelIndex of [-1, 0.5]) {
+      const selected = { input: { ...input, channelIndex } }
+      expect(await ipc.get(VOICE_IPC.monitorAvailability)!(null, selected)).toMatchObject({ available: { reason: 'no-input' } })
+      expect(await ipc.get(VOICE_IPC.monitorSet)!(null, { ...selected, on: true })).toMatchObject({ available: { reason: 'no-input' } })
+    }
+    expect(await ipc.get(VOICE_IPC.monitorSet)!(null, { input: { ...input, channelIndex: -1 }, on: 'bad' })).toMatchObject({ available: { reason: 'error' } })
+    } finally { Object.defineProperty(process, 'platform', platform) }
+  })
+  it('rejects invalid channels for availability and monitor start without clamping', async () => {
+    const { store, native } = fixture()
+    const listed = await native.inputDevices()
+    listed.devices[0].channels = 2
+    for (const channelIndex of [-1, 0.5, 2, 100]) {
+      const selected = { input: { ...input, channelIndex } }
+      expect((await store.availability(selected)).available).toEqual({ reason: 'no-input' })
+      expect((await store.set({ ...selected, on: true })).available).toEqual({ reason: 'no-input' })
+    }
+    expect(native.voiceMonitorAvailability).not.toHaveBeenCalled()
+    expect(native.beginVoiceMonitor).not.toHaveBeenCalled()
+    const selected = { input: { ...input, channelIndex: 1 } }
+    expect((await store.availability(selected)).available).toBe(true)
+    expect((await store.set({ ...selected, on: true })).on).toBe(true)
+    expect(native.voiceMonitorAvailability).toHaveBeenCalledWith({ inputUid: 'mic', inputChannel: 1 })
+    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0].inputChannel).toBe(1)
   })
   it('opens once, clamps gain, closes with its generation and reopens with a fresh generation', async () => {
     const { store, native } = fixture()

@@ -7,6 +7,9 @@ export const voice: Translation<typeof en> = {
   'player.voice.stripLabel': '我的声音音轨',
 
   'player.voice.input': '输入',
+  'player.voice.inputMono': '{device}（单声道）',
+  'player.voice.inputChannel': '{device} · 输入 {n}',
+  'player.voice.inputChannelLabeled': '{device} · {label}',
   'player.voice.inputNone': '未找到输入设备',
   'player.voice.inputPerm': '需要麦克风权限',
   'player.voice.monitorOff': '监听我的声音（已关）',

@@ -22,6 +22,7 @@ struct VoiceMonitorRender {
   std::atomic<uint32_t> silent{1};
   std::atomic<uint64_t> callbacks{0};
   uint32_t outputs{2}; // Prepared before start, immutable until stop.
+  uint64_t outputMask{3}; // Selected client lanes only; every other lane is zero.
   float current{0}, destination{0}, step{0};
   uint32_t remaining{0};
   static bool render(void* context, const AudioHostRenderBlock& block) noexcept {
@@ -56,7 +57,10 @@ struct VoiceMonitorRender {
           static_cast<float>(std::clamp(scaled, -double(kVoiceMonitorCeiling), double(kVoiceMonitorCeiling)));
       if (block.output)
         for (uint32_t channel = 0; channel < channels; ++channel)
-          if (block.output[channel]) block.output[channel][frame] = voice;
+          if (block.output[channel]) {
+            const bool selected = (self.outputMask & (uint64_t{1} << channel)) != 0;
+            block.output[channel][frame] = selected ? voice : 0.0f;
+          }
     }
     self.peak.store(peak, std::memory_order_relaxed);
     self.rms.store(frames ? static_cast<float>(std::sqrt(squares / frames)) : 0, std::memory_order_relaxed);
@@ -129,7 +133,8 @@ class VoiceMonitorHost final {
   VoiceMonitorAvailability availability(const std::string& inputUid, uint32_t channel,
       const std::string& outputUid, bool nativeOutput, bool permission) const;
   VoiceMonitorResult begin(const std::string& inputUid, uint32_t channel, const std::string& outputUid,
-      bool nativeOutput, bool permission, float gainDb, uint32_t targetFrames, uint32_t maxFrames, uint64_t generation);
+      bool nativeOutput, bool permission, float gainDb, uint32_t targetFrames, uint32_t maxFrames, uint64_t generation,
+      const std::vector<uint32_t>& songOutputChannels = {});
   bool setGain(float gainDb) noexcept;
   VoiceMonitorStatus status();
   VoiceMonitorResult end(uint64_t generation);

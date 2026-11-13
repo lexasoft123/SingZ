@@ -23,6 +23,7 @@ import {
   VOICE_STATES,
   VoiceController,
   type VoiceEnginePort,
+  type VoiceInputOption,
   type VoiceModel,
   type VoiceTakeApi
 } from '../../src/renderer/src/audio/voice-take'
@@ -97,7 +98,12 @@ function fakeApi(over: Partial<VoiceTakeApi> = {}): VoiceTakeApi & Record<keyof 
 }
 
 let clock = 0
-async function setup(apiOver: Partial<VoiceTakeApi> = {}, engineOver?: (e: ReturnType<typeof fakeEngine>) => void) {
+async function setup(
+  apiOver: Partial<VoiceTakeApi> = {},
+  engineOver?: (e: ReturnType<typeof fakeEngine>) => void,
+  inputs: VoiceInputOption[] = [{ id: 'mic', label: 'Scarlett 2i2' }],
+  storage: Pick<Storage, 'getItem' | 'setItem'> | null = null
+) {
   const engine = fakeEngine()
   engineOver?.(engine)
   const api = fakeApi(apiOver)
@@ -105,9 +111,9 @@ async function setup(apiOver: Partial<VoiceTakeApi> = {}, engineOver?: (e: Retur
     api,
     engine,
     askMicAccess: async () => true,
-    listInputs: async () => ({ inputs: [{ id: 'mic', label: 'Scarlett 2i2' }], labelsHidden: false }),
+    listInputs: async () => ({ inputs, labelsHidden: false }),
     now: () => clock,
-    storage: null
+    storage
   })
   await c.setSong('song-1')
   await c.refreshInputs()
@@ -1041,6 +1047,208 @@ describe('monitoring owns an armed input (meter live) and an availability refres
     await toggling
     expect(api.monitorSet).toHaveBeenCalledWith(expect.objectContaining({ on: false }))
     expect(c.getSnapshot().monitor.on).toBe(false)
+    c.dispose()
+  })
+})
+
+describe('input channels (spec J2, VS-REC-011)', () => {
+  const quadro: VoiceInputOption[] = Array.from({ length: 16 }, (_, ch) => ({
+    id: `zen#${ch}`,
+    label: 'Zen Quadro SC',
+    deviceName: 'zen-uid',
+    channelIndex: ch,
+    channels: 16,
+    channelLabel: ch === 5 ? 'Vocal mic' : null
+  }))
+  const mono: VoiceInputOption[] = [{ id: 'mbp#0', label: 'MacBook Pro Microphone', deviceName: 'mbp-uid', channelIndex: 0, channels: 1, channelLabel: null }]
+  const memory = () => {
+    const m = new Map<string, string>()
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m }
+  }
+  const render = (c: VoiceController, engine: unknown): string =>
+    renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
+
+  it('lists every channel of a 16-channel device under one optgroup, using the device channel labels', async () => {
+    const { c, engine } = await setup({}, undefined, [...quadro, ...mono])
+    const html = render(c, engine)
+    expect(html).toContain('<optgroup label="Zen Quadro SC">')
+    expect((html.match(/<option value="zen#/g) ?? []).length).toBe(16)
+    expect(html).toContain('Zen Quadro SC · In 1')
+    expect(html).toContain('Zen Quadro SC · In 16')
+    expect(html).toContain('Zen Quadro SC · Vocal mic') // the device's own name for channel 6
+    expect(html).toContain('MacBook Pro Microphone (mono)')
+    expect(html).not.toContain('<optgroup label="MacBook Pro Microphone">') // a mono device is a single option
+    c.dispose()
+  })
+  it('selecting a channel sets the request fields used by arm, record and monitor', async () => {
+    const { c, api } = await setup({}, undefined, quadro)
+    c.selectInput('zen#7')
+    await c.arm()
+    expect(api.arm).toHaveBeenLastCalledWith({ input: { deviceName: 'zen-uid', channelIndex: 7 } })
+    await c.toggleRecord()
+    expect(api.recordStart).toHaveBeenLastCalledWith(expect.objectContaining({ input: { deviceName: 'zen-uid', channelIndex: 7 } }))
+    await c.toggleRecord()
+    c.keep()
+    await c.toggleMonitor()
+    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ input: { deviceName: 'zen-uid', channelIndex: 7 }, on: true }))
+    c.dispose()
+  })
+  it('re-asks monitor availability when only the channel changes', async () => {
+    const { c, api } = await setup({}, undefined, quadro)
+    api.monitorAvailability.mockClear()
+    c.selectInput('zen#9')
+    await vi.waitFor(() => expect(api.monitorAvailability).toHaveBeenCalledWith({ input: { deviceName: 'zen-uid', channelIndex: 9 } }))
+    c.dispose()
+  })
+  it('persists the channel per device and restores it; a missing channel or device falls back with no error', async () => {
+    const store = memory()
+    const first = await setup({}, undefined, [...quadro, ...mono], store)
+    first.c.selectInput('zen#7')
+    first.c.selectInput('mbp#0')
+    first.c.dispose()
+    expect(JSON.parse(store.m.get('singz.voice.input')!)).toEqual({ device: 'mbp-uid', channels: { 'zen-uid': 7, 'mbp-uid': 0 } })
+    // the last device and the channel remembered for it come back
+    const again = await setup({}, undefined, [...quadro, ...mono], store)
+    expect(again.c.getSnapshot().input).toBe('mbp#0')
+    again.c.selectInput('zen#7')
+    again.c.dispose()
+    const restored = await setup({}, undefined, [...quadro, ...mono], store)
+    expect(restored.c.getSnapshot().input).toBe('zen#7')
+    restored.c.dispose()
+    // the device is still there but now has fewer channels: channel 0, no error
+    const fewer = await setup({}, undefined, quadro.slice(0, 4), store)
+    expect(fewer.c.getSnapshot().input).toBe('zen#0')
+    expect(fewer.c.getSnapshot().error).toBeNull()
+    fewer.c.dispose()
+    // the device is gone: the first available input, no error
+    const gone = await setup({}, undefined, mono, store)
+    expect(gone.c.getSnapshot().input).toBe('mbp#0')
+    expect(gone.c.getSnapshot().error).toBeNull()
+    gone.c.dispose()
+  })
+  it('ignores an unreadable or older stored value', async () => {
+    const store = memory()
+    store.m.set('singz.voice.input', 'zen#3')
+    const r = await setup({}, undefined, quadro, store)
+    expect(r.c.getSnapshot().input).toBe('zen#0')
+    r.c.dispose()
+  })
+})
+
+describe('changing the input while armed (main refuses a mismatched armed channel)', () => {
+  const opt = (dev: string, ch: number): VoiceInputOption => ({ id: `${dev}#${ch}`, label: dev, deviceName: dev, channelIndex: ch, channels: 8, channelLabel: null })
+  const inputs = [...Array.from({ length: 8 }, (_, ch) => opt('zen', ch)), opt('mbp', 0)]
+  /** A fake main that models the armed input: a take on a different channel or device is refused. */
+  function mainModel() {
+    const st = { armed: null as { dev: string; ch: number } | null, opens: 0, closes: 0, log: [] as string[] }
+    return {
+      st,
+      api: {
+        arm: vi.fn(async (r: { input: { deviceName: string; channelIndex: number } }) => {
+          st.armed = { dev: r.input.deviceName, ch: r.input.channelIndex }
+          st.opens++
+          st.log.push(`arm ${r.input.deviceName}#${r.input.channelIndex}`)
+          return { ok: true as const }
+        }),
+        disarm: vi.fn(async () => { st.armed = null; st.closes++; st.log.push('disarm'); return { ok: true } }),
+        recordStart: vi.fn(async (r: { input: { deviceName: string; channelIndex: number } }) => {
+          if (st.armed && (st.armed.dev !== r.input.deviceName || st.armed.ch !== r.input.channelIndex)) {
+            return { ok: false as const, reason: 'no-input' as const, message: 'armed channel differs' }
+          }
+          return { ok: true as const, takeId: 'take-1' }
+        })
+      }
+    }
+  }
+  const armedOn = async (id: string, extra: Partial<VoiceTakeApi> = {}) => {
+    const main = mainModel()
+    const r = await setup({ ...main.api, ...extra } as never, undefined, inputs)
+    r.c.selectInput(id)
+    await r.c.arm()
+    return { ...r, main }
+  }
+  const settle = async () => { await vi.advanceTimersByTimeAsync(0); await Promise.resolve() }
+
+  it('re-arms on the new channel so Record succeeds instead of reading input missing', async () => {
+    const { c, main } = await armedOn('zen#0')
+    expect(main.st.armed).toEqual({ dev: 'zen', ch: 0 })
+    c.selectInput('zen#7')
+    await vi.waitFor(() => expect(main.st.armed).toEqual({ dev: 'zen', ch: 7 }))
+    expect(main.st.log.slice(-2)).toEqual(['disarm', 'arm zen#7'])
+    expect(c.getSnapshot().armed).toBe(true)
+    await c.toggleRecord()
+    expect(c.state).toBe('recording')
+    expect(c.getSnapshot().inputMissing).toBe(false)
+    c.dispose()
+  })
+  it('a different device is re-armed too', async () => {
+    const { c, main } = await armedOn('zen#3')
+    c.selectInput('mbp#0')
+    await vi.waitFor(() => expect(main.st.armed).toEqual({ dev: 'mbp', ch: 0 }))
+    await c.toggleRecord()
+    expect(c.state).toBe('recording')
+    c.dispose()
+  })
+  it('two quick selections: only the last stays armed and nothing leaks open', async () => {
+    const { c, main } = await armedOn('zen#0')
+    c.selectInput('zen#2')
+    c.selectInput('zen#5')
+    await vi.waitFor(() => expect(main.st.armed).toEqual({ dev: 'zen', ch: 5 }))
+    await settle()
+    expect(main.st.armed).toEqual({ dev: 'zen', ch: 5 })
+    expect(main.st.opens - main.st.closes).toBe(1) // exactly one input open
+    expect(c.getSnapshot().armed).toBe(true)
+    c.dispose()
+  })
+  it('selecting while not armed arms nothing', async () => {
+    const main = mainModel()
+    const { c } = await setup(main.api as never, undefined, inputs)
+    c.selectInput('zen#4')
+    await settle()
+    expect(main.api.arm).not.toHaveBeenCalled()
+    expect(main.st.armed).toBeNull()
+    c.dispose()
+  })
+  it('a selection while recording is ignored', async () => {
+    const { c, main } = await armedOn('zen#0')
+    await c.toggleRecord()
+    main.api.arm.mockClear()
+    c.selectInput('zen#6')
+    await settle()
+    expect(c.getSnapshot().input).toBe('zen#0')
+    expect(main.api.arm).not.toHaveBeenCalled()
+    c.dispose()
+  })
+  it('while monitoring: the monitor is released; an input the singer armed is re-armed, one the monitor armed is released', async () => {
+    const own = await armedOn('zen#0')
+    await own.c.toggleMonitor() // singer's arm already open: monitor does not own it
+    expect(own.c.getSnapshot().monitor.on).toBe(true)
+    own.c.selectInput('zen#7')
+    await vi.waitFor(() => expect(own.main.st.armed).toEqual({ dev: 'zen', ch: 7 }))
+    expect(own.c.getSnapshot().monitor.on).toBe(false)
+    expect(own.api.monitorSet).toHaveBeenCalledWith(expect.objectContaining({ on: false }))
+    own.c.dispose()
+    const main = mainModel()
+    const viaMonitor = await setup(main.api as never, undefined, inputs)
+    viaMonitor.c.selectInput('zen#0')
+    await viaMonitor.c.toggleMonitor() // monitoring armed it
+    expect(main.st.armed).toEqual({ dev: 'zen', ch: 0 })
+    viaMonitor.c.selectInput('zen#7')
+    await vi.waitFor(() => expect(main.st.armed).toBeNull())
+    await settle()
+    expect(main.st.armed).toBeNull() // released, not re-armed
+    expect(viaMonitor.c.getSnapshot().armed).toBe(false)
+    viaMonitor.c.dispose()
+  })
+  it('a failed re-arm leaves the strip disarmed in the existing state and the select usable', async () => {
+    let calls = 0
+    const { c } = await armedOn('zen#0', {
+      arm: vi.fn(async () => (++calls === 1 ? { ok: true as const } : { ok: false as const, reason: 'no-input' as const, message: '' }))
+    } as never)
+    c.selectInput('zen#7')
+    await vi.waitFor(() => expect(c.getSnapshot().inputMissing).toBe(true))
+    expect(c.getSnapshot().armed).toBe(false)
+    expect(c.getSnapshot().input).toBe('zen#7')
     c.dispose()
   })
 })

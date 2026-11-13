@@ -167,7 +167,12 @@ ready.then(async () => {
   const voiceAvailability = addon.voiceMonitorAvailability(voiceInput)
   assert.equal(voiceAvailability.available, false)
   assert.ok(['platform', 'output-not-native', 'no-input', 'permission'].includes(voiceAvailability.reason))
-  assert.equal(addon.voiceMonitorAvailability({ ...voiceInput, inputChannel: 0.5 }).available, false)
+  for (const inputChannel of [-1, 0.5, 64, Infinity, NaN]) {
+    const invalid = addon.voiceMonitorAvailability({ ...voiceInput, inputChannel })
+    assert.equal(invalid.available, false)
+    assert.equal(invalid.reason, 'error')
+    assert.equal(addon.beginVoiceMonitor({ ...voiceInput, inputChannel, gainDb: 0, targetFrames: 32, maxFrames: 256 }, 11n).ok, false)
+  }
   for (const generation of [0n, -1n, 1, 1.5, Infinity, 2n ** 64n]) {
     assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: 0, targetFrames: 32, maxFrames: 256 }, generation).ok, false)
     assert.equal(addon.endVoiceMonitor(generation).ok, false)
@@ -307,7 +312,7 @@ ready.then(async () => {
   const outputs = hostDevices.devices.filter((device) => device.outputChannels > 0)
   if (outputs.length === 0) {
     console.log(
-      'prepared-graph accounting skipped: the host has no output device at all ' +
+      'prepared-graph accounting and native song-output open skipped: the host has no output device at all ' +
       `(provider ${hostDevices.provider}, ${hostDevices.devices.length} devices)`
     )
     finish()
@@ -329,6 +334,18 @@ ready.then(async () => {
       outputDeviceUid: hostDevices.defaultOutputUid || outputs[0].uid
     }
     delete preparedConfig.graphDocument
+    if (process.platform === 'darwin') {
+      const selectedOutput = outputs.find(device => device.uid === preparedConfig.outputDeviceUid)
+      assert.ok(selectedOutput)
+      // Exact app route inputs: request the current preferred buffer, rather
+      // than zero. Opening a silent prepared graph exercises the REAL AUHAL
+      // opt-in guard without starting any hardware callback or audible audio.
+      preparedConfig.sampleRate = Math.round(selectedOutput.nominalSampleRate)
+      preparedConfig.bufferFrames = selectedOutput.bufferFrames.preferredFrames || 512
+      preparedConfig.maximumFrames = 4096
+      preparedConfig.outputChannels = Array.from({ length: Math.min(2, selectedOutput.outputChannels) }, (_, index) => index)
+      preparedConfig.masterGain = 0
+    }
     const preparedResult = await addon.preparePlayback(preparedConfig, [{
       id: 'smoke', path: wav, gain: 1, muted: false, solo: false
     }], 4n)
@@ -341,6 +358,11 @@ ready.then(async () => {
       'aggregate retained bytes include the graph arena exactly once')
     assert.ok(prepared.graphSnapshot && prepared.graphSnapshot.nodes.length > 0,
       'prepared status exposes the actual compiled graph')
+    if (process.platform === 'darwin') {
+      const opened = addon.openPlaybackOutput(4n)
+      assert.equal(opened.ok, true, opened.error || opened.message)
+      console.log('PASS native song-output open with current preferred buffer and silent graph')
+    }
     const unloaded = addon.unloadPlayback(4n)
     assert.equal(unloaded.ok, true, unloaded.error)
     assert.equal(unloaded.cleanupComplete, true)

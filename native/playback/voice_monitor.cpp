@@ -15,7 +15,8 @@ VoiceMonitorAvailability classifyVoiceMonitorRoute(const AudioHostInventory& inv
   if (!native || output.empty()) return refuse("output-not-native", "The song needs a native output");
   const AudioHostDeviceInfo* input=nullptr;
   for (const auto& device : inventory.devices) if (device.uid==uid) { input=&device; break; }
-  if (!input || channel>=input->inputChannels) return refuse("no-input", "Select an available microphone channel");
+  if (!input) return refuse("no-input", "Select an available microphone");
+  if (channel>=input->inputChannels) return refuse("error", "Invalid microphone channel");
   if (uid!=output) return refuse("route-separate-devices", "Input and output must use the same physical device");
   if (input->direction!=AudioHostEndpointDirection::Duplex || !input->outputChannels ||
       input->inputChannels>kAudioHostMaxChannels || input->outputChannels>kAudioHostMaxChannels)
@@ -107,7 +108,8 @@ VoiceMonitorAvailability VoiceMonitorHost::availability(const std::string& uid,u
   return classifyVoiceMonitorRoute(impl_->host.enumerate(),uid,channel,output,native,permission,impl_->macOS);
 }
 VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t channel,const std::string& output,
-    bool native,bool permission,float gain,uint32_t target,uint32_t maximum,uint64_t generation) {
+    bool native,bool permission,float gain,uint32_t target,uint32_t maximum,uint64_t generation,
+    const std::vector<uint32_t>& songOutputChannels) {
   auto& self=*impl_;
   VoiceMonitorResult result;
   if (!generation || generation<=self.generation) {result.reason="error";result.error="Stale monitor generation";return result;}
@@ -115,17 +117,29 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
   const auto inventory=self.macOS && native && !output.empty() ? self.host.enumerate() : AudioHostInventory{};
   const auto route=classifyVoiceMonitorRoute(inventory,uid,channel,output,native,permission,self.macOS);
   if (!route.available) {result.reason=route.reason;result.error=route.detail;return result;}
-  self.stop(true); self.generation=generation; self.lost=false; self.warningFlags=0; self.reason.clear();
   const auto device=std::find_if(inventory.devices.begin(),inventory.devices.end(),[&](const auto& d){return d.uid==uid;});
   if (device==inventory.devices.end()) {result.reason="device-lost";result.error="Device disappeared";return result;}
-  const uint32_t outputs=std::min(device->outputChannels,2u);
+  auto physicalOutputs=songOutputChannels;
+  if (physicalOutputs.empty()) {
+    physicalOutputs.push_back(0);
+    if (device->outputChannels>1) physicalOutputs.push_back(1);
+  }
+  // v1 voice is mono on the song's first stereo pair (or its sole channel).
+  // AUHAL's device-sized map silences physical lanes outside this client map.
+  if (physicalOutputs.size()>2) physicalOutputs.resize(2);
+  if (std::any_of(physicalOutputs.begin(),physicalOutputs.end(),[&](uint32_t c){return c>=device->outputChannels;}) ||
+      (physicalOutputs.size()==2 && physicalOutputs[0]==physicalOutputs[1])) {
+    result.reason="error";result.error="Invalid song output channel map";return result;
+  }
+  self.stop(true); self.generation=generation; self.lost=false; self.warningFlags=0; self.reason.clear();
+  const uint32_t outputs=static_cast<uint32_t>(physicalOutputs.size());
+  self.render.outputMask=(uint64_t{1}<<outputs)-1;
   self.render.current=self.render.destination=self.render.step=0; self.render.remaining=0;
   self.render.target.store(0); self.render.silent.store(1); self.render.outputs=outputs;
   for (uint32_t frames=target;frames<=maximum;frames*=2) {
     AudioHostConfig config;
     config.inputDeviceUid=config.outputDeviceUid=uid;
-    config.inputChannels={channel}; config.outputChannels={0};
-    if (outputs>1) config.outputChannels.push_back(1);
+    config.inputChannels={channel}; config.outputChannels=physicalOutputs;
     config.requestedSampleRate=device->nominalSampleRate;
     config.requestedBufferFrames=frames; config.maximumFrames=kAudioHostMaxFrames;
     config.allowSharedDeviceBufferChange=true; config.maximumAcceptableBufferFrames=maximum;

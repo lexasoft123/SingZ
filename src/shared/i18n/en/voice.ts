@@ -7,6 +7,9 @@ export const voice = {
 
   // ── controls ──
   'player.voice.input': 'Input',
+  'player.voice.inputMono': '{device} (mono)',
+  'player.voice.inputChannel': '{device} · In {n}',
+  'player.voice.inputChannelLabeled': '{device} · {label}',
   'player.voice.inputNone': 'No input found',
   'player.voice.inputPerm': 'Mic access needed',
   'player.voice.monitorOff': 'Monitor my voice (off)',

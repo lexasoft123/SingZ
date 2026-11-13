@@ -7,6 +7,9 @@ export const voice: Translation<typeof en> = {
   'player.voice.stripLabel': 'Дорожка голоса',
 
   'player.voice.input': 'Вход',
+  'player.voice.inputMono': '{device} (моно)',
+  'player.voice.inputChannel': '{device} · Вх {n}',
+  'player.voice.inputChannelLabeled': '{device} · {label}',
   'player.voice.inputNone': 'Вход не найден',
   'player.voice.inputPerm': 'Нужен доступ к микрофону',
   'player.voice.monitorOff': 'Слышать себя (выключено)',

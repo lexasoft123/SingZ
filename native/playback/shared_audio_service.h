@@ -42,6 +42,8 @@ class SharedAudioService final {
   uint64_t watchedDeviceCount() const noexcept;
   std::string providerId() const;
   std::string activeOutputUid() const;
+  // UID and physical output channel map copied together under the route lock.
+  AudioHostConfig activeOutputConfig() const;
   uint64_t outputRouteGeneration() const noexcept;
   // Mobile may park the shared output while another route owns the device.
   void parkOutput() noexcept;

@@ -288,10 +288,11 @@ struct SharedAudioService::Impl {
   }
   AudioHostResult openLocked(AudioHostConfig config) {
 #if defined(__APPLE__) && TARGET_OS_OSX
-    // Opt in only to an unchanged-buffer song capacity lease. A nonzero song
-    // period request must retain its former Unsupported behavior: only the
-    // independent monitor is authorized to write the shared device period.
-    config.allowSharedDeviceBufferChange = config.requestedBufferFrames == 0;
+    // Song opens pass the current preferred period as a nonzero request.
+    // Opt in so zCore registers the capacity lease for both zero and explicit
+    // periods; unchanged requests do not write, changes use the shared ledger.
+    // Route identity below deliberately remains independent of this opt-in.
+    if (provider != "box-loopz") config.allowSharedDeviceBufferChange = true;
 #endif
     if (!enumerated) refreshLocked();
     startWatcherLocked();
@@ -325,6 +326,20 @@ struct SharedAudioService::Impl {
     outputGeneration.fetch_add(1, std::memory_order_release);
     backend->stop();
     auto result = backend->open(config, render, this);
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (!result.ok && result.error == AudioHostError::InvalidConfiguration &&
+        config.requestedBufferFrames != 0 && !config.exclusive &&
+        config.inputDeviceUid.empty() && config.inputChannels.empty() && provider != "box-loopz") {
+      // A monitor may hold a smaller buffer than the song's cached preference.
+      // zCore refuses an incompatible request BEFORE writing or adding a lease.
+      // Treat the song period as best effort: retry once at the current device
+      // size, retaining every capacity/channel/format check in the real ledger.
+      // Keep the original preference in route identity; telemetry is read-back.
+      auto currentBufferConfig = config;
+      currentBufferConfig.requestedBufferFrames = 0;
+      result = backend->open(currentBufferConfig, render, this);
+    }
+#endif
     if (result.ok) {
       route = std::move(config);
       rate.store(result.format.sampleRate, std::memory_order_release);
@@ -607,6 +622,9 @@ std::string SharedAudioService::providerId() const {
 }
 std::string SharedAudioService::activeOutputUid() const {
   std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->route.outputDeviceUid;
+}
+AudioHostConfig SharedAudioService::activeOutputConfig() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->route;
 }
 uint64_t SharedAudioService::outputRouteGeneration() const noexcept {
   return impl_->outputGeneration.load(std::memory_order_acquire);

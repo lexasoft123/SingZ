@@ -112,11 +112,18 @@ export class VoiceTakeStore {
 
   async arm(request: { input: { deviceName: string; channelIndex: number } }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; message?: string }> {
     if (this.active || this.starting || this.arming) return { ok: false, reason: 'busy', message: 'A voice take is already recording or arming.' }
-    if (this.armed) return { ok: true }
+    if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) return { ok: false, reason: 'no-input', message: 'The selected microphone is unavailable.' }
     this.arming = true
     try {
       const result = await this.options.native.armCapture(request.input)
-      if (!result.ok || result.generation === undefined) return { ok: false, reason: result.reason ?? 'error', message: result.error ?? 'The microphone could not be armed.' }
+      if (!result.ok || result.generation === undefined) {
+        if (this.armed) {
+          const released = await this.options.native.disarmCapture(this.armed.generation)
+          if (!released.ok) return { ok: false, reason: 'error', message: 'The microphone could not be released.' }
+          this.armed = null
+        }
+        return { ok: false, reason: result.reason ?? 'error', message: result.error ?? 'The microphone could not be armed.' }
+      }
       this.armed = { generation: result.generation, deviceName: result.deviceName ?? request.input.deviceName, channelIndex: request.input.channelIndex }
       return { ok: true }
     } finally { this.arming = false }
@@ -143,7 +150,8 @@ export class VoiceTakeStore {
   async start(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult> {
     if (this.active || this.starting || this.arming) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
     this.finalizedTake = null
-    if (!validId(request.songId) || !request.input || !Number.isFinite(request.input.channelIndex) || request.input.channelIndex < 0 || !Number.isFinite(request.tempo) || !Number.isFinite(request.transposeSemitones)) return { ok: false, reason: 'error', message: 'Invalid recording request.' }
+    if (!validId(request.songId) || !request.input || !Number.isFinite(request.tempo) || !Number.isFinite(request.transposeSemitones)) return { ok: false, reason: 'error', message: 'Invalid recording request.' }
+    if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) return { ok: false, reason: 'no-input', message: 'The selected microphone is unavailable.' }
     const takeId = randomUUID()
     const paths = this.takePaths(request.songId, takeId)
     const generation = BigInt(`0x${takeId.replace(/-/g, '').slice(0, 15)}`)
@@ -151,11 +159,21 @@ export class VoiceTakeStore {
     let captureGeneration = generation
     this.starting = true
     try {
+      if (this.armed) {
+        const selected = await this.options.native.armCapture(request.input)
+        if (!selected.ok || selected.generation === undefined) {
+          const released = await this.options.native.disarmCapture(this.armed.generation)
+          if (!released.ok) return { ok: false, reason: 'error', message: 'The microphone could not be released.' }
+          this.armed = null
+          return { ok: false, reason: selected.reason ?? 'error', message: selected.reason === 'no-input' ? 'The selected microphone is unavailable.' : 'The microphone could not be armed.' }
+        }
+        this.armed = { generation: selected.generation, deviceName: selected.deviceName ?? request.input.deviceName, channelIndex: request.input.channelIndex }
+      }
       await mkdir(paths.dir, { recursive: true })
       captureAttempted = true
-      const result = await this.options.native.recordTake({ dir: paths.dir, takeId, generation: this.armed?.generation ?? generation, deviceName: this.armed?.deviceName ?? request.input.deviceName, channelIndex: this.armed?.channelIndex ?? request.input.channelIndex })
+      const result = await this.options.native.recordTake({ dir: paths.dir, takeId, generation: this.armed?.generation ?? generation, deviceName: request.input.deviceName, channelIndex: request.input.channelIndex })
       captureGeneration = result.generation ?? this.armed?.generation ?? generation
-      if (!result.ok) return { ok: false, reason: 'error', message: result.error ?? 'Recording could not start.' }
+      if (!result.ok) return { ok: false, reason: result.reason ?? 'error', message: result.reason === 'no-input' ? 'The selected microphone is unavailable.' : result.error ?? 'Recording could not start.' }
       const active: Active = {
       request, takeId, dir: paths.dir, wavPath: paths.wav, createdAt: this.now().toISOString(),
       startPositionSec: 0, inputLatencyFrames: 0, outputLatencyFrames: 0, graphLatencyFrames: 0,

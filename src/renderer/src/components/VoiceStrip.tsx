@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
-import { meterFraction, monitorDbToFader, primaryState, recordBlock, type VoiceController, type VoiceModel } from '../audio/voice-take'
+import { meterFraction, monitorDbToFader, primaryState, recordBlock, type VoiceController, type VoiceInputOption, type VoiceModel } from '../audio/voice-take'
 import type { VoiceMonitorReason } from '../../../shared/voice-take'
 import { t, type Key } from '../i18n'
 import { blockText, clock, dbText, sgn } from './voice-format'
@@ -21,6 +21,25 @@ const REASON_KEY: Record<VoiceMonitorReason, Key> = {
   error: 'player.voice.monReasonError'
 }
 const monitorReasonText = (m: VoiceModel): string => (m.monitor.avail === 'ok' || !m.monitor.reason ? '' : t(REASON_KEY[m.monitor.reason]))
+
+/** Inputs grouped per device, in order; a device with several channels becomes an optgroup. */
+function inputGroups(inputs: VoiceInputOption[]): VoiceInputOption[][] {
+  const groups: VoiceInputOption[][] = []
+  for (const o of inputs) {
+    const last = groups[groups.length - 1]
+    if (last && (last[0]!.deviceName ?? last[0]!.label) === (o.deviceName ?? o.label)) last.push(o)
+    else groups.push([o])
+  }
+  return groups
+}
+/** 'Device (mono)', 'Device · <the device's channel name>' or 'Device · In N'. */
+function inputOptionText(o: VoiceInputOption): string {
+  if (o.channels === undefined) return o.label
+  if (o.channels <= 1) return t('player.voice.inputMono', { device: o.label })
+  return o.channelLabel
+    ? t('player.voice.inputChannelLabeled', { device: o.label, label: o.channelLabel })
+    : t('player.voice.inputChannel', { device: o.label, n: (o.channelIndex ?? 0) + 1 })
+}
 
 const METER_SEGS = 24
 const HOT_FROM = 17
@@ -267,11 +286,21 @@ export default function VoiceStrip({
             {needSetup || m.inputs.length === 0 ? (
               <option value="">{m.perm === 'denied' ? t('player.voice.inputPerm') : t('player.voice.inputNone')}</option>
             ) : (
-              m.inputs.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.label}
-                </option>
-              ))
+              inputGroups(m.inputs).map((g) =>
+                g.length === 1 ? (
+                  <option key={g[0]!.id} value={g[0]!.id}>
+                    {inputOptionText(g[0]!)}
+                  </option>
+                ) : (
+                  <optgroup key={g[0]!.deviceName ?? g[0]!.label} label={g[0]!.label}>
+                    {g.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {inputOptionText(o)}
+                      </option>
+                    ))}
+                  </optgroup>
+                )
+              )
             )}
           </select>
         </div>

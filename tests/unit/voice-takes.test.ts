@@ -218,6 +218,91 @@ describe('voice take storage', () => {
     expect(missing).toMatchObject({ ok: false, reason: 'no-input' })
   })
 
+  it('rejects invalid capture channels for arm and record without clamping', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = []
+    let channels = 2
+    const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
+      calls.push({ method, args })
+      if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'mic', label: 'Mic', isDefault: true, sampleRate: 48000, channels, channelLabels: ['1', '2'] }] } as T
+      return { ok: true } as T
+    } }
+    const native = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
+    const s = new VoiceTakeStore({ rootDir: root, native })
+    for (const channelIndex of [-1, 0.5, 2, 100]) {
+      const input = { deviceName: 'Mic', channelIndex }
+      expect(await s.arm({ input })).toMatchObject({ ok: false, reason: 'no-input' })
+      expect(await s.start({ ...request, input })).toMatchObject({ ok: false, reason: 'no-input' })
+    }
+    expect(calls.filter(c => c.method === 'beginCapture' || c.method === 'recordTake')).toHaveLength(0)
+    expect(await s.arm({ input: { deviceName: 'Mic', channelIndex: 1 } })).toMatchObject({ ok: true })
+    expect(calls.find(c => c.method === 'beginCapture')?.args[0]).toMatchObject({ inputChannel: 1 })
+    channels = 1
+    expect(await s.arm({ input: { deviceName: 'Mic', channelIndex: 1 } })).toMatchObject({ ok: false, reason: 'no-input' })
+    await s.disarm()
+    channels = 2
+    const second = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    expect(await second.recordTake({ dir: root, takeId: 'valid', generation: 99n, deviceName: 'Mic', channelIndex: 1 })).toMatchObject({ ok: true })
+    expect(calls.filter(c => c.method === 'beginCapture').at(-1)?.args[0]).toMatchObject({ inputChannel: 1 })
+    expect(calls.filter(c => c.method === 'recordTake')).toHaveLength(1)
+  })
+  it('reopens armed capture for channel and resolved device changes, and records the requested channel', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
+    const events: Array<{ method: string; args: unknown[] }> = []
+    let generation = 0n
+    const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
+      events.push({ method, args })
+      if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'zen', label: 'Zen', channels: 8, isDefault: true }, { uid: 'quad', label: 'Quad', channels: 4, isDefault: false }] } as T
+      if (method === 'captureState') return { state: generation ? 'running' : 'stopped', ownershipGeneration: generation.toString() } as T
+      if (method === 'beginCapture') { generation = args[1] as bigint; return { ok: true } as T }
+      if (method === 'cancelCapture') { if (args[0] === generation) generation = 0n; return { ok: true } as T }
+      if (method === 'captureStats') return { firstSampleCaptured: true, firstSampleHostNs: '1000000000', sampleRate: 48000 } as T
+      if (method === 'presentationQuery') return { found: true, songSeconds: 0, sampleRate: 48000 } as T
+      if (method === 'finishTake') return { ok: true, frames: 48000, sampleRate: 48000 } as T
+      return { ok: true } as T
+    } }
+    const native = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    const s = new VoiceTakeStore({ rootDir: root, native })
+    expect(await s.arm({ input: { deviceName: 'zen', channelIndex: 0 } })).toMatchObject({ ok: true })
+    const first = generation
+    expect(await s.arm({ input: { deviceName: 'Zen', channelIndex: 0 } })).toMatchObject({ ok: true })
+    expect(events.filter(e => e.method === 'beginCapture')).toHaveLength(1)
+    expect(await s.arm({ input: { deviceName: 'zen', channelIndex: 7 } })).toMatchObject({ ok: true })
+    expect(events.find(e => e.method === 'cancelCapture')?.args[0]).toBe(first)
+    expect(generation).not.toBe(first)
+    expect(events.filter(e => e.method === 'beginCapture').at(-1)?.args[0]).toMatchObject({ deviceUid: 'zen', inputChannel: 7 })
+    const second = generation
+    expect(await s.arm({ input: { deviceName: 'quad', channelIndex: 0 } })).toMatchObject({ ok: true })
+    expect(events.filter(e => e.method === 'cancelCapture').at(-1)?.args[0]).toBe(second)
+    expect(events.filter(e => e.method === 'beginCapture').at(-1)?.args[0]).toMatchObject({ deviceUid: 'quad', inputChannel: 0 })
+    const third = generation
+    const started = await s.start({ ...request, input: { deviceName: 'quad', channelIndex: 3 } })
+    expect(started.ok).toBe(true)
+    expect(events.filter(e => e.method === 'cancelCapture').at(-1)?.args[0]).toBe(third)
+    expect(generation).not.toBe(third)
+    expect(events.filter(e => e.method === 'beginCapture').at(-1)?.args[0]).toMatchObject({ deviceUid: 'quad', inputChannel: 3 })
+    expect(events.find(e => e.method === 'recordTake')?.args[2]).toBe(generation)
+    expect(await s.arm({ input: { deviceName: 'zen', channelIndex: 0 } })).toMatchObject({ ok: false, reason: 'busy' })
+    await s.stop()
+    await s.disarm()
+  })
+  it('does not open a replacement when releasing the old capture fails', async () => {
+    const events: string[] = []
+    let generation = 0n
+    const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
+      events.push(method)
+      if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'zen', label: 'Zen', channels: 8, isDefault: true }] } as T
+      if (method === 'captureState') return { state: 'running', ownershipGeneration: generation.toString() } as T
+      if (method === 'beginCapture') { generation = args[1] as bigint; return { ok: true } as T }
+      if (method === 'cancelCapture') return { ok: false } as T
+      return { ok: true } as T
+    } }
+    const native = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    const s = new VoiceTakeStore({ native })
+    expect((await s.arm({ input: { deviceName: 'zen', channelIndex: 0 } })).ok).toBe(true)
+    expect(await s.arm({ input: { deviceName: 'zen', channelIndex: 7 } })).toMatchObject({ ok: false, reason: 'error' })
+    expect(events.filter(e => e === 'beginCapture')).toHaveLength(1)
+  })
   it('arms for live level, reuses capture for recording, keeps it after stop, and disarms', async () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root); const s = new VoiceTakeStore({ rootDir: root, native: fakeNative() })
     expect(await s.arm({ input: { deviceName: 'Mic', channelIndex: 0 } })).toMatchObject({ ok: true })
