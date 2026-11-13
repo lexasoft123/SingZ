@@ -16,7 +16,7 @@ type BoxIpcOptions = {
   appVersion: string
   rendererURL: string
   socketPath?: string
-  microphones?: { snapshot(): Promise<BoxMicrophoneSnapshot>; levels(): Promise<BoxMicrophoneLevels>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
+  microphones?: { subscribeLevels?(listener: (value: BoxMicrophoneLevels) => Promise<void>): Promise<() => void> | (() => void); snapshot(): Promise<BoxMicrophoneSnapshot>; levels(): Promise<BoxMicrophoneLevels>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
   audioInputs: () => unknown
   audioHost: () => unknown
   cecStatus?: () => BoxCecStatus
@@ -69,7 +69,14 @@ export function registerBoxIpc(options: BoxIpcOptions) {
     }
   }
   const expectedRendererUrl = normalizeUrl(options.rendererURL)
-  const clearSender = (): void => controller.setCommandSender(null)
+  let meterSubscription = '', meterSequence = 0, meterVersion = 0
+  let stopMeter: (() => void) | undefined
+  let meterAck: { sequence: number; resolve(): void } | undefined
+  const clearMeter = (): void => {
+    ++meterVersion; meterSubscription = ''; stopMeter?.(); stopMeter = undefined
+    meterAck?.resolve(); meterAck = undefined
+  }
+  const clearSender = (): void => { clearMeter(); controller.setCommandSender(null) }
   const enableSender = (sender: WebContents): void => {
     controller.setCommandSender((envelope) => {
       if (attached === sender && !sender.isDestroyed()) sender.send('box:controller-command', envelope)
@@ -123,6 +130,33 @@ export function registerBoxIpc(options: BoxIpcOptions) {
       return retainedResult(() => options.restoreRetainedPlayback!(value))
     },
     'box:microphones': () => options.microphones ? retainedResult(() => options.microphones!.snapshot()) : failure('Microphone analysis unavailable.', 'unavailable'),
+    'box:microphone-levels-subscribe': async (event, [key]) => {
+      if (typeof key !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(key)) return failure('Invalid meter subscription.', 'invalid-command')
+      if (!options.microphones?.subscribeLevels) return failure('Unknown Box audio command', 'unavailable')
+      clearMeter(); meterSubscription = key
+      const version = meterVersion
+      const sender = event.sender
+      try {
+        const stop = await options.microphones.subscribeLevels(value => {
+          if (meterVersion !== version || meterSubscription !== key || attached !== sender || sender.isDestroyed()) return Promise.resolve()
+          return new Promise<void>(resolve => {
+            const sequence = ++meterSequence
+            meterAck = { sequence, resolve }
+            sender.send('box:microphone-levels-push', value, key, sequence)
+          })
+        })
+        if (meterVersion !== version || meterSubscription !== key) stop(); else stopMeter = stop
+        return { ok: true, value: null }
+      } catch (error) { if (meterVersion === version && meterSubscription === key) clearMeter(); return failure(String(error), 'unavailable') }
+    },
+    'box:microphone-levels-unsubscribe': (_event, [key]) => {
+      if (key === meterSubscription) clearMeter()
+      return { ok: true, value: null }
+    },
+    'box:microphone-levels-ack': (_event, [key, sequence]) => {
+      if (meterAck && key === meterSubscription && sequence === meterAck.sequence) { meterAck.resolve(); meterAck = undefined }
+      return { ok: true, value: null }
+    },
     'box:microphone-levels': () => options.microphones ? retainedResult(() => options.microphones!.levels()) : failure('Microphone analysis unavailable.', 'unavailable'),
     'box:microphone-selection-set': (_event, [edit]) => options.microphones ? retainedResult(() => options.microphones!.setSelection(edit as BoxMicrophoneSelectionEdit)) : failure('Microphone analysis unavailable.', 'unavailable'),
     'box:routing-snapshot': () => routing.snapshot(),

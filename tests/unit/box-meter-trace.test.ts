@@ -92,3 +92,20 @@ it('reads actual ALSA period and buffer values, excluding closed endpoints', asy
     expect(await readAlsaCaptureTiming(join(root, 'absent'))).toEqual([])
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+
+it('retains read-calibrated clocks for unsolicited push and first changed pixels', () => {
+  const log = new BoxMeterTraceLog()
+  log.receivePush(trace(), '5', [3], 19)
+  expect(log.hook.records()).toHaveLength(0)
+  log.receive(trace(), '5', [3], 10, 19)
+  log.receivePush(trace(), '5', [3], 20)
+  const row = log.hook.records()[1]
+  expect(row.delivery).toBe('push')
+  expect(row.hostMinusRendererMs).toBe(1998)
+  expect(row.clockUncertaintyMs).toBe(2)
+  expect(row.captureToReceiveMs).toBe(16)
+  log.paint(row.id, 33)
+  expect(log.hook.records()[1].captureToPaintMs).toBe(29)
+  log.dispose()
+})

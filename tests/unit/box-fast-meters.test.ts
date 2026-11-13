@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { Profiler, createElement } from 'react'
+import { PeakMeter, type PeakMeterHandle } from '@singz/ui'
+import { Profiler, createElement, createRef } from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -36,6 +37,7 @@ beforeEach(async () => {
     return context as unknown as CanvasRenderingContext2D
   } as never)
   frames = new Map(); frameId = 0; clock = 0
+  vi.spyOn(performance, 'now').mockImplementation(() => clock)
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
 })
@@ -293,7 +295,7 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
     const inventory: CaptureInputDevice[] = [{ uid: 'mic', label: 'Microphone', channels: 2, isDefault: true, channelLabels: [], sampleRate: 48000 }]
     const owner = {
       devices: vi.fn(async () => ({ ok: true, devices: inventory })),
-      begin: vi.fn(async (_id, config, next) => { generation = next; return { ok: true, state: 'running', deviceUid: config.deviceUid, inputChannel: config.inputChannel } as CaptureStartResult }),
+      begin: vi.fn(async (_id, config, next, _emit: Parameters<MicrophoneAnalysisOwner['begin']>[3]) => { generation = next; return { ok: true, state: 'running', deviceUid: config.deviceUid, inputChannel: config.inputChannel } as CaptureStartResult }),
       cancel: vi.fn(async () => { generation = ''; return { ok: true, cancelled: true } }),
       state: vi.fn(async () => ({ state: 'running' as const, ownershipGeneration: generation, error: '' })),
       takeMicrophoneLevels: vi.fn(async () => ({ ...meters, ownershipGeneration: generation })),
@@ -335,6 +337,26 @@ describe('host level read (MicrophoneAnalysisSupervisor.levels)', () => {
       expect((await f.supervisor.levels()).trace).toBeUndefined()
       expect(hardware).not.toHaveBeenCalled()
     } finally { await f.supervisor.dispose(); vi.unstubAllEnvs() }
+  })
+  it('pushes on analysis notifications only while subscribed, coalescing to sixty per second', async () => {
+    const f = fixture(); await f.supervisor.ready
+    const listener = vi.fn()
+    const stop = f.supervisor.subscribeLevels(listener)
+    await vi.advanceTimersByTimeAsync(0)
+    listener.mockClear(); f.owner.takeMicrophoneLevels.mockClear()
+    const notify = f.owner.begin.mock.calls[0][3]
+    for (let i = 0; i < 200; i++) {
+      notify({ ownershipGeneration: f.generation(), frequency: 0, clarity: 0 } as never)
+      await vi.advanceTimersByTimeAsync(5)
+    }
+    expect(listener.mock.calls.length).toBeGreaterThanOrEqual(56)
+    expect(listener.mock.calls.length).toBeLessThanOrEqual(62)
+    expect(f.owner.takeMicrophoneLevels.mock.calls.length).toBe(listener.mock.calls.length)
+    stop(); const count = listener.mock.calls.length
+    for (let i = 0; i < 100; i++) notify({ ownershipGeneration: f.generation(), frequency: 0, clarity: 0 } as never)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(listener).toHaveBeenCalledTimes(count)
+    await f.supervisor.dispose()
   })
   it('reads native levels fresh on every call, with no 1 s cache and no state read', async () => {
     const f = fixture(); await f.supervisor.ready
@@ -384,6 +406,8 @@ describe('host-to-brick latency at a 30 Hz display', () => {
   it('measures first changed live pixels across request/frame phases', async () => {
     const delays: number[] = []
     for (let phase = 0; phase < 100; phase += 5) {
+      // Start both performance.now and rAF in the same clock domain before mounting.
+      clock = 0
       const host = fakeHost()
       host.patch({ levels: { channelIndices: [0, 1], peak: [.0063, .0063], rms: [0, 0] } })
       host.api.microphoneLevels.mockImplementation(() => {
@@ -407,8 +431,6 @@ describe('host-to-brick latency at a 30 Hz display', () => {
           }
         }
       }
-      // Reset the display clock per sample; timer clock remains monotonic.
-      clock = 0
       await advance(400 + phase)
       const ctx = canvases.get(node.querySelector('canvas')!)!
       const before = ctx.liveExtent
@@ -478,4 +500,43 @@ describe('display-aligned fast demand', () => {
     unsubscribe(); expect(frames.size).toBe(0); store.dispose()
     expect(vi.getTimerCount()).toBe(0)
   })
+})
+
+
+it('a deferred fast-host reply draws before another rAF when the thirty fps cap permits', async () => {
+  const ref = createRef<PeakMeterHandle>()
+  const node = document.createElement('div'); document.body.append(node)
+  const root = createRoot(node)
+  await act(async () => root.render(createElement(PeakMeter, { db: -Infinity, renderMode: 'canvas', maxFps: 30, attackMs: 0, paintOnReceive: true, ref })))
+  clock += 40
+  const ctx = canvases.get(node.querySelector('canvas')!)!
+  const before = ctx.liveExtent
+  let deliver!: (peak: number) => void
+  const response = new Promise<number>(done => { deliver = done })
+  const receive = response.then(peak => ref.current!.push(microphoneLevelDb(peak)))
+  clock += 2; deliver(.8); await receive
+  expect(ctx.liveExtent).toBeGreaterThan(before) // No frame callback has run.
+  const painted = ctx.paints
+  clock += 2; ref.current!.push(0)
+  expect(ctx.paints).toBe(painted) // Still respects the cap.
+  act(() => root.unmount()); node.remove()
+})
+
+
+it('probes the oldest host level method only once per epoch with a real frame clock', async () => {
+  const host = fakeHost()
+  host.api.microphoneLevels.mockResolvedValue({ ok: false, error: 'Error: Unknown Box audio command' })
+  const store = new BoxMicrophones(host.api, Date.now, undefined)
+  store.connect(); await vi.advanceTimersByTimeAsync(0)
+  const stop = store.subscribe(() => {})
+  for (let i = 0; i < 90; i++) {
+    await vi.advanceTimersByTimeAsync(1000 / 30); clock += 1000 / 30
+    const due = [...frames]; frames.clear()
+    for (const [, callback] of due) callback(clock)
+    await vi.advanceTimersByTimeAsync(0)
+  }
+  expect(host.api.microphoneLevels).toHaveBeenCalledOnce()
+  expect(host.api.microphones.mock.calls.length).toBeGreaterThanOrEqual(12)
+  expect(host.api.microphones.mock.calls.length).toBeLessThanOrEqual(17)
+  stop(); store.dispose(); expect(vi.getTimerCount()).toBe(0)
 })
