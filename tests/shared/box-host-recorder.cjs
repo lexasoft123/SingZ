@@ -14,6 +14,12 @@ const allowedOwner = new Set([
   'playbackCapability', 'playbackStatus', 'state', 'stats', 'measurePlaybackLanes',
   'rendererDetached', 'rendererGone', 'endMonitor'
 ])
+// Observation-only service calls. Keep in step with boxAudioReadOnly() in
+// src/shared/box-audio.ts (a .cjs file cannot import that TypeScript module).
+const allowedService = new Set([
+  'reconcile', 'microphones', 'microphoneLevels', 'subscribeMicrophoneLevels',
+  'unsubscribeMicrophoneLevels', 'ackMicrophoneLevels'
+])
 
 async function startBoxHostRecorder({ socketPath, realSocketPath, maxFrameBytes = REQUEST_FRAME_BYTES, maxRecords = 64 }) {
   if (!path.isAbsolute(socketPath) || !path.isAbsolute(realSocketPath) || socketPath === realSocketPath)
@@ -74,7 +80,7 @@ async function startBoxHostRecorder({ socketPath, realSocketPath, maxFrameBytes 
       if (typeof operation !== 'string' || operation.length > 64) throw new Error('Recorder rejected routing operation')
     }
     const allowed = request.target === 'owner' ? allowedOwner.has(request.method) && !forbiddenOwner.has(request.method)
-      : request.target === 'service' ? (request.method === 'reconcile' || request.method === 'microphones')
+      : request.target === 'service' ? allowedService.has(request.method)
         : request.target === 'routing' ? request.method === 'capabilities' || (request.method === 'request' && operation === 'state')
           : request.target === 'binding' ? request.method === 'inputDevices' || request.method === 'initializeSharedAudio' : false
     const forbidden = forbiddenOwner.has(request.method) ||
