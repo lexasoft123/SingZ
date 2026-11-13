@@ -143,5 +143,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': 'Маршрут: {device} · буфер {frames} кадров · оценочная задержка ≈ {ms} мс · с задержкой',
   'player.voice.routeMeasuredDelayed': 'Маршрут: {device} · буфер {frames} кадров · измеренная задержка ≈ {ms} мс · с задержкой',
   'player.voice.monitorBadgeDelayed': '≈ {ms} мс · задержка',
-  'player.voice.monitorBadgeDelayedTip': 'Вход и выход на разных устройствах или используют больший буфер: задержка будет заметна'
+  'player.voice.monitorBadgeDelayedTip': 'Вход и выход на разных устройствах или используют больший буфер: задержка будет заметна',
+  'player.voice.monitorWarningGeneric': 'Заметка о прослушивании: проверьте настройки звука',
+  'player.voice.monitorWarningBufferChanged': 'Другое приложение изменило аудиобуфер; сохранённый размер не восстановлен',
+  'player.voice.monitorWarningVirtualRoute': 'Маршрут виртуальный или не распознан, поэтому задержка лишь оценочная'
 }

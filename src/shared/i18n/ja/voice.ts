@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "経路: {device} · バッファ {frames} フレーム · 推定遅延 ≈ {ms} ms · 遅延あり",
   'player.voice.routeMeasuredDelayed': "経路: {device} · バッファ {frames} フレーム · 実測遅延 ≈ {ms} ms · 遅延あり",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · 遅延あり",
-  'player.voice.monitorBadgeDelayedTip': "入力と出力が別のデバイスにあるか、バッファが大きいため、はっきりとした遅延があります"
+  'player.voice.monitorBadgeDelayedTip': "入力と出力が別のデバイスにあるか、バッファが大きいため、はっきりとした遅延があります",
+  'player.voice.monitorWarningGeneric': "モニタリングの注意: オーディオ設定を確認してください",
+  'player.voice.monitorWarningBufferChanged': "別のアプリがオーディオバッファを変更したため、保存したサイズは復元されませんでした",
+  'player.voice.monitorWarningVirtualRoute': "この経路は仮想または未確認のため、遅延は推定値です"
 }

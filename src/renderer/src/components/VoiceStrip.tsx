@@ -3,7 +3,7 @@ import type { MultitrackEngine } from '../audio/engine'
 import type { TimeView } from '../model'
 import { meterFraction, monitorDbToFader, primaryState, recordBlock, songSpan, type VoiceController, type VoiceInputOption, type VoiceModel } from '../audio/voice-take'
 import { t, type Key } from '../i18n'
-import { blockText, clock, dbText, laneCanRetry, laneText, monitorWarningText, pitchFollowShift, REASON_KEY, sgn, takeIsSilent, voiceIsShifted } from './voice-format'
+import { blockText, clock, dbText, laneCanRetry, isKnownMonitorWarning, laneText, monitorWarningText, pitchFollowShift, REASON_KEY, sgn, takeIsSilent, voiceIsShifted } from './voice-format'
 import Tooltip from './Tooltip'
 import VoiceTrackSettings from './VoiceTrackSettings'
 import { useVoiceModel } from './voice-host'
@@ -196,7 +196,8 @@ function statusLine(
   if (m.stoppedBy === 'seek' && state === 'take-review') return { cls: 'warn', text: t('player.voice.msgSeekStopped') }
   if (state === 'take-review') return { cls: '', text: t('player.voice.msgReview') }
   if (m.monitor.on && m.monitor.warnings.length > 0) {
-    return { cls: 'warn', text: t('player.voice.monitorWarning', { text: monitorWarningText(m.monitor.warnings[0]!) }) }
+    const w = m.monitor.warnings[0]!
+    return { cls: 'warn', text: isKnownMonitorWarning(w) ? t('player.voice.monitorWarning', { text: monitorWarningText(w) }) : monitorWarningText(w) }
   }
   if (m.monitor.on && m.monitorHint) return { cls: '', text: t('player.voice.monitorHint') }
   if (m.monitor.on) return { cls: '', text: t('player.voice.msgMonitoring') }

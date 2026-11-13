@@ -3311,3 +3311,31 @@ describe('localized monitor safety notes and remembered gain', () => {
     c.dispose()
   })
 })
+
+describe('monitor warnings are never rendered raw', () => {
+  const render = async (warnings: string[]) => {
+    const x = await setup({ monitorSet: vi.fn(async (req: { on: boolean }) => monState({ on: req.on, warnings })) })
+    await x.c.toggleMonitor()
+    const strip = renderToStaticMarkup(createElement(VoiceStrip, { controller: x.c, engine: x.engine as never }))
+    const settings = renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: x.c, onClose: () => undefined }))
+    x.c.dispose()
+    return { strip, settings }
+  }
+  it('an unknown token and an unlisted English native note become the generic note', async () => {
+    for (const raw of ['internal-new-token-42', 'Some native English note']) {
+      const { strip, settings } = await render([raw])
+      expect(strip + settings).not.toContain(raw)
+      expect(strip).toContain('Monitoring note: check your audio setup')
+      expect(settings).toContain('Monitoring note: check your audio setup')
+    }
+  })
+  it('known tokens and the known native notes map to their localized text', async () => {
+    const { strip, settings } = await render(['Audio buffer changed externally; saved size was not restored', 'Virtual or unclassified route: latency is estimated'])
+    expect(strip).toContain('Monitoring note: The audio buffer was changed by another app')
+    expect(settings).toContain('so the delay is only an estimate')
+    expect(strip + settings).not.toContain('Audio buffer changed externally')
+    expect(strip + settings).not.toContain('check your audio setup') // negative control: known notes are not generic
+    const fb = await render(['route-feedback-risk'])
+    expect(fb.strip + fb.settings).not.toContain('route-feedback-risk')
+  })
+})

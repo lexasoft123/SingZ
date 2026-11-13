@@ -79,8 +79,8 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
         </Tooltip>
       </div>
       <p className="vs-set-route">{routeLine(m)}</p>
-      {m.monitor.on && m.monitor.warnings.map((warning, index) => (
-        <p className="vs-set-warn" role="note" key={index}>{monitorWarningText(warning)}</p>
+      {m.monitor.on && [...new Set(m.monitor.warnings)].map(warning => (
+        <p className="vs-set-warn" role="note" key={warning}>{monitorWarningText(warning)}</p>
       ))}
       <section className="vs-set-field" aria-labelledby="vs-effects-h">
         <h3 id="vs-effects-h">{t('player.voice.effects')}</h3>

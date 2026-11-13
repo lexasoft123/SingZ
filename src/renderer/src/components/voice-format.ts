@@ -10,9 +10,15 @@ export const clock = (s: number): string => {
 }
 export const dbText = (db: number): string => (db <= -59 ? '\u2212\u221e' : db >= 0 ? String(Math.round(db)) : `\u2212${Math.round(-db)}`)
 
-/** Known native warning identifiers are never rendered as user-facing text. */
-export const monitorWarningText = (warning: string): string => warning === 'route-feedback-risk'
-  ? t('player.voice.monFeedbackRisk') : warning
+/** Native warning tokens/notes that have a localized string: an explicit allowlist, never rendered raw. */
+const KNOWN_WARNINGS: Record<string, Key> = {
+  'route-feedback-risk': 'player.voice.monFeedbackRisk',
+  'Audio buffer changed externally; saved size was not restored': 'player.voice.monitorWarningBufferChanged',
+  'Virtual or unclassified route: latency is estimated': 'player.voice.monitorWarningVirtualRoute'
+}
+export const isKnownMonitorWarning = (warning: string): boolean => Object.prototype.hasOwnProperty.call(KNOWN_WARNINGS, warning)
+/** Anything not on the allowlist (a new token, an internal id, an English native note) becomes the generic note. */
+export const monitorWarningText = (warning: string): string => t(isKnownMonitorWarning(warning) ? KNOWN_WARNINGS[warning]! : 'player.voice.monitorWarningGeneric')
 
 export const REASON_KEY: Record<VoiceMonitorReason, Key> = {
   'route-separate-devices': 'player.voice.monReasonSeparateDevices',

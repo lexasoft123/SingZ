@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "เส้นทาง: {device} · บัฟเฟอร์ {frames} เฟรม · ความหน่วงโดยประมาณ ≈ {ms} ms · หน่วง",
   'player.voice.routeMeasuredDelayed': "เส้นทาง: {device} · บัฟเฟอร์ {frames} เฟรม · ความหน่วงที่วัดได้ ≈ {ms} ms · หน่วง",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · หน่วง",
-  'player.voice.monitorBadgeDelayedTip': "อินพุตและเอาต์พุตอยู่คนละอุปกรณ์หรือใช้บัฟเฟอร์ใหญ่ขึ้น: จะรู้สึกถึงความหน่วงได้ชัดเจน"
+  'player.voice.monitorBadgeDelayedTip': "อินพุตและเอาต์พุตอยู่คนละอุปกรณ์หรือใช้บัฟเฟอร์ใหญ่ขึ้น: จะรู้สึกถึงความหน่วงได้ชัดเจน",
+  'player.voice.monitorWarningGeneric': "หมายเหตุการมอนิเตอร์: ตรวจสอบการตั้งค่าเสียงของคุณ",
+  'player.voice.monitorWarningBufferChanged': "แอปอื่นเปลี่ยนบัฟเฟอร์เสียง ขนาดที่บันทึกไว้จึงไม่ถูกคืนค่า",
+  'player.voice.monitorWarningVirtualRoute': "เส้นทางนี้เป็นแบบเสมือนหรือไม่รู้จัก ความหน่วงจึงเป็นเพียงค่าประมาณ"
 }

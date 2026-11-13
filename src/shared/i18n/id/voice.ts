@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "Rute: {device} · buffer {frames} frame · perkiraan tunda ≈ {ms} ms · tertunda",
   'player.voice.routeMeasuredDelayed': "Rute: {device} · buffer {frames} frame · tunda terukur ≈ {ms} ms · tertunda",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · tertunda",
-  'player.voice.monitorBadgeDelayedTip': "Input dan output Anda berada di perangkat berbeda atau memakai buffer lebih besar: akan terasa tertunda"
+  'player.voice.monitorBadgeDelayedTip': "Input dan output Anda berada di perangkat berbeda atau memakai buffer lebih besar: akan terasa tertunda",
+  'player.voice.monitorWarningGeneric': "Catatan pemantauan: periksa pengaturan audio Anda",
+  'player.voice.monitorWarningBufferChanged': "Buffer audio diubah oleh aplikasi lain; ukuran tersimpan tidak dipulihkan",
+  'player.voice.monitorWarningVirtualRoute': "Rute ini virtual atau tidak dikenali, sehingga tunda hanya perkiraan"
 }

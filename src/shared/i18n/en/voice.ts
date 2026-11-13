@@ -147,5 +147,8 @@ export const voice = {
   'player.voice.routeEstimatedDelayed': 'Route: {device} · buffer {frames} frames · estimated delay ≈ {ms} ms · delayed',
   'player.voice.routeMeasuredDelayed': 'Route: {device} · buffer {frames} frames · measured delay ≈ {ms} ms · delayed',
   'player.voice.monitorBadgeDelayed': '≈ {ms} ms · delayed',
-  'player.voice.monitorBadgeDelayedTip': 'Your input and output are on different devices or use a larger buffer: expect a noticeable delay'
+  'player.voice.monitorBadgeDelayedTip': 'Your input and output are on different devices or use a larger buffer: expect a noticeable delay',
+  'player.voice.monitorWarningGeneric': 'Monitoring note: check your audio setup',
+  'player.voice.monitorWarningBufferChanged': 'The audio buffer was changed by another app; your saved size was not restored',
+  'player.voice.monitorWarningVirtualRoute': 'This route is virtual or unrecognised, so the delay is only an estimate'
 } as const

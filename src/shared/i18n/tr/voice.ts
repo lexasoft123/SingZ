@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "Yol: {device} · {frames} kare tampon · tahmini gecikme ≈ {ms} ms · gecikmeli",
   'player.voice.routeMeasuredDelayed': "Yol: {device} · {frames} kare tampon · ölçülen gecikme ≈ {ms} ms · gecikmeli",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · gecikmeli",
-  'player.voice.monitorBadgeDelayedTip': "Giriş ve çıkış farklı cihazlarda ya da daha büyük bir tampon kullanıyor: belirgin bir gecikme olur"
+  'player.voice.monitorBadgeDelayedTip': "Giriş ve çıkış farklı cihazlarda ya da daha büyük bir tampon kullanıyor: belirgin bir gecikme olur",
+  'player.voice.monitorWarningGeneric': "İzleme notu: ses ayarlarınızı kontrol edin",
+  'player.voice.monitorWarningBufferChanged': "Ses tamponu başka bir uygulama tarafından değiştirildi; kayıtlı boyut geri yüklenmedi",
+  'player.voice.monitorWarningVirtualRoute': "Bu yol sanal ya da tanınmıyor, bu yüzden gecikme yalnızca bir tahmin"
 }

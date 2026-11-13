@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "Rota: {device} · buffer de {frames} quadros · atraso estimado ≈ {ms} ms · com atraso",
   'player.voice.routeMeasuredDelayed': "Rota: {device} · buffer de {frames} quadros · atraso medido ≈ {ms} ms · com atraso",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · com atraso",
-  'player.voice.monitorBadgeDelayedTip': "Entrada e saída estão em dispositivos diferentes ou usam um buffer maior: o atraso será perceptível"
+  'player.voice.monitorBadgeDelayedTip': "Entrada e saída estão em dispositivos diferentes ou usam um buffer maior: o atraso será perceptível",
+  'player.voice.monitorWarningGeneric': "Aviso de monitoramento: confira sua configuração de áudio",
+  'player.voice.monitorWarningBufferChanged': "Outro app alterou o buffer de áudio; o tamanho salvo não foi restaurado",
+  'player.voice.monitorWarningVirtualRoute': "Esta rota é virtual ou não reconhecida, então o atraso é apenas uma estimativa"
 }

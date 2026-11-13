@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "路徑：{device} · 緩衝 {frames} 幀 · 估計延遲 ≈ {ms} ms · 延遲較大",
   'player.voice.routeMeasuredDelayed': "路徑：{device} · 緩衝 {frames} 幀 · 實測延遲 ≈ {ms} ms · 延遲較大",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · 延遲較大",
-  'player.voice.monitorBadgeDelayedTip': "輸入與輸出在不同裝置上，或緩衝較大：會有明顯延遲"
+  'player.voice.monitorBadgeDelayedTip': "輸入與輸出在不同裝置上，或緩衝較大：會有明顯延遲",
+  'player.voice.monitorWarningGeneric': "監聽提示：請檢查你的音訊設定",
+  'player.voice.monitorWarningBufferChanged': "其他應用程式變更了音訊緩衝，已儲存的大小未能還原",
+  'player.voice.monitorWarningVirtualRoute': "此路徑為虛擬或無法辨識，延遲僅為估計值"
 }

@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "Laluan: {device} · penimbal {frames} bingkai · anggaran lengah ≈ {ms} ms · lengah",
   'player.voice.routeMeasuredDelayed': "Laluan: {device} · penimbal {frames} bingkai · lengah diukur ≈ {ms} ms · lengah",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · lengah",
-  'player.voice.monitorBadgeDelayedTip': "Input dan output anda berada pada peranti berbeza atau menggunakan penimbal lebih besar: lengah akan ketara"
+  'player.voice.monitorBadgeDelayedTip': "Input dan output anda berada pada peranti berbeza atau menggunakan penimbal lebih besar: lengah akan ketara",
+  'player.voice.monitorWarningGeneric': "Nota pemantauan: semak persediaan audio anda",
+  'player.voice.monitorWarningBufferChanged': "Penimbal audio diubah oleh aplikasi lain; saiz yang disimpan tidak dipulihkan",
+  'player.voice.monitorWarningVirtualRoute': "Laluan ini maya atau tidak dikenali, jadi lengah hanyalah anggaran"
 }

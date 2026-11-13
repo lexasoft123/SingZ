@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "रूट: {device} · बफ़र {frames} फ़्रेम · अनुमानित देरी ≈ {ms} ms · देरी के साथ",
   'player.voice.routeMeasuredDelayed': "रूट: {device} · बफ़र {frames} फ़्रेम · मापी गई देरी ≈ {ms} ms · देरी के साथ",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · देरी",
-  'player.voice.monitorBadgeDelayedTip': "आपका इनपुट और आउटपुट अलग-अलग डिवाइस पर हैं या बड़ा बफ़र इस्तेमाल करते हैं: ध्यान देने लायक देरी होगी"
+  'player.voice.monitorBadgeDelayedTip': "आपका इनपुट और आउटपुट अलग-अलग डिवाइस पर हैं या बड़ा बफ़र इस्तेमाल करते हैं: ध्यान देने लायक देरी होगी",
+  'player.voice.monitorWarningGeneric': "मॉनिटरिंग नोट: अपना ऑडियो सेटअप जाँचें",
+  'player.voice.monitorWarningBufferChanged': "किसी दूसरे ऐप ने ऑडियो बफ़र बदल दिया; सहेजा गया आकार वापस नहीं लौटाया गया",
+  'player.voice.monitorWarningVirtualRoute': "यह रूट वर्चुअल या अपरिचित है, इसलिए देरी केवल अनुमान है"
 }

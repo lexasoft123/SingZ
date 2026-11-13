@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "경로: {device} · 버퍼 {frames}프레임 · 추정 지연 ≈ {ms} ms · 지연됨",
   'player.voice.routeMeasuredDelayed': "경로: {device} · 버퍼 {frames}프레임 · 측정 지연 ≈ {ms} ms · 지연됨",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · 지연됨",
-  'player.voice.monitorBadgeDelayedTip': "입력과 출력이 다른 장치에 있거나 버퍼가 커서 눈에 띄는 지연이 있습니다"
+  'player.voice.monitorBadgeDelayedTip': "입력과 출력이 다른 장치에 있거나 버퍼가 커서 눈에 띄는 지연이 있습니다",
+  'player.voice.monitorWarningGeneric': "모니터링 알림: 오디오 설정을 확인하세요",
+  'player.voice.monitorWarningBufferChanged': "다른 앱이 오디오 버퍼를 변경해 저장된 크기가 복원되지 않았습니다",
+  'player.voice.monitorWarningVirtualRoute': "가상이거나 알 수 없는 경로라 지연은 추정값입니다"
 }

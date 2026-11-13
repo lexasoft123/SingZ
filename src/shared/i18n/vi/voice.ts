@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "Tuyến: {device} · bộ đệm {frames} khung · độ trễ ước tính ≈ {ms} ms · bị trễ",
   'player.voice.routeMeasuredDelayed': "Tuyến: {device} · bộ đệm {frames} khung · độ trễ đo được ≈ {ms} ms · bị trễ",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · bị trễ",
-  'player.voice.monitorBadgeDelayedTip': "Đầu vào và đầu ra ở các thiết bị khác nhau hoặc dùng bộ đệm lớn hơn: sẽ có độ trễ đáng kể"
+  'player.voice.monitorBadgeDelayedTip': "Đầu vào và đầu ra ở các thiết bị khác nhau hoặc dùng bộ đệm lớn hơn: sẽ có độ trễ đáng kể",
+  'player.voice.monitorWarningGeneric': "Lưu ý khi nghe lại: hãy kiểm tra thiết lập âm thanh của bạn",
+  'player.voice.monitorWarningBufferChanged': "Một ứng dụng khác đã đổi bộ đệm âm thanh; kích thước đã lưu không được khôi phục",
+  'player.voice.monitorWarningVirtualRoute': "Tuyến này là ảo hoặc không nhận diện được nên độ trễ chỉ là ước tính"
 }

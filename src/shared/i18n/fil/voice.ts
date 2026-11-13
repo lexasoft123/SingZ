@@ -138,5 +138,8 @@ export const voice: Translation<typeof en> = {
   'player.voice.routeEstimatedDelayed': "Ruta: {device} · buffer na {frames} frame · tantiyang delay ≈ {ms} ms · may delay",
   'player.voice.routeMeasuredDelayed': "Ruta: {device} · buffer na {frames} frame · nasukat na delay ≈ {ms} ms · may delay",
   'player.voice.monitorBadgeDelayed': "≈ {ms} ms · may delay",
-  'player.voice.monitorBadgeDelayedTip': "Magkaibang device ang input at output mo o mas malaki ang buffer: mapapansin ang delay"
+  'player.voice.monitorBadgeDelayedTip': "Magkaibang device ang input at output mo o mas malaki ang buffer: mapapansin ang delay",
+  'player.voice.monitorWarningGeneric': "Paalala sa monitoring: tingnan ang iyong audio setup",
+  'player.voice.monitorWarningBufferChanged': "Binago ng ibang app ang audio buffer; hindi naibalik ang naka-save na laki",
+  'player.voice.monitorWarningVirtualRoute': "Virtual o hindi kilala ang route na ito, kaya tantiya lang ang delay"
 }
