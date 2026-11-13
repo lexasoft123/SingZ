@@ -295,3 +295,15 @@ body.modal-open .vs-rec-t.recording .vs-rec-core { animation-play-state: paused;
   .sz-tip { animation: sz-tip-in 0.12s ease-out; }
 }
 @keyframes sz-tip-in { from { opacity: 0; } }
+
+/* Voice strip input select: a full-width block in the controls column (no flex growth: no stray gap). */
+.sz-tip-wrap.block { display: flex; width: 100%; flex: none; }
+.vs-select { flex: 1; min-width: 0; }
+.vs-select select { display: block; min-width: 0; text-overflow: ellipsis; }
+.vs-select::after { right: 9px; }
+
+/* App-level monitor chip (title bar): shown while a monitor runs with no strip on screen. */
+.vs-mon-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, #5be3b0 55%, transparent); background: color-mix(in srgb, #5be3b0 12%, transparent); color: #5be3b0; font: 600 11px var(--font-mono); cursor: pointer; }
+.vs-mon-chip svg { width: 14px; height: 14px; }
+.vs-mon-chip:hover { background: color-mix(in srgb, #5be3b0 22%, transparent); }
+.vs-mon-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

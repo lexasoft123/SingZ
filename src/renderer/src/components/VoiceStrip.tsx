@@ -224,6 +224,10 @@ export default function VoiceStrip({
   const status = statusLine(m, controller)
   const keepRef = useRef<HTMLButtonElement>(null)
   const gearRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    controller.setStripMounted(true)
+    return () => controller.setStripMounted(false)
+  }, [controller])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const trackRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ x0: number; start0: number; pxPerSec: number; moved: boolean; max: number; last: number } | null>(null)
@@ -344,7 +348,7 @@ export default function VoiceStrip({
         <label className="vs-sr-only" htmlFor="voice-input">
           {t('player.voice.input')}
         </label>
-        <Tooltip label={inputTip} className="grow">
+        <Tooltip label={inputTip} className="block">
         <div className="vs-select">
           <select
             id="voice-input"

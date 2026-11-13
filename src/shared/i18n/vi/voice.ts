@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "Cần quyền truy cập micro",
   'player.voice.monitorOff': "Nghe lại giọng mình (tắt)",
   'player.voice.monitorOn': "Đang nghe lại giọng. Nhấp để tắt",
+  'player.voice.monitorChip': "Đang nghe lại giọng bạn: nhấp để dừng",
   'player.voice.monReasonSeparateDevices': "Nghe lại giọng cần đầu vào và đầu ra trên cùng một thiết bị, như audio interface.",
   'player.voice.monReasonLatency': "Thiết bị này không đủ nhanh để nghe lại giọng (hơn 256 khung). Vẫn ghi âm được.",
   'player.voice.monReasonBluetooth': "Bluetooth trễ quá nhiều để nghe lại giọng. Vẫn ghi âm được.",

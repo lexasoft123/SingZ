@@ -14,6 +14,7 @@ export const voice = {
   'player.voice.inputPerm': 'Mic access needed',
   'player.voice.monitorOff': 'Monitor my voice (off)',
   'player.voice.monitorOn': 'Monitoring on. Click to turn off',
+  'player.voice.monitorChip': 'Monitoring your voice: click to stop',
   'player.voice.monReasonSeparateDevices': 'Monitoring needs the input and output on one device, like an audio interface.',
   'player.voice.monReasonLatency': 'This device cannot monitor fast enough (over 256 frames). Recording still works.',
   'player.voice.monReasonBluetooth': 'Bluetooth adds too much delay to monitor. Recording still works.',

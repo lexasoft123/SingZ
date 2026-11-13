@@ -31,6 +31,7 @@ import {
   type VoiceTakeApi
 } from '../../src/renderer/src/audio/voice-take'
 import VoiceStrip from '../../src/renderer/src/components/VoiceStrip'
+import { MonitorChipView } from '../../src/renderer/src/components/VoiceMonitorChip'
 import Tooltip, { placeTip, TipController, TIP_DELAY_MS } from '../../src/renderer/src/components/Tooltip'
 import { takeIsSilent } from '../../src/renderer/src/components/voice-format'
 import VoiceTrackSettings from '../../src/renderer/src/components/VoiceTrackSettings'
@@ -2623,5 +2624,36 @@ describe('Tooltip styles', () => {
     expect(css).toMatch(/prefers-reduced-motion: no-preference\)\s*\{\s*\.sz-tip \{ animation/)
     expect(css).toMatch(/\.sz-tip\.above::after/)
     expect(css).toMatch(/\.sz-tip\.below::after/)
+  })
+})
+
+describe('app-level monitor chip', () => {
+  const html = (c: VoiceController): string => renderToStaticMarkup(createElement(MonitorChipView, { m: c.getSnapshot(), onStop: () => undefined }))
+  it('monitor on with no strip mounted (library view) shows the chip; it stops the monitor; a mounted strip hides it', async () => {
+    const { c, api } = await setup()
+    expect(html(c)).toBe('') // monitor off: nothing
+    await c.toggleMonitor()
+    expect(html(c)).toContain('aria-label="Monitoring your voice: click to stop"') // negative control below
+    expect(html(c)).toContain('class="vs-mon-chip"')
+    c.setStripMounted(true)
+    expect(html(c)).toBe('') // the strip is on screen: it owns the control
+    c.setStripMounted(false)
+    // the click wiring: the button calls the stop handler, which is the controller's releaseMonitor
+    let stopped = 0
+    const el = MonitorChipView({ m: c.getSnapshot(), onStop: () => { stopped++; void c.releaseMonitor() } }) as { props: { children: { props: { onClick: () => void } } } }
+    el.props.children.props.onClick()
+    expect(stopped).toBe(1)
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.on).toBe(false))
+    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: false }))
+    expect(html(c)).toBe('')
+    c.dispose()
+  })
+  it('the strip reports itself mounted through the controller', async () => {
+    const { c, engine } = await setup()
+    expect(c.getSnapshot().stripMounted).toBe(false)
+    c.setStripMounted(true)
+    expect(c.getSnapshot().stripMounted).toBe(true)
+    void engine
+    c.dispose()
   })
 })

@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "Perlu akses mikrofon",
   'player.voice.monitorOff': "Pantau suara saya (mati)",
   'player.voice.monitorOn': "Pemantauan aktif. Klik untuk mematikan",
+  'player.voice.monitorChip': "Memantau suara Anda: klik untuk berhenti",
   'player.voice.monReasonSeparateDevices': "Pemantauan memerlukan input dan output pada satu perangkat, seperti audio interface.",
   'player.voice.monReasonLatency': "Perangkat ini tidak cukup cepat untuk memantau (lebih dari 256 frame). Perekaman tetap berfungsi.",
   'player.voice.monReasonBluetooth': "Bluetooth menambah jeda terlalu besar untuk memantau. Perekaman tetap berfungsi.",

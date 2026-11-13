@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "Se necesita acceso al micrófono",
   'player.voice.monitorOff': "Escuchar mi voz (apagado)",
   'player.voice.monitorOn': "Monitoreo activado. Haz clic para apagarlo",
+  'player.voice.monitorChip': "Monitoreando tu voz: haz clic para detener",
   'player.voice.monReasonSeparateDevices': "El monitoreo necesita la entrada y la salida en un mismo dispositivo, como una interfaz de audio.",
   'player.voice.monReasonLatency': "Este dispositivo no monitorea con la rapidez suficiente (más de 256 frames). La grabación sigue funcionando.",
   'player.voice.monReasonBluetooth': "Bluetooth añade demasiado retraso para monitorear. La grabación sigue funcionando.",

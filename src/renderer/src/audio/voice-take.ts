@@ -155,6 +155,8 @@ export interface VoiceTake {
 
 export interface VoiceModel {
   songId: string | null
+  /** The Voice strip is on screen (the app-level monitor chip shows only while it is not). */
+  stripMounted: boolean
   armed: boolean
   starting: boolean
   recording: boolean
@@ -223,6 +225,7 @@ const HINT_SEEN = new WeakSet<object>() // engines whose singer has already seen
 
 export const INITIAL_VOICE_MODEL: VoiceModel = {
   songId: null,
+  stripMounted: false,
   armed: false,
   starting: false,
   recording: false,
@@ -460,6 +463,10 @@ export class VoiceController {
   }
 
   // ── lifecycle ──
+  setStripMounted(mounted: boolean): void {
+    if (this.model.stripMounted !== mounted) this.set({ stripMounted: mounted })
+  }
+
   /** Follow the song on screen (null = none): metadata, takes, input devices. Returns the cleanup. */
   bindSong(src: { path: string; projectDir: string | null; title: string; artist: string } | null): () => void {
     this.songMeta = { title: src?.title ?? '', artist: src?.artist ?? '' }

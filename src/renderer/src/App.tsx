@@ -654,6 +654,7 @@ function EngineChip({
 
 const QuickStart = lazy(() => import('./components/QuickStart'))
 const VH = lazy(() => import('./components/VoiceHost'))
+const VMC = lazy(() => import('./components/VoiceMonitorChip'))
 
 export default function App(): React.JSX.Element {
   // Re-render on a language switch; every child App renders follows. Nothing
@@ -730,6 +731,11 @@ export default function App(): React.JSX.Element {
   const vocalSplitRequestsRef = useRef(new VocalSplitRequests())
   const [sep, setSep] = useState<SplitProgress | null>(null)
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null)
+  // The voice chunk loads with the first song screen; from then on a monitor left running outside it gets its chip.
+  const [voiceSeen, setVoiceSeen] = useState(false)
+  useEffect(() => {
+    if (song) setVoiceSeen(true)
+  }, [song])
   const [showSetup, setShowSetup] = useState(false)
   const [showLog, setShowLog] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
@@ -4006,6 +4012,11 @@ export default function App(): React.JSX.Element {
           >
             {t('app.titlebar.log')}
           </button>
+          {voiceSeen && (
+            <Suspense fallback={null}>
+              <VMC engine={engine} />
+            </Suspense>
+          )}
           <EngineChip
             status={engineStatus}
             onClick={() => {

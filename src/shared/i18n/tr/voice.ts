@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "Mikrofon erişimi gerekli",
   'player.voice.monitorOff': "Sesimi izle (kapalı)",
   'player.voice.monitorOn': "İzleme açık. Kapatmak için tıklayın",
+  'player.voice.monitorChip': "Sesiniz izleniyor: durdurmak için tıklayın",
   'player.voice.monReasonSeparateDevices': "İzleme için giriş ve çıkış, ses arayüzü gibi aynı cihazda olmalı.",
   'player.voice.monReasonLatency': "Bu cihaz izleme için yeterince hızlı değil (256 kareden fazla). Kayıt yine çalışır.",
   'player.voice.monReasonBluetooth': "Bluetooth izleme için çok fazla gecikme ekler. Kayıt yine çalışır.",

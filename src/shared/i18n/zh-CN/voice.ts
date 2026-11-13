@@ -14,6 +14,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': '需要麦克风权限',
   'player.voice.monitorOff': '监听我的声音（已关）',
   'player.voice.monitorOn': '监听已开启。点击关闭',
+  'player.voice.monitorChip': '正在监听你的声音：点击停止',
   'player.voice.monReasonSeparateDevices': '监听需要输入和输出在同一台设备上，例如音频接口。',
   'player.voice.monReasonLatency': '此设备无法足够快地监听（超过 256 帧）。仍可录音。',
   'player.voice.monReasonBluetooth': '蓝牙延迟过大，无法监听。仍可录音。',

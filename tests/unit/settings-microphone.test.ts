@@ -628,6 +628,9 @@ it('shows only known native route telemetry and available provider choices', () 
   expect(audioRouteStatus({ state: 'unloaded' } as never)).toBe('No audio route open')
   expect(audioRouteStatus({ state: 'open', format: { sampleRate: 48000, nominalBufferFrames: 32 } } as never)).toBe('48 kHz · buffer 32')
   expect(audioRouteStatus({ state: 'open', format: { sampleRate: 0, nominalBufferFrames: 0 } } as never)).toBe('')
+  const full = { state: 'open', format: { sampleRate: 48000, nominalBufferFrames: 32 }, totalPresentationLatencyFrames: '240' } as never
+  expect(audioRouteStatus(full, 'Zen Quadro')).toBe('Zen Quadro · 48 kHz · buffer 32 · ≈5 ms')
+  expect(audioRouteStatus({ state: 'open', format: { sampleRate: 48000, nominalBufferFrames: 0 }, totalPresentationLatencyFrames: '0' } as never)).toBe('48 kHz') // unknown values stay out
   expect(showPlaybackProviderChoice([{ id: 'wasapi', available: true }, { id: 'asio', available: false }] as never)).toBe(false)
   expect(showPlaybackProviderChoice([{ id: 'wasapi', available: true }, { id: 'asio', available: true }] as never)).toBe(true)
 })

@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "ต้องอนุญาตการเข้าถึงไมโครโฟน",
   'player.voice.monitorOff': "มอนิเตอร์เสียงของฉัน (ปิด)",
   'player.voice.monitorOn': "เปิดมอนิเตอร์อยู่ คลิกเพื่อปิด",
+  'player.voice.monitorChip': "กำลังมอนิเตอร์เสียงของคุณ: คลิกเพื่อหยุด",
   'player.voice.monReasonSeparateDevices': "การมอนิเตอร์ต้องใช้อินพุตและเอาต์พุตบนอุปกรณ์เดียวกัน เช่น ออดิโออินเทอร์เฟซ",
   'player.voice.monReasonLatency': "อุปกรณ์นี้เร็วไม่พอสำหรับการมอนิเตอร์ (เกิน 256 เฟรม) การอัดเสียงยังใช้งานได้",
   'player.voice.monReasonBluetooth': "บลูทูธทำให้หน่วงมากเกินไปสำหรับการมอนิเตอร์ การอัดเสียงยังใช้งานได้",

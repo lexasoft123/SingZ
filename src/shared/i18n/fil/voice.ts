@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "Kailangan ng access sa mikropono",
   'player.voice.monitorOff': "I-monitor ang boses ko (naka-off)",
   'player.voice.monitorOn': "Naka-on ang monitoring. I-click para i-off",
+  'player.voice.monitorChip': "Minomonitor ang boses mo: i-click para ihinto",
   'player.voice.monReasonSeparateDevices': "Kailangan ng monitoring na nasa iisang device ang input at output, gaya ng audio interface.",
   'player.voice.monReasonLatency': "Hindi sapat ang bilis ng device na ito para sa monitoring (lampas 256 frame). Gumagana pa rin ang recording.",
   'player.voice.monReasonBluetooth': "Masyadong malaki ang delay ng Bluetooth para sa monitoring. Gumagana pa rin ang recording.",

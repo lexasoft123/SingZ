@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "マイクへのアクセスが必要です",
   'player.voice.monitorOff': "自分の声をモニター（オフ）",
   'player.voice.monitorOn': "モニター中。クリックでオフ",
+  'player.voice.monitorChip': "声をモニター中: クリックで停止",
   'player.voice.monReasonSeparateDevices': "モニターには、オーディオインターフェースのように入力と出力が同じデバイスにある必要があります。",
   'player.voice.monReasonLatency': "このデバイスでは遅延が大きすぎてモニターできません（256フレーム超）。録音は使えます。",
   'player.voice.monReasonBluetooth': "Bluetoothは遅延が大きすぎてモニターできません。録音は使えます。",

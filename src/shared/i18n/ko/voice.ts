@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "마이크 접근 권한 필요",
   'player.voice.monitorOff': "내 목소리 모니터링(꺼짐)",
   'player.voice.monitorOn': "모니터링 켜짐. 클릭하면 끕니다",
+  'player.voice.monitorChip': "내 목소리 모니터링 중: 클릭하여 중지",
   'player.voice.monReasonSeparateDevices': "모니터링에는 오디오 인터페이스처럼 입력과 출력이 한 장치에 있어야 합니다.",
   'player.voice.monReasonLatency': "이 장치는 모니터링하기에 충분히 빠르지 않습니다(256프레임 초과). 녹음은 계속 사용할 수 있습니다.",
   'player.voice.monReasonBluetooth': "블루투스는 지연이 커서 모니터링할 수 없습니다. 녹음은 계속 사용할 수 있습니다.",

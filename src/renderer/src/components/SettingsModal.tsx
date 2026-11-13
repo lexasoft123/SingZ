@@ -80,12 +80,18 @@ export function playbackProviderCanChange(
   return !rendererLeaseBlocked && status?.state === 'unloaded'
 }
 
-export function audioRouteStatus(status: DesktopPlaybackStatus | null): string {
+/** 'Device · 48 kHz · buffer 32 · ≈5 ms': only what the native state actually reports. */
+export function audioRouteStatus(status: DesktopPlaybackStatus | null, deviceName?: string): string {
   if (!status) return ''
   if (status.state === 'unloaded') return t('settings.route.notOpen')
   const parts: string[] = []
-  if (status.format?.sampleRate > 0) parts.push(`${status.format.sampleRate / 1000} kHz`)
+  const rate = status.format?.sampleRate ?? 0
+  if (deviceName) parts.push(deviceName)
+  if (rate > 0) parts.push(`${rate / 1000} kHz`)
   if (status.format?.nominalBufferFrames > 0) parts.push(t('settings.route.buffer', { frames: status.format.nominalBufferFrames }))
+  // Estimated delay: the provider's total presentation latency, frames at the route's rate.
+  const latencyFrames = Number(status.totalPresentationLatencyFrames)
+  if (rate > 0 && Number.isFinite(latencyFrames) && latencyFrames > 0) parts.push(`≈${Math.max(1, Math.round((latencyFrames / rate) * 1000))} ms`)
   return parts.join(' · ')
 }
 
@@ -738,7 +744,10 @@ export default function SettingsModal({
   const outputOptions = hostInventory?.ok
     ? hostInventory.devices.filter(device => device.outputChannels > 0).map(device => ({ id: device.uid, label: device.label }))
     : []
-  const routeStatus = audioRouteStatus(playbackStatus)
+  const routeDeviceName = hostInventory?.ok
+    ? hostInventory.devices.find((device) => device.uid === (audio.nativeOutputUid || hostInventory.defaultOutputUid))?.label
+    : undefined
+  const routeStatus = audioRouteStatus(playbackStatus, routeDeviceName)
 
   const savedGone = (id: string | undefined, rows: { id: string }[] | undefined): boolean =>
     Boolean(id && rows && !rows.some((device) => device.id === id))

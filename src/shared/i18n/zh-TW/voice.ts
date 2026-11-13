@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "需要麥克風權限",
   'player.voice.monitorOff': "監聽我的聲音（關閉）",
   'player.voice.monitorOn': "監聽已開啟。點擊以關閉",
+  'player.voice.monitorChip': "正在監聽你的聲音：點擊停止",
   'player.voice.monReasonSeparateDevices': "監聽需要輸入與輸出在同一個裝置上，例如音訊介面。",
   'player.voice.monReasonLatency': "此裝置無法足夠快地監聽（超過 256 影格）。仍可錄音。",
   'player.voice.monReasonBluetooth': "藍牙延遲過大，無法監聽。仍可錄音。",

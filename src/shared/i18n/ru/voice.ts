@@ -14,6 +14,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': 'Нужен доступ к микрофону',
   'player.voice.monitorOff': 'Слышать себя (выключено)',
   'player.voice.monitorOn': 'Прослушивание включено. Нажмите, чтобы выключить',
+  'player.voice.monitorChip': 'Мониторинг голоса включён: нажмите, чтобы остановить',
   'player.voice.monReasonSeparateDevices': 'Для прослушивания вход и выход должны быть на одном устройстве, например на аудиоинтерфейсе.',
   'player.voice.monReasonLatency': 'Это устройство не успевает для прослушивания (больше 256 фреймов). Запись работает.',
   'player.voice.monReasonBluetooth': 'Bluetooth даёт слишком большую задержку для прослушивания. Запись работает.',

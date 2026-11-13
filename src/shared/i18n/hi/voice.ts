@@ -13,6 +13,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.inputPerm': "माइक्रोफ़ोन की अनुमति चाहिए",
   'player.voice.monitorOff': "अपनी आवाज़ सुनें (बंद)",
   'player.voice.monitorOn': "मॉनिटरिंग चालू है। बंद करने के लिए क्लिक करें",
+  'player.voice.monitorChip': "आपकी आवाज़ की मॉनिटरिंग चालू है: रोकने के लिए क्लिक करें",
   'player.voice.monReasonSeparateDevices': "मॉनिटरिंग के लिए इनपुट और आउटपुट एक ही डिवाइस पर होने चाहिए, जैसे ऑडियो इंटरफ़ेस।",
   'player.voice.monReasonLatency': "यह डिवाइस मॉनिटरिंग के लिए पर्याप्त तेज़ नहीं है (256 फ़्रेम से ज़्यादा)। रिकॉर्डिंग फिर भी काम करती है।",
   'player.voice.monReasonBluetooth': "ब्लूटूथ में मॉनिटरिंग के लिए बहुत ज़्यादा देरी होती है। रिकॉर्डिंग फिर भी काम करती है।",
