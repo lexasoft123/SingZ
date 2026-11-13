@@ -22,7 +22,7 @@ Later decisions:
   (proposed). The take is conformed offline to the song timeline and played as
   an ordinary lane; the separate listen-back path is removed.
 - [0017: Live monitoring through the common mixer and output](0017-monitoring-through-the-common-mixer.md)
-  (proposed). The live voice is a source of the one shared output callback;
+  (proposed, revision 2). The live voice is a source of the one shared output callback;
   the second monitor host and the monitor-output picker are removed.
 
 Any incompatible interface or persistence change supersedes the relevant ADR rather

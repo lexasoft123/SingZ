@@ -1,11 +1,12 @@
 # ADR 0017: Live monitoring through the common mixer and output
 
-Status: proposed (revision 2: owner answers and the LoopZ audit applied)<br>
+Status: proposed (revision 2)<br>
 Date: 2026-11-13<br>
 Supersedes (when accepted): ADR 0014 "Design: a second small duplex host", its
 monitor-output selection paragraph (`outputDeviceId`, `outputDevice`,
 `outputCandidates`), the same-device-only rule and the two-host parts of "Buffer
 policy" and "Idle monitoring"; spec VS-MON-002, -005, -016, -024 (output picker).
+Revises: VS-MON-008 and AC-5 (see the removal list).
 Kept from 0014: product rules, the -10874 silence block, take-gap padding.
 
 ## Owner decisions (final, input)
@@ -23,7 +24,7 @@ Where does the live voice join the one output stream, how does the microphone
 reach it from any input device, and what happens to the buffer, timing,
 recording, master and permission rules built around the second host?
 
-## Facts read (SingZ tip 7226299; LoopZ `main` 5ab5c99, read-only)
+## Facts read (SingZ read at 3343f4c; LoopZ `main` 5ab5c99, read-only)
 
 SingZ:
 
@@ -57,7 +58,7 @@ SingZ:
 - Song graph: lanes -> song mix -> song gain -> time-pitch -> (output mix) ->
   output gain -> limiter -> output (`native_playback_session.cpp:55-66`,
   `:4085-4109`). Master is an in-graph gain node (`:3466-3468`, `:4298-4299`,
-  `setMasterGain` `:8331`). A zero-source prepare is refused (`:6214`); the graph
+  `setMasterGain` `:8331`). A zero-source prepare is refused (`:6215`); the graph
   is rebuilt per tempo/transpose generation; the training client joins after it.
 - Two-host buffer special cases: `shared_audio_service.cpp:65-66, 322-327,
   344-362, 652-750`. A route-changing reopen fails the song gate (`:333-339`).
@@ -66,7 +67,7 @@ LoopZ (macOS product only; no Windows/Linux backend or result):
 
 - **Buffered path**: capture and output are separate owners; the output host is
   opened output-only (`native/platform/macos/engine/connections.mm:132-145`,
-  `docs/architecture.md:1372-1375`). The output callback reads a timestamped
+  `docs/architecture.md:1376-1378`). The output callback reads a timestamped
   `AudioHistory` at its presentation time minus an explicit queue, at its own
   measured rate (`architecture.md:1327-1334`, `native/core/monitor.cpp:168-231`,
   `native/core/audio_history.cpp:326-431`,
@@ -112,7 +113,8 @@ history mechanism. No CPU or jitter figure is recorded for either path.
    callback reads it at `outputHostTimeNs - queue` through the resampler at the
    measured output rate. Same device, another device and another rate are the
    same code. **The song host stays output-only and is never reopened for
-   monitoring.** The 32..256 buffer negotiation and its session hold stay as the
+   monitoring, except the optional WP5 duplex open at non-playing moments
+   (decision 6).** The 32..256 buffer negotiation and its session hold stay as the
    service's own rule (they decide the queue floor); the two-host bookkeeping
    around them goes.
 3. **Reuse and port.** Reuse: zCore routing (history, resampler, sample clock)
@@ -145,7 +147,8 @@ history mechanism. No CPU or jitter figure is recorded for either path.
      owner from the measured table, not here.
    - Bluetooth and wireless stay refused (`route-bluetooth`, `route-wireless`)
      as policy to confirm; WP0 may measure one route to revisit it.
-6. **Direct fast path (optional, WP5).** Input == output device only. The common
+6. **Direct fast path (optional, WP5; the one exception to decision 2).** Input
+   == output device only. The common
    host is opened with the input channel and the leaf reads `block.input`, as
    LoopZ `DirectMonitor`. The duplex open happens only when no song is playing
    (idle, paused, song load); while a song plays or a take records the history
@@ -153,7 +156,8 @@ history mechanism. No CPU or jitter figure is recorded for either path.
 7. **Under the master.** The service gets a master stage after all clients:
    master gain, then the safety limiter, over song, cues and voice. The renderer
    publishes master volume to the service, also with no song. The leaf keeps its
-   own level and ramp but no private ceiling. The in-graph master gain and
+   own level and ramp; its private ceiling stays until WP3 proves the service
+   limiter (VS-MON-008), then goes. The in-graph master gain and
    limiter are bypassed once the service stage is proven equal (WP3); the limiter
    must add no latency, or `G` in the placement math changes.
 8. **Not a lane, not a graph node.** 0 of 16 lanes, 0 of 128 nodes; it survives
@@ -163,8 +167,9 @@ history mechanism. No CPU or jitter figure is recorded for either path.
    only source. A song joins and leaves without a reopen (VS-MON-023 unchanged).
 10. **Route change and device loss.** Output change or loss: the service reopens
     the preferred route as today; the history read reports missing frames and
-    the monitor turns off with `route-changed` or `device-lost`, never restarted
-    automatically. Input loss: monitor off, song untouched. Never persisted on.
+    the monitor turns off with the existing `device-lost` reason (output or
+    input gone) or `error` (route changed under it), never restarted
+    automatically. No new reason is added. Input loss: monitor off, song untouched. Never persisted on.
 11. **Permission.** Nothing opens an input or prompts at app or song start.
     Speaker-on is a user gesture and asks through `src/main/mic-access.ts` like
     recording; a refusal is the typed `permission` reason.
@@ -194,10 +199,16 @@ history mechanism. No CPU or jitter figure is recorded for either path.
   `retainVoiceMonitorOutput`, `voiceMonitorOutputConfig`, the `monitorOutput`
   token and the retry at `:347-358`. `monitorBufferHeld`,
   `retainedPlaybackCapacity` and `prepareVoiceMonitor` collapse into one
-  service-owned buffer hold. The leaf's private ceiling. Later (WP3): the
+  service-owned buffer hold. In WP3 only: the leaf's private ceiling and the
   in-graph master gain and limiter.
-- Docs: spec VS-MON-002, -005, -016, -024, AC-5; `manual-test.md` lines 13, 31,
-  34; ADR 0014 pointers.
+- Docs, removed or rewritten: spec VS-MON-002, -005, -016, -024;
+  `manual-test.md` lines 13, 31, 34; ADR 0014 pointers.
+- Docs, revised (kept): VS-MON-008: the non-defeatable limiter, -1 dBFS ceiling
+  and bounded gain move from the monitor leaf to the service master stage. The
+  leaf keeps its ceiling until WP3 lands, so the requirement is never unmet;
+  WP3 removes the private ceiling in the same change that proves the service
+  limiter. AC-5: the 256-frame criterion goes; the Bluetooth and wireless
+  refusal with a visible reason stays.
 
 ## Risks
 
