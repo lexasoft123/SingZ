@@ -1,8 +1,8 @@
 /** Tiếng Việt UI strings. Keep keys and placeholders in sync with English. */
-import type { app as en } from '../en/app'
+import type { AppStrings } from '../en/app'
 import type { Translation } from '../types'
 
-export const app: Translation<typeof en> = {
+export const app: Translation<AppStrings> = {
   "app.whatsNew.title": "Có gì mới",
   "app.whatsNew.fullNotes": "Thông tin phát hành đầy đủ",
   "app.whatsNew.done": "Đã hiểu",

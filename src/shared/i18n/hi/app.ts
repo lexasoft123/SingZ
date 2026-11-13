@@ -1,8 +1,8 @@
 /** हिन्दी UI strings. Keep keys and placeholders in sync with English. */
-import type { app as en } from '../en/app'
+import type { AppStrings } from '../en/app'
 import type { Translation } from '../types'
 
-export const app: Translation<typeof en> = {
+export const app: Translation<AppStrings> = {
   "app.whatsNew.title": "नया क्या है",
   "app.whatsNew.fullNotes": "रिलीज़ की पूरी जानकारी",
   "app.whatsNew.done": "ठीक है",

@@ -4,6 +4,8 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
+  lazy,
+  Suspense,
   useRef,
   useState,
   useSyncExternalStore
@@ -41,7 +43,8 @@ import type {
 import { Modal } from '@singz/ui'
 import DspGraphVisualization from './DspGraphVisualization'
 import { t } from '../i18n'
-import NativeOfferCard from './NativeOfferCard'
+
+const NativeOfferCard = lazy(() => import('./NativeOfferCard'))
 
 export interface SettingsModalProps {
   onQuickStart?: () => void
@@ -1726,7 +1729,7 @@ export default function SettingsModal({
           {!devices && <p className="settings-hint">{t('settings.devicesLoading')}</p>}
           {devices?.inputLabelsHidden && <p className="settings-hint">{t('settings.inputLabelsHiddenHint')}</p>}
           {audio.outputId && <p className="settings-hint">{t('settings.nonDefaultSpeakerTip')}</p>}
-          <NativeOfferCard />
+          <Suspense fallback={null}><NativeOfferCard /></Suspense>
         </div>
       </div>
       <div className="modal-actions">

@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import { cldrPlural, fill, fromTag, pluralForm, resolveLocale } from '../../src/shared/i18n/rules'
-import { en } from '../../src/shared/i18n/en'
+import { en as eagerEn } from '../../src/shared/i18n/en'
+import { nativeOffer } from '../../src/shared/i18n/en/native-offer'
 import { es419 } from '../../src/shared/i18n/es-419'
 import { ptBR } from '../../src/shared/i18n/pt-BR'
 import { tr } from '../../src/shared/i18n/tr'
@@ -21,6 +22,10 @@ import { fil } from '../../src/shared/i18n/fil'
 import { ms } from '../../src/shared/i18n/ms'
 import { zhTW } from '../../src/shared/i18n/zh-TW'
 import { loadLocale, setLocale, t, tn } from '../../src/shared/i18n'
+
+// The offer's English copy is registered by its lazy chunk, not the eager
+// dictionary, but it is part of English and every translation must match it.
+const en = { ...eagerEn, ...nativeOffer } as typeof eagerEn
 
 describe('fromTag', () => {
   it('maps every spelling the platforms use', () => {

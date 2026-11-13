@@ -1,8 +1,8 @@
 /* Русский — the `app` strings, typed against English. */
-import type { app as en } from '../en/app'
+import type { AppStrings } from '../en/app'
 import type { Translation } from '../types'
 
-export const app: Translation<typeof en> = {
+export const app: Translation<AppStrings> = {
   'app.whatsNew.title': "Что нового",
   'app.whatsNew.fullNotes': "Все изменения",
   'app.whatsNew.done': "Понятно",

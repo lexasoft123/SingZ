@@ -100,7 +100,6 @@ import LyricsPanel from './components/LyricsPanel'
 import { lyricsJobProgressed, lyricsJobSettled, lyricsJobStarted, type LyricsState } from './lyrics-state'
 import { createLazyDialogRoute } from './components/LazyDialogRoute'
 import { getLocale, t, tn, useLocale } from './i18n'
-import { openNativeOffer, useNativeOffer } from './native-offer'
 import { Language } from './components/Language'
 
 // The lyrics editor rides outside the boot bundle like VocalTraining does —
@@ -110,6 +109,11 @@ const loadRetainedAudio = () => import('./components/RetainedAudioControl')
 const RetainedAudioControl = lazy(loadRetainedAudio)
 
 const LyricsEditor = lazy(() => import('./components/LyricsEditor'))
+// The native-app offer stays out of the eager entry and out of the What's New
+// primary/recovery closures (check-renderer-split): its own lazy chunks, handed
+// to What's New as a slot.
+const NativeOfferCard = lazy(() => import('./components/NativeOfferCard'))
+const NativeOfferChip = lazy(() => import('./components/NativeOfferChip'))
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import PersistentMonitorControl from './components/PersistentMonitorControl'
 import type ProjectPickerComponent from './components/ProjectPicker'
@@ -835,7 +839,6 @@ export default function App(): React.JSX.Element {
   const [ver, setVer] = useState('')
   const [whatsNew, setWhatsNew] = useState<ReleaseNotes | null>(null)
   const [update, setUpdate] = useState<import('../../shared/types').UpdateState>({ state: 'none' })
-  const nativeOffer = useNativeOffer()
   const [isProject, setIsProject] = useState(false)
   /** A project folder opened from outside the library can be brought into it. */
   const [inLibrary, setInLibrary] = useState(true)
@@ -3953,16 +3956,7 @@ export default function App(): React.JSX.Element {
             {t('app.update.get', { version: update.version })}
           </button>
         )}
-        {nativeOffer.available && nativeOffer.channel === 'stable' && update.state !== 'ready' && (
-          <button
-            type="button"
-            className="pill ghost small no-drag update-chip"
-            title={t('app.nativeOffer.chipTitle')}
-            onClick={openNativeOffer}
-          >
-            {t('app.nativeOffer.chip')}
-          </button>
-        )}
+        {update.state !== 'ready' && <Suspense fallback={null}><NativeOfferChip /></Suspense>}
         {update.state === 'downloading' && (
           <span className="chip-status no-drag update-chip" title={t('app.update.downloadingTitle')}>
             <span className="dot idle" /> {t('app.update.downloading', { percent: update.percent })}
@@ -4319,7 +4313,7 @@ export default function App(): React.JSX.Element {
       )}
 
       {whatsNew && !wizard && !showSetup && !showLog && !showProjects && !showSettings && !showImport && (
-        <RecoverableWhatsNew notes={whatsNew} onClose={closeWhatsNew} />
+        <RecoverableWhatsNew notes={whatsNew} onClose={closeWhatsNew} offer={<Suspense fallback={null}><NativeOfferCard /></Suspense>} />
       )}
       {wizard && (
         <SetupWizard

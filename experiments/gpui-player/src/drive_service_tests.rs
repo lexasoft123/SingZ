@@ -259,10 +259,12 @@ fn actual_oauth_worker_syncs_and_clean_repeat_publishes_no_payloads() {
         .count();
     assert!(published >= 3);
     f.control(json!({"resetLedger":true}));
+    // A clean sync can finish between two polls, so `busy` may never be
+    // observed. Wait on last_sync, which only advances.
+    let previous_sync = service.snapshot().scheduler.last_sync;
     service.action(Action::SyncNow).unwrap();
-    wait(&service, |s| s.busy);
     wait(&service, |s| {
-        !s.busy && s.scheduler.last_sync.is_some() && s.error.is_none()
+        !s.busy && s.scheduler.last_sync > previous_sync && s.error.is_none()
     });
     assert_eq!(
         f.state()["requests"]
@@ -676,10 +678,11 @@ fn concurrent_save_and_exhausted_snapshot_reads_preserve_intent_and_command_reco
     snapshot_conflicts().lock().unwrap().remove(&f.config);
     service.set_root(f.root.clone()).unwrap();
     wait(&service, |s| !s.suspended && s.scheduler.dirty > 0);
+    let previous_sync = service.snapshot().scheduler.last_sync;
     service.action(Action::SyncNow).unwrap();
-    wait(&service, |s| s.busy);
     wait(&service, |s| {
         !s.busy && s.scheduler.phase == Phase::Idle && s.error.is_none() && s.scheduler.dirty == 0
+            && s.scheduler.last_sync > previous_sync
     });
     assert_eq!(f.remote_doc()["foreign"], 3);
     assert!(!ledger.snapshot().unwrap().is_dirty());

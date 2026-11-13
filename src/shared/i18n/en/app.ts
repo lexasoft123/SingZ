@@ -1,4 +1,9 @@
 /* English strings for the `app` namespace — see ../index.ts. */
+import type { nativeOffer } from './native-offer'
+
+// The native-offer keys live in ./native-offer (registered by the lazy offer
+// chunk). AppStrings adds their type, so every translation is still checked
+// against them; this eager object stays a plain literal for the native build.
 export const app = {
   'app.whatsNew.title': "What’s new",
   'app.whatsNew.fullNotes': "Full release notes",
@@ -52,16 +57,6 @@ export const app = {
   'app.update.downloadingTitle': 'Downloading the update in the background',
   // {percent} is a 0-100 whole number
   'app.update.downloading': 'update {percent}%',
-
-  // ── native-app offer (C-44; off unless the build enables it) ──
-  // {version} is the native app's version number, e.g. "0.27.0-beta.1"
-  "app.nativeOffer.betaTitle": "Try the new SingZ (beta)",
-  "app.nativeOffer.stableTitle": "The new SingZ is here",
-  "app.nativeOffer.body": "A new version of SingZ ({version}) is ready. Your songs stay where they are, and your audio and metronome choices come along the first time it starts. You can keep using this version.",
-  "app.nativeOffer.open": "Open the download",
-  "app.nativeOffer.dismiss": "Not now",
-  "app.nativeOffer.chip": "Get the new SingZ",
-  "app.nativeOffer.chipTitle": "The new SingZ is available — opens the download",
 
   // ── save / library ──
   'app.save.tooltipProject': 'Save stems, lyrics and settings into this project folder',
@@ -162,3 +157,5 @@ export const app = {
   'app.project.copied': 'Copied into your library — {dir}. The original folder is untouched.',
   'app.project.renamed': 'Renamed — the project folder is now {dir}'
 }
+
+export type AppStrings = typeof app & typeof nativeOffer

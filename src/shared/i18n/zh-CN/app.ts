@@ -1,8 +1,8 @@
 /* 简体中文 — the `app` strings, typed against English. */
-import type { app as en } from '../en/app'
+import type { AppStrings } from '../en/app'
 import type { Translation } from '../types'
 
-export const app: Translation<typeof en> = {
+export const app: Translation<AppStrings> = {
   'app.whatsNew.title': "更新内容",
   'app.whatsNew.fullNotes': "完整更新说明",
   'app.whatsNew.done': "知道了",

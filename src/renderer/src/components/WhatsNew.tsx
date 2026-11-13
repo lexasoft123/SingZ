@@ -2,12 +2,11 @@ import { Modal } from '@singz/ui'
 import type { ReleaseNotes, HighlightIcon } from '../../../shared/release-highlights'
 const telegram = new URL('../../../../mobile/assets/telegram-logo.png', import.meta.url).href
 import { t } from '../i18n'
-import NativeOfferCard from './NativeOfferCard'
 function HighlightIconView({ icon }: { icon: HighlightIcon }): React.JSX.Element {
   const paths = { news: 'M4 4h16v16H4z M8 8h8 M8 12h8 M8 16h4', export: 'M12 3v12 M7 10l5 5 5-5 M4 16v5h16v-5', mic: 'M9 4a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0z M5 10v1a7 7 0 0 0 14 0v-1 M12 18v4 M8 22h8', controls: 'M4 7h16 M4 17h16 M8 4v6 M16 14v6' }
   return <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[icon]} /></svg>
 }
-export default function WhatsNew({ notes, onClose }: { notes: ReleaseNotes; onClose: () => void }): React.JSX.Element {
+export default function WhatsNew({ notes, onClose, offer }: { notes: ReleaseNotes; onClose: () => void; offer?: React.ReactNode }): React.JSX.Element {
   return <Modal cardClassName="whats-new-dialog" aria-label={t('app.whatsNew.title')} onClose={onClose}>
     <div className="whats-new-heading"><span>SingZ <small>v{notes.version}</small></span><button type="button" className="pill ghost" aria-label={t('app.whatsNew.done')} onClick={onClose}>×</button></div>
     <h2>{t('app.whatsNew.title')}</h2>
@@ -22,7 +21,7 @@ export default function WhatsNew({ notes, onClose }: { notes: ReleaseNotes; onCl
         </article>)}
       </section>)}
     </div>
-    <NativeOfferCard />
+    {offer}
     <div className="modal-actions">
       <button type="button" className="pill ghost" onClick={() => void window.singz.openExternal(notes.url)}>{t('app.whatsNew.fullNotes')} ↗</button>
       <button type="button" className="pill primary" onClick={onClose}>{t('app.whatsNew.done')}</button>

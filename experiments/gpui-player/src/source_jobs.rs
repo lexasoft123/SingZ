@@ -193,6 +193,14 @@ impl Service {
         Self::new_with_start_hook(|| {})
     }
     fn new_with_start_hook(start: impl FnOnce() + Send + 'static) -> Self {
+        Self::new_with_hooks(start, |_| {})
+    }
+    /// `before_run` is called with the id of each job that is still owned and
+    /// about to run (never for a job cancelled while queued).
+    fn new_with_hooks(
+        start: impl FnOnce() + Send + 'static,
+        mut before_run: impl FnMut(u64) + Send + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::sync_channel(8);
         let serial = Arc::new(AtomicU64::new(1));
         let generation = serial.clone();
@@ -241,6 +249,7 @@ impl Service {
                     worker_retired.fetch_max(id, Ordering::Release);
                     continue;
                 }
+                before_run(id);
                 state.generation = id;
                 state.busy = true;
                 state.label = crate::i18n::t("main.source.preparing");
@@ -2504,7 +2513,11 @@ mod tests {
     #[test]
     fn queued_cancel_retires_without_first_snapshot_and_next_job_still_runs() {
         let (release, blocked) = mpsc::channel();
-        let service = Service::new_with_start_hook(move || { blocked.recv().unwrap(); });
+        let (release_next, next_gate) = mpsc::channel::<()>();
+        // `next` cannot start until the test releases it, after asserting that
+        // it is not retired. Only an owned job reaches this hook.
+        let service = Service::new_with_hooks(move || { blocked.recv().unwrap(); },
+            move |_| { next_gate.recv().unwrap(); });
         // Hold startup discovery and queue a split behind it. No Run snapshot
         // has ever existed when the UI requests cancellation.
         service.check().unwrap();
@@ -2528,6 +2541,7 @@ mod tests {
         let next = service.start(Job::Open(PathBuf::from("missing-next-source.wav"))).unwrap();
         assert!(next > id);
         assert!(!service.retired(next));
+        release_next.send(()).unwrap();
         while !service.retired(next) {
             assert!(Instant::now() < deadline, "Next source request did not run");
             thread::sleep(Duration::from_millis(2));

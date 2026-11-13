@@ -1,8 +1,8 @@
 /** Brazilian Portuguese UI strings. Keep keys and placeholders in sync with English. */
-import type { app as en } from '../en/app'
+import type { AppStrings } from '../en/app'
 import type { Translation } from '../types'
 
-export const app: Translation<typeof en> = {
+export const app: Translation<AppStrings> = {
   "app.whatsNew.title": "O que há de novo",
   "app.whatsNew.fullNotes": "Notas completas da versão",
   "app.whatsNew.done": "Entendido",

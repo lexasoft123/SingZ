@@ -1,8 +1,8 @@
 /** 한국어 UI strings. Keep keys and placeholders in sync with English. */
-import type { app as en } from '../en/app'
+import type { AppStrings } from '../en/app'
 import type { Translation } from '../types'
 
-export const app: Translation<typeof en> = {
+export const app: Translation<AppStrings> = {
   "app.whatsNew.title": "새로운 기능",
   "app.whatsNew.fullNotes": "전체 공개 메모",
   "app.whatsNew.done": "확인",

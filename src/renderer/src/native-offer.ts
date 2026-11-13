@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react'
+import { register } from '../../shared/i18n/core'
+import { nativeOffer } from '../../shared/i18n/en/native-offer'
 import type { NativeHandoverReport, NativeOffer } from '../../shared/native-handover'
+
+// English copy for the offer lives with the lazy offer chunk, not the eager entry.
+register('en', nativeOffer)
 
 type Storage = Pick<globalThis.Storage, 'getItem'>
 const json = (storage: Storage, key: string): unknown => {

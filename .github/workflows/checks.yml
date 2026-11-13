@@ -237,7 +237,9 @@ jobs:
           - { name: windows, runner: windows-2022 }
           - { name: linux, runner: ubuntu-24.04 }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # Room for the release build, the separate test build, the tests, clippy and
+    # the helper session tests: on macOS the test build alone takes over 30 minutes.
+    timeout-minutes: 120
     permissions:
       contents: read
     defaults:
@@ -331,6 +333,14 @@ jobs:
         working-directory: ${{ env.G }}
         timeout-minutes: 40
         run: node ../../scripts/with-native-build-lock.mjs --owner ci-gpui-build -- cargo build --release --locked
+
+      # The test profile compiles separately from the release build above, and
+      # on macOS that compile alone has grown past 30 minutes. Building the test
+      # binaries in their own step keeps the Test budget for running tests.
+      - name: Build tests
+        working-directory: ${{ env.G }}
+        timeout-minutes: 45
+        run: node ../../scripts/with-native-build-lock.mjs --owner ci-gpui-test-build -- cargo test --locked --no-run
 
       - name: Test
         working-directory: ${{ env.G }}
