@@ -2,7 +2,7 @@ import { ipcMain } from 'electron'
 import { allowFile } from './media'
 import { computeWavPeaks } from './voice-takes'
 import { conformTake, invalidateConformedTake, releaseConformedTake, isConformTakeError } from './voice-take-conform'
-import { isVoiceTakeEffects, type VoiceTakeConformRequest, type VoiceTakeConformResult } from '../shared/voice-take'
+import { isVoiceTakeEffects, safeVoiceTakeMessage, type VoiceTakeConformRequest, type VoiceTakeConformResult } from '../shared/voice-take'
 import { desktopAudioProcess } from './audio-process'
 import { log } from './log'
 import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
@@ -280,7 +280,7 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   ipcMain.handle(VOICE_IPC.level, async () => {
     try { const level = await store.level(); levelFailureLogged = false; return level }
     catch (error) {
-      if (!levelFailureLogged) log('voice-take', 'level failed ' + JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), 'warn')
+      if (!levelFailureLogged) log('voice-take', 'level failed ' + JSON.stringify({ error: safeVoiceTakeMessage(error instanceof Error ? error.message : undefined, 'capture-level-failed') }), 'warn')
       levelFailureLogged = true
       return { peakDb: -120, rmsDb: -120, takeActive: false }
     }

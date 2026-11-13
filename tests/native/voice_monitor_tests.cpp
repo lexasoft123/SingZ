@@ -223,6 +223,14 @@ void renderTests() {
   run();CHECK(near(left[63],.25));CHECK(near(rt.peak.load(),.25));CHECK(near(rt.rms.load(),.25));
   input.fill(8);run();CHECK(near(left[63],kVoiceMonitorCeiling));CHECK(near(left[63],std::pow(10.,-.05)));
   input.fill(-8);run();CHECK(near(left[63],-std::pow(10.,-.05)));
+  // +36 dB: a full-scale input stays at or under the ceiling, finite, with no sign wrap; the unlimited mutant does not.
+  CHECK(kVoiceMonitorGainMaxDb==36.0f && kVoiceMonitorGainMinDb==-60.0f);
+  rt.target.store(std::pow(10.0f,kVoiceMonitorGainMaxDb/20.0f));run();run();
+  for(float v:{1.0f,-1.0f,.5f,-.5f,.01f}){input.fill(v);run();for(uint32_t i=0;i<64;++i)CHECK(std::isfinite(left[i]) && std::abs(left[i])<=kVoiceMonitorCeiling+1e-6f);}
+  input.fill(1.0f);run();CHECK(near(left[63],kVoiceMonitorCeiling));
+  input.fill(-1.0f);run();CHECK(near(left[63],-kVoiceMonitorCeiling));
+  CHECK(std::abs(voiceMonitorLimit(1e9))<=kVoiceMonitorCeiling && std::abs(voiceMonitorLimit(-1e9))<=kVoiceMonitorCeiling); // the 'limiter' CMake mutant (voiceMonitorLimit returns its input) fails here and above
+  rt.target.store(1);input.fill(.25f);run();run();
   input.fill(std::numeric_limits<float>::quiet_NaN());run();CHECK(left[0]==0 && rt.peak.load()==0 && rt.rms.load()==0);
   input.fill(std::numeric_limits<float>::infinity());run();CHECK(left[63]==0);
   input.fill(std::numeric_limits<float>::denorm_min());run();CHECK(left[63]==0 && rt.peak.load()==0 && rt.rms.load()==0);
@@ -268,7 +276,12 @@ void hostTests() {
   CHECK((r->config.inputChannels==std::vector<uint32_t>{2}));CHECK((r->config.outputChannels==std::vector<uint32_t>{0,1}));
   CHECK(r->config.allowSharedDeviceBufferChange && r->config.maximumAcceptableBufferFrames==256 && r->config.maximumFrames==8192 && r->config.holdSharedDeviceBuffer);
   CHECK(started.latency.bufferFrames==32 && started.latency.roundTripFrames==92);CHECK(near(started.latency.roundTripMs,92*1000./48000));
-  CHECK(host.setGain(100));for(int i=0;i<4;++i)r->callback();CHECK(near(r->lastVoice.load(),.1*std::pow(10.,.6)));CHECK(!host.setGain(std::numeric_limits<float>::quiet_NaN()));
+  CHECK(host.setGain(12));for(int i=0;i<4;++i)r->callback();CHECK(near(r->lastVoice.load(),.1*std::pow(10.,.6)));
+  // The range tops out at +36 dB (a stale +12 clamp would stop at x4): 0.1 * 10^1.8 exceeds the ceiling, so +100 dB must clamp to +36 and the ceiling.
+  CHECK(host.setGain(100));for(int i=0;i<4;++i)r->callback();CHECK(near(r->lastVoice.load(),kVoiceMonitorCeiling));
+  CHECK(host.setGain(36));
+  // The floor clamp is observable: -100 dB must land on -60 dB (1e-4 of a 0.1 input), not 1e-6 (the 'gain' mutant has no clamp).
+  CHECK(host.setGain(-100));for(int i=0;i<4;++i)r->callback();CHECK(near(r->lastVoice.load(),.1*std::pow(10.,-3.)));CHECK(r->lastVoice.load()>5e-5f);CHECK(!host.setGain(std::numeric_limits<float>::quiet_NaN()));
   CHECK(begin(host,2).ok);const auto stopped=r->stops;
   CHECK(!host.end(1).ok);CHECK(host.status().running && r->stops==stopped);
   CHECK(!begin(host,1).ok);CHECK(host.status().running);

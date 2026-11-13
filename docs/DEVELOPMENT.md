@@ -142,6 +142,27 @@ the path is retained (even if compiled identity is then refused) for the
 process lifetime because Windows may keep the DLL mapped. Bounded stale cleanup
 removes only old, strictly named, same-owner directories whose recorded PID is
 confirmed dead; every live PID (including another worktree's SingZ) is preserved.
+**Stale addon refuses to start.** Native playback is the only desktop path
+(ADR 0015), so at startup (`src/main/addon-startup-gate.ts`, wired in
+`src/main/index.ts` before any window or IPC) main checks the selected addon's
+manifest against this checkout. A provenance mismatch ("older or different
+checkout") or, in an unpackaged run, missing `current.json` metadata logs the
+reason, shows one error box with `npm run capture:addon -- <platform>-<arch>`
+and both fingerprints, and exits 1 before any window exists. With
+`SINGZ_E2E_HIDDEN` set there is no dialog: the reason goes to stderr and the
+exit code is 1. A packaged build treats the same failures as a corrupt install
+(reinstall message). Only two causes gate: the fingerprint mismatch and a
+manifest that is absent (ENOENT) or not JSON. Every other error, including I/O
+errors during the source-fingerprint walk (retried once), a missing binary, ABI
+and unsupported platform, is not gated and keeps the lazy-load behaviour. The
+fingerprint is computed once and passed to the audio process (only the
+unpackaged audio process honours it, and only a 40-hex value; main always
+walks the tree itself). It is cached for main's lifetime, so a rebuild after
+startup shows as a mismatch on audio-process respawn (conservative). `SINGZ_ALLOW_STALE_ADDON=1` opts out for tooling
+that deliberately loads a stale addon; it is ignored when `app.isPackaged`.
+Check: `node tests/e2e/mac/stale-addon-gate-e2e.cjs` (scratch manifest, needs
+a built `out/`).
+
 `SINGZ_CAPTURE_ADDON=/absolute/file.node` overrides the selected path
 for diagnostics only; it does not bypass identity checks. The file must match
 this checkout (in development) and carry its own matching

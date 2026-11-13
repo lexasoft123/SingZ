@@ -197,7 +197,7 @@ napi_value begin(napi_env env,napi_callback_info info) {
   std::lock_guard lock(control);
   if(!useAllowed())return error(env,"Audio input is busy or unsupported");
   const auto route=currentRoute(outputChoice);
-  auto r=host.begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,-60.0,12.0)),32,256,g,route.channels,&sharedAudioService());
+  auto r=host.begin(uid,channel,route.output,route.native,permissionGranted(),static_cast<float>(std::clamp(gain,double(kVoiceMonitorGainMinDb),double(kVoiceMonitorGainMaxDb))),32,256,g,route.channels,&sharedAudioService());
   if(r.ok){monitoredOutput=route.output;monitoredChannels=route.channels;monitorOutput=outputChoice;monitoredInput=uid;monitoredInputChannel=channel;}
   auto o=result(env,r);outputs(env,o,uid,channel,outputChoice ? *outputChoice : route.output);return o;
 }
@@ -213,7 +213,7 @@ napi_value gain(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);double gain=0;
   if(argc!=1 || napi_get_value_double(env,arg,&gain)!=napi_ok || !std::isfinite(gain)){auto o=object(env);boolean(env,o,"ok",false);return o;}
   std::lock_guard lock(control);auto o=object(env);
-  boolean(env,o,"ok",host.setGain(static_cast<float>(std::clamp(gain,-60.0,12.0))));return o;
+  boolean(env,o,"ok",host.setGain(static_cast<float>(std::clamp(gain,double(kVoiceMonitorGainMinDb),double(kVoiceMonitorGainMaxDb)))));return o;
 }
 napi_value status(napi_env env,napi_callback_info) {
   std::lock_guard lock(control);

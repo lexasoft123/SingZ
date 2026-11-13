@@ -25,23 +25,30 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
    headphones button.
 3. Optional: with the Speaker off, hover the fader: it reads "Voice level" (the
    take playback level). Turn the Speaker on: the fader now reads "Monitor
-   level" and sits at the remembered monitor gain (-12 dB by default). Move it
+   level" and sits at the remembered monitor gain (-6 dB by default; range -60..+36 dB, 0 dB at the middle). Move it
    if you like.
 3b. Open the gear (Track settings) on the Voice track: Esc closes it and focus returns to
-   the gear. Check the monitor level, the take level and the Monitor output picker
-   ("Same as song output (<device>)" first; a Bluetooth or separate device is greyed with
-   its reason). With the Speaker on, pick another usable output: expect a brief
-   "Switching the monitor output…" and the route line to name the new device; a refused
-   device leaves monitoring off with the reason, and a running take is not interrupted.
-   Unplug the remembered device and reopen: it falls back to the default and says so.
+   the gear. Check the monitor level, the take level and the route line. There is NO
+   monitor output picker: the route line names the one common output ("Output: <device>
+   (Settings › Audio route)"); to change it use Settings > Audio route. With the Speaker
+   on, the line adds the buffer and delay. A separate input and output device (until
+   ADR 0017's mixer client lands) leaves the monitor off with the reason "Monitoring needs
+   the input and output on one device"; that message never mentions a monitor output. A
+   running take is not interrupted. A `singz.voice.monitorOutput` left by an older build
+   is ignored and removed.
 4. Play the song. Turn the Speaker button on (it works with or without the song
-   playing). Expect: a quiet start at -12 dB, the song keeps playing, no
+   playing). Expect: a moderate start at -6 dB, the song keeps playing, no
    confirmation dialog, a one-time hint "Use headphones to avoid feedback", a
    latency badge of a few ms (an estimate, about 5 ms at the smallest buffer on
    the verification interface).
 5. Sing or speak. You should hear yourself with the song. Raise the interface
    output level slowly if too quiet. **[inferred]** (not yet verified with a real
    microphone).
+5b. Monitor gain range (by ear, headphones at LOW volume first): with the real mic, raise
+   Monitor level in Track settings to +24, then +36. Expect your voice to get clearly
+   louder with no sudden jump, never harsh digital wrap; peaks flatten at the -1 dBFS
+   safety ceiling (hard clip, no added latency). Above +12 dB the note "High gain:
+   feedback risk" appears; 0 dB is marked on the slider. Return to -6 dB.
 6. Adjust the monitor level with the fader while monitoring. Expect your voice
    level to change and the song level not to.
 7. Toggle monitoring off and on a few times. Expect one tiny click or gap at the

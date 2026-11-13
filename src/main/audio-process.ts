@@ -5,7 +5,7 @@ import { app, utilityProcess, type UtilityProcess } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CaptureOwner, type NativeCaptureBinding } from './capture'
+import { CaptureOwner, verifiedCaptureFingerprintEnv, type NativeCaptureBinding } from './capture'
 import { log, logChunk } from './log'
 import { createBoxAudioClient } from './box-audio/client'
 import {
@@ -80,6 +80,7 @@ class DesktopAudioProcess {
       allowLoadingUnsignedLibraries: true,
       env: { ...process.env, SINGZ_AUDIO_PROCESS: '1', SINGZ_AUDIO_EPOCH: epoch,
         SINGZ_AUDIO_PACKAGED: app.isPackaged ? '1' : '0',
+        ...(app.isPackaged ? {} : verifiedCaptureFingerprintEnv()),
         ...(process.env.SINGZ_SURFACE === 'box' ? { SINGZ_AUDIO_BOX_DATA_DIR: app.getPath('userData') } : {}),
         SINGZ_AUDIO_RESOURCES_PATH: process.resourcesPath }
     })

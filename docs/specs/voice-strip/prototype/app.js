@@ -390,16 +390,12 @@ const closeSettings = () => { setModal.hidden = true; $('gearBtn').setAttribute(
 function updateSettings() {
   $('setMon').value = S.monLevel; $('setMonOut').textContent = `${Math.round(S.monLevel * 0.72 - 60)} dB`;
   $('setTake').value = S.level; $('setTakeOut').textContent = `${S.level}%`;
-  $('setRoute').textContent = monitoring() ? 'Route: Scarlett 2i2 · buffer 32 frames · estimated delay ≈ 5 ms' : 'Route: shown while monitoring.';
+  $('setRoute').textContent = monitoring() ? 'Route: Scarlett 2i2 · buffer 32 frames · estimated delay ≈ 5 ms' : 'Output: Scarlett 2i2 (Settings › Audio route)';
 }
 $('gearBtn').onclick = openSettings; $('setDone').onclick = closeSettings;
 setModal.onclick = (e) => { if (e.target === setModal) closeSettings(); };
 $('setMon').oninput = (e) => { S.monLevel = +e.target.value; render(); updateSettings(); };
 $('setTake').oninput = (e) => { S.level = +e.target.value; render(); updateSettings(); };
-$('setOut').onchange = () => {
-  $('setNote').textContent = monitoring() ? 'Switching the monitor output…' : '';
-  if (monitoring()) setTimeout(() => { $('setNote').textContent = ''; }, 800);
-};
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !setModal.hidden) { e.stopPropagation(); closeSettings(); } }, true);
 $('armBtn').onclick = () => { if (!canRecord()) return; S.phase = S.phase === 'armed' ? 'idle' : 'armed'; if (S.phase === 'armed') setClip(false); announce(S.phase === 'armed' ? STR.announce.armed : STR.announce.disarmed); render(); };
 $('clipLed').onclick = () => { setClip(false); announce('Clip indicator reset'); };

@@ -11,6 +11,13 @@ namespace singz {
 // This complete callback leaf is extracted by CMake for the realtime policy.
 inline constexpr float kVoiceMonitorCeiling = 0.8912509381337456f;
 inline constexpr uint32_t kVoiceMonitorRampFrames = 128;
+// Monitor gain range in dB. Mirrors src/shared/voice-monitor-gain.ts (a TS test pins the equality).
+inline constexpr float kVoiceMonitorGainMinDb = -60.0f;
+inline constexpr float kVoiceMonitorGainMaxDb = 36.0f;
+// Zero-latency safety ceiling: a hard clamp, never a wrap; the callers only pass finite samples.
+inline double voiceMonitorLimit(double scaled) noexcept {
+  return std::clamp(scaled, -double(kVoiceMonitorCeiling), double(kVoiceMonitorCeiling));
+}
 inline float flushVoiceMonitorDenormal(float sample) noexcept {
   return (std::bit_cast<uint32_t>(sample) & 0x7f800000u) == 0 ? 0.0f : sample;
 }
@@ -54,11 +61,11 @@ struct VoiceMonitorRender {
       // float subnormal arithmetic or publishes a subnormal output.
       const double scaled = static_cast<double>(input) * self.current;
       const float voice = std::abs(scaled) < 0x1p-126 ? 0.0f :
-          static_cast<float>(std::clamp(scaled, -double(kVoiceMonitorCeiling), double(kVoiceMonitorCeiling)));
+          static_cast<float>(voiceMonitorLimit(scaled));
       if (block.output)
         for (uint32_t channel = 0; channel < channels; ++channel)
           if (block.output[channel]) {
-            const bool selected = (self.outputMask & (uint64_t{1} << channel)) != 0;
+            [[maybe_unused]] const bool selected = (self.outputMask & (uint64_t{1} << channel)) != 0;
             block.output[channel][frame] = selected ? voice : 0.0f;
           }
     }
@@ -123,7 +130,7 @@ struct VoiceMonitorSongRoute {
   uint64_t generation{0};
 };
 inline VoiceMonitorSongRoute voiceMonitorSongRoute(const AudioHostConfig& config,
-    const std::string& provider, const AudioHostStatus& status, uint64_t generation, bool currentSongOutput) {
+    const std::string& provider, const AudioHostStatus& status, uint64_t generation, [[maybe_unused]] bool currentSongOutput) {
   // Status/generations are retained for diagnostics only. Unit teardown and
   // re-prepare do not change the selected native provider/UID/channel map.
   return {config.outputDeviceUid,currentSongOutput && provider=="coreaudio" && !config.outputDeviceUid.empty(),
@@ -131,8 +138,8 @@ inline VoiceMonitorSongRoute voiceMonitorSongRoute(const AudioHostConfig& config
 }
 // Reject only a proven cross-device Web Audio route. Idle and an unknown
 // browser endpoint do not imply that the selected native device is unusable.
-inline bool voiceMonitorBrowserOutputCompatible(bool playing, const std::string& browserUid,
-    const std::string& monitorUid) noexcept {
+inline bool voiceMonitorBrowserOutputCompatible([[maybe_unused]] bool playing, [[maybe_unused]] const std::string& browserUid,
+    [[maybe_unused]] const std::string& monitorUid) noexcept {
   return !playing || browserUid.empty() || browserUid==monitorUid;
 }
 inline bool voiceMonitorSongCanBegin(const VoiceMonitorSongRoute& route) noexcept {
@@ -149,7 +156,7 @@ inline constexpr uint32_t kVoiceMonitorMuteWaitMs = 100;
 inline constexpr uint32_t kVoiceMonitorBeginWaitBudgetMs = kVoiceMonitorSettleWaitMs+kVoiceMonitorMuteWaitMs;
 // Shared input capture/recording and playback/training cues are compatible.
 // Box input ownership, mic mix, and unknown future ownership modes are not.
-inline bool voiceMonitorUseAllowed(bool boxOwnsCapture, bool micMixActive, bool ownerSupported) noexcept {
+inline bool voiceMonitorUseAllowed([[maybe_unused]] bool boxOwnsCapture, [[maybe_unused]] bool micMixActive, [[maybe_unused]] bool ownerSupported) noexcept {
   return !boxOwnsCapture && !micMixActive && ownerSupported;
 }
 // Externally serialized by the bridge control mutex. Only the last N-API

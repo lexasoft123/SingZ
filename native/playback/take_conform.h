@@ -1,18 +1,20 @@
 #pragma once
 #include <atomic>
+#include <filesystem>
 #include <cstdint>
 #include <string>
 #include <stdexcept>
 #include <vector>
 
 namespace singz {
-inline constexpr const char *kTakeConformVersion = "take-conform-2";
+inline constexpr const char *kTakeConformVersion = "take-conform-3";
 inline constexpr uint64_t kTakeConformMaximumSeconds = 4u * 60u * 60u;
-enum class TakeConformFailure { TakeTooLong, MemoryBudget, ConformError, Cancelled };
+enum class TakeConformFailure { TakeTooLong, MemoryBudget, ConformError, Cancelled, PathTooLong };
 inline const char *takeConformFailureCode(TakeConformFailure code) noexcept {
   switch (code) {
     case TakeConformFailure::TakeTooLong: return "take-too-long";
     case TakeConformFailure::MemoryBudget: return "memory-budget";
+    case TakeConformFailure::PathTooLong: return "path-too-long";
     case TakeConformFailure::Cancelled: return "cancelled";
     default: return "conform-error";
   }
@@ -47,6 +49,12 @@ struct TakeConformStreamResult {
   uint32_t signalsmithPasses{0};
   uint64_t processedBlocks{0};
 };
+// Normalises Windows drive/UNC/relative paths before adding the wide-API
+// extended-length namespace. Returned lane paths keep that namespace.
+// Pure Windows formatter shared by IO and portable path regressions. Input is
+// absolute; the IO wrapper resolves current-drive/relative paths first.
+std::wstring takeConformWindowsPath(const std::wstring &);
+std::filesystem::path takeConformFilePath(const std::string &);
 // Offline, bounded-block file-to-file render. The destination must be a fresh
 // temporary path: exceptions/cancellation close and remove it. Header patch and
 // fsync complete before return; the cache owner atomically renames it afterwards.

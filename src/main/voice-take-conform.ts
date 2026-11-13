@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, open, readFile, readdir, rename, rm, utimes } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects, resolveVoiceTakeTimeline, VOICE_TAKE_SIDECAR_VERSION, type VoiceTakeEffect, type VoiceTakeSidecar } from '../shared/voice-take'
 
-export type ConformTakeErrorCode = 'take-too-long' | 'memory-budget' | 'conform-error' | 'cancelled'
+export type ConformTakeErrorCode = 'take-too-long' | 'memory-budget' | 'path-too-long' | 'conform-error' | 'cancelled'
 export class ConformTakeError extends Error {
   constructor(public readonly code: ConformTakeErrorCode, public readonly detail: string) {
     super(detail)
@@ -12,14 +12,15 @@ export class ConformTakeError extends Error {
 }
 export const isConformTakeError = (error: unknown): error is ConformTakeError => error instanceof ConformTakeError
 const nativeErrorCode = (code: unknown): ConformTakeErrorCode =>
-  code === 'take-too-long' || code === 'memory-budget' || code === 'cancelled' ? code : 'conform-error'
+  code === 'take-too-long' || code === 'memory-budget' || code === 'path-too-long' || code === 'cancelled' ? code : 'conform-error'
 
-export const TAKE_CONFORM_VERSION = 'take-conform-2'
+export const TAKE_CONFORM_VERSION = 'take-conform-3'
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/
 const MAX_BYTES = 8 * 1024 * 1024 * 1024 // disk quota; no PCM is retained in memory
 const MAX_TAKE_SECONDS = 4 * 60 * 60
 const MAX_WAV_FRAMES = Math.floor((0xffffffff - 36) / 2)
 const MAX_ENTRIES = 8
+const PUBLICATION_GRACE_MS = 5000
 export interface TakeConformNativeRequest {
   anchors: { takeFrame: number; projectFrame: number }[]
   settings: { takeFrame: number; transposeSemitones: number }[]
@@ -46,6 +47,37 @@ export interface ConformTakeOptions {
 const finite = (n: number, bound: number): boolean => Number.isFinite(n) && Math.abs(n) <= bound
 function check(condition: unknown, message: string, code: ConformTakeErrorCode = 'conform-error'): asserts condition { if (!condition) throw new ConformTakeError(code, message) }
 const cancelled = (): ConformTakeError => new ConformTakeError('cancelled', 'Take conform cancelled')
+/** Namespace every Windows IO/lane path, after resolving relative segments.
+ * Keep this pure/platform-selectable so drive, UNC and long paths are portable tests. */
+export function conformFilePath(path: string, platform: NodeJS.Platform = process.platform, cwd = process.cwd()): string {
+  check(path.length > 0 && !path.includes('\0'), 'Invalid conform path')
+  if (platform !== 'win32') return path
+  let ordinary = path.replaceAll('/', '\\')
+  if (ordinary.startsWith('\\\\?\\UNC\\')) ordinary = '\\\\' + ordinary.slice(8)
+  else if (ordinary.startsWith('\\\\?\\') && /^[a-zA-Z]:\\/.test(ordinary.slice(4))) ordinary = ordinary.slice(4)
+  check(!ordinary.startsWith('\\\\?\\') && !ordinary.startsWith('\\\\.\\'), 'Unsupported conform device path')
+  const full = win32.resolve(cwd, ordinary)
+  check(/^[a-zA-Z]:\\/.test(full) || /^\\\\[^\\]+\\[^\\]+/.test(full), 'Conform path must resolve to a drive or UNC share')
+  const result = win32.toNamespacedPath(full)
+  check(result.length < 32767 && Buffer.byteLength(result, 'utf8') <= 32768 && full.split('\\').every(part => part.length <= 255),
+    'Conform path exceeds Windows component, total-length or native UTF-8 limits', 'path-too-long')
+  return result
+}
+interface CacheRecord { version: string; key: string; takeId: string }
+const cacheWav = /^[a-f0-9]{16}(?:[a-f0-9]{16}){0,3}\.wav$/
+const metadataPath = (path: string): string => path.slice(0, -4) + '.json'
+async function cacheRecord(path: string): Promise<CacheRecord | undefined> {
+  try {
+    const stat = await lstat(metadataPath(path))
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024) return undefined
+    const value = JSON.parse(await readFile(metadataPath(path), 'utf8')) as CacheRecord
+    return value && typeof value === 'object' && typeof value.key === 'string' && typeof value.takeId === 'string' && value.version === TAKE_CONFORM_VERSION && /^[a-f0-9]{64}$/.test(value.key) && ID.test(value.takeId) ? value : undefined
+  } catch (error) {
+    if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
 
 /** Bounded cache beside the raw take. No PCM is copied over RPC. All file IO is
  * asynchronous and native DSP executes on a worker in the audio utility process.
@@ -62,7 +94,9 @@ export class VoiceTakeConformer {
   }
   private active = new Map<string, { job: string; stop: () => void; done: Promise<unknown> }>()
   constructor(private readonly rootDir: string, private readonly native: TakeConformNative,
-    private readonly limits = { maxBytes: MAX_BYTES, maxEntries: MAX_ENTRIES }) {
+    private readonly limits = { maxBytes: MAX_BYTES, maxEntries: MAX_ENTRIES },
+    private readonly now: () => number = Date.now) {
+    this.rootDir = conformFilePath(rootDir)
     check(Number.isSafeInteger(limits.maxBytes) && limits.maxBytes >= 44 && limits.maxBytes <= MAX_BYTES &&
       Number.isSafeInteger(limits.maxEntries) && limits.maxEntries >= 1 && limits.maxEntries <= MAX_ENTRIES, 'Invalid conform cache limits')
   }
@@ -115,25 +149,38 @@ export class VoiceTakeConformer {
       const request = prepareConformRequest(sidecar, frames, options)
       const placement = (request.startPositionSec + request.userOffsetSec) * request.outputRate
       const placementFrame = placement < 0 ? -Math.round(-placement) : Math.round(placement)
-      const key = createHash('sha256').update(JSON.stringify([TAKE_CONFORM_VERSION, before, request])).digest('hex')
+      const key = createHash('sha256').update(JSON.stringify([TAKE_CONFORM_VERSION, songId, takeId, before, request])).digest('hex')
       const cacheDir = join(dir, '.conform')
       try { await mkdir(cacheDir) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e }
       const cacheStat = await lstat(cacheDir)
       check(cacheStat.isDirectory() && !cacheStat.isSymbolicLink(), 'Invalid conform cache directory')
-      const name = `${takeId}.conform-${key}.wav`, path = join(cacheDir, name)
+      // A full key in bounded metadata prevents a truncated-prefix cache hit.
+      // Extend the prefix on collision; never replace a different (possibly pinned) lane.
+      let path = ''
+      for (const length of [16, 32, 48, 64]) {
+        const candidate = join(cacheDir, `${key.slice(0, length)}.wav`)
+        const record = await cacheRecord(candidate)
+        let exists = false
+        try { await lstat(candidate); exists = true } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        if (record?.key === key && record.takeId === takeId) { path = candidate; break }
+        if (!exists && !record && !path) path = candidate
+      }
+      check(path, 'Conform cache key collision')
+      const recordText = JSON.stringify({ version: TAKE_CONFORM_VERSION, key, takeId })
       if (options.retain) { this.retain(path); retainedPath = path }
       await this.prune(dir, '', path)
       assertCurrent()
       try {
         const cache = await lstat(path)
-        if (cache.isFile() && !cache.isSymbolicLink() && cache.size >= 44 && cache.size <= this.limits.maxBytes) {
+        const record = await cacheRecord(path)
+        if (record?.key === key && record.takeId === takeId && cache.isFile() && !cache.isSymbolicLink() && cache.size >= 44 && cache.size <= this.limits.maxBytes) {
           const h = Buffer.alloc(44), handle = await open(path, 'r')
           try { await handle.read(h, 0, 44, 0) } finally { await handle.close() }
           const durationFrames = h.readUInt32LE(40) / 2
           if (Number.isSafeInteger(durationFrames) && h.readUInt32LE(4) === cache.size - 8 && h.toString('ascii', 36, 40) === 'data' && h.toString('ascii', 0, 4) === 'RIFF' && h.toString('ascii', 8, 16) === 'WAVEfmt ' &&
             h.readUInt32LE(24) === options.outputRate && h.readUInt16LE(22) === 1 && h.readUInt16LE(34) === 16 &&
             durationFrames * 2 + 44 === cache.size && durationFrames <= options.songDurationProjectFrames && await identity() === before && await readFile(sidecarPath, 'utf8') === sideText) {
-            await utimes(path, new Date(), new Date()); assertCurrent()
+            await utimes(path, new Date(this.now()), new Date(this.now())); assertCurrent()
             return { path, key, durationFrames, placementFrame, cached: true }
           }
         }
@@ -145,8 +192,9 @@ export class VoiceTakeConformer {
       // Windows keeps an open lane file undeletable. Reserve the replacement
       // before rendering; busy old files count against the hard cache bounds.
       check(duration <= MAX_WAV_FRAMES, 'Conform output exceeds RIFF bounds', 'memory-budget')
-      await this.prune(dir, '', path, duration * 2 + 44)
-      const temp = join(cacheDir, `${name}.${job}.tmp`)
+      await this.prune(dir, '', path, duration * 2 + 44 + Buffer.byteLength(recordText))
+      const stem = job.replaceAll('-', '')
+      const temp = join(cacheDir, `${stem}.tmp`), metaTemp = join(cacheDir, `${stem}.json.tmp`)
       try {
         assertCurrent()
         const result = await this.native.conformTake(raw, temp, request, job)
@@ -160,18 +208,21 @@ export class VoiceTakeConformer {
         // callers see a complete WAV or a miss, never a partially-written lane.
         const durable = await open(temp, 'r+')
         try { await durable.sync() } finally { await durable.close() }
+        const metadata = await open(metaTemp, 'wx')
+        try { await metadata.writeFile(recordText); await metadata.sync() } finally { await metadata.close() }
         assertCurrent(); await rename(temp, path)
+        await rename(metaTemp, metadataPath(path))
         await this.prune(dir, takeId, path)
         assertCurrent()
         return { path, key, durationFrames: result.durationFrames, placementFrame, cached: false }
-      } finally { await rm(temp, { force: true }) }
+      } finally { await Promise.all([rm(temp, { force: true }), rm(metaTemp, { force: true })]) }
     })()
     this.active.set(songId, { job, stop, done })
     try { return await done }
     catch (error) {
       if (retainedPath) this.release(retainedPath)
       if (isConformTakeError(error)) throw error
-      throw new ConformTakeError('conform-error', error instanceof Error ? error.message : String(error))
+      throw new ConformTakeError((error as NodeJS.ErrnoException)?.code === 'ENAMETOOLONG' ? 'path-too-long' : 'conform-error', error instanceof Error ? error.message : String(error))
     }
     finally {
       options.signal?.removeEventListener('abort', stop)
@@ -200,7 +251,7 @@ export class VoiceTakeConformer {
         throw e
       }
     }
-    const rows: { path: string; bytes: number; mtime: number }[] = []
+    const rows: { path: string; bytes: number; mtime: number; publishing: boolean }[] = []
     const cacheDir = join(dir, '.conform')
     let names: string[]
     try {
@@ -208,25 +259,54 @@ export class VoiceTakeConformer {
       check(cacheStat.isDirectory() && !cacheStat.isSymbolicLink(), 'Invalid conform cache directory')
       names = await readdir(cacheDir)
     } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; throw e }
+    const removeLane = async (path: string): Promise<boolean> => {
+      if (!await remove(path)) return false
+      await rm(metadataPath(path), { force: true })
+      return true
+    }
     for (const name of names) {
-      if (/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}\.conform-[a-f0-9]{64}\.wav\.[a-f0-9-]{36}\.tmp$/.test(name)) {
-        const path = join(cacheDir, name), s = await lstat(path)
-        if (Date.now() - s.mtimeMs > 600000) await remove(path)
+      const path = join(cacheDir, name)
+      const legacy = /^([a-zA-Z0-9][a-zA-Z0-9_-]{0,127})\.conform-([a-f0-9]{64})\.wav$/.exec(name)
+      if (/^[a-f0-9]{32}(?:\.json)?\.tmp$/.test(name) || /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}\.conform-[a-f0-9]{64}\.wav\.[a-f0-9-]{36}\.tmp$/.test(name)) {
+        const stat = await lstat(path).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return undefined })
+        if (!stat) continue
+        if (this.now() - stat.mtimeMs > 600000) await remove(path)
         continue
       }
-      const match = /^([a-zA-Z0-9][a-zA-Z0-9_-]{0,127})\.conform-([a-f0-9]{64})\.wav$/.exec(name)
-      if (!match) continue
-      const path = join(cacheDir, name), s = await lstat(path)
-      let rawExists = true
-      try { rawExists = (await lstat(join(dir, `${match[1]}.wav`))).isFile() } catch { rawExists = false }
-      if (!rawExists || (match[1] === invalidateTake && path !== keep) || !s.isFile() || s.isSymbolicLink()) { if (await remove(path)) continue }
-      rows.push({ path, bytes: s.size, mtime: s.mtimeMs })
+      if (/^[a-f0-9]{16}(?:[a-f0-9]{16}){0,3}\.json$/.test(name)) {
+        try { await lstat(path.slice(0, -5) + '.wav') } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          await remove(path)
+        }
+        continue
+      }
+      if (!legacy && !cacheWav.test(name)) continue
+      const stat = await lstat(path).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return undefined })
+      if (!stat) continue
+      const record = legacy ? undefined : await cacheRecord(path)
+      // WAV rename precedes metadata rename. A concurrent non-cancelling prune
+      // must leave this publication window intact, including unretained calls.
+      let publishing = false
+      if (!legacy && !record && stat.isFile() && !stat.isSymbolicLink() && this.now() - stat.mtimeMs < PUBLICATION_GRACE_MS) {
+        try { await lstat(metadataPath(path)) } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          publishing = true
+        }
+      }
+      let rawExists = false
+      if (record) try { rawExists = (await lstat(join(dir, `${record.takeId}.wav`))).isFile() } catch { /* removed raw take */ }
+      const invalid = legacy || !record || !name.startsWith(record.key.slice(0, name.length - 4)) || !rawExists ||
+        record.takeId === invalidateTake || !stat.isFile() || stat.isSymbolicLink()
+      if (!publishing && path !== keep && invalid && await removeLane(path)) continue
+      let metadataBytes = 0
+      if (record) metadataBytes = (await lstat(metadataPath(path)).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return undefined }))?.size ?? 0
+      rows.push({ path, bytes: stat.size + metadataBytes, mtime: stat.mtimeMs, publishing })
     }
     rows.sort((a, b) => Number(b.path === keep) - Number(a.path === keep) || b.mtime - a.mtime || a.path.localeCompare(b.path))
     let bytes = reserveBytes, entries = reserveBytes ? 1 : 0
     for (const row of rows) {
       if (reserveBytes && row.path === keep) continue // atomic replacement
-      if ((entries + 1 > this.limits.maxEntries || bytes + row.bytes > this.limits.maxBytes) && await remove(row.path)) continue
+      if ((entries + 1 > this.limits.maxEntries || bytes + row.bytes > this.limits.maxBytes) && !row.publishing && await removeLane(row.path)) continue
       bytes += row.bytes; entries++
     }
     check(bytes <= this.limits.maxBytes && entries <= this.limits.maxEntries, 'Conform cache is full (lane files still in use)', 'memory-budget')

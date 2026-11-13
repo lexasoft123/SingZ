@@ -2,6 +2,11 @@
 // Shared by main, preload and renderer. No PCM crosses IPC: only ids, paths and numbers.
 
 export const VOICE_TAKE_SIDECAR_VERSION = 1
+
+/** Diagnostic/public errors must not persist POSIX or Windows file paths. */
+export function safeVoiceTakeMessage(message: unknown, fallback: string): string {
+  return typeof message === 'string' && message.length <= 256 && !/[\\/\r\n]/.test(message) ? message : fallback
+}
 /** Native conform work budget; IPC and renderer add time for publication and transport. */
 export const VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS = 8 * 60 * 1000
 
@@ -187,6 +192,8 @@ export interface VoiceRecordStopResult {
   take?: VoiceTakeSummary
   reason?: 'device-lost' | 'error'
   message?: string
+  /** Main ended a native take at a transport boundary; preserve its explanation. */
+  note?: 'seek'
 }
 
 export interface VoiceRecordSettingsChange {
@@ -297,8 +304,9 @@ export interface VoiceMonitorOutputCandidate extends VoiceMonitorOutputDevice {
   reason?: VoiceMonitorReason
 }
 export interface VoiceMonitorState {
-  /** Resolved native output UID and display-only name. Present on current main-process replies. */
+  /** Display-only name of the common output the monitor resolved to (feeds the route line). The id is deprecated (ADR 0017 WP6). */
   outputDevice?: VoiceMonitorOutputDevice | null
+  /** @deprecated No UI or controller reads this; the monitor follows the common output (ADR 0017 WP6 deletes it). */
   outputCandidates?: VoiceMonitorOutputCandidate[]
   available: true | { reason: VoiceMonitorReason; detail?: string }
   on: boolean
@@ -315,7 +323,7 @@ export interface VoiceMonitorPlaybackContext {
   selectedOutputUid: string
 }
 export interface VoiceMonitorAvailabilityRequest {
-  /** Native inventory UID (as in playback outputDeviceUid); null/undefined follows app output, then default. */
+  /** @deprecated The renderer never sets it; the monitor follows the app's common output (ADR 0017 WP6 deletes it). */
   outputDeviceId?: string | null
   /** Publish route context through the existing serialized monitor IPC without selecting/arming input. */
   contextOnly?: boolean
@@ -324,7 +332,7 @@ export interface VoiceMonitorAvailabilityRequest {
 }
 
 export interface VoiceMonitorSetRequest {
-  /** Same native UID selection as monitorAvailability; switching stops the old monitor before beginning the new route. */
+  /** @deprecated The renderer never sets it; see monitorAvailability (ADR 0017 WP6 deletes it). */
   outputDeviceId?: string | null
   input: { deviceName: string; channelIndex: number }
   on: boolean
@@ -339,7 +347,7 @@ export interface VoiceMonitorGainRequest {
 // ADR 0016: transient native lane. These values never enter project persistence.
 export const VOICE_TAKE_LANE_ID = 'voice:take'
 export type VoiceTakeLaneOmission = 'lane-limit' | 'node-limit' | 'graph-incompatible' | 'native-unavailable'
-export type VoiceTakeConformFailure = 'take-too-long' | 'memory-budget' | 'graph-budget' | 'conform-error'
+export type VoiceTakeConformFailure = 'take-too-long' | 'memory-budget' | 'path-too-long' | 'graph-budget' | 'conform-error'
 export interface VoiceTakeConformedWaveform { offsetSec: number; durationSec: number; peaks: number[] }
 export function isVoiceTakeConformedWaveform(value: unknown): value is VoiceTakeConformedWaveform {
   if (!value || typeof value !== 'object') return false

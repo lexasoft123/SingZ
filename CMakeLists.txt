@@ -765,7 +765,7 @@ if(SINGZ_CORE_TESTS)
   # Compile each deliberate fault into the real leaf/lifecycle, then run the
   # identical behavior suite. Expected failure proves the checks are sensitive.
   file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor.cpp" _voice_monitor_control)
-  foreach(_mutant IN ITEMS ramp clamp finite timestamp xrun mono route buffer steps generation lost song gain latency fade
+  foreach(_mutant IN ITEMS ramp clamp limiter finite timestamp xrun mono route buffer steps generation lost song gain latency fade
       song_optin suitability latency_suitability provider_error sanitized denormal denormal_output route_fade route_reason environments guard_box guard_mix guard_owner inventory settle all_outputs output_map input_channel input_range stale_song_period native_route_state current_native_route monitor_writer monitor_ceiling monitor_capacity retained_reopen idle_monitor_hold idle_song_hold idle_adopt_period browser_route idle_begin idle_late_registration output_choice_identity output_choice_usable output_choice_outputs independent_monitor_output other_song_buffer pinned_monitor_pair)
     if((_mutant STREQUAL "song_optin" OR _mutant STREQUAL "stale_song_period" OR _mutant STREQUAL "steps" OR _mutant STREQUAL "retained_reopen") AND NOT APPLE)
       continue() # This opt-in policy is macOS-only.
@@ -779,6 +779,8 @@ if(SINGZ_CORE_TESTS)
       string(REPLACE "kVoiceMonitorRampFrames = 128" "kVoiceMonitorRampFrames = 1" _header "${_header}")
     elseif(_mutant STREQUAL "clamp")
       string(REPLACE "0.8912509381337456f" "1.0f" _header "${_header}")
+    elseif(_mutant STREQUAL "limiter")
+      string(REPLACE "return std::clamp(scaled, -double(kVoiceMonitorCeiling), double(kVoiceMonitorCeiling));" "return scaled;" _header "${_header}")
     elseif(_mutant STREQUAL "finite")
       string(REPLACE "valid && std::isfinite(block.input[0][frame])" "valid" _header "${_header}")
     elseif(_mutant STREQUAL "timestamp")
@@ -794,7 +796,7 @@ if(SINGZ_CORE_TESTS)
     elseif(_mutant STREQUAL "steps")
       string(REPLACE "frames*=2" "frames=512" _service "${_service}")
     elseif(_mutant STREQUAL "gain")
-      string(REPLACE "std::clamp(gain,-60.0f,12.0f)" "gain" _control "${_control}")
+      string(REPLACE "std::clamp(gain,kVoiceMonitorGainMinDb,kVoiceMonitorGainMaxDb)" "gain" _control "${_control}")
     elseif(_mutant STREQUAL "latency")
       string(REPLACE "uint64_t(result.bufferFrames)*2" "uint64_t(result.bufferFrames)" _control "${_control}")
     elseif(_mutant STREQUAL "fade")
@@ -890,6 +892,10 @@ if(SINGZ_CORE_TESTS)
       string(REPLACE "  self.stop(true); self.generation=generation;" "  sharedAudioService().shutdown(); self.stop(true); self.generation=generation;" _control "${_control}")
       string(PREPEND _control "#include \"native/playback/shared_audio_service.h\"\n")
     endif()
+    # A stale mutant (its target text edited away) would be byte-identical and silently pass.
+    if(_header STREQUAL _voice_monitor_header AND _control STREQUAL _voice_monitor_control AND _service STREQUAL _service_original)
+      message(FATAL_ERROR "voice_monitor negative control '${_mutant}' no longer changes any source; update its REPLACE text")
+    endif()
     set(_dir "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-negative-${_mutant}")
     file(MAKE_DIRECTORY "${_dir}")
     if(NOT _service STREQUAL _service_original)
@@ -928,14 +934,14 @@ if(SINGZ_CORE_TESTS)
     if(_seam STREQUAL "redundant_notification")
       file(READ "${ZCORE_ROOT}/zcore/platform/macos/audio_host_macos_helpers.h" _original)
       string(REPLACE "return !readable || !same ? kMacAudioHostFormatChanged : 0u;"
-        "return kMacAudioHostFormatChanged;" _fault "${_original}")
+        "(void)readable; (void)same; return kMacAudioHostFormatChanged;" _fault "${_original}")
       set(_definition VOICE_MONITOR_MAC_HELPERS_HEADER)
     else()
       file(READ "${ZCORE_ROOT}/zcore/platform/macos/audio_device_macos_buffer.h" _original)
       if(_seam STREQUAL "restore_capacity")
         # Old behavior: wait for even a capacity-only song lease to close.
         string(REPLACE "if (owner.second.changed || owner.second.hold) return AudioBufferWarningNone;"
-          "return AudioBufferWarningNone;" _fault "${_original}")
+          "{ (void)owner; return AudioBufferWarningNone; }" _fault "${_original}")
       else()
         # Ignore the external-value guard: even a CAS failure must not be
         # misreported as restoration or lose the new baseline for re-arm.

@@ -69,6 +69,46 @@ describe('voice take storage', () => {
     expect(await s.start(request)).toMatchObject({ ok: false, reason: 'busy' })
   })
 
+  it('finalizes immediately when no first-sample timestamp becomes available', async () => {
+    vi.useFakeTimers()
+    const root = mkdtempSync(join(tmpdir(), 'singz-no-stamp-')); roots.push(root)
+    const native = fakeNative()
+    native.captureStats = vi.fn(async () => ({ firstSampleCaptured: false }))
+    native.finishTake = vi.fn(native.finishTake)
+    native.stopCapture = vi.fn(async () => ({ ok: true }))
+    const s = new VoiceTakeStore({ rootDir: root, native })
+    try {
+      const starting = s.start(request)
+      await vi.waitFor(() => expect(native.captureStats).toHaveBeenCalled())
+      await vi.advanceTimersByTimeAsync(1100)
+      expect(await starting).toMatchObject({ ok: false, reason: 'error', message: expect.stringContaining('No microphone samples') })
+      expect(native.finishTake).toHaveBeenCalledTimes(1)
+      expect(native.stopCapture).toHaveBeenCalledTimes(1)
+      expect((await s.level()).takeActive).toBe(false)
+      expect((await s.stop()).take?.status).toBe('partial-error')
+    } finally { vi.useRealTimers() }
+  })
+
+  it.each(['/home/private-user/take.wav', 'C:\\Users\\private-user\\take.wav'])('redacts sampling and finalization error paths: %s', async message => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-safe-log-')); roots.push(root)
+    for (const phase of ['sampling', 'finalization'] as const) {
+      const native = fakeNative()
+      const s = new VoiceTakeStore({ rootDir: root, native })
+      const started = await s.start(request)
+      expect(started.ok).toBe(true)
+      if (phase === 'sampling') native.captureStats = async () => { throw new Error(message) }
+      else native.finishTake = async () => { throw new Error(message) }
+      const stopped = await s.stop()
+      if (phase === 'finalization') expect(stopped.message).toBe('The take could not be finalized.')
+      const takeId = started.ok ? started.takeId : ''
+      const diagnostics = logEntries().filter(entry => entry.source === 'voice-take' &&
+        entry.line.includes(takeId) && entry.line.includes(phase === 'sampling' ? 'sampling failed' : 'finalize failed'))
+      expect(diagnostics).toHaveLength(1)
+      expect(diagnostics[0].line).not.toContain('private-user')
+      expect(diagnostics[0].line).toContain(phase === 'sampling' ? 'capture-sampling-failed' : 'The take could not be finalized.')
+    }
+  })
+
   it('recovers a wav without a sidecar and computes its duration', async () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
     mkdirSync(join(root, 'song-1')); writeFileSync(join(root, 'song-1', 'take-1.wav'), wav(22050, 22050))
@@ -792,7 +832,9 @@ describe('take timeline anchors and FX descriptor', () => {
     else f.pause()
     f.at(3)
     if (poll) await f.poll(3)
-    expect((await f.s.stop(undefined, 'seek')).take?.status).toBe('complete')
+    const stopped = await f.s.stop(undefined, 'seek')
+    expect(stopped).toMatchObject({ take: { status: 'complete' }, note: 'seek' })
+    expect(await f.s.stop()).toEqual(stopped)
     expect(f.read()).toMatchObject({ startPositionSec: 12, latencySource: 'reported', anchors })
     expect((await f.s.level()).takeActive).toBe(false)
   })

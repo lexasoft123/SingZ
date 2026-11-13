@@ -1280,9 +1280,18 @@ template<class F> void conformArray(napi_env env, napi_value obj, const char *na
 napi_value conformTake(napi_env env, napi_callback_info info) {
   size_t argc = 4; napi_value argv[4]{}; napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   auto job = std::make_unique<ConformJob>(); job->env = env;
+  const auto cleanupFailedJob = [&] {
+    if (job->registered) { std::lock_guard lock(conformMutex); conformJobs.erase(job->id); job->registered = false; }
+    if (job->work) { napi_delete_async_work(env, job->work); job->work = nullptr; }
+  };
   try {
     if (argc != 4) throw std::runtime_error("conformTake requires input, output, request and job id");
-    job->inputPath = getStringValue(env, argv[0], 32768); job->outputPath = getStringValue(env, argv[1], 32768);
+    for (size_t i=0;i<2;++i) {
+      size_t bytes=0;
+      if (napi_get_value_string_utf8(env,argv[i],nullptr,0,&bytes)!=napi_ok) throw std::runtime_error("Invalid conform path");
+      if (bytes>131068) throw singz::TakeConformError(singz::TakeConformFailure::PathTooLong,"Conform path exceeds UTF-8 length limit");
+    }
+    job->inputPath = getStringValue(env, argv[0], 131072); job->outputPath = getStringValue(env, argv[1], 131072);
     job->id = getStringValue(env, argv[3], 128);
     if (job->id.empty() || job->inputPath.empty() || job->outputPath.empty() || job->inputPath == job->outputPath ||
       job->inputPath.find('\0') != std::string::npos || job->outputPath.find('\0') != std::string::npos)
@@ -1312,6 +1321,8 @@ napi_value conformTake(napi_env env, napi_callback_info info) {
       [](napi_env, void *data) {
         auto *j = static_cast<ConformJob *>(data);
         try {
+          const auto input=singz::takeConformFilePath(j->inputPath).u8string(),output=singz::takeConformFilePath(j->outputPath).u8string();
+          j->inputPath.assign(input.begin(),input.end());j->outputPath.assign(output.begin(),output.end());
           auto result = singz::conformTakeFile(j->inputPath, j->outputPath, j->request, j->cancelled.get());
           if (j->cancelled->load()) { std::error_code ignored; std::filesystem::remove(std::filesystem::path(std::u8string(j->outputPath.begin(), j->outputPath.end())), ignored); throw singz::TakeConformError(singz::TakeConformFailure::Cancelled,"Take conform cancelled"); }
           j->outputComplete = true;
@@ -1337,9 +1348,11 @@ napi_value conformTake(napi_env env, napi_callback_info info) {
       }, job.get(), &job->work);
     if (created != napi_ok || napi_queue_async_work(env, job->work) != napi_ok) throw std::runtime_error("Could not queue conform worker");
     job.release(); return promise;
+  } catch (const singz::TakeConformError &e) {
+    cleanupFailedJob();
+    napi_throw_error(env, singz::takeConformFailureCode(e.code()), e.what()); return nullptr;
   } catch (const std::exception &e) {
-    if (job->registered) { std::lock_guard lock(conformMutex); conformJobs.erase(job->id); }
-    if (job->work) napi_delete_async_work(env, job->work);
+    cleanupFailedJob();
     napi_throw_error(env, "conform-error", e.what()); return nullptr;
   }
 }

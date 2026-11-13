@@ -297,7 +297,7 @@ describe('recording', () => {
     c.dispose()
   })
 
-  it.each([.5, .75, 1, 1.25])('native recording survives a cold projected-position correction at tempo %s', async tempo => {
+  it.each([.25, .5, .75, 1, 1.25, 2])('native recording survives a cold projected-position correction at tempo %s', async tempo => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { c, engine, api } = await setup({}, e => {
       Object.defineProperty(e, 'nativeActive', { value: true })
@@ -349,6 +349,33 @@ describe('recording', () => {
       api.level.mockResolvedValue({ peakDb: -20, rmsDb: -30, takeActive: false })
       await c.pollLevel()
       await vi.waitFor(() => expect(c.state).toBe('take-review'))
+    } finally { c.dispose(); warning.mockRestore() }
+  })
+
+  it.each(['seek', 'pause'])('restores the native %s explanation from the idempotent stop result', async boundary => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { c, engine, api } = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary(), note: 'seek' as const })) },
+      e => Object.defineProperty(e, 'nativeActive', { value: true }))
+    try {
+      await c.toggleRecord(); clock = 100
+      if (boundary === 'seek') engine._pos = 90
+      else engine._playing = false
+      c.tick()
+      api.level.mockResolvedValue({ peakDb: -20, rmsDb: -30, takeActive: false })
+      await c.pollLevel()
+      await vi.waitFor(() => expect(c.state).toBe('take-review'))
+      expect(c.getSnapshot().stoppedBy).toBe('seek')
+    } finally { c.dispose(); warning.mockRestore() }
+  })
+
+  it.each(['/home/private-user/take.wav', 'C:\\Users\\private-user\\take.wav'])('redacts recording start error paths: %s', async message => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { c } = await setup({ recordStart: vi.fn(async () => ({ ok: false, reason: 'error', message })) })
+    try {
+      await c.toggleRecord()
+      const diagnostic = warning.mock.calls.find(call => String(call[0]).includes('start failed'))?.[0]
+      expect(diagnostic).toContain('record-start-failed')
+      expect(diagnostic).not.toContain('private-user')
     } finally { c.dispose(); warning.mockRestore() }
   })
 
@@ -932,7 +959,7 @@ describe('live monitoring (M2)', () => {
     vi.fn(async () => monState({ available: reason, on: false, latency: null }))
   it('availability is asked when the song loads and again on device change', async () => {
     const { c, api } = await setup()
-    expect(api.monitorAvailability).toHaveBeenCalledWith({ input: { deviceName: 'Scarlett 2i2', channelIndex: 0 }, outputDeviceId: null })
+    expect(api.monitorAvailability).toHaveBeenCalledWith({ input: { deviceName: 'Scarlett 2i2', channelIndex: 0 } })
     api.monitorAvailability.mockClear()
     await c.refreshInputs() // what a device-change notification triggers
     await vi.waitFor(() => expect(api.monitorAvailability).toHaveBeenCalled())
@@ -941,7 +968,7 @@ describe('live monitoring (M2)', () => {
   it('toggles on and off through monitorSet, with the monitor gain, never persisted as on', async () => {
     const { c, api } = await setup()
     await c.toggleMonitor()
-    expect(api.monitorSet).toHaveBeenLastCalledWith({ input: { deviceName: 'Scarlett 2i2', channelIndex: 0 }, on: true, gainDb: -12, outputDeviceId: null })
+    expect(api.monitorSet).toHaveBeenLastCalledWith({ input: { deviceName: 'Scarlett 2i2', channelIndex: 0 }, on: true, gainDb: -6 })
     expect(c.state).toBe('monitoring-on')
     expect(c.getSnapshot().monitor.latency?.roundTripMs).toBe(6)
     await c.toggleMonitor()
@@ -994,8 +1021,8 @@ describe('live monitoring (M2)', () => {
     c.setMonitorFader(0)
     await vi.waitFor(() => expect(api.monitorGain).toHaveBeenCalledWith({ gainDb: -60 }))
     expect(c.getSnapshot().level).toBe(40) // each keeps its own value
-    expect(monitorFaderToDb(100)).toBe(12)
-    expect(monitorDbToFader(0)).toBe(83)
+    expect(monitorFaderToDb(100)).toBe(36)
+    expect(monitorDbToFader(0)).toBe(50)
     c.dispose()
   })
   it('a running monitor survives a song change and unload; speaker-off and dispose still stop it', async () => {
@@ -1304,7 +1331,7 @@ describe('input channels (spec J2, VS-REC-011)', () => {
     const { c, api } = await setup({}, undefined, quadro)
     api.monitorAvailability.mockClear()
     c.selectInput('zen#9')
-    await vi.waitFor(() => expect(api.monitorAvailability).toHaveBeenCalledWith({ input: { deviceName: 'zen-uid', channelIndex: 9 }, outputDeviceId: null }))
+    await vi.waitFor(() => expect(api.monitorAvailability).toHaveBeenCalledWith({ input: { deviceName: 'zen-uid', channelIndex: 9 } }))
     c.dispose()
   })
   it('persists the channel per device and restores it; a missing channel or device falls back with no error', async () => {
@@ -1515,33 +1542,52 @@ describe('monitor level preset, memory and hint', () => {
     const m = new Map(Object.entries(init))
     return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m }
   }
-  it('defaults to a safe -12 dB', async () => {
-    expect(INITIAL_VOICE_MODEL.monitorGainDb).toBe(-12)
+  it('defaults to -6 dB (-12 was too quiet for a typical mic)', async () => {
+    expect(INITIAL_VOICE_MODEL.monitorGainDb).toBe(-6)
     const { c } = await setup()
-    expect(c.getSnapshot().monitorGainDb).toBe(-12)
+    expect(c.getSnapshot().monitorGainDb).toBe(-6)
     c.dispose()
   })
-  it('remembers the monitor gain in storage, clamped to -60..+12, and ignores junk', async () => {
+  it('remembers the monitor gain in storage, clamped to -60..+36, and ignores junk', async () => {
     const store = memory()
     const a = await setup({}, undefined, undefined, store)
     a.c.setMonitorFader(0)
     expect(store.m.get('singz.voice.monitorGain')).toBe('-60')
     a.c.setMonitorFader(60)
-    expect(store.m.get('singz.voice.monitorGain')).toBe('-17')
+    expect(store.m.get('singz.voice.monitorGain')).toBe('8')
     a.c.dispose()
     const b = await setup({}, undefined, undefined, store)
-    expect(b.c.getSnapshot().monitorGainDb).toBe(-17)
+    expect(b.c.getSnapshot().monitorGainDb).toBe(8)
     b.c.dispose()
     for (const raw of ['99', '-999', 'loud', '', '   ', 'NaN', 'Infinity']) {
       const junk = memory({ 'singz.voice.monitorGain': raw })
       const r = await setup({}, undefined, undefined, junk)
-      expect(r.c.getSnapshot().monitorGainDb, JSON.stringify(raw)).toBe(-12) // never 0 dB, never clamped up to +12
-      expect(junk.m.get('singz.voice.monitorGain')).toBe('-12') // junk is rewritten with the default
+      expect(r.c.getSnapshot().monitorGainDb, JSON.stringify(raw)).toBe(-6) // never 0 dB, never clamped to an edge
+      expect(junk.m.get('singz.voice.monitorGain')).toBe('-6') // junk is rewritten with the default
       r.c.dispose()
+    }
+    for (const [raw, db] of [['24', 24], ['36', 36], ['12.5', 12.5], ['-60', -60]] as const) {
+      const hi = await setup({}, undefined, undefined, memory({ 'singz.voice.monitorGain': raw }))
+      expect(hi.c.getSnapshot().monitorGainDb, raw).toBe(db) // above the old +12 max is valid now
+      hi.c.dispose()
     }
     const ok = await setup({}, undefined, undefined, memory({ 'singz.voice.monitorGain': ' -6.5 ' }))
     expect(ok.c.getSnapshot().monitorGainDb).toBe(-6.5)
     ok.c.dispose()
+  })
+  it('monitor fader mapping: extremes, 0 dB mid-way, fine steps where people sing, every position round-trips', () => {
+    expect(monitorFaderToDb(0)).toBe(-60)
+    expect(monitorFaderToDb(100)).toBe(36)
+    expect(monitorFaderToDb(50)).toBe(0)
+    expect(monitorFaderToDb(20)).toBe(-24)
+    expect(monitorFaderToDb(80)).toBe(24)
+    expect(monitorFaderToDb(-5)).toBe(-60)
+    expect(monitorFaderToDb(500)).toBe(36)
+    expect(monitorFaderToDb(NaN)).toBe(-60)
+    expect(monitorDbToFader(99)).toBe(100)
+    expect(monitorDbToFader(-99)).toBe(0)
+    for (let v = 0; v <= 100; v++) expect(monitorDbToFader(monitorFaderToDb(v)), `fader ${v}`).toBe(v)
+    for (let v = 21; v <= 80; v++) expect(monitorFaderToDb(v) - monitorFaderToDb(v - 1)).toBeLessThanOrEqual(1) // singing range
   })
   it('monitorSet carries the remembered gain, so monitoring never opens louder than it', async () => {
     const { c, api } = await setup({}, undefined, undefined, memory({ 'singz.voice.monitorGain': '-30' }))
@@ -1553,17 +1599,17 @@ describe('monitor level preset, memory and hint', () => {
     const { c, api } = await setup()
     c.setFader(50)
     expect(c.getSnapshot().level).toBe(50)
-    expect(c.getSnapshot().monitorGainDb).toBe(-12)
+    expect(c.getSnapshot().monitorGainDb).toBe(-6)
     expect(api.monitorGain).not.toHaveBeenCalled()
     await c.toggleMonitor()
-    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ gainDb: -12 }))
+    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ gainDb: -6 }))
     c.dispose()
   })
   it('the fader edits the take level by default and the monitor level exactly while the speaker is on', async () => {
     const { c, api } = await setup()
     c.setFader(40)
     expect(c.getSnapshot().level).toBe(40)
-    expect(c.getSnapshot().monitorGainDb).toBe(-12)
+    expect(c.getSnapshot().monitorGainDb).toBe(-6)
     await c.toggleMonitor()
     c.setFader(0)
     await vi.waitFor(() => expect(api.monitorGain).toHaveBeenCalledWith({ gainDb: -60 }))
@@ -2089,20 +2135,18 @@ describe('voice lane without a take', () => {
   })
 })
 
-describe('monitor output in the track settings popup', () => {
+describe('one common output: the track settings popup has no monitor output of its own', () => {
   const memory = (init: Record<string, string> = {}) => {
     const m = new Map(Object.entries(init))
-    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m }
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k), m }
   }
   const KEY = 'singz.voice.monitorOutput'
-  const candidates = [
-    { id: 'zen-uid', name: 'Zen Quadro', usable: true },
-    { id: 'bt-uid', name: 'Headphones BT', usable: false, reason: 'route-bluetooth' as const },
-    { id: 'mbp-spk', name: 'MacBook Speakers', usable: false, reason: 'route-separate-devices' as const }
-  ]
-  const withCandidates = (over: Partial<VoiceMonitorState> = {}) =>
-    ({ monitorAvailability: vi.fn(async () => monState({ on: false, outputCandidates: candidates, outputDevice: { id: 'zen-uid', name: 'Zen Quadro' }, ...over })) }) as Partial<VoiceTakeApi>
+  // The deprecated contract fields may still arrive from main; nothing in the UI or controller may use them.
+  const withDeprecated = (over: Partial<VoiceMonitorState> = {}) =>
+    ({ monitorAvailability: vi.fn(async () => monState({ on: false, outputCandidates: [{ id: 'zen-uid', name: 'Zen Quadro', usable: true }, { id: 'bt-uid', name: 'Headphones BT', usable: false, reason: 'route-bluetooth' as const }], outputDevice: { id: 'zen-uid', name: 'Zen Quadro' }, ...over })) }) as Partial<VoiceTakeApi>
   const settingsHtml = (c: VoiceController): string => renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: c, onClose: () => undefined }))
+  const sentOutputs = (api: ReturnType<typeof fakeApi>): unknown[] =>
+    [...api.monitorSet.mock.calls, ...api.monitorAvailability.mock.calls].map((c) => c[0] as object)
 
   it('the voice header has a Track settings gear that opens the popup (aria-haspopup dialog)', async () => {
     const { c, engine } = await setup()
@@ -2110,210 +2154,60 @@ describe('monitor output in the track settings popup', () => {
     expect(html).toMatch(/aria-haspopup="dialog"[^>]*aria-expanded="false"[^>]*aria-label="Track settings"/)
     c.dispose()
   })
-  it('lists the candidates; an unusable one is disabled with its typed reason and cannot be chosen', async () => {
-    const store = memory()
-    const { c, api } = await setup(withCandidates(), undefined, undefined, store)
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
+  it('the popup renders no select and no monitor-output label, even when main still reports output candidates', async () => {
+    const { c } = await setup(withDeprecated())
+    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputDevice).not.toBeNull())
     const html = settingsHtml(c)
-    expect(html).toContain('Same as song output (Zen Quadro)')
-    expect(html).toMatch(/<option value="bt-uid" disabled="">Headphones BT \(unavailable: Bluetooth adds too much delay[^<]*<\/option>/)
-    expect(html).toMatch(/<option value="mbp-spk" disabled="">MacBook Speakers \(unavailable: Monitoring needs the input and output on one device/)
-    expect(html).toMatch(/<option value="zen-uid">Zen Quadro<\/option>/)
-    api.monitorAvailability.mockClear()
-    await c.setMonitorOutput('bt-uid') // negative control: the disabled entry is refused
-    await c.setMonitorOutput('not-listed')
-    expect(c.getSnapshot().monitorOutput).toBeNull()
-    expect(store.m.get(KEY)).toBeUndefined()
-    expect(api.monitorAvailability).not.toHaveBeenCalled()
+    expect(html).not.toContain('<select')
+    expect(html).not.toContain('<option')
+    expect(html).not.toMatch(/Monitor output|Same as song output|saved output|Switching the monitor/i)
+    expect(html).not.toContain('Headphones BT')
+    expect(html).toContain('Monitor level')
+    expect(html).toContain('Take playback level')
+    expect(html).toContain('Effects')
     c.dispose()
   })
-  it('the selection is sent as outputDeviceId and remembered; the default sends null', async () => {
-    const store = memory()
-    const { c, api } = await setup(withCandidates(), undefined, undefined, store)
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    await c.setMonitorOutput('zen-uid')
-    expect(store.m.get(KEY)).toBe('zen-uid')
-    await vi.waitFor(() => expect(api.monitorAvailability).toHaveBeenLastCalledWith(expect.objectContaining({ outputDeviceId: 'zen-uid' })))
-    await c.toggleMonitor()
-    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: true, outputDeviceId: 'zen-uid' }))
-    await c.setMonitorOutput(null)
-    expect(store.m.get(KEY)).toBe('')
-    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: true, outputDeviceId: null }))
+  it('the controller never sends outputDeviceId, to availability or to monitorSet', async () => {
+    const { c, api } = await setup(withDeprecated())
+    await vi.waitFor(() => expect(api.monitorAvailability).toHaveBeenCalled())
     await c.toggleMonitor()
     await c.toggleMonitor()
-    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ on: true, outputDeviceId: null }))
-    c.dispose()
-    // a fresh controller (remount after restart) restores the choice; monitoring itself is never remembered
-    const again = await setup(withCandidates(), undefined, undefined, memory({ [KEY]: 'zen-uid' }))
-    expect(again.c.getSnapshot().monitorOutput).toBe('zen-uid')
-    expect(again.c.getSnapshot().monitor.on).toBe(false)
-    again.c.dispose()
-  })
-  it('choosing an output while monitoring restarts it as a transient state, not an error', async () => {
-    const { c, api } = await setup(withCandidates())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
     await c.toggleMonitor()
-    let done!: (v: VoiceMonitorState) => void
-    api.monitorSet.mockImplementationOnce(() => new Promise<VoiceMonitorState>((r) => { done = r }))
-    const switching = c.setMonitorOutput('zen-uid')
-    await vi.waitFor(() => expect(c.getSnapshot().monitorSwitching).toBe(true))
-    expect(settingsHtml(c)).toContain('Switching the monitor output…')
-    expect(c.getSnapshot().error).toBeNull()
-    done(monState({ on: true, outputCandidates: candidates, outputDevice: { id: 'zen-uid', name: 'Zen Quadro' } }))
-    await switching
-    expect(c.getSnapshot().monitorSwitching).toBe(false)
-    expect(c.getSnapshot().monitor.on).toBe(true)
-    expect(c.getSnapshot().error).toBeNull()
+    expect(api.monitorSet).toHaveBeenCalled()
+    for (const arg of sentOutputs(api)) expect(arg).not.toHaveProperty('outputDeviceId')
+    expect(c).not.toHaveProperty('setMonitorOutput')
     c.dispose()
   })
-  it('a typed refusal on the new device leaves the monitor off without raising an error', async () => {
-    const { c, api } = await setup(withCandidates())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
+  it('a stored singz.voice.monitorOutput is ignored, removed once, and never written back', async () => {
+    const store = memory({ [KEY]: 'zen-uid' })
+    const { c, api } = await setup(withDeprecated(), undefined, undefined, store)
+    expect(store.m.has(KEY)).toBe(false)
     await c.toggleMonitor()
-    api.monitorSet.mockResolvedValueOnce(monState({ available: { reason: 'route-separate-devices' }, on: false, latency: null, outputCandidates: candidates }))
-    await c.setMonitorOutput('zen-uid')
-    expect(c.getSnapshot().monitor.on).toBe(false)
-    expect(c.getSnapshot().monitor.reason).toBe('route-separate-devices')
-    expect(c.getSnapshot().error).toBeNull()
+    c.setMonitorFader(40)
+    expect(store.m.has(KEY)).toBe(false)
+    for (const arg of sentOutputs(api)) expect(arg).not.toHaveProperty('outputDeviceId')
     c.dispose()
+    // negative control: a storage without removeItem still ends up not holding the choice
+    const bare = new Map([[KEY, 'bt-uid']])
+    const legacy = await setup({}, undefined, undefined, { getItem: (k: string) => bare.get(k) ?? null, setItem: (k: string, v: string) => void bare.set(k, v) })
+    expect(bare.get(KEY)).toBe('')
+    legacy.c.dispose()
   })
-  it('a remembered device missing from the candidates falls back to the default and says so', async () => {
-    const store = memory({ [KEY]: 'gone-uid' })
-    const { c, api } = await setup(withCandidates(), undefined, undefined, store)
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    expect(c.getSnapshot().monitorOutput).toBeNull()
-    expect(c.getSnapshot().monitorOutputMissing).toBe(true)
-    expect(settingsHtml(c)).toContain('The saved output is not available.')
-    await c.toggleMonitor()
-    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ outputDeviceId: null }))
-    c.dispose()
-    // negative control: a present remembered device is used and no fallback note is shown
-    const ok = await setup(withCandidates(), undefined, undefined, memory({ [KEY]: 'zen-uid' }))
-    await vi.waitFor(() => expect(ok.c.getSnapshot().monitorOutputs).toHaveLength(3))
-    expect(ok.c.getSnapshot().monitorOutput).toBe('zen-uid')
-    expect(ok.c.getSnapshot().monitorOutputMissing).toBe(false)
-    ok.c.dispose()
-  })
-  it('strict parse: junk in storage is ignored', async () => {
-    for (const raw of ['on', ' padded ', 'a\u0000b', 'x'.repeat(300)]) {
-      const { c } = await setup({}, undefined, undefined, memory({ [KEY]: raw }))
-      expect(c.getSnapshot().monitorOutput, raw).toBeNull()
-      c.dispose()
-    }
-  })
-  it('the route line shows the device, buffer and estimated delay only while monitoring', async () => {
-    const { c } = await setup(withCandidates())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    expect(settingsHtml(c)).toContain('Route: shown while monitoring.')
+  it('the route line names the one common output, then adds buffer and delay only while monitoring', async () => {
+    const { c } = await setup(withDeprecated())
+    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputDevice).not.toBeNull())
+    expect(settingsHtml(c)).toContain('Output: Zen Quadro (Settings › Audio route)')
     await c.toggleMonitor()
     expect(settingsHtml(c)).toMatch(/Route: Zen Quadro · buffer \d+ frames · estimated delay ≈ \d+ ms/)
     c.dispose()
   })
-})
-
-describe('monitor output: back-to-back picks, refusals and unusable remembered devices', () => {
-  const memory = (init: Record<string, string> = {}) => {
-    const m = new Map(Object.entries(init))
-    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m }
-  }
-  const cands = [
-    { id: 'a-uid', name: 'Interface A', usable: true },
-    { id: 'b-uid', name: 'Interface B', usable: true },
-    { id: 'bt-uid', name: 'Headphones BT', usable: false, reason: 'route-separate-devices' as const }
-  ]
-  const apiOver = (): Partial<VoiceTakeApi> =>
-    ({ monitorAvailability: vi.fn(async () => monState({ on: false, outputCandidates: cands })) }) as Partial<VoiceTakeApi>
-  const outputsOf = (api: ReturnType<typeof fakeApi>): (string | null | undefined)[] =>
-    api.monitorSet.mock.calls.filter((c) => (c[0] as { on: boolean }).on).map((c) => (c[0] as { outputDeviceId?: string | null }).outputDeviceId)
-
-  it('pick A then B back to back while the switch is in flight: B is sent once A settles', async () => {
-    const { c, api } = await setup(apiOver())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    await c.toggleMonitor()
-    api.monitorSet.mockClear()
-    let doneA!: (v: VoiceMonitorState) => void
-    api.monitorSet.mockImplementationOnce(() => new Promise<VoiceMonitorState>((r) => { doneA = r }))
-    const a = c.setMonitorOutput('a-uid')
-    await vi.waitFor(() => expect(api.monitorSet).toHaveBeenCalledTimes(1))
-    await c.setMonitorOutput('b-uid') // in flight: recorded, not dropped
-    expect(api.monitorSet).toHaveBeenCalledTimes(1)
-    doneA(monState({ on: true, outputCandidates: cands }))
-    await a
-    await vi.waitFor(() => expect(api.monitorSet).toHaveBeenCalledTimes(2))
-    expect(outputsOf(api)).toEqual(['a-uid', 'b-uid']) // negative control: without the re-issue native would stay on A
-    expect(c.getSnapshot().monitorOutput).toBe('b-uid')
-    await vi.advanceTimersByTimeAsync(0)
-    expect(api.monitorSet).toHaveBeenCalledTimes(2) // once, no loop
+  it('a typed refusal (route-separate-devices) shows its message, which never mentions a monitor output', async () => {
+    const { c } = await setup({ monitorAvailability: vi.fn(async () => monState({ available: { reason: 'route-separate-devices' }, on: false, latency: null })) })
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('route-separate-devices'))
+    const html = settingsHtml(c)
+    expect(html).toContain('Monitoring needs the input and output on one device')
+    expect(html).not.toMatch(/monitor output/i)
     c.dispose()
-  })
-  it('a pick made while the toggle-on is in flight is sent after it lands', async () => {
-    const { c, api } = await setup(apiOver())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    let done!: (v: VoiceMonitorState) => void
-    api.monitorSet.mockImplementationOnce(() => new Promise<VoiceMonitorState>((r) => { done = r }))
-    const toggling = c.toggleMonitor()
-    await vi.waitFor(() => expect(api.monitorSet).toHaveBeenCalledTimes(1))
-    await c.setMonitorOutput('b-uid')
-    done(monState({ on: true, outputCandidates: cands }))
-    await toggling
-    await vi.waitFor(() => expect(outputsOf(api)).toEqual([null, 'b-uid']))
-    c.dispose()
-  })
-  it('a pick that returns to what was sent while in flight is not re-sent', async () => {
-    const { c, api } = await setup(apiOver())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    await c.toggleMonitor()
-    api.monitorSet.mockClear()
-    let doneA!: (v: VoiceMonitorState) => void
-    api.monitorSet.mockImplementationOnce(() => new Promise<VoiceMonitorState>((r) => { doneA = r }))
-    const a = c.setMonitorOutput('a-uid')
-    await vi.waitFor(() => expect(api.monitorSet).toHaveBeenCalledTimes(1))
-    await c.setMonitorOutput('b-uid')
-    await c.setMonitorOutput('a-uid')
-    doneA(monState({ on: true, outputCandidates: cands }))
-    await a
-    await vi.advanceTimersByTimeAsync(0)
-    expect(outputsOf(api)).toEqual(['a-uid'])
-    c.dispose()
-  })
-  it('a refused switch releases the input the monitor held', async () => {
-    const { c, api } = await setup(apiOver())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    await c.toggleMonitor()
-    expect(c.getSnapshot().armed).toBe(false) // monitoring holds the input, the arm button is untouched
-    api.disarm.mockClear()
-    api.monitorSet.mockResolvedValueOnce(monState({ available: { reason: 'route-separate-devices' }, on: false, latency: null, outputCandidates: cands }))
-    await c.setMonitorOutput('a-uid')
-    expect(c.getSnapshot().monitor.on).toBe(false)
-    expect(c.getSnapshot().armed).toBe(false) // negative control: it used to stay armed with the input open
-    await vi.waitFor(() => expect(api.disarm).toHaveBeenCalled())
-    c.dispose()
-  })
-  it('a failed switch (the call throws) turns the monitor off and releases its arm', async () => {
-    const { c, api } = await setup(apiOver())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    await c.toggleMonitor()
-    api.disarm.mockClear()
-    api.monitorSet.mockRejectedValueOnce(new Error('boom'))
-    await c.setMonitorOutput('a-uid')
-    expect(c.getSnapshot().monitor.on).toBe(false)
-    expect(c.getSnapshot().armed).toBe(false)
-    await vi.waitFor(() => expect(api.disarm).toHaveBeenCalled())
-    c.dispose()
-  })
-  it('a remembered output that is present but unusable falls back to the default and says so', async () => {
-    const { c, api } = await setup(apiOver(), undefined, undefined, memory({ 'singz.voice.monitorOutput': 'bt-uid' }))
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputs).toHaveLength(3))
-    expect(c.getSnapshot().monitorOutput).toBeNull()
-    expect(c.getSnapshot().monitorOutputMissing).toBe(true)
-    await c.toggleMonitor()
-    expect(api.monitorSet).toHaveBeenLastCalledWith(expect.objectContaining({ outputDeviceId: null }))
-    c.dispose()
-    // negative control: a usable remembered output is kept
-    const ok = await setup(apiOver(), undefined, undefined, memory({ 'singz.voice.monitorOutput': 'a-uid' }))
-    await vi.waitFor(() => expect(ok.c.getSnapshot().monitorOutputs).toHaveLength(3))
-    expect(ok.c.getSnapshot().monitorOutput).toBe('a-uid')
-    ok.c.dispose()
   })
 })
 

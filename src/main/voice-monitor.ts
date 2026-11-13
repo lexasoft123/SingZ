@@ -1,4 +1,5 @@
 import { VOICE_MONITOR_MAX_FRAMES, VOICE_MONITOR_TARGET_FRAMES, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorState, type VoiceMonitorReason, type VoiceMonitorLatency, type VoiceMonitorPlaybackContext } from '../shared/voice-take'
+import { clampMonitorGainDb } from '../shared/voice-monitor-gain'
 import type { CaptureInputDevice, DesktopAudioHostInventoryResult } from '../shared/types'
 
 type OutputDetails = Pick<VoiceMonitorState, 'outputDevice' | 'outputCandidates'>
@@ -16,7 +17,7 @@ export function microphonePermission(preferences: { getMediaAccessStatus(type: '
   return preferences.getMediaAccessStatus('microphone') === 'granted'
 }
 const normalize = (s: string): string => s.trim().replace(/\s+\([^()]*\)\s*$/, '').trim().toLocaleLowerCase()
-const clamp = (n: number): number => Math.max(-60, Math.min(12, n))
+const clamp = clampMonitorGainDb
 class MonitorCloseError extends Error {}
 // Terminal failures emitted by the audio RPC; ordinary native errors retain ownership.
 export function isAudioProcessFailure(error: unknown): boolean {

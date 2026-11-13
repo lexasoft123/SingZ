@@ -3,6 +3,14 @@
 #include <thread>
 #include <iostream>
 #include <cmath>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#endif
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
 #endif
@@ -45,7 +53,53 @@ inline void benchmark(uint32_t seconds,uint32_t rate,uint32_t outputRate) {
   const double rss=peakRss();std::cout<<seconds<<" seconds at "<<rate<<" -> "<<outputRate<<": "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()<<" s, peak RSS "<<rss<<" MiB\n";
   check(rss<16,"Streaming conform peak RSS exceeds 16 MiB");
 }
+inline void pathLimits() {
+  check(singz::takeConformWindowsPath(LR"(C:\one\..\two.wav)")==LR"(\\?\C:\two.wav)","Portable native drive normalization");
+  check(singz::takeConformWindowsPath(LR"(\\server\share\one\..\two.wav)")==LR"(\\?\UNC\server\share\two.wav)","Portable native UNC normalization");
+  check(singz::takeConformWindowsPath(LR"(\\?\UNC\server\share\..\two.wav)")==LR"(\\?\UNC\server\share\two.wav)","UNC dot segments must stay inside the share root");
+  const auto longDrive=std::wstring(L"C:\\")+std::wstring(200,L'p')+L"\\"+std::wstring(100,L'q')+L"\\song\\.conform\\0123456789abcdef.wav";
+  check(longDrive.size()>260,"Portable native fixture must exceed MAX_PATH");
+  check(singz::takeConformWindowsPath(longDrive)==L"\\\\?\\"+longDrive,"Native long-path formatter must preserve full path");
+  std::wstring total=L"C:\\";for(int i=0;i<164;++i)total+=std::wstring(200,L'p')+L"\\";
+  std::wstring unicode=L"C:\\";for(int i=0;i<128;++i)unicode+=L"\U0001f3b5";
+  for(const auto &path:{std::wstring(L"C:\\")+std::wstring(256,L'p'),total,unicode}) {
+    bool rejected=false;try{singz::takeConformWindowsPath(path);}catch(const singz::TakeConformError &e){rejected=e.code()==singz::TakeConformFailure::PathTooLong;}
+    check(rejected,"Portable native path/component limit must return path-too-long");
+  }
+  Paths paths;generate(paths.input,1,48000);const auto r=request(1,48000,48000);
+  const auto tooLong=(std::filesystem::path(paths.output).parent_path()/std::string(300,'x')).string();
+  bool typed=false;
+  try {singz::conformTakeFile(paths.input,tooLong,r);}
+  catch(const singz::TakeConformError &e){typed=e.code()==singz::TakeConformFailure::PathTooLong && std::string(e.what()).find("length limit")!=std::string::npos;}
+  check(typed,"Overlong path must have a path-too-long code and explicit detail");
+  typed=false;
+  try {singz::takeConformFilePath(std::string(131069,'x'));}
+  catch(const singz::TakeConformError &e){typed=e.code()==singz::TakeConformFailure::PathTooLong;}
+  check(typed,"Reject oversized UTF-8 paths before allocating conversion buffers");
+#if defined(_WIN32)
+  const auto utf8=[](const std::filesystem::path &path){const auto s=path.u8string();return std::string(s.begin(),s.end());};
+  check(singz::takeConformFilePath(R"(C:\one\..\two.wav)").native()==LR"(\\?\C:\two.wav)","Normalise drive paths before namespace");
+  check(singz::takeConformFilePath(R"(\\server\share\one\..\two.wav)").native()==LR"(\\?\UNC\server\share\two.wav)","Normalise UNC share before namespace");
+  check(singz::takeConformFilePath(R"(\\?\UNC\server\share\one\..\two.wav)").native()==LR"(\\?\UNC\server\share\two.wav)","Keep existing extended UNC paths idempotent");
+  check(singz::takeConformFilePath(R"(.\one\..\two.wav)")==singz::takeConformFilePath(utf8(std::filesystem::current_path()/"two.wav")),"Resolve relative paths against the current directory");
+  const auto ordinaryRoot=std::filesystem::path(paths.output).parent_path()/std::filesystem::path(paths.output).filename();
+  const auto owner=singz::takeConformFilePath(utf8(ordinaryRoot));
+  struct Cleanup {std::filesystem::path path;~Cleanup(){std::error_code e;std::filesystem::remove_all(path,e);}} cleanup{owner};
+  const auto ordinaryDeep=ordinaryRoot/std::string(100,'p')/std::string(100,'q')/std::string(100,'r');
+  const auto deep=singz::takeConformFilePath(utf8(ordinaryDeep));std::filesystem::create_directories(deep);
+  const auto input=deep/"raw.wav",output=deep/"out.wav",finalPath=deep/"lane.wav";
+  check(CopyFileW(singz::takeConformFilePath(paths.input).c_str(),input.c_str(),TRUE)!=0,"Cannot create long-path fixture");
+  check(utf8(ordinaryDeep).size()>260,"Windows fixture must exceed MAX_PATH");
+  const auto result=singz::conformTakeFile(utf8(ordinaryDeep/"raw.wav"),utf8(ordinaryDeep/"out.wav"),r);
+  check(result.durationFrames==36000,"Long Windows path must conform successfully without registry opt-in");
+  std::filesystem::rename(output,finalPath);
+  // This is the same wide CRT descriptor open used by playback_addon_bridge.
+  const int fd=_wopen(finalPath.c_str(),_O_RDONLY|_O_BINARY);
+  check(fd>=0,"Namespaced final lane path must open for native playback");_close(fd);
+#endif
+}
 inline void failures() {
+  pathLimits();
   {
     Paths paths;generate(paths.input,1,48000);auto r=request(1,48000,192000);
     r.startPositionSec=20000;r.songDurationProjectFrames=uint64_t(36000)*192000;

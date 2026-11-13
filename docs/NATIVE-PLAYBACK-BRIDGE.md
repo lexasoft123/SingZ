@@ -1193,11 +1193,11 @@ input pages, a 64 KiB output buffer, DSP state and bounded converter scratch
 remain resident. No take-sized PCM is held. The WAV header is patched and the
 file synced before returning; cancellation, truncation or a changed source
 removes the temporary file. Failures carry `errorCode` (`take-too-long`,
-`memory-budget`, `conform-error`, or `cancelled`) and a diagnostic `detail`;
+`memory-budget`, `path-too-long`, `conform-error`, or `cancelled`) and a diagnostic `detail`;
 `memory-budget` denotes file-size/cache admission, not a resident-PCM budget.
 The main wrapper preserves these as `ConformTakeError.code` and `.detail`. Input is limited to four hours and ordinary RIFF
-size bounds. The version remains `take-conform-2`: frozen committed-v2 fixture
-comparisons require byte-identical WAV output. Placement inserts silence or
+size bounds. Cache version `take-conform-3` shortens file names without changing PCM:
+frozen committed-v2 fixture comparisons still require byte-identical WAV output. Placement inserts silence or
 trims a negative head and never exceeds the song duration.
 
 The main wrapper validates ids and paths, reads asynchronously, and caches in a
@@ -1205,8 +1205,27 @@ The main wrapper validates ids and paths, reads asynchronously, and caches in a
 anchors, recorded settings, ordered effects, placement, song duration, rate and
 algorithm version. Rendering uses a unique temporary file and rename; cancelled,
 failed or changed-source work is never published. Per-song cache bounds are eight
-files and 8 GiB of disk storage; Windows files held by a playing lane remain charged to that
+lane entries and 8 GiB of disk storage; Windows files held by a playing lane remain charged to that
 budget until the next prune can unlink them. Space for a replacement is reserved
 before rendering; a full cache fails explicitly. Stale variants and deleted-take files are reclaimed
-on the next conform or explicit `invalidate`. Take deletion/move callers may
+on the next conform or explicit `invalidate`. Version 3 normally uses a
+16-hex key prefix plus `.wav` (20 characters), with the complete SHA-256 key,
+version and owning take id in a bounded adjacent `.json` record. A hit requires
+the full key; a prefix collision extends to 32/48/64 hex characters without
+overwriting a different lane. Both files count against the disk quota. Temporary
+WAV names contain only a 32-hex job id plus `.tmp` (36 characters); metadata
+uses the job id plus `.json.tmp`. Both are synced before rename, and a missing
+or malformed metadata record cannot produce a cache hit. Legacy long-named v2
+files are ignored and reclaimed by eviction (busy/pinned files remain charged).
+
+On Windows, main normalises drive/UNC/relative paths and uses the extended-length
+`\\?\` / `\\?\UNC\` namespace for every file operation, including publication
+and the final lane path returned to playback. The native conform API likewise
+normalises before namespacing and uses wide file APIs; it does not depend on the
+host long-path registry setting. The native session already opens the returned
+namespaced path with `_wopen`. Paths exceeding filesystem/component or binding UTF-8 limits
+return typed `path-too-long` with diagnostic detail through IPC. See Microsoft's
+[Windows path limits](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation).
+
+Take deletion/move callers may
 call `invalidate` for immediate reclamation. Cached PCM never crosses RPC.

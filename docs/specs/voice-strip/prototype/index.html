@@ -117,15 +117,7 @@
     <h2>Voice track settings</h2>
     <div class="set-row"><label for="setMon">Monitor level</label><input id="setMon" type="range" min="0" max="100" value="50"><output id="setMonOut">-12 dB</output></div>
     <div class="set-row"><label for="setTake">Take playback level</label><input id="setTake" type="range" min="0" max="100" value="80"><output id="setTakeOut">80%</output></div>
-    <div class="set-row"><label for="setOut">Monitor output</label>
-      <select id="setOut">
-        <option value="">Same as song output (Scarlett 2i2)</option>
-        <option value="scar">Scarlett 2i2</option>
-        <option value="bt" disabled>Headphones BT (unavailable: Bluetooth adds too much delay to monitor. Recording still works.)</option>
-        <option value="spk" disabled>MacBook Speakers (unavailable: Monitoring needs the input and output on one device, like an audio interface.)</option>
-      </select></div>
-    <p class="set-note" id="setNote" role="status"></p>
-    <p class="set-route" id="setRoute">Route: shown while monitoring.</p>
+    <p class="set-route" id="setRoute">Output: Scarlett 2i2 (Settings › Audio route)</p>
     <div class="set-actions"><button type="button" id="setDone" class="btn">Done</button></div>
   </div>
 </div>

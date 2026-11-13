@@ -223,7 +223,9 @@ describe('voice monitoring', () => {
     expect((await store.set({ input, on: true, gainDb: 100 })).on).toBe(true)
     await store.set({ input, on: true })
     expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0]).toMatchObject({ gainDb: 12, targetFrames: 32, maxFrames: 256 })
+    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0]).toMatchObject({ gainDb: 36, targetFrames: 32, maxFrames: 256 })
+    expect((await store.gain(20)).gainDb).toBe(20) // above the old +12 ceiling is valid
+    expect((await store.gain(99)).gainDb).toBe(36)
     expect((await store.gain(-100)).gainDb).toBe(-60)
     expect(native.setVoiceMonitorGain).toHaveBeenCalledWith(-60)
     await store.set({ input, on: false })

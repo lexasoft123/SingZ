@@ -20,7 +20,7 @@ import type {
   VoiceTakePeaksResult,
   VoiceTakeAnchor
 } from '../shared/voice-take'
-import { VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_PEAKS_MAX, VOICE_TAKE_SIDECAR_VERSION, VOICE_TAKE_ANCHORS_MAX, defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects } from '../shared/voice-take'
+import { VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_PEAKS_MAX, VOICE_TAKE_SIDECAR_VERSION, VOICE_TAKE_ANCHORS_MAX, defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects, safeVoiceTakeMessage } from '../shared/voice-take'
 
 export type VoiceTakeNative = {
   armCapture(args: { deviceName: string; channelIndex: number }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; generation?: bigint; deviceName?: string }>
@@ -182,6 +182,7 @@ export class VoiceTakeStore {
   private armed: ArmedCapture | null = null
   private playGeneration: bigint | null = null
   private finalizedTake: VoiceTakeSummary | null = null
+  private finalizedNote?: 'seek'
   private readonly root: string
   private readonly now: () => Date
   private readonly query: VoiceTakeNative['presentationQuery']
@@ -232,6 +233,7 @@ export class VoiceTakeStore {
   async start(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult> {
     if (this.active || this.starting || this.arming) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
     this.finalizedTake = null
+    this.finalizedNote = undefined
     if (!validId(request.songId) || !request.input || !validSettings(request)) return { ok: false, reason: 'error', message: 'Invalid recording request.' }
     if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) return { ok: false, reason: 'no-input', message: 'The selected microphone is unavailable.' }
     const takeId = randomUUID()
@@ -330,10 +332,17 @@ export class VoiceTakeStore {
       }
       this.active = active
       this.finalizedTake = null
+      if (!active.firstSampleHostNs) {
+        // No capture timestamp means neither this poll nor native-history seek
+        // detection can watch the take. Finalize it now instead of orphaning it.
+        await this.stop('error')
+        captureAttempted = false // stop() already released unarmed capture.
+        return { ok: false, reason: 'error', message: 'No microphone samples were available. Try recording again.' }
+      }
       if (active.firstSampleHostNs) {
         active.monitor = setInterval(() => { void this.checkDiscontinuity(active).catch(error => {
           log('voice-take', 'sampling failed ' + JSON.stringify({ takeId: active.takeId, phase: 'poll',
-            error: error instanceof Error ? error.message : String(error) }), 'warn')
+            error: safeVoiceTakeMessage(error instanceof Error ? error.message : undefined, 'capture-sampling-failed') }), 'warn')
           this.endTimeline(active); void this.stop(undefined, 'seek')
         }) }, 250)
         active.monitor.unref()
@@ -484,7 +493,7 @@ export class VoiceTakeStore {
 
   async stop(reason?: 'device-lost' | 'error', note?: 'seek'): Promise<VoiceRecordStopResult> {
     const active = this.active
-    if (!active) return this.finalizedTake ? { ok: true, take: this.finalizedTake } : { ok: false, reason: 'error', message: 'No recording is active.' }
+    if (!active) return this.finalizedTake ? { ok: true, take: this.finalizedTake, ...(this.finalizedNote ? { note: this.finalizedNote } : {}) } : { ok: false, reason: 'error', message: 'No recording is active.' }
     log('voice-take', 'stop requested ' + JSON.stringify({ takeId: active.takeId, reason: reason ?? 'normal', note: note ?? null,
       timelineEnded: active.timelineEnded === true, placementFault: active.placementFault === true,
       discontinuitySerial: active.discontinuitySerial, faultSerial: active.faultSerial, lastAnchor: active.anchors.at(-1) }))
@@ -501,7 +510,7 @@ export class VoiceTakeStore {
       if (!active.placementFault) {
         try { await this.sampleAnchors(active, true) } catch (error) {
           log('voice-take', 'sampling failed ' + JSON.stringify({ takeId: active.takeId, phase: 'final',
-            error: error instanceof Error ? error.message : String(error) }), 'warn')
+            error: safeVoiceTakeMessage(error instanceof Error ? error.message : undefined, 'capture-sampling-failed') }), 'warn')
           this.endTimeline(active)
         }
       }
@@ -538,12 +547,13 @@ export class VoiceTakeStore {
         nativeOk: finished.ok, deviceLost: finished.deviceLost, placementFault: active.placementFault === true,
         timelineEnded: active.timelineEnded === true, anchors: active.anchors.length }))
       this.finalizedTake = summary(sidecar)
-      return { ok: true, take: this.finalizedTake }
+      this.finalizedNote = note ?? (active.timelineEnded ? 'seek' : undefined)
+      return { ok: true, take: this.finalizedTake, ...(this.finalizedNote ? { note: this.finalizedNote } : {}) }
     } catch (error) {
       log('voice-take', 'finalize failed ' + JSON.stringify({ takeId: active.takeId,
-        error: error instanceof Error ? error.message : String(error), placementFault: active.placementFault === true,
+        error: safeVoiceTakeMessage(error instanceof Error ? error.message : undefined, 'The take could not be finalized.'), placementFault: active.placementFault === true,
         timelineEnded: active.timelineEnded === true }), 'warn')
-      return { ok: false, reason: 'error', message: error instanceof Error && !error.message.includes('/') ? error.message : 'The take could not be finalized.' }
+      return { ok: false, reason: 'error', message: safeVoiceTakeMessage(error instanceof Error ? error.message : undefined, 'The take could not be finalized.') }
     } finally {
       this.finalizing.delete(active.takeId)
       if (!this.armed && this.options.native.stopCapture) await this.options.native.stopCapture(active.generation).catch(() => undefined)

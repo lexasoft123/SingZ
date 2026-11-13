@@ -16,8 +16,7 @@ import type {
   VoiceMonitorAvailabilityRequest,
   VoiceMonitorGainRequest,
   VoiceMonitorLatency,
-  VoiceMonitorOutputCandidate,
-  VoiceMonitorOutputDevice,
+    VoiceMonitorOutputDevice,
   VoiceMonitorReason,
   VoiceMonitorSetRequest,
   VoiceMonitorState,
@@ -34,7 +33,8 @@ import type {
   VoiceTakePeaksResult,
   VoiceTakeSummary
 } from '../../../shared/voice-take'
-import { VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS, defaultVoiceTakeEffects, isVoiceTakeEffects, isVoiceTakeConformedWaveform, type VoiceTakeEffect, type VoiceTakeConformOptions, type VoiceTakeConformResult, type VoiceTakeInvalidateRequest, type VoiceTakeLaneControl, type VoiceTakeLaneSource, type VoiceTakeLaneState } from '../../../shared/voice-take'
+import { VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS, defaultVoiceTakeEffects, isVoiceTakeEffects, isVoiceTakeConformedWaveform, safeVoiceTakeMessage, type VoiceTakeEffect, type VoiceTakeConformOptions, type VoiceTakeConformResult, type VoiceTakeInvalidateRequest, type VoiceTakeLaneControl, type VoiceTakeLaneSource, type VoiceTakeLaneState } from '../../../shared/voice-take'
+import { VOICE_MONITOR_GAIN_DEFAULT_DB, VOICE_MONITOR_GAIN_MAX_DB, VOICE_MONITOR_GAIN_MIN_DB, clampMonitorGainDb } from '../../../shared/voice-monitor-gain'
 import { stableVoiceSongId } from './voice-song-id'
 import { micOwnership } from './mic-ownership'
 
@@ -139,7 +139,7 @@ export interface VoiceControllerDeps {
   /** Capture devices; `labelsHidden` means the OS has not granted access. */
   listInputs: () => Promise<{ inputs: VoiceInputOption[]; labelsHidden: boolean }>
   now?: () => number
-  storage?: Pick<Storage, 'getItem' | 'setItem'> | null
+  storage?: (Pick<Storage, 'getItem' | 'setItem'> & Partial<Pick<Storage, 'removeItem'>>) | null
 }
 
 export interface VoiceTake {
@@ -190,16 +190,8 @@ export interface VoiceModel {
   monitorGainDb: number
   /** The take clip is selected (one take at a time; never while recording). Reset with the song. */
   takeSelected: boolean
-  /** The chosen monitor output (native UID); null follows the song output, then the system default. Remembered, never 'on'. */
-  monitorOutput: string | null
-  /** The remembered output is no longer among the candidates: the monitor fell back to the default. */
-  monitorOutputMissing: boolean
-  /** Output candidates from main's last reply, with typed reasons for the unusable ones. */
-  monitorOutputs: VoiceMonitorOutputCandidate[]
-  /** The resolved route's output device (display name), when main reported one. */
+  /** The common output (display name) main resolved for the monitor, when it reported one. Display only: the monitor follows the app's output. */
   monitorOutputDevice: VoiceMonitorOutputDevice | null
-  /** A new output was chosen while monitoring: the brief restart, shown as a transient state, not an error. */
-  monitorSwitching: boolean
   /** True during the first monitoring episode of the session: shows the quiet headphones hint. */
   monitorHint: boolean
   /** A quiet, non-error note about monitoring (never an error state). */
@@ -234,7 +226,7 @@ export type AnnounceKey =
   | 'announceMonitorOff'
 
 /** A safe starting monitor level: a hot microphone at 0 dB can feed back or hurt. */
-export const MONITOR_GAIN_DEFAULT_DB = -12
+export const MONITOR_GAIN_DEFAULT_DB = VOICE_MONITOR_GAIN_DEFAULT_DB
 const HINT_SEEN = new WeakSet<object>() // engines whose singer has already seen the headphones hint
 
 export const INITIAL_VOICE_MODEL: VoiceModel = {
@@ -253,11 +245,7 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   monitor: { avail: 'ok', reason: null, on: false, latency: null, warnings: [] },
   monitorGainDb: MONITOR_GAIN_DEFAULT_DB,
   takeSelected: false,
-  monitorOutput: null,
-  monitorOutputMissing: false,
-  monitorOutputs: [],
   monitorOutputDevice: null,
-  monitorSwitching: false,
   monitorHint: false,
   monitorNote: null,
   error: null,
@@ -319,13 +307,8 @@ const LIVE_PEAKS_MAX = 100_000
 const SEEK_JUMP_SEC = 0.75
 const STORAGE_KEY = 'singz.voice.input'
 const MONITOR_GAIN_KEY = 'singz.voice.monitorGain'
-const MONITOR_OUTPUT_KEY = 'singz.voice.monitorOutput'
-/** Strict: a native output UID is a short printable string; anything else stored is junk. */
-export function parseMonitorOutput(raw: string | null | undefined): string | null {
-  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 256 || raw !== raw.trim()) return null
-  // eslint-disable-next-line no-control-regex
-  return /[\u0000-\u001f\u007f]/.test(raw) || raw === 'on' || raw === 'off' ? null : raw
-}
+/** Retired separate monitor output: never read, never written; the stored value is deleted once. */
+const LEGACY_MONITOR_OUTPUT_KEY = 'singz.voice.monitorOutput'
 const SONG_START_TIMEOUT_MS = 3000
 const AVAILABILITY_RETRY_MS = [500, 1500, 3000]
 const MONITOR_STATE_EVERY = 10 // level polls (~50 ms each) per monitor-state check
@@ -426,8 +409,8 @@ export class VoiceController {
     this.now = deps.now ?? (() => Date.now())
     this.restoreStems(MUTED_BY_SOLO.get(deps.engine) ?? null)
     this.saved = this.readStored()
-    this.savedOutput = this.readMonitorOutput()
-    this.model = { ...this.model, monitorGainDb: this.readMonitorGain(), monitorOutput: this.savedOutput }
+    this.dropLegacyMonitorOutput()
+    this.model = { ...this.model, monitorGainDb: this.readMonitorGain() }
     micOwnership.setVoiceLevelReader(() => ({ dbfs: this.levelDb, peak: this.peakDb }))
   }
 
@@ -439,21 +422,15 @@ export class VoiceController {
     )
   }
 
-  /** The remembered output, whether or not it is currently among the candidates. */
-  private savedOutput: string | null = null
-  /** The output id of the last monitorSet(on) sent, to know whether a pick still has to be sent. */
-  private lastSentOutput: string | null | undefined = undefined
-  /** A pick arrived while a call was in flight. */
-  private outputDirty = false
-
-  private readMonitorOutput(): string | null {
+  /** The monitor follows the common output now: a value a previous build stored is ignored and removed. */
+  private dropLegacyMonitorOutput(): void {
     try {
-      const raw = this.deps.storage?.getItem(MONITOR_OUTPUT_KEY)
-      const id = parseMonitorOutput(raw)
-      if (raw !== null && raw !== undefined && raw !== '' && id === null) this.deps.storage?.setItem(MONITOR_OUTPUT_KEY, '') // junk: forget it
-      return id
+      const st = this.deps.storage
+      if (st?.getItem(LEGACY_MONITOR_OUTPUT_KEY) == null) return
+      if (st.removeItem) st.removeItem(LEGACY_MONITOR_OUTPUT_KEY)
+      else st.setItem(LEGACY_MONITOR_OUTPUT_KEY, '')
     } catch {
-      return null
+      /* private mode */
     }
   }
 
@@ -464,7 +441,7 @@ export class VoiceController {
       if (raw === null || raw === undefined) return MONITOR_GAIN_DEFAULT_DB
       const text = raw.trim()
       const v = text === '' ? NaN : Number(text)
-      if (Number.isFinite(v) && v >= -60 && v <= 12) return v
+      if (Number.isFinite(v) && v >= VOICE_MONITOR_GAIN_MIN_DB && v <= VOICE_MONITOR_GAIN_MAX_DB) return v
       this.deps.storage?.setItem(MONITOR_GAIN_KEY, String(MONITOR_GAIN_DEFAULT_DB))
     } catch {
       /* unreadable: the safe default */
@@ -1109,7 +1086,7 @@ export class VoiceController {
     }
     if (!res.ok) {
       if (startedSong && engine.playing) engine.pause()
-      console.warn('[voice-take] start failed ' + JSON.stringify({ reason: res.reason, message: res.message,
+      console.warn('[voice-take] start failed ' + JSON.stringify({ reason: res.reason, message: safeVoiceTakeMessage(res.message, 'record-start-failed'),
         native: engine.nativeActive === true, playing: engine.playing, positionSec: engine.position, tempo: engine.tempo }))
       this.failStart(res.reason)
       return
@@ -1222,7 +1199,7 @@ export class VoiceController {
     if (res.ok && res.take) {
       this.set({
         take: { ...this.withTimeline(this.fromSummary(res.take, false, cur?.n ?? this.takeCount), cur), changed: res.take.settingsChanged || !!cur?.changed },
-        stoppedBy: reason === 'user' ? null : reason,
+        stoppedBy: reason === 'user' ? null : res.note ?? reason,
         ...this.say('announceReview')
       })
       this.loadPeaks(res.take.takeId)
@@ -1605,14 +1582,8 @@ export class VoiceController {
     const avail = available ? 'ok' : reason === 'route-latency' ? 'latency' : 'route'
     const on = available && st.on
     this.monitorOpen = on
-    const cands = st.outputCandidates
-    // A remembered output that is gone, or present but unusable now (e.g. a separate device after an input change), falls back to the default.
-    const found = cands !== undefined && this.savedOutput !== null && cands.some((c) => c.id === this.savedOutput && c.usable)
     this.set({
       ...(on ? {} : { monitorHint: false }),
-      ...(cands !== undefined
-        ? { monitorOutputs: cands, monitorOutput: found ? this.savedOutput : null, monitorOutputMissing: this.savedOutput !== null && !found }
-        : {}),
       ...(st.outputDevice !== undefined ? { monitorOutputDevice: st.outputDevice } : {}),
       monitor: { avail, reason, on, latency: on ? st.latency : null, warnings: on ? st.warnings : [] },
       ...(wasOn !== on ? this.say(on ? 'announceMonitorOn' : 'announceMonitorOff') : {})
@@ -1667,7 +1638,7 @@ export class VoiceController {
 
   private async fetchMonitorAvailability(): Promise<VoiceMonitorState | null> {
     try {
-      return await this.deps.api.monitorAvailability({ input: this.monitorRequestInput(), outputDeviceId: this.model.monitorOutput })
+      return await this.deps.api.monitorAvailability({ input: this.monitorRequestInput() })
     } catch {
       return null // advisory; a toggle attempt reports the real failure
     }
@@ -1718,8 +1689,7 @@ export class VoiceController {
         }
       }
       this.set({ monitorNote: null })
-      this.lastSentOutput = this.model.monitorOutput
-      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb, outputDeviceId: this.model.monitorOutput })
+      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb })
       if (stale()) {
         // Torn down while main was opening it: do not leave it on.
         if (st.on) void Promise.resolve(this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: false })).catch(() => undefined)
@@ -1744,7 +1714,6 @@ export class VoiceController {
     } finally {
       if (token === this.monitorToken) {
         this.monitorPending = false
-        this.flushOutput()
       }
     }
   }
@@ -1778,82 +1747,6 @@ export class VoiceController {
   setFader(v: number): void {
     if (this.faderEditsMonitor) this.setMonitorFader(v)
     else this.setLevel(v)
-  }
-
-  /**
-   * Choose the monitor output (null = same as the song output). An unusable or unknown candidate is refused.
-   * While monitoring the native side restarts on the new device (or stays off with a typed refusal): shown
-   * as `monitorSwitching`, never as an error; a take in progress is not touched.
-   */
-  async setMonitorOutput(id: string | null): Promise<void> {
-    const m = this.model
-    if (id !== null) {
-      const cand = m.monitorOutputs.find((c) => c.id === id)
-      if (!cand || !cand.usable) return
-    }
-    if (id === this.savedOutput && !m.monitorOutputMissing) return
-    this.savedOutput = id
-    try {
-      this.deps.storage?.setItem(MONITOR_OUTPUT_KEY, id ?? '') // '' = follow the song output
-    } catch {
-      /* private mode */
-    }
-    this.set({ monitorOutput: id, monitorOutputMissing: false })
-    // A switch or a toggle-on is already in flight: the wanted id is recorded and sent once it settles.
-    if (this.monitorPending) {
-      this.outputDirty = true
-      return
-    }
-    await this.settleOutput()
-  }
-
-  /** Output chosen by the singer, no call in flight: ask availability (monitor off) or restart on the new device (on). */
-  private async settleOutput(): Promise<void> {
-    if (!this.model.monitor.on) {
-      void this.refreshMonitorAvailability()
-      return
-    }
-    if (this.lastSentOutput === this.model.monitorOutput) return
-    await this.switchOutput()
-  }
-
-  /** After an in-flight monitorSet settles: send a pick that arrived meanwhile (once, only if it still differs). */
-  private flushOutput(): void {
-    if (this.disposed || this.monitorPending) return
-    if (this.model.monitor.on) {
-      if (this.lastSentOutput !== this.model.monitorOutput) void this.switchOutput()
-    } else if (this.outputDirty) {
-      this.outputDirty = false
-      void this.refreshMonitorAvailability()
-    }
-  }
-
-  private async switchOutput(): Promise<void> {
-    this.outputDirty = false
-    this.monitorPending = true
-    const token = ++this.monitorToken
-    const id = this.model.monitorOutput
-    this.lastSentOutput = id
-    this.set({ monitorSwitching: true })
-    try {
-      const st = await this.deps.api.monitorSet({ input: this.monitorRequestInput(), on: true, gainDb: this.model.monitorGainDb, outputDeviceId: id })
-      if (token !== this.monitorToken || this.disposed) return
-      this.applyMonitorState(st)
-      if (!this.model.monitor.on) {
-        // Refused on the new device: the monitor is off, so its hold on the input is released like releaseMonitor does.
-        this.monitorPending = false
-        this.releaseInputIfUnused()
-      }
-    } catch {
-      if (token === this.monitorToken) {
-        await this.releaseMonitor() // a failed switch leaves nothing running: release the monitor and its arm
-        this.raiseMonitorError()
-      }
-    } finally {
-      if (token === this.monitorToken) this.monitorPending = false
-      this.set({ monitorSwitching: false })
-      if (token === this.monitorToken) this.flushOutput()
-    }
   }
 
   /** Monitor gain in dB: remembered, sent live (coalesced) while monitoring. */
@@ -2049,12 +1942,34 @@ export function songSpan(take: Pick<VoiceTake, 'durationSec' | 'tempo' | 'timeli
   return span
 }
 
-/** The strip fader (0..100) as monitor gain: -60 dB .. +12 dB in half-dB steps; 0 dB sits at 83. */
+/** Fader (0..100) <-> monitor dB, piecewise linear so singing range keeps resolution:
+ *  0..20 = -60..-24 dB, 20..80 = -24..+24 dB (0.8 dB per step, 0 dB at 50), 80..100 = +24..+36 dB.
+ *  Results are rounded to half dB; every integer fader position round-trips. */
+const FADER_KNOTS: ReadonlyArray<readonly [number, number]> = [[0, VOICE_MONITOR_GAIN_MIN_DB], [20, -24], [80, 24], [100, VOICE_MONITOR_GAIN_MAX_DB]]
 export function monitorFaderToDb(v: number): number {
-  const clamped = Math.max(0, Math.min(100, v))
-  return Math.round((clamped / 100 * 72 - 60) * 2) / 2
+  const x = Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0
+  for (let i = 1; i < FADER_KNOTS.length; i++) {
+    const [x1, d1] = FADER_KNOTS[i]
+    if (x <= x1) {
+      const [x0, d0] = FADER_KNOTS[i - 1]
+      return Math.round((d0 + ((x - x0) / (x1 - x0)) * (d1 - d0)) * 2) / 2
+    }
+  }
+  return VOICE_MONITOR_GAIN_MAX_DB
 }
-export const monitorDbToFader = (db: number): number => Math.round(((Math.max(-60, Math.min(12, db)) + 60) / 72) * 100)
+export function monitorDbToFader(db: number): number {
+  const d = clampMonitorGainDb(Number.isFinite(db) ? db : VOICE_MONITOR_GAIN_MIN_DB)
+  for (let i = 1; i < FADER_KNOTS.length; i++) {
+    const [x1, d1] = FADER_KNOTS[i]
+    if (d <= d1) {
+      const [x0, d0] = FADER_KNOTS[i - 1]
+      return Math.round(x0 + ((d - d0) / (d1 - d0)) * (x1 - x0))
+    }
+  }
+  return 100
+}
+/** Fader position of 0 dB (unity), for the tick in Track settings. */
+export const MONITOR_UNITY_FADER = monitorDbToFader(0)
 
 /** dBFS (-60..0) to a 0..1 meter fraction. */
 export const meterFraction = (db: number): number => Math.max(0, Math.min(1, (db + 60) / 60))

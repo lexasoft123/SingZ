@@ -75,7 +75,8 @@ import { MicrophoneSelectionStore } from './box-audio/microphone-store'
 import { randomUUID } from 'node:crypto'
 import { BoxCecService, boxCecEnabled } from './box/cec'
 import { boxMicrophones, boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
-import { failedPlayback, playbackCodecSupportsPath } from './capture'
+import { checkCaptureAddonProvenance, failedPlayback, playbackCodecSupportsPath } from './capture'
+import { enforceAddonStartupGate } from './addon-startup-gate'
 import { createRemoteCaptureOwner } from './audio-process'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
 import { registerVoiceTakes } from './voice-takes-ipc'
@@ -1019,6 +1020,17 @@ app.whenReady().then(async () => {
     `SingZ ${app.isPackaged ? app.getVersion() : 'dev'} on ${process.platform}-${process.arch}` +
       ` — electron ${process.versions.electron}`
   )
+  // Native playback is the only desktop path (ADR 0015): an addon built from
+  // another checkout must stop startup, before any window or IPC exists.
+  if (requestedRendererSurface(process.argv) === 'desktop' && !enforceAddonStartupGate({
+    check: checkCaptureAddonProvenance,
+    app,
+    dialog,
+    env: process.env,
+    log: (message, level) => log('app', message, level),
+    stderr: (message) => process.stderr.write(message),
+    target: `${process.platform}-${process.arch}`
+  })) return
   registerWhatsNew()
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)

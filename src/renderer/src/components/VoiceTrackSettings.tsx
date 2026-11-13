@@ -1,19 +1,20 @@
 import { useEffect, useRef } from 'react'
 import { Modal } from '@singz/ui'
-import { monitorDbToFader, type VoiceController, type VoiceModel } from '../audio/voice-take'
+import { VOICE_MONITOR_GAIN_HIGH_DB } from '../../../shared/voice-monitor-gain'
+import { MONITOR_UNITY_FADER, monitorDbToFader, type VoiceController, type VoiceModel } from '../audio/voice-take'
 import { t } from '../i18n'
 import { pitchFollowShift, REASON_KEY, sgn } from './voice-format'
 import { useVoiceModel } from './voice-host'
 import Tooltip from './Tooltip'
 import './voice-strip.css'
 
-/** The route line: resolved output device, buffer and delay while monitoring. */
+/** The route line: the one common output (Settings > Audio route), plus buffer and delay while monitoring. */
 function routeLine(m: VoiceModel): string {
   if (!m.monitor.on && m.monitor.avail !== 'ok' && m.monitor.reason) return t(REASON_KEY[m.monitor.reason])
   const lat = m.monitor.latency
-  if (!m.monitor.on || !lat || !m.monitorOutputDevice) return t('player.voice.routeIdle')
+  if (!m.monitor.on || !lat) return m.monitorOutputDevice ? t('player.voice.routeOutput', { device: m.monitorOutputDevice.name }) : t('player.voice.routeIdle')
   return t(lat.source === 'measured' ? 'player.voice.routeMeasured' : 'player.voice.routeEstimated', {
-    device: m.monitorOutputDevice.name,
+    device: m.monitorOutputDevice?.name ?? t('settings.common.systemDefault'),
     frames: lat.bufferFrames,
     ms: Math.round(lat.roundTripMs)
   })
@@ -29,11 +30,6 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
   const m = useVoiceModel(controller)
   const first = useRef<HTMLInputElement>(null)
   useEffect(() => first.current?.focus(), [])
-  const sameLabel =
-    m.monitorOutput === null && m.monitorOutputDevice
-      ? t('player.voice.outputSameNamed', { name: m.monitorOutputDevice.name })
-      : t('player.voice.outputSame')
-  const outTitle = m.monitorOutputs.find((c) => c.id === m.monitorOutput)?.name ?? sameLabel
   return (
     <Modal cardClassName="vs-settings" aria-label={t('player.voice.settingsTitle')} onClose={onClose}>
       <h2>{t('player.voice.settingsTitle')}</h2>
@@ -55,6 +51,12 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
             onChange={(e) => controller.setMonitorFader(Number(e.target.value))}
           />
         </Tooltip>
+        <div className="vs-unity" aria-hidden="true">
+          <span className="vs-unity-tick" style={{ left: `${MONITOR_UNITY_FADER}%` }}>0 dB</span>
+        </div>
+        {m.monitorGainDb > VOICE_MONITOR_GAIN_HIGH_DB && (
+          <div className="vs-set-warn" role="note">{t('player.voice.monitorHighGain')}</div>
+        )}
       </div>
       <div className="vs-set-field">
         <div className="vs-set-head">
@@ -74,27 +76,6 @@ export default function VoiceTrackSettings({ controller, onClose }: { controller
           />
         </Tooltip>
       </div>
-      <div className="vs-set-field">
-        <label className="settings-label" htmlFor="vs-set-out">{t('player.voice.outputLabel')}</label>
-        <Tooltip label={outTitle} className="grow">
-          <select
-            id="vs-set-out"
-            className="settings-select vs-set-select"
-            value={m.monitorOutput ?? ''}
-            onChange={(e) => void controller.setMonitorOutput(e.target.value === '' ? null : e.target.value)}
-          >
-            <option value="">{sameLabel}</option>
-            {m.monitorOutputs.map((c) => (
-              <option key={c.id} value={c.id} disabled={!c.usable}>
-                {c.usable ? c.name : t('player.voice.outputOption', { name: c.name, reason: t(REASON_KEY[c.reason ?? 'error']) })}
-              </option>
-            ))}
-          </select>
-        </Tooltip>
-      </div>
-      <p className="vs-set-note" role="status">
-        {m.monitorSwitching ? t('player.voice.outputSwitching') : m.monitorOutputMissing ? t('player.voice.outputMissing') : ''}
-      </p>
       <p className="vs-set-route">{routeLine(m)}</p>
       <section className="vs-set-field" aria-labelledby="vs-effects-h">
         <h3 id="vs-effects-h">{t('player.voice.effects')}</h3>

@@ -9,7 +9,7 @@
 #endif
 namespace singz {
 VoiceMonitorAvailability classifyVoiceMonitorRoute(const AudioHostInventory& inventory,
-    const std::string& uid, uint32_t channel, const std::string& output, bool native, bool permission, bool macOS) {
+    const std::string& uid, [[maybe_unused]] uint32_t channel, const std::string& output, bool native, bool permission, bool macOS) {
   VoiceMonitorAvailability result;
   auto refuse = [&](const char* reason, const char* detail) { result.reason=reason; result.detail=detail; return result; };
   if (!macOS) return refuse("platform", "Live monitoring is available on macOS");
@@ -228,7 +228,7 @@ VoiceMonitorResult VoiceMonitorHost::begin(const std::string& uid,uint32_t chann
 bool VoiceMonitorHost::setGain(float gain) noexcept {
   if (!impl_->running || !std::isfinite(gain)) return false;
   impl_->render.silent.store(0,std::memory_order_release);
-  impl_->render.target.store(std::pow(10.0f,std::clamp(gain,-60.0f,12.0f)/20.0f),std::memory_order_release);
+  impl_->render.target.store(std::pow(10.0f,std::clamp(gain,kVoiceMonitorGainMinDb,kVoiceMonitorGainMaxDb)/20.0f),std::memory_order_release);
   return true;
 }
 VoiceMonitorStatus VoiceMonitorHost::status() {

@@ -139,8 +139,18 @@ export interface NativeCaptureBinding {
 
 const require = createRequire(import.meta.url)
 
+/** Why a load failed, where the cause is one the startup gate acts on
+ *  (src/main/addon-startup-gate.ts). Absent = any other failure. */
+export type CaptureAddonFailureKind = 'provenance-mismatch' | 'metadata-missing'
+export interface CaptureAddonFingerprints { checkout?: string; addon?: string }
+
 export class CaptureAddonLoadError extends Error {
-  constructor(message: string, readonly retryable: boolean) {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly kind?: CaptureAddonFailureKind,
+    readonly fingerprints?: CaptureAddonFingerprints
+  ) {
     super(message)
     this.name = 'CaptureAddonLoadError'
   }
@@ -939,6 +949,59 @@ export function loadCaptureBindingWith(runtime: CaptureBindingLoadRuntime): Nati
   }
 }
 
+/** The gate fires only for a manifest that is absent (ENOENT) or not JSON.
+ *  Any other read error is an I/O condition, not proof of a stale build. */
+export function readCaptureManifestForGate(
+  path: string,
+  parse: (path: string) => CaptureArtifactManifest = parseCaptureManifest
+): CaptureArtifactManifest {
+  try { return parse(path) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT' || error instanceof SyntaxError)
+      throw new CaptureAddonLoadError(
+        `Capture addon metadata is not available (${String(error)}). Rebuild with npm run capture:addon and retry.`,
+        true,
+        'metadata-missing'
+      )
+    throw error
+  }
+}
+
+const STAMP_ENV = 'SINGZ_VERIFIED_SOURCE_STAMP'
+let verifiedFingerprint: { key: string; stamp: string } | null = null
+
+/** The dev source walk, once per (root, electron): retried once for a
+ *  transient FS error; the result is handed to the audio process so its real
+ *  load does not walk the tree again. A persistent walk error is thrown raw
+ *  and is never a gate kind. */
+export function developmentSourceFingerprint(
+  root: string,
+  electronVersion: string,
+  compute: (root: string, electronVersion: string) => string = captureSourceFingerprint,
+  env: Record<string, string | undefined> = process.env
+): string {
+  const key = `${root}\n${electronVersion}`
+  if (verifiedFingerprint?.key === key) return verifiedFingerprint.stamp
+  // Only the forked development audio process trusts a handed-over stamp;
+  // main (whatever its env holds) always walks the tree itself.
+  const inherited = env.SINGZ_AUDIO_PROCESS === '1' && env.SINGZ_AUDIO_PACKAGED !== '1' ? env[STAMP_ENV] : undefined
+  if (inherited?.startsWith(`${key}\n`)) {
+    const stamp = inherited.slice(key.length + 1)
+    if (/^[0-9a-f]{40}$/.test(stamp)) return stamp
+  }
+  let stamp: string
+  try { stamp = compute(root, electronVersion) }
+  catch { stamp = compute(root, electronVersion) }
+  verifiedFingerprint = { key, stamp }
+  return stamp
+}
+
+/** Env for the forked audio process (development only), see above. */
+export function verifiedCaptureFingerprintEnv(): Record<string, string> {
+  // Always set, so a stale value inherited by main never reaches the child.
+  return { [STAMP_ENV]: verifiedFingerprint ? `${verifiedFingerprint.key}\n${verifiedFingerprint.stamp}` : '' }
+}
+
 function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
   const root = process.cwd()
   const electronVersion = process.versions.electron
@@ -948,10 +1011,10 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
   const envOverride = process.env.SINGZ_CAPTURE_ADDON
   if (envOverride) {
     addonPath = resolve(envOverride)
-    manifest = parseCaptureManifest(captureAddonManifestPath(addonPath))
+    manifest = readCaptureManifestForGate(captureAddonManifestPath(addonPath))
   } else if (app.isPackaged) {
     const engines = join(audioResourcesPath, 'engines')
-    manifest = parseCaptureManifest(join(engines, 'singz-capture.manifest.json'))
+    manifest = readCaptureManifestForGate(join(engines, 'singz-capture.manifest.json'))
     addonPath = resolveCaptureAddonPath({
       envOverride,
       packaged: true,
@@ -962,7 +1025,7 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
     })
   } else {
     const manifestPath = join(root, 'build', 'capture-runtime', target, 'current.json')
-    manifest = parseCaptureManifest(manifestPath)
+    manifest = readCaptureManifestForGate(manifestPath)
     addonPath = resolveCaptureAddonPath({
       packaged: false,
       resourcesPath: audioResourcesPath,
@@ -976,12 +1039,14 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
   }
   if (!app.isPackaged) {
     const fingerprintStartedAt = Date.now()
-    const expectedSourceStamp = captureSourceFingerprint(root, electronVersion)
+    const expectedSourceStamp = developmentSourceFingerprint(root, electronVersion)
     lastCaptureResolvePhases = `fingerprint ${Date.now() - fingerprintStartedAt} ms`
     if (manifest.sourceStamp !== expectedSourceStamp) {
       throw new CaptureAddonLoadError(
         'The capture addon belongs to an older or different checkout. Rebuild with npm run capture:addon and retry.',
-        true
+        true,
+        'provenance-mismatch',
+        { checkout: expectedSourceStamp, addon: manifest.sourceStamp }
       )
     }
   }
@@ -1016,6 +1081,24 @@ export function captureAddonPath(): string {
   return captureBindingLoadRuntime().addonPath
 }
 
+/** Raw errors from selecting the addon keep today's lazy-load report
+ *  (retryable, no gate kind); only readCaptureManifestForGate and the
+ *  fingerprint compare produce gate kinds. */
+function asCaptureLoadError(error: unknown): CaptureAddonLoadError {
+  if (error instanceof CaptureAddonLoadError) return error
+  return new CaptureAddonLoadError(
+    `Capture addon metadata is not available (${String(error)}). Rebuild with npm run capture:addon and retry.`,
+    true
+  )
+}
+
+/** Main-process startup check: select the addon and compare its provenance
+ *  with this checkout, without loading it. Throws CaptureAddonLoadError. */
+export function checkCaptureAddonProvenance(): void {
+  try { captureBindingLoadRuntime() }
+  catch (error) { throw asCaptureLoadError(error) }
+}
+
 /** A native module loaded from a private staging path owns process-wide
  * state. All product adapters must share its successful binding, and a
  * module that initialized incompatibly requires restart rather than another
@@ -1047,13 +1130,7 @@ export function loadBoxAudioHostBinding(authority: BoxAudioHostAuthority): Nativ
 
 function loadProcessCaptureBinding(): NativeCaptureBinding {
   try { return processCaptureBinding() }
-  catch (error) {
-    if (error instanceof CaptureAddonLoadError) throw error
-    throw new CaptureAddonLoadError(
-      `Capture addon metadata is not available (${String(error)}). Rebuild with npm run capture:addon and retry.`,
-      true
-    )
-  }
+  catch (error) { throw asCaptureLoadError(error) }
 }
 
 export function validMicrophoneMixConfig(value: unknown): value is DesktopMicrophoneMixConfig {
