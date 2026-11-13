@@ -24,6 +24,8 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-native-range-'))
 const profile = path.join(scratch, 'profile'), library = path.join(scratch, 'library'), songDir = path.join(library, 'Native range fixture')
 const PAIRS = [[1, 0], [0.25, 0], [4, 0], [0.25, 24], [4, -24], [0.25, -24], [4, 24], [1, 24], [1, -24], [0.5, 12], [2, -12]]
 const TOLERANCE = 0.05
+/** The one speed predicate: played speed within TOLERANCE of the requested tempo. */
+const speedOk = (played, tempo) => Math.abs(played / tempo - 1) <= TOLERANCE
 const rows = []
 let app
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -38,7 +40,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
     fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ projectsRoot: library, language: 'en',
       ...(process.env.E2E_OUTPUT_UID ? { outputDeviceId: `native:${process.env.E2E_OUTPUT_UID}` } : {}) }))
     app = await _electron.launch({ executablePath: require('electron'), args: [path.join(root, 'out/main/index.js')], env: { ...process.env,
-      SINGZ_USERDATA_DIR: profile, SINGZ_PACK_DIR: path.join(scratch, 'pack'), SINGZ_NO_SYNC: '1', SINGZ_MUTE: '1',
+      SINGZ_USERDATA_DIR: profile, SINGZ_MODELS_DIR: path.join(scratch, 'models'), SINGZ_PACK_DIR: path.join(scratch, 'pack'), SINGZ_NO_SYNC: '1', SINGZ_MUTE: '1',
       SINGZ_E2E_HIDDEN: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en' } })
     await quietLaunch(app) // seeds the first-run quick-start flag
     const win = await app.firstWindow()
@@ -84,7 +86,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
         if (!m.native) problems.push('native is not active')
         if (m.err) problems.push(`playbackError ${m.err}`)
         if (m.state !== 'playing') problems.push(`state ${m.state}`)
-        if (!(Math.abs(m.speed / tempo - 1) <= TOLERANCE)) problems.push(`speed off by more than ${TOLERANCE * 100}%`)
+        if (!speedOk(m.speed, tempo)) problems.push(`speed off by more than ${TOLERANCE * 100}%`)
         if (Math.abs(m.rate - tempo) > 1e-3) problems.push(`core rate ${m.rate} != ${tempo}`)
         if (m.st !== transpose) problems.push(`core transpose ${m.st} != ${transpose}`)
         if (String(m.rf) !== '0') problems.push(`renderFailures ${m.rf}`)
@@ -99,9 +101,9 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
         log: (await window.singz.getLog()).slice(-12).map(x => `${x.source}: ${String(x.line).slice(0, 160)}`) })).catch(e => ({ diag: String(e) }))
       console.error('-- engine/log at the first failure --', JSON.stringify(diag, null, 1))
     }
-    // Negative control: the checker must reject a speed that is really half the request.
-    const rejects = !(Math.abs(0.5 / 1 - 1) <= TOLERANCE)
-    rows.push({ pair: 'negative control: half speed is rejected by the tolerance', requested: 1, played: '0.500', error: '-50.0%', core: '-', result: rejects ? 'PASS' : 'FAIL', note: '' })
+    // Controls on the real predicate: a half-speed sample must fail it, an on-speed sample must pass it.
+    rows.push({ pair: 'negative control: half-speed sample (0.5 for 1) is rejected', requested: 1, played: '0.500', error: '-50.0%', core: '-', result: speedOk(0.5, 1) ? 'FAIL' : 'PASS', note: '' })
+    rows.push({ pair: 'positive control: on-speed sample (1.01 for 1) is accepted', requested: 1, played: '1.010', error: '1.0%', core: '-', result: speedOk(1.01, 1) ? 'PASS' : 'FAIL', note: '' })
     if (rows.some(r => r.result !== 'PASS')) process.exitCode = 1
   } catch (error) {
     rows.push({ pair: 'driver completion', result: 'FAIL', note: String(error.stack || error) })

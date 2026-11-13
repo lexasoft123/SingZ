@@ -338,11 +338,11 @@ async function runPass(kind, songs) {
     }
   }
 
-  // ---- launch, set the toggle, reload so boot reads it -------------------
+  // ---- launch, set the metronome, reload so boot reads it -------------------
   let { app, win } = await launch()
   liveWin = win
   liveApp = app
-  await val(win, `(() => { const p = JSON.parse(localStorage.getItem('singz.audio') || '{}'); p.nativePlayback = true; localStorage.setItem('singz.audio', JSON.stringify(p)); localStorage.setItem('singz.desktop.native-playback', '1'); localStorage.setItem('singz.met', JSON.stringify({ click: false, countInBars: 0, volume: 0, accent: true, grid: true })); return 1 })()`)
+  await val(win, `(() => { localStorage.setItem('singz.met', JSON.stringify({ click: false, countInBars: 0, volume: 0, accent: true, grid: true })); return 1 })()`)
   // PS_STREAM_LANES=1|0 pins the desktop's streamed-lanes preference for the
   // run. The platform default is what a singer gets; this is how the OTHER
   // answer is measured on a machine — the Windows streaming proof ran with it
