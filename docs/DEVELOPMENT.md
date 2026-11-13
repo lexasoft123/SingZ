@@ -10,7 +10,7 @@ the tooling.
 ## Setup
 
 ```bash
-scripts/worktree-setup.sh --desktop-only  # installs deps + review hook, builds/verifies analyzer
+scripts/worktree-setup.sh --desktop-only  # installs deps + review hook, builds/verifies analyzer + capture addon
 scripts/vendor-llama.sh        # llama-server, the lyrics recogniser — once per machine (needs cmake)
 scripts/vendor-crispasr.sh     # crispasr, its word aligner — once per machine (needs cmake)
 scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
@@ -571,8 +571,9 @@ with `reuse_lyrics_from` requires a matching receipt and fails explicitly when
 it cannot validate one, rather than silently rebuilding or blessing new bytes.
 Clear that input to build from the pinned sources in that case.
 Capture publishes immutable generations to local `build/capture-runtime/` and
-packaging snapshots to `build/capture-package/`; build it with
-`npm run capture:addon` when needed.
+packaging snapshots to `build/capture-package/`; bootstrap builds the
+host addon (skip with `SINGZ_SETUP_SKIP_ADDON=1`; rebuild with `npm run capture:addon`).
+On macOS it also adds Homebrew/nvm/fnm paths when node/npm/cmake are missing from PATH.
 
 ### Native build lock (removed)
 
