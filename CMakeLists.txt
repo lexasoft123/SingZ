@@ -363,6 +363,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     native/electron/capture_addon.cpp
     native/electron/voice_monitor_bridge.cpp
     native/electron/voice_monitor_bridge.h
+    native/playback/take_conform.cpp
     native/electron/take_writer.cpp
     native/electron/take_writer.h
     native/electron/audio_export_bridge.cpp
@@ -375,6 +376,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     native/electron/native_audio_ownership.h)
   target_compile_features(singz_capture PRIVATE cxx_std_20)
   target_include_directories(singz_capture PRIVATE
+    "${SINGZ_REPO_ROOT}/third_party/native/signalsmith"
     "${SINGZ_NODE_INCLUDE_DIR}"
     # Platform provider headers live under zcore/platform and intentionally
     # remain a private source-tree include for app bindings.
@@ -1272,6 +1274,31 @@ if(SINGZ_CORE_TESTS AND SINGZ_BUILD_HOST_TOOLS)
     "${CMAKE_CURRENT_SOURCE_DIR}/assets/pitch/crepe-tiny.bin"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pitch/crepe-tiny-parity.f32"
     "${CMAKE_CURRENT_BINARY_DIR}/crepe-recording-test.wav")
+endif()
+
+add_library(singz_take_conform STATIC native/playback/take_conform.cpp)
+target_compile_features(singz_take_conform PUBLIC cxx_std_20)
+target_link_libraries(singz_take_conform PUBLIC SingZ::zcore_resample)
+set_target_properties(singz_take_conform PROPERTIES POSITION_INDEPENDENT_CODE YES)
+target_include_directories(singz_take_conform PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
+if(SINGZ_CORE_TESTS)
+  foreach(_conform_variant IN ITEMS tests negative_ratio negative_placement negative_latency negative_drift)
+    set(_conform_target take_conform_${_conform_variant})
+    add_executable(${_conform_target} tests/native/take_conform_tests.cpp native/playback/take_conform.cpp)
+    target_compile_features(${_conform_target} PRIVATE cxx_std_20)
+    target_link_libraries(${_conform_target} PRIVATE SingZ::zcore_resample Threads::Threads)
+    target_include_directories(${_conform_target} PRIVATE "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
+    target_compile_options(${_conform_target} PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>" "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+    if(NOT _conform_variant STREQUAL "tests")
+      string(TOUPPER "${_conform_variant}" _conform_define)
+      target_compile_definitions(${_conform_target} PRIVATE SINGZ_CONFORM_${_conform_define})
+    endif()
+    add_test(NAME ${_conform_target} COMMAND ${_conform_target})
+    set_tests_properties(${_conform_target} PROPERTIES TIMEOUT 120)
+    if(NOT _conform_variant STREQUAL "tests")
+      set_tests_properties(${_conform_target} PROPERTIES WILL_FAIL TRUE)
+    endif()
+  endforeach()
 endif()
 
 if(SINGZ_CORE_TESTS)

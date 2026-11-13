@@ -71,6 +71,8 @@ export interface NativeCaptureBinding {
   microphoneMixStatus?(): DesktopMicrophoneMixStatus
   captureRecording(action: 'record' | 'finish', path: string, generation: bigint): Record<string, unknown>
   recordTake(directory: string, takeId: string, generation: bigint): Promise<{ ok: boolean; error?: string }>
+  conformTake: import('./voice-take-conform').TakeConformNative['conformTake']
+  cancelTakeConform: import('./voice-take-conform').TakeConformNative['cancelTakeConform']
   finishTake(generation: bigint): Promise<Record<string, unknown>>
   cancelTake(generation: bigint): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
   playTake(config: unknown, generation: bigint): Promise<{ ok: boolean; error?: string; startHostTimeNs?: string }>

@@ -148,6 +148,13 @@ was sung, exactly on the song timeline at any tempo. For a take recorded at
 5. Old takes with mid-take changes can be off by tens of ms (no anchors).
 6. Removing code from the shared `TrainingPcmMixer` touches phone training cues.
 
+WP1 retains the first sample's input/output/graph latency basis for all anchor
+queries, preserving existing placement math and the measured `startPositionSec`.
+A tempo seam can change graph latency; changing the subtraction mid-take could
+make the map regress. Hardware verification must record a tone take across a
+tempo 1 → 0.5 seam and measure anchor error in milliseconds before, at and after
+the seam. An error above 5 ms opens a follow-up on audible-history mapping.
+
 ## Work packages
 
 Coordinator: Claude `opus` (specs, result review, commit gate, `code-reviewer`

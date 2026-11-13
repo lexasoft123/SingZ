@@ -83,6 +83,39 @@ void boundariesAndEviction() {
   CHECK(h.query(origin).found);
   CHECK(!h.query(origin + 100000000000).found);
 }
+
+void settingsSeamsVersusFaults() {
+  PlaybackPresentationHistory h;
+  CHECK(h.append(entry(0, 48000)));
+  const auto start = h.query(origin);
+  auto seam = entry(10, 48480, .5); seam.generation = 2;
+  CHECK(h.append(seam));
+  auto p = h.query(origin + 15000000);
+  CHECK(p.found && p.discontinuitySerial > start.discontinuitySerial);
+  CHECK(p.faultSerial == start.faultSerial);
+  CHECK(p.mappingStartHostNs == origin + 10000000);
+  CHECK(p.mappingStartSongSeconds == 1.01 && p.rate == .5);
+  // A transpose-only seam also changes the epoch while preserving the time map.
+  seam = entry(20, 48720, .5); seam.generation = 3; seam.transposeSemitones = 2;
+  CHECK(h.append(seam)); p = h.query(origin + 25000000);
+  CHECK(p.found && p.faultSerial == start.faultSerial && p.transposeSemitones == 2);
+  CHECK(p.mappingStartHostNs == origin + 20000000);
+  // Negative control: a seek sharing a tempo seam must NEVER inherit its exemption.
+  seam = entry(30, 96000, 2); seam.generation = 4; seam.seekCount = 1;
+  CHECK(h.append(seam)); p = h.query(origin + 35000000);
+  CHECK(p.found && p.faultSerial > start.faultSerial);
+  const auto seekFault = p.faultSerial;
+  seam = entry(40, 96960, 2); seam.generation = 4; seam.seekCount = 1;
+  seam.nonAffine = true;
+  CHECK(h.append(seam)); p = h.query(origin + 45000000);
+  CHECK(!p.found && p.faultSerial > seekFault);
+
+  PlaybackPresentationHistory opaque;
+  CHECK(opaque.append(entry(0, 0)));
+  seam = entry(10, 480); seam.generation = 2; // Unexplained graph replacement, same settings.
+  CHECK(opaque.append(seam));
+  CHECK(opaque.query(origin + 15000000).faultSerial != opaque.query(origin).faultSerial);
+}
 // A synchronous output fixture proves this is the SONG callback's published
 // coordinate, including adopted seek/pause commands, rather than an unrelated
 // synthetic journal. stop() also reenters the query while the session holds its
@@ -244,10 +277,67 @@ void allocationFreeAndConcurrent() {
   CHECK(h.query(origin + 499995000000).found);
   (void)hits; // Scheduling is unconstrained; every observed hit must be coherent.
 }
+
+void realtimeSettingsSeam() {
+  auto backend = std::make_unique<PresentationBackend>();
+  auto *fake = backend.get();
+  NativePlaybackTestHooks hooks;
+  // A non-integral number of 480-frame callbacks forces an interior seam
+  // independent of host speed, including the Release negative control.
+  hooks.timePitchPrimeNs = 70010000;
+  NativePlaybackSession session(std::move(backend), &hooks);
+  const auto path = (std::filesystem::temp_directory_path() /
+      ("singz-anchor-seam-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav")).string();
+  WavWriter wav; const std::vector<float> pcm(480000, .1f);
+  CHECK(wav.open(path, 48000, 1)); CHECK(wav.append(pcm.data(), pcm.size())); CHECK(wav.finalize());
+  const auto lanes = [&] {
+#if defined(_WIN32)
+    const int fd = _open(path.c_str(), _O_RDONLY | _O_BINARY);
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY);
+#endif
+    CHECK(fd >= 0);
+    std::vector<NativePlaybackLaneSource> result;
+    result.push_back({"song", OwnedFileDescriptor(fd), 1, false, false, {}});
+    return result;
+  };
+  NativePlaybackPrepareConfig config;
+  config.outputDeviceUid = "presentation:output"; config.outputChannels = {0, 1};
+  config.requestedSampleRate = 48000; config.maximumFrames = 512;
+  CHECK(session.prepare(config, lanes(), 1).ok);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  for (unsigned n = 0; n < 30; ++n) fake->drive();
+  const auto before = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  CHECK(before.found);
+  config.swapFromGeneration = 1; config.preparedStartProjectFrame = 14400;
+  config.playbackRate = .5; config.transposeSemitones = 2;
+  CHECK(session.prepare(config, lanes(), 2).ok);
+  for (unsigned n = 0; n < 100; ++n) fake->drive();
+  const auto after = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  CHECK(after.found && after.generation == 2 && after.rate == .5 && after.transposeSemitones == 2);
+  CHECK(after.discontinuitySerial > before.discontinuitySerial);
+  if (after.faultSerial != before.faultSerial) {
+    const auto left = session.presentationQueryRealtime(after.mappingStartHostNs - 1);
+    const auto right = session.presentationQueryRealtime(after.mappingStartHostNs);
+    std::fprintf(stderr, "seam fault: before=%llu after=%llu edge=%llu left(found=%d gen=%llu frame=%.12f rate=%.6f) right(found=%d gen=%llu frame=%.12f rate=%.6f)\n",
+        static_cast<unsigned long long>(before.faultSerial), static_cast<unsigned long long>(after.faultSerial),
+        static_cast<unsigned long long>(after.mappingStartHostNs), left.found, static_cast<unsigned long long>(left.generation),
+        left.projectFrame, left.rate, right.found, static_cast<unsigned long long>(right.generation), right.projectFrame, right.rate);
+  }
+  CHECK(after.faultSerial == before.faultSerial);
+  CHECK(after.mappingStartHostNs > before.mappingStartHostNs);
+  CHECK((after.mappingStartHostNs - origin) % 10000000 != 0); // Seam is inside a 10 ms callback.
+  CHECK(session.seek(2, 96000).ok); fake->drive();
+  const auto fault = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  CHECK(fault.found && fault.faultSerial > after.faultSerial);
+  CHECK(session.stop(2).ok && session.unload(2).ok);
+  std::remove(path.c_str());
+}
 }
 int main() {
-  affineAndEdges(); boundariesAndEviction(); allocationFreeAndConcurrent(); realtimeSessionQuery();
+  affineAndEdges(); boundariesAndEviction(); settingsSeamsVersusFaults(); allocationFreeAndConcurrent(); realtimeSessionQuery();
   for (double rate : {.25, .5, 2.0}) realtimeSessionQuery(rate);
   realtimeSessionQuery(1, 2);
+  realtimeSettingsSeam();
   std::puts("playback presentation history tests passed");
 }

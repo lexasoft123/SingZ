@@ -14,6 +14,7 @@
 #include "training_audio_session.h"
 #include "voice_monitor_bridge.h"
 #include "take_writer.h"
+#include "../playback/take_conform.h"
 #include "microphone_mix_bridge.h"
 #include <zcore/audio/capture_recording.h>
 #include <filesystem>
@@ -784,6 +785,9 @@ napi_value stats(napi_env env, napi_callback_info) {
   setU64(env, result, "gapRegressions", gaps.gapRegressions);
   set(env, result, "gapOverflow", boolValue(env, gaps.gapOverflow));
   setU64(env, result, "lastSampleHostNs", owner.takeWriter.lastSampleHostNs());
+  const auto frameStamp = owner.takeWriter.frameStamp();
+  setU64(env, result, "takeFrameHostNs", frameStamp.hostNs);
+  setU64(env, result, "takeFrame", frameStamp.takeFrame);
   const auto firstSample = owner.takeWriter.firstSample();
   set(env, result, "firstSampleCaptured", boolValue(env, owner.takePresent && firstSample.captured));
   setU64(env, result, "firstSampleHostNs", firstSample.hostNs);
@@ -1235,6 +1239,112 @@ napi_value cancelTake(napi_env env, napi_callback_info info) {
   } catch (const std::exception& e) { return takeError(env, "error", e.what()); }
 }
 
+// Offline jobs run on libuv workers in the audio utility process. Cancellation
+// never takes the capture owner mutex and is checked once per DSP block.
+struct ConformJob {
+  napi_env env{}; napi_async_work work{}; napi_deferred deferred{};
+  std::string id, inputPath, outputPath, error;
+  singz::TakeConformRequest request;
+  std::shared_ptr<std::atomic<bool>> cancelled;
+  uint64_t frames{0}; uint32_t inputLatency{0}, outputLatency{0}; bool registered{false};
+};
+std::mutex conformMutex;
+std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> conformJobs;
+napi_value conformProperty(napi_env env, napi_value obj, const char *name) {
+  napi_value v{};
+  if (napi_get_named_property(env, obj, name, &v) != napi_ok) throw std::runtime_error("Missing conform property");
+  return v;
+}
+double conformNumber(napi_env env, napi_value obj, const char *name) {
+  double value = 0;
+  if (napi_get_value_double(env, conformProperty(env, obj, name), &value) != napi_ok || !std::isfinite(value))
+    throw std::runtime_error("Invalid conform number");
+  return value;
+}
+uint64_t conformFrame(napi_env env, napi_value obj, const char *name) {
+  const double n = conformNumber(env, obj, name);
+  if (n < 0 || n > 9007199254740991.0 || std::floor(n) != n) throw std::runtime_error("Invalid conform frame");
+  return static_cast<uint64_t>(n);
+}
+bool conformBool(napi_env env, napi_value obj, const char *name) {
+  bool value{};
+  if (napi_get_value_bool(env, conformProperty(env, obj, name), &value) != napi_ok) throw std::runtime_error("Invalid conform boolean");
+  return value;
+}
+template<class F> void conformArray(napi_env env, napi_value obj, const char *name, uint32_t max, F item) {
+  auto v = conformProperty(env, obj, name); bool array = false; uint32_t length = 0;
+  if (napi_is_array(env, v, &array) != napi_ok || !array || napi_get_array_length(env, v, &length) != napi_ok || length > max)
+    throw std::runtime_error("Invalid conform array");
+  for (uint32_t i = 0; i < length; ++i) { napi_value row{}; if (napi_get_element(env, v, i, &row) != napi_ok) throw std::runtime_error("Invalid conform row"); item(row); }
+}
+napi_value conformTake(napi_env env, napi_callback_info info) {
+  size_t argc = 4; napi_value argv[4]{}; napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  auto job = std::make_unique<ConformJob>(); job->env = env;
+  try {
+    if (argc != 4) throw std::runtime_error("conformTake requires input, output, request and job id");
+    job->inputPath = getStringValue(env, argv[0], 32768); job->outputPath = getStringValue(env, argv[1], 32768);
+    job->id = getStringValue(env, argv[3], 128);
+    if (job->id.empty() || job->inputPath.empty() || job->outputPath.empty() || job->inputPath == job->outputPath ||
+      job->inputPath.find('\0') != std::string::npos || job->outputPath.find('\0') != std::string::npos)
+      throw std::runtime_error("Invalid conform paths/id");
+    auto &r = job->request; const auto config = argv[2];
+    const auto rate = conformFrame(env, config, "outputRate");
+    if (rate < 8000 || rate > 192000) throw std::runtime_error("Invalid conform output rate");
+    r.outputRate = static_cast<uint32_t>(rate);
+    r.songDurationProjectFrames = conformFrame(env, config, "songDurationProjectFrames");
+    r.startPositionSec = conformNumber(env, config, "startPositionSec"); r.userOffsetSec = conformNumber(env, config, "userOffsetSec");
+    conformArray(env, config, "anchors", 20000, [&](napi_value a) { r.anchors.push_back({conformFrame(env, a, "takeFrame"), conformNumber(env, a, "projectFrame")}); });
+    conformArray(env, config, "settings", 20000, [&](napi_value s) { r.settings.push_back({conformFrame(env, s, "takeFrame"), conformNumber(env, s, "transposeSemitones")}); });
+    conformArray(env, config, "effects", 16, [&](napi_value e) {
+      auto params = conformProperty(env, e, "params");
+      r.effects.push_back({getStringValue(env, conformProperty(env, e, "id"), 32), conformBool(env, e, "enabled"),
+        conformNumber(env, params, "manualOffsetSemitones"), conformBool(env, params, "preserveFormants")});
+    });
+    job->cancelled = std::make_shared<std::atomic<bool>>(false);
+    { std::lock_guard lock(conformMutex);
+      if (conformJobs.size() >= 4 || conformJobs.count(job->id)) throw std::runtime_error("Conform queue full or duplicate id");
+      conformJobs.emplace(job->id, job->cancelled); job->registered = true;
+    }
+    napi_value promise{}, resource{};
+    if (napi_create_promise(env, &job->deferred, &promise) != napi_ok) throw std::runtime_error("Could not create conform promise");
+    napi_create_string_utf8(env, "offlineTakeConform", NAPI_AUTO_LENGTH, &resource);
+    const auto created = napi_create_async_work(env, nullptr, resource,
+      [](napi_env, void *data) {
+        auto *j = static_cast<ConformJob *>(data);
+        try {
+          auto result = singz::conformTakePcm(singz::readTakeConformWav(j->inputPath), j->request, j->cancelled.get());
+          if (j->cancelled->load()) throw std::runtime_error("Take conform cancelled");
+          singz::writeTakeConformWav(j->outputPath, result.pcm);
+          j->frames = result.pcm.samples.size(); j->inputLatency = result.inputLatencyFrames; j->outputLatency = result.outputLatencyFrames;
+        } catch (const std::exception &e) { j->error = e.what(); }
+      }, [](napi_env env, napi_status status, void *data) {
+        std::unique_ptr<ConformJob> j(static_cast<ConformJob *>(data));
+        { std::lock_guard lock(conformMutex); conformJobs.erase(j->id); }
+        if (status != napi_ok && j->error.empty()) j->error = "Take conform worker cancelled";
+        napi_value result{}; napi_create_object(env, &result);
+        set(env, result, "ok", boolValue(env, j->error.empty() && !j->cancelled->load()));
+        set(env, result, "error", stringValue(env, j->cancelled->load() ? "Take conform cancelled" : j->error));
+        set(env, result, "durationFrames", numberValue(env, static_cast<double>(j->frames)));
+        set(env, result, "inputLatencyFrames", uintValue(env, j->inputLatency)); set(env, result, "outputLatencyFrames", uintValue(env, j->outputLatency));
+        napi_resolve_deferred(env, j->deferred, result); napi_delete_async_work(env, j->work);
+      }, job.get(), &job->work);
+    if (created != napi_ok || napi_queue_async_work(env, job->work) != napi_ok) throw std::runtime_error("Could not queue conform worker");
+    job.release(); return promise;
+  } catch (const std::exception &e) {
+    if (job->registered) { std::lock_guard lock(conformMutex); conformJobs.erase(job->id); }
+    if (job->work) napi_delete_async_work(env, job->work);
+    napi_throw_error(env, nullptr, e.what()); return nullptr;
+  }
+}
+napi_value cancelTakeConform(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1]{}; napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  if (argc != 1) { napi_throw_error(env, nullptr, "cancelTakeConform requires a job id"); return nullptr; }
+  const auto id = getStringValue(env, argv[0], 128);
+  std::lock_guard lock(conformMutex); const auto found = conformJobs.find(id);
+  if (found != conformJobs.end()) found->second->store(true);
+  napi_value result{}; napi_get_undefined(env, &result); return result;
+}
+
 void cleanup(void*) {
   if (!singz::cleanupVoiceMonitor()) return; // Other N-API environments still own shared hosts.
   singz::cleanupMicrophoneMix();
@@ -1263,6 +1373,8 @@ napi_value init(napi_env env, napi_value exports) {
       {"cancelCapture", nullptr, cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureState", nullptr, state, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"recordTake", nullptr, recordTake, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"conformTake", nullptr, conformTake, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"cancelTakeConform", nullptr, cancelTakeConform, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"finishTake", nullptr, finishTake, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cancelTake", nullptr, cancelTake, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureRecording", nullptr, captureRecording, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -118,6 +118,34 @@ void overflow(const std::filesystem::path& dir) {
   const auto wav = bytes(result.path);
   require(wav[44 + 3 * 2] == 255 && wav[45 + 3 * 2] == 127 && wav[45 + 4 * 2] == 128, "PCM saturation");
 }
+void liveFrameStamp(const std::filesystem::path& dir) {
+  singz::TakeWriter writer(512, 480);
+  std::atomic<bool> entered{false}, release{false}, done{false};
+  writer.start(utf8Path(dir), "live-frame-stamp", 48000, [&] {
+    entered.store(true);
+    while (!release.load()) std::this_thread::yield();
+    return false;
+  });
+  waitFor(entered);
+  const std::vector<float> pcm(480, .25f);
+  auto b = block(pcm); constexpr uint64_t origin = 10000000000ull;
+  for (uint64_t i = 0; i < 400; ++i) {
+    b.capture.sampleHostTimeNs = origin + i * 10000000;
+    require(writer.append(b), "anchor fixture dropped a block");
+  }
+  singz::TakeWriteResult result;
+  std::thread finisher([&] { release.store(true); result = writer.finish(); done.store(true); });
+  bool coherent = true;
+  do {
+    const auto stamp = writer.frameStamp();
+    if (stamp.hostNs)
+      coherent = coherent && stamp.hostNs >= origin &&
+          stamp.takeFrame == (stamp.hostNs - origin) * 48 / 1000000;
+  } while (!done.load());
+  finisher.join();
+  require(coherent, "live frame stamp mixed a file cursor with another block timestamp");
+  require(result.error.empty() && result.frames == 400 * 480, "anchor fixture lost PCM");
+}
 void concurrentFinish(const std::filesystem::path& dir) {
   singz::TakeWriter writer(16, 8);
   const std::vector<float> pcm(8, .125f);
@@ -226,6 +254,9 @@ void forwardGap(const std::filesystem::path& dir) {
   require(result.gapPaddedFrames == 1440 && result.gapPaddedBlocks == 1 && !result.gapOverflow,
           "30ms gap padding stats");
   require(result.firstSampleHostNs == atFrame(0), "gap shifted placement anchor");
+  const auto stamp = writer.frameStamp();
+  require(stamp.hostNs == c.capture.sampleHostTimeNs && stamp.takeFrame == 512 + 1440 + 32,
+          "anchor cursor omitted gap padding or paired a frame with another block's host time");
   const auto stats = writer.gapStats();
   require(stats.gapPaddedFrames == result.gapPaddedFrames && stats.gapPaddedBlocks == 1,
           "live gap stats disagree with result");
@@ -554,6 +585,7 @@ int main(int argc, char** argv) {
     if (which == "all" || which == "gap-mac-silence") gapMacReplacementSilence(dir);
     if (which == "all" || which == "gap-rate") gapRateBoundary(dir);
     if (which == "all" || which == "gap-rt") gapRealtimePolicy();
+    if (which == "all" || which == "live-anchor") liveFrameStamp(dir);
     if (which == "all" || which == "roundtrip") roundtrip(dir);
     if (which == "all" || which == "overflow") overflow(dir);
     if (which == "all" || which == "lifecycle") lifecycle(dir);

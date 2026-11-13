@@ -23,6 +23,11 @@
       "partialRuntimeTag": "singz-prepared-audio-fd-ffmpeg-partial-runtime-v2"
     }
   },
+  "offlineTakeAddon": {
+    "conformTake": { "arity": 4, "synchronous": false, "target": "binding" },
+    "cancelTakeConform": { "arity": 1, "synchronous": true, "target": "binding" },
+    "note": "Separate capture-addon control surface; never enters the playback callback."
+  },
   "methods": {
     "phone": [
       {

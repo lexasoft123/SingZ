@@ -33,9 +33,12 @@ import {
   desktopStreamLanesPreferred,
   detectedDesktopPlatform
 } from './native-playback-preference'
+import { VOICE_TAKE_LANE_ID, type VoiceTakeLaneState, type VoiceTakeLaneSource, type VoiceTakeLaneControl } from '../../../shared/voice-take'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 import {
   GRAPH_NODE_TYPES,
+  parseGraphDocument,
+  MAX_NATIVE_GRAPH_PORTS_PER_NODE,
   MAX_NATIVE_GRAPH_NODES,
   projectGraphDocumentForNative,
   synthesizedNativeGraphNodeCount
@@ -255,6 +258,8 @@ export interface DesktopNativePlaybackLease {
 }
 
 export interface DesktopNativePlaybackStructuralPatch {
+  lanes?: DesktopPlaybackLaneConfig[]
+  graphDocument?: ParsedGraphDocument
   browserOutputId?: string
   beat?: BeatInfo | null
   metronome?: MetronomeConfig
@@ -272,6 +277,8 @@ export interface DesktopNativeLaneControl {
 }
 
 export interface DesktopNativePlaybackEngineRequest {
+  voiceTake?: VoiceTakeLaneSource & VoiceTakeLaneControl
+  onVoiceTakeState?: (state: VoiceTakeLaneState) => void
   browserOutputId?: string
   lanes: Array<{
     id: string
@@ -310,11 +317,78 @@ export type DesktopNativePlaybackPreparationDecision =
   | { backend: 'native'; prepare: DesktopNativePlaybackPrepare }
   | Extract<DesktopPlaybackBackendDecision, { backend: 'legacy' }>
 
+/** Add only to the prepare projection. The source document and engine tracks
+ * remain canonical save/export inputs. No song can be rejected for this lane. */
+export function withVoiceTakeLane(request: DesktopNativePlaybackEngineRequest): {
+  request: DesktopNativePlaybackEngineRequest; state: VoiceTakeLaneState
+} {
+  const voice = request.voiceTake
+  if (!voice) return { request, state: { status: 'idle' } }
+  const omit = (reason: import('../../../shared/voice-take').VoiceTakeLaneOmission) => ({ request: { ...request, voiceTake: undefined }, state: { status: 'omitted', reason } as VoiceTakeLaneState })
+  if (request.lanes.length >= 16) return omit('lane-limit')
+  let graphDocument = request.graphDocument
+  if (!graphDocument) {
+    const correction = request.transpose - 12 * Math.log2(request.playbackRate)
+    if (synthesizedNativeGraphNodeCount({ laneCount: request.lanes.length + 1,
+      trainingLaneCount: request.training?.stems.length ?? 0, hasReference: true,
+      needsTimePitch: Math.abs(correction) > 1e-6 }) > MAX_NATIVE_GRAPH_NODES) return omit('node-limit')
+  } else {
+    if (graphDocument.nodes.length + 3 > MAX_NATIVE_GRAPH_NODES) return omit('node-limit')
+    try {
+      // The complete lane mix feeds the existing song bus (including its time/
+      // pitch node). Refuse ambiguous custom topology rather than bypass FX.
+      const projection = projectGraphDocumentForNative(graphDocument)
+      if (!projection) return omit('graph-incompatible')
+      const byId = new Map(projection.nodes.map(n => [n.id, n]))
+      const mixes = projection.nodes.filter(n => n.type === GRAPH_NODE_TYPES.mix &&
+        projection.connections.some(c => c.to.node === n.id && byId.get(c.from.node)?.binding?.kind === 'project-lane'))
+      if (mixes.length !== 1) return omit('graph-incompatible')
+      const mix = mixes[0], output = mix.ports.outputs[0]
+      if (!output || mix.ports.inputs.length >= MAX_NATIVE_GRAPH_PORTS_PER_NODE) return omit('graph-incompatible')
+      const raw = JSON.parse(JSON.stringify(graphDocument.raw))
+      const rawMix = raw.nodes.find((n: { id: string }) => n.id === mix.id)
+      const input = `lane:${VOICE_TAKE_LANE_ID}`
+      if (rawMix.ports.inputs.some((p: { id: string }) => p.id === input)) return omit('graph-incompatible')
+      rawMix.ports.inputs.push({ id: input, channels: output.channels })
+      let next = projection.nodes.reduce((max, n) => BigInt(n.id) > max ? BigInt(n.id) : max, 0n) + 1n
+      const source = String(next++), map = String(next++), gain = String(next++)
+      const node = (id: string, type: string, execution: string, inputs: unknown[], outputs: unknown[], parameters = {}) =>
+        ({ id, type, typeVersion: 1, execution, unavailable: 'silence', ports: { inputs, outputs }, parameters, binding: { kind: 'project-lane', laneId: VOICE_TAKE_LANE_ID } })
+      const mono = { id: 'out', channels: 1 }, stereo = { id: 'out', channels: output.channels }
+      raw.nodes.push(node(source, GRAPH_NODE_TYPES.projectLaneSource, 'native', [], [mono]),
+        node(map, GRAPH_NODE_TYPES.channelMap, 'builtin', [{ id: 'in', channels: 1 }], [stereo]),
+        node(gain, GRAPH_NODE_TYPES.gain, 'builtin', [{ id: 'in', channels: output.channels }], [stereo], { gain: 1 }))
+      raw.connections.push({ from: { node: source, port: 'out' }, to: { node: map, port: 'in' } },
+        { from: { node: map, port: 'out' }, to: { node: gain, port: 'in' } },
+        { from: { node: gain, port: 'out' }, to: { node: mix.id, port: input } })
+      graphDocument = parseGraphDocument(JSON.stringify(raw))
+      projectGraphDocumentForNative(graphDocument)
+    } catch { return omit('graph-incompatible') }
+  }
+  return { request: { ...request, graphDocument, voiceTake: undefined, lanes: [...request.lanes,
+    { id: VOICE_TAKE_LANE_ID, path: voice.path, volume: voice.gain,
+      muted: voice.muted || voice.suppressed, solo: voice.solo && !voice.suppressed }] }, state: { status: 'ready' } }
+}
+
 /** Detailed admission result shared by Play and prepare-ahead. WP3 can use the
  * same failure without reconstructing a reason from a null prepare request. */
 export async function inspectDesktopNativePlayback(
   request: DesktopNativePlaybackEngineRequest
 ): Promise<DesktopNativePlaybackPreparationDecision> {
+  if (request.voiceTake) {
+    const result = withVoiceTakeLane(request)
+    if (result.state.status !== 'ready') {
+      request.onVoiceTakeState?.(result.state)
+      return inspectDesktopNativePlayback(result.request)
+    }
+    const decision = await inspectDesktopNativePlayback(result.request)
+    if (decision.backend === 'native') request.onVoiceTakeState?.({ status: 'ready' })
+    else {
+      request.onVoiceTakeState?.({ status: 'omitted', reason: 'native-unavailable' })
+      return inspectDesktopNativePlayback({ ...request, voiceTake: undefined })
+    }
+    return decision
+  }
   if (!request.graphDocument) {
     const correction = request.transpose - 12 * Math.log2(request.playbackRate)
     const trainingLaneCount = request.training?.stems.length ?? 0
@@ -407,6 +481,11 @@ export async function tryStartDesktopNativePlayback(
   })
   if (!prepare) return false
   const started = await client.prepareAndStart(prepare)
+  if (!started && request.voiceTake && prepare.lanes.some(lane => lane.id === VOICE_TAKE_LANE_ID) &&
+      !client.active && !client.recoveryPending) {
+    request.onVoiceTakeState?.({ status: 'error', reason: 'prepare-failed' })
+    return tryStartDesktopNativePlayback(client, { ...request, voiceTake: undefined }, onDecline)
+  }
   if (!started && client.lastFailure) onDecline?.(client.lastFailure)
   return started
 }
@@ -427,6 +506,11 @@ export async function prepareDesktopNativePlaybackAhead(
   })
   if (!prepare) return false
   const prepared = await client.prepareAhead(prepare)
+  if (!prepared && request.voiceTake && prepare.lanes.some(lane => lane.id === VOICE_TAKE_LANE_ID) &&
+      !client.active && !client.recoveryPending) {
+    request.onVoiceTakeState?.({ status: 'error', reason: 'prepare-failed' })
+    return prepareDesktopNativePlaybackAhead(client, { ...request, voiceTake: undefined }, onDecline)
+  }
   if (!prepared && client.lastFailure) onDecline?.(client.lastFailure)
   return prepared
 }
@@ -1274,7 +1358,8 @@ export class DesktopNativePlaybackClient {
             const currentRoute = await this.resolveRoute(request, ahead.route)
             same = !recovering &&
               JSON.stringify(this.configFor(request, currentRoute)) === ahead.signature &&
-              request.positionSeconds === ahead.positionSeconds
+              request.positionSeconds === ahead.positionSeconds &&
+              JSON.stringify(request.lanes) === JSON.stringify(ahead.request.lanes)
           } catch (error) {
             try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
             throw error
@@ -1450,7 +1535,8 @@ export class DesktopNativePlaybackClient {
       if (this.ahead) {
         const route = await this.resolveRoute(preparedRequest)
         const config = this.configFor(preparedRequest, route)
-        if (JSON.stringify(config) === this.ahead.signature) return true
+        if (JSON.stringify(config) === this.ahead.signature &&
+            JSON.stringify(preparedRequest.lanes) === JSON.stringify(this.ahead.request.lanes)) return true
         await this.discardAheadUnlocked()
         return this.prepareAheadUnlocked(preparedRequest, route)
       }
@@ -1734,6 +1820,16 @@ export class DesktopNativePlaybackClient {
   ): Promise<void> {
     return this.serialize(async () => {
       this.assertCommandableGeneration()
+      if (this.ahead) {
+        const ahead = this.ahead, request = { ...ahead.request, ...patch }
+        const route = options.refreshRoute || options.force ? await this.resolveRoute(request) : ahead.route
+        const signature = JSON.stringify(this.configFor(request, route))
+        if (!options.force && signature === ahead.signature && JSON.stringify(request.lanes) === JSON.stringify(ahead.request.lanes)) return
+        await this.discardAheadUnlocked()
+        if (!await this.prepareAheadUnlocked(request, route)) throw new DesktopNativePlaybackError(
+          this.lastFailure?.code ?? 'graph-rejected', this.lastFailure?.detail ?? 'Native take lane preparation failed')
+        return
+      }
       if (!this.generation || !this.request || !this.route) {
         if (this.ownsOutput) throw new Error('Native playback has no rebuildable generation.')
         return
@@ -1749,7 +1845,8 @@ export class DesktopNativePlaybackClient {
       // and a selection drag or the loader's control resets arrive here many
       // times a second with nothing new to say.
       if (!options.force &&
-          JSON.stringify(desired) === JSON.stringify(this.configFor(this.request, this.route))) {
+          JSON.stringify(desired) === JSON.stringify(this.configFor(this.request, this.route)) &&
+          JSON.stringify(request.lanes) === JSON.stringify(this.request.lanes)) {
         this.request = request
         return
       }
@@ -2336,6 +2433,14 @@ export class DesktopNativePlaybackClient {
   ): Promise<DesktopNativeLaneControl> {
     return this.serialize(async () => {
       this.assertCommandableGeneration()
+      if (this.ahead) {
+        const ahead = this.ahead, current = ahead.request.lanes.find(lane => lane.id === id)
+        if (!current) throw new Error('Native playback lane is not part of this generation.')
+        const next = { gain: patch.gain ?? current.gain, muted: patch.muted ?? current.muted, solo: patch.solo ?? current.solo }
+        ensure(await window.singz.setDesktopPlaybackLane(ahead.generation, id, next.gain, next.muted, next.solo), 'Native lane update failed')
+        ahead.request = { ...ahead.request, lanes: ahead.request.lanes.map(lane => lane.id === id ? { ...lane, ...next } : lane) }
+        return next
+      }
       if (!this.generation) {
         if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
         throw new Error('Native playback is not active.')

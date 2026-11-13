@@ -14,7 +14,9 @@ import {
   POLL_EDGE_MAX_MS,
   POLL_EDGE_MS,
   POLL_FAST_MS,
-  selectDesktopPlaybackBackend
+  selectDesktopPlaybackBackend,
+  withVoiceTakeLane,
+  inspectDesktopNativePlayback
 } from '../../src/renderer/src/audio/desktop-native-playback'
 import { playbackProviderCanChange } from '../../src/renderer/src/components/SettingsModal'
 import type {
@@ -702,6 +704,26 @@ describe('desktop native playback facade', () => {
     ...patch
   })
 
+  it('adds/replaces/removes a transient source with a running seam even when config topology is synthesized', async () => {
+    const h = seamHarness(generation => playing(generation))
+    await h.start()
+    const stems: import('../../src/shared/types').DesktopPlaybackLaneConfig[] = [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }]
+    await h.client.reconfigure({ lanes: [...stems, { id: 'voice:take', path: '/cache/a.wav', gain: 0.891, muted: false, solo: false }] })
+    expect(h.prepared).toHaveLength(2)
+    expect(h.prepared[1].swapFromGeneration).toBe('1')
+    expect((h.api.prepareDesktopPlayback as ReturnType<typeof vi.fn>).mock.calls[1][1].at(-1)).toMatchObject({ id: 'voice:take', path: '/cache/a.wav' })
+    await h.client.reconfigure({ lanes: [...stems, { id: 'voice:take', path: '/cache/b.wav', gain: 0.891, muted: false, solo: false }] })
+    expect(h.prepared).toHaveLength(3)
+    expect((h.api.prepareDesktopPlayback as ReturnType<typeof vi.fn>).mock.calls[2][1].at(-1)?.path).toBe('/cache/b.wav')
+    await h.client.updateLane('voice:take', { muted: true, solo: true, gain: 0.25 })
+    expect(h.prepared).toHaveLength(3)
+    expect(h.api.setDesktopPlaybackLane).toHaveBeenLastCalledWith('3', 'voice:take', 0.25, true, true)
+    await h.client.reconfigure({ lanes: stems })
+    expect(h.prepared).toHaveLength(4)
+    expect((h.api.prepareDesktopPlayback as ReturnType<typeof vi.fn>).mock.calls[3][1].some((l: { id: string }) => l.id === 'voice:take')).toBe(false)
+    await h.client.unload()
+  })
+
   it.each([false, true])('ignores period-only CoreAudio inventory changes (song paused: %s)', async (pauseSong) => {
     let paused = false
     const h = seamHarness(generation => playing(generation, { transportState: paused ? 'paused' : 'playing' }))
@@ -825,6 +847,28 @@ describe('desktop native playback facade', () => {
       initialTransport: { state: 'playing' } })
     expect(h.client.transportActive).toBe(true)
     expect(h.client.status?.renderedProjectFrame).toBe('192000')
+    await h.client.unload()
+  })
+
+  it('replaces a stopped prepared-ahead source and silences it via lane control without a recording rebuild', async () => {
+    const h = seamHarness(generation => playing(generation))
+    const stem = { id: 'stem', path: '/allowed/stem.wav', gain: 1, muted: false, solo: false }
+    const voice = { id: 'voice:take', path: '/cache/old.wav', gain: .891, muted: false, solo: true }
+    const request: DesktopNativePlaybackPrepare = { provider: 'coreaudio', lanes: [stem], beat: null,
+      metronome: h.metronome, countIn: false, positionSeconds: 0, durationSeconds: 10, sampleRate: 48000,
+      masterGain: 0, playbackRate: 1, transpose: 0, training: null, loop: null }
+    await h.client.prepareAhead(request)
+    await h.client.reconfigure({ lanes: [stem, voice] })
+    expect(h.prepared).toHaveLength(2)
+    const replaced = { ...voice, path: '/cache/finalized.wav' }
+    await h.client.reconfigure({ lanes: [stem, replaced] })
+    expect(h.prepared).toHaveLength(3)
+    await h.client.updateLane('voice:take', { muted: true, solo: false })
+    expect(h.api.setDesktopPlaybackLane).toHaveBeenLastCalledWith('3', 'voice:take', .891, true, false)
+    expect(h.prepared).toHaveLength(3)
+    await h.client.prepareAndStart({ ...request, lanes: [stem, { ...replaced, muted: true, solo: false }] })
+    expect(h.prepared).toHaveLength(3) // Record's Play adopts the already-silent generation.
+    expect(h.calls).toContain('start:3')
     await h.client.unload()
   })
 
@@ -4372,5 +4416,58 @@ describe('native playback disabled by policy', () => {
       mod.selectDesktopPlaybackBackend('darwin', { ...features, enabled: true, runtime: null })
       expect(warn).toHaveBeenCalled()
     } finally { info.mockRestore(); warn.mockRestore() }
+  })
+})
+
+
+describe('ADR 0016 transient lane projection', () => {
+  const request = () => ({ lanes: [{ id: 'vocals', path: '/stems/v.wav', volume: 1, muted: false, solo: false }],
+    graphDocument: null, transpose: 0, playbackRate: 1, training: null,
+    voiceTake: { path: '/cache/placed.wav', gain: 0.25, muted: false, solo: true, suppressed: false }
+  } as import('../../src/renderer/src/audio/desktop-native-playback').DesktopNativePlaybackEngineRequest)
+  it('adds exactly one source with native M/S/gain and never mutates saved lane/document inputs', () => {
+    const original = request(), saved = JSON.stringify(original.lanes)
+    const prepared = withVoiceTakeLane(original)
+    expect(prepared.state).toEqual({ status: 'ready' })
+    expect(prepared.request.lanes.at(-1)).toEqual({ id: 'voice:take', path: '/cache/placed.wav', volume: .25, muted: false, solo: true })
+    expect(JSON.stringify(original.lanes)).toBe(saved)
+    expect(original.graphDocument).toBeNull()
+    // Negative control: the old/no-take request cannot satisfy the lane assertion.
+    expect(withVoiceTakeLane({ ...original, voiceTake: undefined }).request.lanes.some(l => l.id === 'voice:take')).toBe(false)
+  })
+  it('joins the song bus before time/pitch in custom graphs while retaining the canonical graph verbatim', () => {
+    const document = nonDefaultSongGraph(), saved = JSON.stringify(document.raw)
+    const result = withVoiceTakeLane({ ...request(), graphDocument: document })
+    expect(result.state).toEqual({ status: 'ready' })
+    const doc = result.request.graphDocument!
+    expect(doc.nodes).toHaveLength(document.nodes.length + 3)
+    const voiceNodes = doc.nodes.filter(n => (n.raw.binding as any)?.laneId === 'voice:take')
+    expect(voiceNodes.map(n => n.raw.type)).toEqual([GRAPH_NODE_TYPES.projectLaneSource, GRAPH_NODE_TYPES.channelMap, GRAPH_NODE_TYPES.gain])
+    expect((doc.raw.connections as any[]).some(c => c.from.node === voiceNodes[2].raw.id && c.to.node === '4')).toBe(true)
+    expect(JSON.stringify(document.raw)).toBe(saved)
+    expect(saved).not.toContain('voice:take')
+  })
+  it('suppression forcibly mutes and clears Solo so recording and legacy Listen cannot solo an empty lane', () => {
+    const req = request()
+    const result = withVoiceTakeLane({ ...req, voiceTake: { ...req.voiceTake!, suppressed: true } })
+    expect(result.request.lanes.at(-1)).toMatchObject({ muted: true, solo: false, volume: .25 })
+  })
+  it('omits at 16 lanes without rejecting or changing the stems', () => {
+    const req = request()
+    req.lanes = Array.from({ length: 16 }, (_, i) => ({ ...req.lanes[0], id: `stem-${i}` }))
+    const result = withVoiceTakeLane(req)
+    expect(result.state).toEqual({ status: 'omitted', reason: 'lane-limit' })
+    expect(result.request.lanes).toEqual(req.lanes)
+  })
+  it('omits at the 128-node cap and preserves the legal original custom graph', () => {
+    const base = nonDefaultSongGraph(), raw = JSON.parse(JSON.stringify(base.raw))
+    while (raw.nodes.length < 126) raw.nodes.push({ ...raw.nodes[2], id: String(100 + raw.nodes.length), binding: undefined })
+    const graphDocument = parseGraphDocument(JSON.stringify(raw)), req = { ...request(), graphDocument }
+    const result = withVoiceTakeLane(req)
+    expect(result.state).toEqual({ status: 'omitted', reason: 'node-limit' })
+    expect(result.request.graphDocument).toBe(graphDocument)
+    // Negative control: leave room for precisely three nodes.
+    raw.nodes.pop()
+    expect(withVoiceTakeLane({ ...req, graphDocument: parseGraphDocument(JSON.stringify(raw)) }).state).toEqual({ status: 'ready' })
   })
 })

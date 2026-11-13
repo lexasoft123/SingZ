@@ -1,4 +1,7 @@
 import { ipcMain } from 'electron'
+import { allowFile } from './media'
+import { conformTake, invalidateConformedTake, releaseConformedTake } from './voice-take-conform'
+import { isVoiceTakeEffects, type VoiceTakeConformRequest, type VoiceTakeConformResult } from '../shared/voice-take'
 import { desktopAudioProcess } from './audio-process'
 import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
 import { VoiceTakeStore, createUnavailableVoiceNative, type VoiceTakeNative } from './voice-takes'
@@ -62,13 +65,17 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
     const adjustedHostNs = hostNs > trimNs ? hostNs - trimNs : 0n
     const raw = await desktopAudioProcess.call<{
       found: boolean; projectFrame?: number; songSeconds?: number; rate?: number; sampleRate?: number;
-      outputLatencyFrames?: number; graphLatencyFrames?: number; discontinuitySerial?: number;
+      outputLatencyFrames?: number; graphLatencyFrames?: number; discontinuitySerial?: number | string;
+      transposeSemitones?: number; faultSerial?: number | string; mappingStartHostNs?: number | string; mappingStartSongSeconds?: number;
       paused?: boolean; seekDuringCallback?: boolean; generation?: string | number
     }>('binding', 'presentationQuery', [adjustedHostNs.toString()])
     return {
       ok: true, found: raw.found, projectFrame: raw.projectFrame, songSeconds: raw.songSeconds, sampleRate: raw.sampleRate,
       startPositionSec: raw.songSeconds, paused: raw.paused, outputLatencyFrames: raw.outputLatencyFrames,
       graphLatencyFrames: raw.graphLatencyFrames, discontinuitySerial: raw.discontinuitySerial,
+      transposeSemitones: raw.transposeSemitones, faultSerial: raw.faultSerial, generation: raw.generation, rate: raw.rate,
+      mappingStartCaptureHostNs: raw.mappingStartHostNs === undefined ? undefined : (BigInt(raw.mappingStartHostNs) + trimNs).toString(),
+      mappingStartSongSeconds: raw.mappingStartSongSeconds,
       seekDuringCallback: raw.seekDuringCallback,
       latencySource: raw.found ? (args.firstSampleQuality === 'unknown' ? 'measured-trim' as const : 'reported' as const) : 'measured-trim' as const
     }
@@ -121,6 +128,81 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
 }
 
 export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
+  // Leases are scoped to the renderer that requested the cache entry. Pin at
+  // publication, before replying: POSIX otherwise allows prune-before-open.
+  const jobs = new Map<string, AbortController>()
+  const latestBySong = new Map<string, AbortController>()
+  const mutations = new Map<string, Promise<unknown>>()
+  const leases = new Map<string, { owner: number; songId: string; takeId: string; path: string }>()
+  const watched = new Set<number>()
+  const validId = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(v)
+  const key = (owner: number, id: string): string => `${owner}:${id}`
+  ipcMain.handle(VOICE_IPC.conform, async (event, raw: VoiceTakeConformRequest): Promise<VoiceTakeConformResult> => {
+    if (!raw || !validId(raw.songId) || !validId(raw.takeId) || !validId(raw.requestId) ||
+        !Number.isSafeInteger(raw.outputRate) || raw.outputRate < 8000 || raw.outputRate > 192000 ||
+        !Number.isSafeInteger(raw.songDurationProjectFrames) || raw.songDurationProjectFrames <= 0 ||
+        (raw.effects !== undefined && !isVoiceTakeEffects(raw.effects))) return { ok: false, reason: 'conform-failed' }
+    const owner = event.sender.id, id = key(owner, raw.requestId)
+    if (jobs.has(id) || leases.has(id)) return { ok: false, reason: 'conform-failed' }
+    if (!watched.has(owner)) {
+      watched.add(owner)
+      event.sender.once('destroyed', () => {
+        watched.delete(owner)
+        for (const [id, job] of jobs) if (id.startsWith(`${owner}:`)) job.abort()
+        for (const [id, lease] of leases) if (lease.owner === owner) {
+          leases.delete(id)
+          void releaseConformedTake(lease.path).then(() => invalidateConformedTake(lease.songId, lease.takeId, { cancelActive: false })).catch(() => {})
+        }
+      })
+    }
+    const controller = new AbortController()
+    jobs.set(id, controller)
+    latestBySong.get(raw.songId)?.abort()
+    latestBySong.set(raw.songId, controller)
+    let timedOut = false
+    const timeout = setTimeout(() => { timedOut = true; controller.abort() }, 95000)
+    try {
+      const mutation = (mutations.get(raw.songId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+        if (controller.signal.aborted) throw new Error('Take conform cancelled')
+        if (raw.effects !== undefined) await store.setEffects(raw.songId, raw.takeId, raw.effects)
+      })
+      mutations.set(raw.songId, mutation)
+      try { await mutation } finally { if (mutations.get(raw.songId) === mutation) mutations.delete(raw.songId) }
+      if (controller.signal.aborted) return { ok: false, reason: timedOut ? 'timeout' : 'cancelled' }
+      const result = await conformTake(raw.songId, raw.takeId, { songDurationProjectFrames: raw.songDurationProjectFrames,
+        outputRate: raw.outputRate, effects: raw.effects, signal: controller.signal, retain: true })
+      if (controller.signal.aborted || event.sender.isDestroyed()) {
+        await releaseConformedTake(result.path)
+        await invalidateConformedTake(raw.songId, raw.takeId, { cancelActive: false })
+        return { ok: false, reason: timedOut ? 'timeout' : 'cancelled' }
+      }
+      leases.set(id, { owner, songId: raw.songId, takeId: raw.takeId, path: result.path })
+      allowFile(result.path)
+      return { ok: true, ...result, leaseId: raw.requestId }
+    } catch {
+      return { ok: false, reason: timedOut ? 'timeout' : controller.signal.aborted ? 'cancelled' : 'conform-failed' }
+    } finally {
+      clearTimeout(timeout); jobs.delete(id)
+      if (latestBySong.get(raw.songId) === controller) latestBySong.delete(raw.songId)
+    }
+  })
+  ipcMain.handle(VOICE_IPC.cancelConform, async (event, requestId: unknown) => {
+    if (validId(requestId)) jobs.get(key(event.sender.id, requestId))?.abort()
+  })
+  ipcMain.handle(VOICE_IPC.invalidateConformed, async (event, raw: import('../shared/voice-take').VoiceTakeInvalidateRequest) => {
+    try {
+      if (!raw || !validId(raw.songId) || !validId(raw.takeId)) return { ok: false }
+      if (raw.leaseId !== undefined) {
+        if (!validId(raw.leaseId)) return { ok: false }
+        const id = key(event.sender.id, raw.leaseId), lease = leases.get(id)
+        if (!lease || lease.songId !== raw.songId || lease.takeId !== raw.takeId) return { ok: false }
+        leases.delete(id)
+        await releaseConformedTake(lease.path)
+      }
+      await invalidateConformedTake(raw.songId, raw.takeId, { cancelActive: false })
+      return { ok: true }
+    } catch { return { ok: false } }
+  })
   const startValid = (value: unknown): value is VoiceRecordStartRequest => {
     const request = value as VoiceRecordStartRequest
     return Boolean(request && typeof request === 'object' && typeof request.songId === 'string' && typeof request.songTitle === 'string' && typeof request.songArtist === 'string' && request.input && typeof request.input.deviceName === 'string' && Number.isFinite(request.input.channelIndex) && Number.isFinite(request.tempo) && Number.isFinite(request.transposeSemitones))

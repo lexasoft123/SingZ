@@ -1,5 +1,5 @@
 import { clampNativeTranspose, clampPlaybackRate } from './native-playback-limits'
-import type { VoiceMonitorPlaybackContext } from '../../../shared/voice-take'
+import { VOICE_TAKE_LANE_ID, type VoiceMonitorPlaybackContext, type VoiceTakeLaneState, type VoiceTakeLaneSource, type VoiceTakeLaneControl } from '../../../shared/voice-take'
 import { sanitizeSongVolume } from './song-volume'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
 import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
@@ -144,6 +144,83 @@ export class MultitrackEngine {
   private outputMeterSplit: ChannelSplitterNode | null = null
   private outputMeters: AnalyserNode[] = []
   private outputMeterSamples = new Float32Array(8192)
+
+  private voiceTakeSource: VoiceTakeLaneSource | null = null
+  private voiceTakeControl: VoiceTakeLaneControl = { gain: 0.891, muted: false, solo: false, suppressed: false }
+  private voiceTakeRecording = false
+  private voiceTakeState: VoiceTakeLaneState = { status: 'idle' }
+  private voiceTakeChanges: Promise<unknown> = Promise.resolve()
+  get voiceTakeLaneState(): VoiceTakeLaneState { return this.voiceTakeState }
+  get voiceTakeOutputRate(): number { return this.ctx.sampleRate }
+  private publishVoiceTakeState = (state: VoiceTakeLaneState): void => {
+    if (JSON.stringify(state) === JSON.stringify(this.voiceTakeState)) return
+    this.voiceTakeState = state
+    this.emit()
+  }
+
+  /** A transient native source, intentionally absent from tracks, track state,
+   * canonical graphDocument, project save and stem export. */
+  setVoiceTakeLane(source: VoiceTakeLaneSource | null): Promise<VoiceTakeLaneState> {
+    if (!source && !this.voiceTakeSource) return Promise.resolve({ status: 'idle' })
+    const epoch = this._songEpoch
+    const run = this.voiceTakeChanges.catch(() => {}).then(async () => {
+      const assertCurrent = (): void => {
+        if (this.teardownStarted || epoch !== this._songEpoch || this.voiceTakeRecording)
+          throw Object.assign(new Error('Take lane change cancelled'), { name: 'AbortError' })
+      }
+      assertCurrent()
+      const { inspectDesktopNativePlayback } = await import('./desktop-native-playback')
+      assertCurrent()
+      await Promise.allSettled([...this.pendingPlayRequests])
+      assertCurrent()
+      let candidateState: VoiceTakeLaneState = { status: 'idle' }
+      const decision = await inspectDesktopNativePlayback({ ...this.nativePlaybackRequest(false),
+        voiceTake: source ? { ...source, ...this.voiceTakeControl } : undefined,
+        onVoiceTakeState: state => { candidateState = state } })
+      assertCurrent()
+      this.voiceTakeSource = source
+      if (!source) this.publishVoiceTakeState({ status: 'idle' })
+      if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead) {
+        if (decision.backend === 'native') {
+          try {
+            await this.nativePlayback.reconfigure({ lanes: decision.prepare.lanes, graphDocument: decision.prepare.graphDocument })
+            this.publishVoiceTakeState(candidateState)
+          } catch (error) {
+            this.voiceTakeSource = null
+            this.publishVoiceTakeState({ status: 'error', reason: 'prepare-failed' })
+            // The song keeps its ordinary preparation path if an optional
+            // take cannot be opened/prepared by the native runtime.
+            const base = await inspectDesktopNativePlayback(this.nativePlaybackRequest(false))
+            if (base.backend === 'native') await this.nativePlayback.reconfigure({ lanes: base.prepare.lanes, graphDocument: base.prepare.graphDocument })
+            else throw error
+          }
+        } else {
+          this.publishVoiceTakeState(source ? { status: 'omitted', reason: 'native-unavailable' } : { status: 'idle' })
+        }
+      } else {
+        // Exactly one prepare when stopped. Cancel the older loader debounce.
+        if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+        this.aheadTimer = null
+        await this.prepareNativeAhead()
+      }
+      return this.voiceTakeState
+    })
+    this.voiceTakeChanges = run
+    return run
+  }
+
+  /** M/S/level and suppression are callback controls, never a voice rebuild.
+   * Recording clears Solo as well as Mute, so an old solo cannot mute stems. */
+  async setVoiceTakeControl(control: VoiceTakeLaneControl, recording = false): Promise<void> {
+    this.voiceTakeRecording = recording
+    this.voiceTakeControl = { ...control }
+    await this.voiceTakeChanges.catch(() => {})
+    const current = this.voiceTakeControl
+    if (this.voiceTakeState.status === 'ready' && (this.nativePlayback?.active || this.nativePlayback?.preparedAhead)) {
+      await this.nativePlayback.updateLane(VOICE_TAKE_LANE_ID, { gain: current.gain,
+        muted: current.muted || current.suppressed, solo: current.solo && !current.suppressed })
+    }
+  }
 
   private tracks: EngineTrack[] = []
   private sources: AudioBufferSourceNode[] = []
@@ -290,6 +367,8 @@ export class MultitrackEngine {
     // timeline. The epochs cannot see it, because a re-arm captures whatever
     // they are at the time.
     this.betweenSongs = true
+    this.voiceTakeSource = null
+    this.voiceTakeState = { status: 'idle' }
     this._songEpoch++
     this._playing = false
     this.aheadEpoch++
@@ -384,6 +463,8 @@ export class MultitrackEngine {
     return {
       browserOutputId: this.desiredOutputId,
       lanes: this.tracks,
+      ...(this.voiceTakeSource ? { voiceTake: { ...this.voiceTakeSource, ...this.voiceTakeControl } } : {}),
+      onVoiceTakeState: this.publishVoiceTakeState,
       beat: this.beatsInfo,
       metronome: this.met,
       countIn,
@@ -439,7 +520,8 @@ export class MultitrackEngine {
     const module = await this.ensureNativePlayback()
     if (stale() || module.client.recoveryPending) return
     if (module.client.retainedPrepared) {
-      await module.client.reprepareRetainedAhead(this.nativePlaybackRequest(true))
+      const { withVoiceTakeLane } = await import('./desktop-native-playback')
+      await module.client.reprepareRetainedAhead(withVoiceTakeLane(this.nativePlaybackRequest(true)).request)
       if (stale()) await module.client.discardAhead()
       return
     }

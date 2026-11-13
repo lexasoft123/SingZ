@@ -320,6 +320,31 @@ M1, M2, M3. Every requirement is intended to be testable; the test column in sec
 | VS-TAKE-004 | Delete or Backspace on the selected clip, and the discard button, SHALL delete the take (files removed, selection cleared). | MUST | M2 |
 | VS-TAKE-005 | Dragging the clip, or the arrow keys (0.1 s, Shift 1 s), SHALL move it on the song timeline, clamped to [0, song duration - take span], with a live ghost and position readout; Esc cancels a drag. The new start SHALL be stored as `userOffsetSec` in the sidecar (additive, version unchanged) beside the measured `startPositionSec`, which is never overwritten; "Reset position" stores 0. Listen-back (alone or with song) and take playback SHALL start from `startPositionSec + userOffsetSec`, replaying the take's tempo/transpose timeline as before. Main validates the request (finite, within 36000 s, never before the song start). | MUST | M2 |
 
+### ADR 0016 engine lane (WP3 transition)
+
+These rules supersede the playback and monitor/M/S wording above for engines
+which expose `setVoiceTakeLane`. The Listen actions remain temporarily for the
+stretched-voice listening check; WP4/WP5 remove their UI and implementation.
+
+| ID | Requirement |
+| --- | --- |
+| VS-LANE-001 | A kept or just-finalized active take plays with normal transport Play as one transient `voice:take` lane. Its conformed WAV includes `startPositionSec + userOffsetSec` as leading silence (negative head trimmed), ends no later than the song, and enters the common song bus before tempo/transpose. Seek, loop, pause/resume and count-in use the same native session as stems. |
+| VS-LANE-002 | Mute, Solo and take level use native lane controls and the stems' solo group, without preparing another graph. An empty, unavailable or preparing lane cannot acquire Solo. The live monitor obeys only Speaker, independently of Mute, any Solo and recording. |
+| VS-LANE-003 | Starting, recording and finalizing force the old take silent and withdraw its Solo via callback controls. A take source is never replaced during those states. A finalized new take conforms, then replaces the old lane with one prepare while stopped or the existing running-stream seam. |
+| VS-LANE-004 | Dragging changes only the UI ghost; a committed drop, keyboard move, reset or FX change debounces conform for 150 ms. Newer requests cancel older work; stale results cannot replace the current lane. Delete removes the lane before releasing its lease and deleting the raw take. |
+| VS-LANE-005 | The controller exposes `lane.status`: `idle`, `conforming`, `ready`, `omitted` (reason `lane-limit`, `node-limit`, `graph-incompatible`, `native-unavailable`) or `error` (reason `conform-failed`, `timeout`, `cancelled`, `prepare-failed`). Retry uses `retryTakeLane()`. A take failure never prevents the song from playing. |
+| VS-LANE-006 | The optional voice uses one of 16 lanes and three of 128 graph nodes. If it does not fit, omit it and keep the song unchanged. The canonical graph document, saved tracks and project export never include it. |
+| VS-LANE-007 | During the temporary legacy Listen path, the native voice lane is forced muted and non-solo from before song Play until `stopPlay` settles. Listen-with-song therefore cannot double the take. |
+| VS-LANE-008 | Each returned cache file is leased before an asynchronous prepare can open it. A replacement releases the old lease only after native accepts the new lane. Pinned files and Windows busy files count against the cache bound; old files are reclaimed when no longer in use, without overwriting a file a lane reads. |
+| VS-LANE-009 | The ordered `effects` slots (including `pitch-follow`) persist per take. Disabling offline pitch-follow bypasses recorded-key compensation; the common song bus still applies the current song key to every lane. It does not preserve sung pitch against arbitrary song transposition. |
+
+The hardware driver `tests/e2e/mac/voice-take-lane-e2e.cjs` uses an isolated,
+generated anchored tone take, checks exact placed PCM (5 ms), native lane source
+clock alignment (5 ms), isolated native output peak, Mute/Solo, 0.5× tempo,
++3 st, seek, loop and count-in. Native status has no per-lane live peak or
+sample-level post-bus tap: source-clock/PCM checks do not replace physical
+loopback and stretched-voice listening acceptance.
+
 ### 5.4 Storage and privacy (VS-STORE)
 
 | ID | Requirement | Pri | M |

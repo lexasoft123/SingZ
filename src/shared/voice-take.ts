@@ -6,6 +6,51 @@ export const VOICE_TAKE_SIDECAR_VERSION = 1
 export type VoiceTakeStatus = 'complete' | 'recovered' | 'partial-device-lost' | 'partial-error'
 export type VoiceTakeLatencySource = 'reported' | 'measured-trim'
 
+/** Both coordinates use the take file's sampleRate; projectFrame is song time at tempo 1.
+ * This keeps the map independent of the output device/song decoder rate. */
+export interface VoiceTakeAnchor {
+  takeFrame: number
+  projectFrame: number
+}
+
+/** Ordered per-take FX slot. Song-key amount is derived, never cached in params. */
+export interface VoiceTakeEffect {
+  id: 'pitch-follow'
+  enabled: boolean
+  params: { manualOffsetSemitones: number; preserveFormants: boolean }
+}
+
+export const VOICE_TAKE_ANCHORS_MAX = 20000
+export const VOICE_TAKE_EFFECTS_MAX = 16
+export const defaultVoiceTakeEffects = (): VoiceTakeEffect[] => [
+  { id: 'pitch-follow', enabled: true, params: { manualOffsetSemitones: 0, preserveFormants: false } }
+]
+
+/** Strict additive-field validators; unknown fields/slots are not silently interpreted. */
+export function isVoiceTakeAnchors(value: unknown): value is VoiceTakeAnchor[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > VOICE_TAKE_ANCHORS_MAX) return false
+  return value.every((point, i) => point && typeof point === 'object' &&
+    Object.keys(point).every(key => key === 'takeFrame' || key === 'projectFrame') &&
+    Number.isSafeInteger(point.takeFrame) && point.takeFrame >= 0 &&
+    Number.isSafeInteger(point.projectFrame) && point.projectFrame >= 0 &&
+    (i === 0 ? point.takeFrame === 0 : point.takeFrame > value[i - 1].takeFrame && point.projectFrame > value[i - 1].projectFrame))
+}
+
+export function isVoiceTakeEffects(value: unknown): value is VoiceTakeEffect[] {
+  if (!Array.isArray(value) || value.length > VOICE_TAKE_EFFECTS_MAX) return false
+  const ids = new Set<string>()
+  return value.every(effect => {
+    if (!effect || typeof effect !== 'object' || effect.id !== 'pitch-follow' || ids.has(effect.id) ||
+        typeof effect.enabled !== 'boolean' || !effect.params || typeof effect.params !== 'object' ||
+        Object.keys(effect).some(key => !['id', 'enabled', 'params'].includes(key)) ||
+        Object.keys(effect.params).some(key => !['manualOffsetSemitones', 'preserveFormants'].includes(key)) ||
+        !Number.isFinite(effect.params.manualOffsetSemitones) || Math.abs(effect.params.manualOffsetSemitones) > 24 ||
+        typeof effect.params.preserveFormants !== 'boolean') return false
+    ids.add(effect.id)
+    return true
+  })
+}
+
 export interface VoiceTakeSettingsPoint {
   /** Seconds since the first captured sample. The first entry is the state at start. */
   atSec: number
@@ -38,6 +83,11 @@ export interface VoiceTakeSidecar {
   latencySource: VoiceTakeLatencySource
   input: { deviceName: string; channelIndex: number }
   settings: VoiceTakeSettingsPoint[]
+  /** Absent on legacy takes: integrate settings[].atSec (wall clock), approximately. */
+  anchors?: VoiceTakeAnchor[]
+  /** Array order is processing order; absent defaults to defaultVoiceTakeEffects(). */
+  effects?: VoiceTakeEffect[]
+  timelineApproximate?: boolean
   matchPercent: number | null
   monitoring: boolean
   status: VoiceTakeStatus
@@ -60,6 +110,51 @@ export interface VoiceTakeSummary {
   transposeSemitones: number
   /** True when the settings changed during the take. */
   settingsChanged: boolean
+  timelineApproximate?: boolean
+  effects?: VoiceTakeEffect[]
+}
+
+/** Deterministic compatibility map for old sidecars; never pretend wall time is capture time. */
+export function resolveVoiceTakeTimeline(take: VoiceTakeSidecar): {
+  anchors: VoiceTakeAnchor[]; effects: VoiceTakeEffect[]; approximate: boolean; settings: VoiceTakeSettingsPoint[]
+} {
+  if (!Number.isFinite(take.sampleRate) || take.sampleRate <= 0 || take.sampleRate > 768000 ||
+      !Number.isFinite(take.durationSec) || take.durationSec < 0 ||
+      !Number.isFinite(take.startPositionSec) || take.startPositionSec < 0)
+    throw new Error('Invalid take timeline.')
+  if (take.effects !== undefined && !isVoiceTakeEffects(take.effects)) throw new Error('Invalid take effects.')
+  const effects = take.effects ?? defaultVoiceTakeEffects()
+  if (take.anchors !== undefined) {
+    if (!isVoiceTakeAnchors(take.anchors) || take.anchors.some(anchor => anchor.takeFrame > Math.round(take.durationSec * take.sampleRate)))
+      throw new Error('Invalid take anchors.')
+    return { anchors: take.anchors, effects, approximate: take.timelineApproximate === true, settings: take.settings }
+  }
+  if (!Array.isArray(take.settings) || !take.settings.length || take.settings.length > VOICE_TAKE_ANCHORS_MAX - 1)
+    throw new Error('Invalid take timeline.')
+  let at = 0, project = take.startPositionSec, tempo = take.settings[0]!.tempo
+  const anchors: VoiceTakeAnchor[] = [{ takeFrame: 0, projectFrame: Math.round(project * take.sampleRate) }]
+  const settings: VoiceTakeSettingsPoint[] = []
+  for (let i = 0; i < take.settings.length; i++) {
+    const point = take.settings[i]!
+    if (!Number.isFinite(point.atSec) || point.atSec < at || (i === 0 && point.atSec !== 0) ||
+        !Number.isFinite(point.tempo) || point.tempo < .25 || point.tempo > 4 ||
+        !Number.isFinite(point.transposeSemitones) || Math.abs(point.transposeSemitones) > 24)
+      throw new Error('Invalid take settings.')
+    const end = Math.min(take.durationSec, point.atSec)
+    // A wall-clock change at/after the final file sample has no audible span.
+    // Return the same clamped walk for both the time map and pitch settings.
+    if (i === 0 || end < take.durationSec) settings.push({ ...point, atSec: end })
+    project += Math.max(0, end - at) * tempo
+    at = end
+    const frame = Math.round(at * take.sampleRate)
+    if (frame > anchors.at(-1)!.takeFrame) anchors.push({ takeFrame: frame, projectFrame: Math.round(project * take.sampleRate) })
+    tempo = point.tempo
+    if (point.atSec >= take.durationSec) break
+  }
+  if (at < take.durationSec) anchors.push({ takeFrame: Math.round(take.durationSec * take.sampleRate),
+    projectFrame: Math.round((project + (take.durationSec - at) * tempo) * take.sampleRate) })
+  if (!isVoiceTakeAnchors(anchors)) throw new Error('Invalid take timeline.')
+  return { anchors, effects, approximate: true, settings }
 }
 
 export interface VoiceRecordStartRequest {
@@ -117,6 +212,9 @@ export interface VoiceInputLevel {
 }
 
 export const VOICE_IPC = {
+  conform: 'voice:conform',
+  cancelConform: 'voice:conform-cancel',
+  invalidateConformed: 'voice:conform-invalidate',
   recordStart: 'voice:record-start',
   recordStop: 'voice:record-stop',
   recordSettings: 'voice:record-settings',
@@ -234,4 +332,34 @@ export interface VoiceMonitorSetRequest {
 
 export interface VoiceMonitorGainRequest {
   gainDb: number
+}
+
+// ADR 0016: transient native lane. These values never enter project persistence.
+export const VOICE_TAKE_LANE_ID = 'voice:take'
+export type VoiceTakeLaneOmission = 'lane-limit' | 'node-limit' | 'graph-incompatible' | 'native-unavailable'
+export type VoiceTakeLaneError = 'conform-failed' | 'timeout' | 'cancelled' | 'prepare-failed'
+export type VoiceTakeLaneState =
+  | { status: 'idle' | 'conforming' | 'ready' }
+  | { status: 'omitted'; reason: VoiceTakeLaneOmission }
+  | { status: 'error'; reason: VoiceTakeLaneError }
+export interface VoiceTakeLaneControl { gain: number; muted: boolean; solo: boolean; suppressed: boolean }
+export interface VoiceTakeLaneSource { path: string }
+export interface VoiceTakeConformOptions {
+  songDurationProjectFrames: number
+  outputRate: number
+  effects?: VoiceTakeEffect[]
+}
+export interface VoiceTakeConformRequest extends VoiceTakeConformOptions {
+  songId: string
+  takeId: string
+  requestId: string
+}
+export type VoiceTakeConformResult =
+  | { ok: true; path: string; key: string; durationFrames: number; cached: boolean; leaseId: string }
+  | { ok: false; reason: 'conform-failed' | 'timeout' | 'cancelled' }
+export interface VoiceTakeInvalidateRequest {
+  songId: string
+  takeId: string
+  /** Retire only this prepare's lease, after native has adopted its replacement. */
+  leaseId?: string
 }

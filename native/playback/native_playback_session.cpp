@@ -456,6 +456,7 @@ struct PreparedPlaybackTransport {
   // the callback reads a plain pointer. Shared, not borrowed: see the struct.
   std::shared_ptr<PlaybackPositionPublication> positionSink;
   PlaybackPresentationEntry presentationCallback{};
+  uint32_t presentationHostOffsetFrames{0};
   uint64_t generation{0};
   int64_t initialProjectFrame{0};
   bool initialPaused{false};
@@ -466,6 +467,7 @@ struct PreparedPlaybackTransport {
   const zdsp::ScheduledCueEvent *cueEvents{nullptr};
   uint32_t cueEventCount{0};
   double playbackRate{1.0};
+  double presentationTransposeSemitones{0.0};
   uint64_t playbackRateQ32{zdsp::kProjectRateOneQ32};
   zdsp::ProcessorHandle timePitchProcessor{};
   SignalsmithTimePitchLoopPlan initialTimePitchLoopPlan{};
@@ -1879,14 +1881,20 @@ struct PreparedPlaybackTransport {
     // Stage ordinary scalars across transport slices; publish exactly ONCE
     // per hardware callback, even for a one-frame loop. The journal is owned
     // by the session's shared publication, so tempo graph swaps keep history.
-    if (offset == 0) {
+    // The router's incoming subblock keeps the hardware callback timestamp.
+    // Account for its prefix exactly once, or both halves of an interior seam
+    // publish the same host timestamp and the journal sees a clock restart.
+    if (offset == 0 || presentationCallback.generation != generation) {
       presentationCallback = {};
-      presentationCallback.hostTimeNs = block.callbackHostTimeNs;
-      presentationCallback.frames = block.frames;
+      presentationCallback.hostTimeNs = block.callbackHostTimeNs +
+          static_cast<uint64_t>(double(presentationHostOffsetFrames + offset) * 1.e9 / block.sampleRate);
+      presentationHostOffsetFrames = 0;
+      presentationCallback.frames = block.frames - offset;
       presentationCallback.sampleRate = block.sampleRate;
       presentationCallback.projectFrame = static_cast<double>(callbackProjectFrame) +
           static_cast<double>(callbackProjectFractionQ32) / 4294967296.0;
       presentationCallback.rate = advancesProject ? playbackRate : 0.0;
+      presentationCallback.transposeSemitones = presentationTransposeSemitones;
       presentationCallback.generation = generation;
       presentationCallback.continuousFrame = callbackContinuousFrame;
       presentationCallback.seekCount = callbackSeekCount;
@@ -3681,6 +3689,7 @@ struct PreparedPlaybackGraph {
     zdsp::initializeGraphRunner(&runner, &publisher, {}, &parameters, nullptr,
                                 &diagnostics);
     runnerInitialized = true;
+    transport.presentationTransposeSemitones = transposeSemitones;
     transport.initialize(transportGeneration, preparedStartProjectFrame,
                          cuePlan == nullptr ? 0 : cuePlan->landingProjectFrame,
                          initialTransport,
@@ -4211,6 +4220,7 @@ struct PreparedPlaybackGraph {
     zdsp::initializeGraphRunner(&runner, &publisher, {}, &parameters, nullptr,
                                 &diagnostics);
     runnerInitialized = true;
+    transport.presentationTransposeSemitones = transposeSemitones;
     transport.initialize(transportGeneration, preparedStartProjectFrame,
                          cuePlan == nullptr ? 0 : cuePlan->landingProjectFrame,
                          initialTransport,
@@ -5275,13 +5285,14 @@ struct NativePlaybackSession::Impl {
                                                context->landingContinuousFrame);
   }
 
-  static void swapLand(void *opaque, uint32_t) noexcept {
+  static void swapLand(void *opaque, uint32_t outgoingFrames) noexcept {
     auto *context = static_cast<PlaybackRenderShared::SwapContext *>(opaque);
     // Exact means the clock is where the anchor was filled for — the
     // prediction proved right — whatever stream frame that happened on.
     const bool exact = context->incoming->adoptClock(
         *context->outgoing, context->exactRequested, context->predictedFrame,
         context->predictedFractionQ32);
+    context->incoming->presentationHostOffsetFrames = outgoingFrames;
     if (context->exactRequested && !exact && context->lateLandings != nullptr)
       context->lateLandings->fetch_add(1u, std::memory_order_relaxed);
   }

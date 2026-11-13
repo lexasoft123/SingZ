@@ -34,6 +34,7 @@ import type {
   VoiceTakePeaksResult,
   VoiceTakeSummary
 } from '../../../shared/voice-take'
+import { defaultVoiceTakeEffects, isVoiceTakeEffects, type VoiceTakeEffect, type VoiceTakeConformOptions, type VoiceTakeConformResult, type VoiceTakeInvalidateRequest, type VoiceTakeLaneControl, type VoiceTakeLaneSource, type VoiceTakeLaneState } from '../../../shared/voice-take'
 import { stableVoiceSongId } from './voice-song-id'
 import { micOwnership } from './mic-ownership'
 
@@ -59,6 +60,9 @@ export type VoiceErrorKind = 'device-lost' | 'busy' | 'error' | 'no-bridge' | 'm
 
 /** What the strip needs of the preload bridge (`window.singz.voiceTakes`, WP4). */
 export interface VoiceTakeApi {
+  conformTake(songId: string, takeId: string, options: VoiceTakeConformOptions, requestId: string): Promise<VoiceTakeConformResult>
+  cancelConform(requestId: string): Promise<void>
+  invalidateConformedTake(request: VoiceTakeInvalidateRequest): Promise<void>
   recordStart(req: VoiceRecordStartRequest): Promise<VoiceRecordStartResult>
   recordStop(): Promise<VoiceRecordStopResult>
   recordSettings(change: VoiceRecordSettingsChange): Promise<unknown>
@@ -86,6 +90,10 @@ export interface VoiceEnginePort {
   readonly playing: boolean
   readonly position: number
   readonly duration?: number
+  readonly voiceTakeOutputRate?: number
+  readonly voiceTakeLaneState?: VoiceTakeLaneState
+  setVoiceTakeLane?(source: VoiceTakeLaneSource | null): Promise<VoiceTakeLaneState>
+  setVoiceTakeControl?(control: VoiceTakeLaneControl, recording?: boolean): Promise<void>
   /** The song's output route: a change re-asks monitor availability. */
   readonly outputDeviceId?: string
   /** True while the native playback graph owns the output (the monitor needs it). */
@@ -155,6 +163,9 @@ export interface VoiceTake {
 }
 
 export interface VoiceModel {
+  /** WP4 binds preparing/omission/error copy and disabled M/S reasons here. */
+  lane: VoiceTakeLaneState
+  effects: VoiceTakeEffect[]
   songId: string | null
   /** The Voice strip is on screen (the app-level monitor chip shows only while it is not). */
   stripMounted: boolean
@@ -198,7 +209,7 @@ export interface VoiceModel {
   inputs: VoiceInputOption[]
   input: string | null
   clipped: boolean
-  /** Take playback mute / solo and level: view state, not yet in the IPC contract. */
+  /** Per-song take controls; the live monitor has its own Speaker/gain. */
   takeMuted: boolean
   solo: boolean
   level: number
@@ -225,6 +236,8 @@ export const MONITOR_GAIN_DEFAULT_DB = -12
 const HINT_SEEN = new WeakSet<object>() // engines whose singer has already seen the headphones hint
 
 export const INITIAL_VOICE_MODEL: VoiceModel = {
+  lane: { status: 'idle' },
+  effects: defaultVoiceTakeEffects(),
   songId: null,
   stripMounted: false,
   armed: false,
@@ -351,6 +364,14 @@ export function voiceControllerFor(engine: object, create: () => VoiceController
 }
 
 export class VoiceController {
+  private laneToken = 0
+  private laneTimer: ReturnType<typeof setTimeout> | null = null
+  private laneRequest: string | null = null
+  private laneLease: (VoiceTakeInvalidateRequest & { leaseId: string }) | null = null
+  private laneAdoption: Promise<unknown> = Promise.resolve()
+  private listenStopping = false
+  private finalizePending: Promise<VoiceRecordStopResult> | null = null
+  private finalizingTake = false
   private model: VoiceModel = INITIAL_VOICE_MODEL
   private readonly listeners = new Set<() => void>()
   private readonly levelListeners = new Set<() => void>()
@@ -466,11 +487,119 @@ export class VoiceController {
   private set(patch: Partial<VoiceModel>): void {
     this.model = { ...this.model, ...patch }
     this.syncTimers()
+    if (['level', 'takeMuted', 'solo', 'starting', 'recording', 'listen', 'lane'].some(k => k in patch))
+      void this.syncLaneControl().catch(() => {})
     this.publishHold()
     for (const fn of [...this.listeners]) fn()
   }
   private say(key: AnnounceKey): Partial<VoiceModel> {
     return { announce: { seq: this.model.announce.seq + 1, key } }
+  }
+
+  private syncLaneControl(): Promise<void> {
+    const m = this.model
+    return this.deps.engine.setVoiceTakeControl?.({ gain: takeGain(m.level, false), muted: m.takeMuted,
+      solo: m.solo, suppressed: m.starting || m.recording || this.finalizingTake ||
+        m.lane.status === 'conforming' || this.listenStopping || !!m.listen || !!this.pendingListen },
+      m.starting || m.recording || this.finalizingTake) ?? Promise.resolve()
+  }
+
+  private cancelLaneConform(): void {
+    this.laneToken++
+    if (this.laneTimer !== null) clearTimeout(this.laneTimer)
+    this.laneTimer = null
+    const request = this.laneRequest
+    this.laneRequest = null
+    if (request) void this.deps.api.cancelConform?.(request).catch(() => {})
+  }
+
+  private async releaseLaneLease(lease: VoiceTakeInvalidateRequest | null): Promise<void> {
+    if (lease) await this.deps.api.invalidateConformedTake?.(lease).catch(() => {})
+  }
+
+  private async removeLane(): Promise<void> {
+    this.cancelLaneConform()
+    const run = this.laneAdoption.catch(() => {}).then(async () => {
+      await this.deps.engine.setVoiceTakeControl?.({ gain: takeGain(this.model.level, false), muted: this.model.takeMuted,
+        solo: false, suppressed: true }, false)
+      await this.deps.engine.setVoiceTakeLane?.(null)
+      const old = this.laneLease
+      this.laneLease = null
+      await this.releaseLaneLease(old)
+    })
+    this.laneAdoption = run
+    await run
+  }
+
+  /** Drop/move/effects requests are debounced; the newest request owns the
+   * result. Neither raw PCM nor an output file chosen by renderer crosses IPC. */
+  private scheduleLaneConform(delay = 0): void {
+    this.cancelLaneConform()
+    if (!this.model.take || !this.model.songId || this.model.starting || this.model.recording || this.finalizingTake) return
+    if (!this.deps.engine.setVoiceTakeLane) return // older/mobile engine
+    const token = this.laneToken
+    this.set({ lane: { status: 'conforming' } })
+    this.laneTimer = setTimeout(() => {
+      this.laneTimer = null
+      void this.conformLane(token)
+    }, delay)
+  }
+
+  private async conformLane(token: number): Promise<void> {
+    const { api, engine } = this.deps, take = this.model.take, songId = this.model.songId
+    if (!take || !songId) return
+    const requestId = `lane-${this.songEpoch}-${token}-${Math.random().toString(36).slice(2)}`
+    this.laneRequest = requestId
+    const stale = (): boolean => this.disposed || token !== this.laneToken || this.model.songId !== songId || this.model.starting || this.model.recording || this.finalizingTake
+    let result: VoiceTakeConformResult
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    let expired = false
+    try {
+      const outputRate = engine.voiceTakeOutputRate ?? 48000
+      const work = api.conformTake(songId, take.takeId, { outputRate,
+        songDurationProjectFrames: Math.round((engine.duration ?? 0) * outputRate), effects: this.model.effects }, requestId)
+        .then(async reply => {
+          if (expired && reply.ok) await this.releaseLaneLease({ songId, takeId: take.takeId, leaseId: reply.leaseId })
+          return reply
+        })
+      result = await Promise.race([work, new Promise<VoiceTakeConformResult>(resolve => {
+        deadline = setTimeout(() => {
+          expired = true
+          void api.cancelConform(requestId).catch(() => {})
+          resolve({ ok: false, reason: 'timeout' })
+        }, 100000)
+      })])
+    } catch { result = { ok: false, reason: 'conform-failed' } }
+    finally { if (deadline !== undefined) clearTimeout(deadline) }
+    if (this.laneRequest === requestId) this.laneRequest = null
+    const lease = result.ok ? { songId, takeId: take.takeId, leaseId: result.leaseId } : null
+    if (stale()) { await this.releaseLaneLease(lease); return }
+    const run = this.laneAdoption.catch(() => {}).then(async () => {
+      if (stale()) { await this.releaseLaneLease(lease); return }
+      const old = this.laneLease
+      try {
+        const state = await engine.setVoiceTakeLane!(result.ok ? { path: result.path } : null)
+        this.laneLease = result.ok ? lease : null
+        await this.releaseLaneLease(old)
+        if (stale()) return // the next adoption/removal owns this lease now
+        this.set({ lane: result.ok ? state : { status: 'error', reason: result.reason } })
+        await this.syncLaneControl()
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') await this.releaseLaneLease(lease)
+        // Retain leases on uncertain native ownership; a later successful
+        // replacement or renderer teardown safely retires them.
+        if (!stale()) this.set({ lane: { status: 'error', reason: 'prepare-failed' } })
+      }
+    })
+    this.laneAdoption = run
+    await run
+  }
+
+  retryTakeLane(): void { this.scheduleLaneConform() }
+  setTakeEffects(effects: VoiceTakeEffect[]): void {
+    if (this.model.recording || this.model.starting || this.finalizingTake || !isVoiceTakeEffects(effects)) return
+    this.set({ effects: effects.map(e => ({ ...e, params: { ...e.params } })) })
+    this.scheduleLaneConform(150)
   }
 
   // ── lifecycle ──
@@ -493,7 +622,15 @@ export class VoiceController {
     const { engine } = this.deps
     let route = `${engine.outputDeviceId}|${engine.nativeActive}`
     let playing = engine.playing
+    let laneExtent = `${engine.duration}|${engine.voiceTakeOutputRate}`
     const unsub = engine.subscribe?.(() => {
+      const extent = `${engine.duration}|${engine.voiceTakeOutputRate}`
+      if (extent !== laneExtent) {
+        laneExtent = extent
+        if (this.model.take) this.scheduleLaneConform(150)
+      }
+      if (this.laneLease && this.model.lane.status !== 'conforming' && engine.voiceTakeLaneState &&
+          JSON.stringify(engine.voiceTakeLaneState) !== JSON.stringify(this.model.lane)) this.set({ lane: engine.voiceTakeLaneState })
       const nowRoute = `${engine.outputDeviceId}|${engine.nativeActive}`
       const stopped = playing && !engine.playing // Web Audio playback ending changes the output context
       playing = engine.playing
@@ -530,9 +667,11 @@ export class VoiceController {
   }
 
   dispose(): void {
+    this.disposed = true
+    this.cancelLaneConform()
     this.cancelAvailabilityRetries()
     this.clearTimers()
-    void this.abortActivity(true).finally(() => this.publishHold())
+    void this.abortActivity(true).then(() => this.removeLane()).catch(() => {}).finally(() => this.publishHold())
   }
 
   /** A song was opened (id) or closed (null): live capture and playback end,
@@ -540,9 +679,17 @@ export class VoiceController {
   async setSong(songId: string | null): Promise<void> {
     if (songId === this.model.songId) return
     const epoch = ++this.songEpoch
+    this.cancelLaneConform()
     // A running monitor outlives the song: it stops on speaker-off, device or route loss, input change or quit.
     await this.abortActivity(false)
+    this.finalizingTake = false
+    if (this.deps.engine.setVoiceTakeLane) {
+      await this.deps.engine.setVoiceTakeControl?.({ gain: takeGain(this.model.level, false), muted: false, solo: false, suppressed: true }, false)
+      await this.removeLane()
+    }
+    if (epoch !== this.songEpoch || this.disposed) return
     this.set({
+      lane: { status: 'idle' }, effects: defaultVoiceTakeEffects(), takeMuted: false, solo: false,
       songId,
       armed: false,
       starting: false,
@@ -564,8 +711,9 @@ export class VoiceController {
         .filter((tk) => tk.status !== 'partial-error' || tk.durationSec > 0)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
       if (newest) {
-        this.set({ take: this.fromSummary(newest, true) })
+        this.set({ take: this.fromSummary(newest, true), effects: newest.effects ?? defaultVoiceTakeEffects() })
         this.loadPeaks(newest.takeId)
+        this.scheduleLaneConform()
       }
     } catch {
       // Listing is a convenience; the strip works without it.
@@ -593,6 +741,8 @@ export class VoiceController {
       if (releaseMon || !this.monitorHolds()) await this.forceDisarm()
       else this.armOpen = true // the monitor now holds what the take held
     }
+    if (this.finalizePending) await this.finalizePending.catch(() => {})
+    this.finalizingTake = false
     await monitorReleased
   }
 
@@ -708,9 +858,11 @@ export class VoiceController {
     this.set({ level: Math.max(0, Math.min(100, Math.round(level))) })
   }
   toggleTakeMute(): void {
+    if (this.deps.engine.setVoiceTakeLane && this.model.lane.status !== 'ready') return
     this.set({ takeMuted: !this.model.takeMuted })
   }
   toggleSolo(): void {
+    if (this.deps.engine.setVoiceTakeLane && this.model.lane.status !== 'ready') return
     this.set({ solo: !this.model.solo })
   }
   resetClip(): void {
@@ -860,30 +1012,39 @@ export class VoiceController {
 
   async startRecording(): Promise<void> {
     const block = recordBlock(this.model)
-    if (block !== null) return
+    if (block !== null || this.finalizingTake) return
     // One press records: a take still being played back stops, and a take under review is kept (its file stays).
     if (this.model.listen) await this.stopListening()
     if (this.model.take && !this.model.take.kept) this.keep()
     if (recordBlock(this.model) !== null || this.model.recording) return
     const { engine, api } = this.deps
+    this.cancelLaneConform()
+    const epoch = this.songEpoch
+    const token = ++this.startToken
+    const stale = (): boolean => epoch !== this.songEpoch || token !== this.startToken || this.disposed
     this.set({ starting: true, clipped: false })
+    if (engine.setVoiceTakeControl) {
+      try { await this.syncLaneControl() } catch { if (!stale()) this.failStart('error'); return }
+      if (stale()) return
+    }
     if (this.model.perm !== 'granted') {
       const ok = await this.deps.askMicAccess().catch(() => false)
+      if (stale()) return
       if (!ok) {
         this.set({ starting: false, perm: 'denied' })
+        this.resumeLaneAfterFailedStart()
         return
       }
       this.set({ perm: 'granted' })
       await this.refreshInputs()
+      if (stale()) return
       if (this.model.inputMissing) {
         this.set({ starting: false })
+        this.resumeLaneAfterFailedStart()
         return
       }
     }
     const input = this.model.inputs.find((i) => i.id === this.model.input)
-    const epoch = this.songEpoch
-    const token = ++this.startToken
-    const stale = (): boolean => epoch !== this.songEpoch || token !== this.startToken || this.disposed
     // Main places the take from the capture's first sample, so the song must
     // already be playing when capture starts: play first, never record paused.
     let startedSong = false
@@ -925,6 +1086,7 @@ export class VoiceController {
       if (startedSong && engine.playing) engine.pause()
       if (err instanceof Error && err.message === BRIDGE_MISSING) {
         this.set({ starting: false, error: 'no-bridge' })
+        this.resumeLaneAfterFailedStart()
         return
       }
       res = { ok: false, reason: 'error', message: '' }
@@ -992,11 +1154,17 @@ export class VoiceController {
     await this.disarmMain()
   }
 
+  private resumeLaneAfterFailedStart(): void {
+    if (this.laneLease) this.set({ lane: this.deps.engine.voiceTakeLaneState ?? { status: 'ready' } })
+    else this.scheduleLaneConform()
+  }
+
   private failStart(reason: 'permission' | 'no-input' | 'busy' | 'error'): void {
     if (this.model.armed) this.set({ armed: false })
     if (reason === 'permission') this.set({ starting: false, perm: 'denied' })
     else if (reason === 'no-input') this.set({ starting: false, inputMissing: true })
     else this.set({ starting: false, error: reason === 'busy' ? 'busy' : 'error' })
+    this.resumeLaneAfterFailedStart()
     // The take never started: the input stays open only for a live monitor, else it is closed whatever we believed.
     if (!this.monitorHolds()) void this.forceDisarm()
   }
@@ -1006,17 +1174,23 @@ export class VoiceController {
     if (!this.model.recording || !id) return
     this.recordingId = null
     const cur = this.model.take
+    const epoch = this.songEpoch
     const elapsed = (this.now() - this.startedAtMs) / 1000
     // Stop the song first for an explicit stop (the take is then reviewed
     // against a still song); a pause or seek already moved it.
     if (reason === 'user' && this.deps.engine.playing) this.deps.engine.pause()
+    this.finalizingTake = true
     this.set({ recording: false, elapsedSec: elapsed })
     let res: VoiceRecordStopResult
-    try {
-      res = await this.deps.api.recordStop()
-    } catch {
-      res = { ok: false, reason: 'error' }
-    }
+    let pending: Promise<VoiceRecordStopResult>
+    try { pending = this.deps.api.recordStop() }
+    catch { pending = Promise.resolve({ ok: false, reason: 'error' }) }
+    this.finalizePending = pending
+    try { res = await pending }
+    catch { res = { ok: false, reason: 'error' } }
+    finally { if (this.finalizePending === pending) this.finalizePending = null }
+    if (epoch !== this.songEpoch) return
+    this.finalizingTake = false
     // The take is over, so the input is no longer held open for it.
     this.takeInput = null
     if (this.model.monitorNote) this.set({ monitorNote: null })
@@ -1035,6 +1209,7 @@ export class VoiceController {
         ...this.say('announceReview')
       })
       this.loadPeaks(res.take.takeId)
+      this.scheduleLaneConform()
       return
     }
     const salvaged = res.take
@@ -1046,6 +1221,8 @@ export class VoiceController {
           ? { ...cur, durationSec: elapsed, partial: true }
           : null
     })
+    if (this.model.take) this.scheduleLaneConform()
+    else void this.removeLane().catch(() => {})
   }
 
   /** The stored take with the settings changes seen while recording appended after its start state. */
@@ -1090,13 +1267,14 @@ export class VoiceController {
   private async doMoveTake(startSec: number): Promise<void> {
     const tk = this.model.take
     const songId = this.model.songId
-    if (!tk || songId === null || this.model.recording || this.model.listen || this.pendingListen || !Number.isFinite(startSec)) return
+    if (!tk || songId === null || this.finalizingTake || this.model.recording || this.model.listen || this.pendingListen || !Number.isFinite(startSec)) return
     const duration = this.deps.engine.duration ?? 0
     const hi = duration > 0 ? Math.max(0, duration - songSpan(tk)) : Number.POSITIVE_INFINITY
     const clamped = Math.min(hi, Math.max(0, startSec))
     const captured = tk.startSec - tk.userOffsetSec
     const offset = Math.round((clamped - captured) * 1000) / 1000
     if (Math.abs(offset - tk.userOffsetSec) < 1e-4) return
+    this.cancelLaneConform()
     this.set({ take: { ...tk, userOffsetSec: offset, startSec: captured + offset } })
     let res: VoiceTakeMoveResult | undefined
     try {
@@ -1106,8 +1284,14 @@ export class VoiceController {
     }
     const cur = this.model.take
     if (this.disposed || !cur || cur.takeId !== tk.takeId) return
-    if (res && res.ok) this.set({ take: { ...cur, userOffsetSec: res.take.userOffsetSec ?? 0, startSec: res.take.startPositionSec + (res.take.userOffsetSec ?? 0) } })
-    else this.set({ take: { ...cur, userOffsetSec: tk.userOffsetSec, startSec: tk.startSec } }) // not saved: back where it was
+    if (res && res.ok) {
+      this.set({ take: { ...cur, userOffsetSec: res.take.userOffsetSec ?? 0, startSec: res.take.startPositionSec + (res.take.userOffsetSec ?? 0) } })
+      this.scheduleLaneConform(150)
+    }
+    else {
+      this.set({ take: { ...cur, userOffsetSec: tk.userOffsetSec, startSec: tk.startSec } }) // not saved: back where it was
+      if (this.model.lane.status === 'conforming') this.scheduleLaneConform(150)
+    }
   }
 
   /** Put the take back where it was captured. */
@@ -1130,7 +1314,7 @@ export class VoiceController {
 
   async discard(): Promise<void> {
     const tk = this.model.take
-    if (!tk || this.model.recording) return
+    if (!tk || this.model.recording || this.model.starting || this.finalizingTake) return
     if (this.pendingListen) {
       // A listen still starting: cancel it and undo what it did so far.
       const mode = this.pendingListen
@@ -1142,7 +1326,11 @@ export class VoiceController {
       await this.deps.api.stopPlay().catch(() => undefined)
     }
     if (this.model.listen) await this.stopListening()
-    this.set({ take: null, takeSelected: false, error: null, ...this.say('announceDiscarded') })
+    try { await this.removeLane() } catch {
+      this.set({ lane: { status: 'error', reason: 'prepare-failed' } })
+      return
+    }
+    this.set({ lane: { status: 'idle' }, take: null, takeSelected: false, error: null, ...this.say('announceDiscarded') })
     await this.deps.api.remove(this.model.songId ?? '', tk.takeId).catch(() => undefined)
   }
 
@@ -1160,6 +1348,7 @@ export class VoiceController {
     // continuation below checks the token and does nothing once it is stale.
     const token = ++this.listenToken
     this.pendingListen = mode
+    if (engine.setVoiceTakeControl) await this.syncLaneControl()
     const ls: ListenSettings | null =
       mode === 'with-song'
         ? { saved: { tempo: engine.tempo, transpose: engine.transpose }, applied: {}, inFlight: true, restoreWhenSettled: false, done: false }
@@ -1205,6 +1394,7 @@ export class VoiceController {
       this.pendingListen = null
       this.requestRestore()
       this.set({ error: 'error' })
+      void this.syncLaneControl().catch(() => {})
       return
     }
     // Recorded BEFORE the await so a teardown during it can restore the stems.
@@ -1230,6 +1420,7 @@ export class VoiceController {
       if (mode === 'with-song') engine.pause()
       this.requestRestore()
       this.set({ error: 'error' })
+      void this.syncLaneControl().catch(() => {})
       return
     }
     this.listenStartedMs = this.now()
@@ -1240,12 +1431,15 @@ export class VoiceController {
   async stopListening(): Promise<void> {
     if (!this.model.listen) return
     const mode = this.model.listen
+    this.listenStopping = true
     this.set({ listen: null })
     this.restoreStems(this.soloedStems)
     this.soloedStems = null
     if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
     this.requestRestore()
     await this.deps.api.stopPlay().catch(() => undefined)
+    this.listenStopping = false
+    await this.syncLaneControl().catch(() => {})
   }
 
   /** Put back the singer's tempo and transpose once this listen's own changes have landed. */
@@ -1277,6 +1471,7 @@ export class VoiceController {
     if (!mode) return
     this.listenToken++
     this.pendingListen = null
+    void this.syncLaneControl().catch(() => {})
     this.restoreStems(this.soloedStems)
     this.soloedStems = null
     if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
@@ -1789,9 +1984,8 @@ export const TAKE_GAIN_MAX = 0.891
 /**
  * The Level fader as take gain: 100 is the native maximum (-1 dB), falling
  * 60 dB over the scale to silence at 0. There is no boost above unity to offer:
- * the native side would clamp it. Level, M and S changes while a take plays
- * apply to the NEXT Listen (native setGain ignores take voices), so they are
- * read when a play request is built, never pushed live.
+ * the legacy listen host would clamp it. The same scale drives the transient
+ * lane live through setLaneControl; the legacy Listen host reads it at start.
  */
 export function takeGainDb(level: number): number {
   if (level <= 0) return -Infinity
@@ -1839,6 +2033,9 @@ export function createBridgeVoiceApi(
       return fn(...args) as ReturnType<VoiceTakeApi[K]>
     }
   return {
+    conformTake: call('conformTake'),
+    cancelConform: call('cancelConform'),
+    invalidateConformedTake: call('invalidateConformedTake'),
     recordStart: call('recordStart'),
     recordStop: call('recordStop'),
     recordSettings: call('recordSettings'),

@@ -92,8 +92,27 @@ void missingAndSeek() {
   i = input(200); i.inputLatencyFrames = UINT64_MAX;
   CHECK(recordPlacement(h, i).fault == RecordPlacementFault::ClockUnavailable);
 }
+void deliberateSeamAndFaultToken() {
+  PlaybackPresentationHistory h;
+  append(h, 0, 480000);
+  const auto first = recordPlacement(h, input(100));
+  CHECK(first.fault == RecordPlacementFault::None);
+  PlaybackPresentationEntry seam;
+  seam.hostTimeNs = origin + 100000000; seam.frames = 4800; seam.sampleRate = 48000;
+  seam.projectFrame = 484800; seam.rate = .5; seam.generation = 2; seam.continuousFrame = 4800;
+  CHECK(h.append(seam));
+  auto i = input(200); i.hasInitialDiscontinuitySerial = true; i.initialDiscontinuitySerial = first.discontinuitySerial;
+  // Legacy consumers fail closed; the new token exempts only proven settings seams.
+  CHECK(recordPlacement(h, i).fault == RecordPlacementFault::SeekDuringTake);
+  i.hasInitialFaultSerial = true; i.initialFaultSerial = first.faultSerial;
+  const auto p = recordPlacement(h, i);
+  CHECK(p.fault == RecordPlacementFault::None && std::abs(p.startPositionSec - 10.12) < 1e-10);
+  seam.hostTimeNs += 100000000; seam.projectFrame = 960000; seam.continuousFrame += 4800; seam.seekCount = 1;
+  CHECK(h.append(seam)); i.firstSampleHostNs += 100000000;
+  CHECK(recordPlacement(h, i).fault == RecordPlacementFault::SeekDuringTake);
+}
 }
 int main() {
-  steadyAndSign(); pauseAndRateChange(); nonUnityStartupAndLongTake(); missingAndSeek();
+  steadyAndSign(); pauseAndRateChange(); nonUnityStartupAndLongTake(); missingAndSeek(); deliberateSeamAndFaultToken();
   std::puts("record placement tests passed");
 }

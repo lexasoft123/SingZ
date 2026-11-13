@@ -1,9 +1,19 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VoiceTakeStore, type VoiceTakeNative } from '../../src/main/voice-takes'
-import { createVoiceTakeNative } from '../../src/main/voice-takes-ipc'
+import { defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects, resolveVoiceTakeTimeline, VOICE_TAKE_ANCHORS_MAX, VOICE_TAKE_EFFECTS_MAX } from '../../src/shared/voice-take'
+import { EventEmitter } from 'node:events'
+import { isAllowed } from '../../src/main/media'
+import { createVoiceTakeNative, registerVoiceTakeIpc } from '../../src/main/voice-takes-ipc'
+
+const voiceIpc = vi.hoisted(() => ({ handlers: new Map<string, (...args: any[]) => Promise<any>>(),
+  conform: vi.fn(), invalidate: vi.fn(async () => {}), release: vi.fn(async () => {}) }))
+vi.mock('electron', async actual => ({ ...await actual<typeof import('electron')>(),
+  ipcMain: { handle: (channel: string, handler: (...args: any[]) => Promise<any>) => voiceIpc.handlers.set(channel, handler) } }))
+vi.mock('../../src/main/voice-take-conform', async actual => ({ ...await actual<typeof import('../../src/main/voice-take-conform')>(),
+  conformTake: voiceIpc.conform, invalidateConformedTake: voiceIpc.invalidate, releaseConformedTake: voiceIpc.release }))
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -407,7 +417,7 @@ describe('voice take storage', () => {
     ['reported', false, 0, 'measured-trim']
   ] as const)('uses only stable reported input latency (%s, %s)', async (source, stable, trim, expectedSource) => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
-    const native = fakeNative(); const calls: Array<Parameters<VoiceTakeNative['presentationQuery']>[0]> = []
+    const native = fakeNative({ frames: 48000, sampleRate: 48000 }); const calls: Array<Parameters<VoiceTakeNative['presentationQuery']>[0]> = []
     native.captureStats = async () => ({ firstSampleCaptured: true, firstSampleHostNs: '1000000000', lastSampleHostNs: '1000000000', sampleRate: 48000, inputLatencyFrames: 120, inputBufferFrames: 512, inputLatencySource: source, inputLatencyStable: stable })
     native.presentationQuery = async args => { calls.push(args); return { ok: true, found: true, startPositionSec: 4, outputLatencyFrames: 20, graphLatencyFrames: 10 } }
     const s = new VoiceTakeStore({ rootDir: root, native }); const started = await s.start(request); expect(started.ok).toBe(true)
@@ -614,5 +624,312 @@ describe('take peaks, moving and deleting (voice lane)', () => {
     expect(readdirSync(join(root, 'song-1'))).toEqual([])
     expect(await s.peaks({ songId: 'song-1', takeId })).toMatchObject({ ok: false })
     expect(await s.list('song-1')).toEqual([])
+  })
+})
+
+describe('take timeline anchors and FX descriptor', () => {
+  const timelineFixture = (tempo = 1, seam?: { at: number; tempo: number; transpose?: number } | Array<{ at: number; tempo: number; transpose?: number }>) => {
+    const seams = seam ? Array.isArray(seam) ? seam : [seam] : []
+    const root = mkdtempSync(join(tmpdir(), 'singz-anchors-')); roots.push(root)
+    const sampleRate = 22050 // Deliberately different from the song/output's 48 kHz.
+    const origin = 10_000_000_000n
+    let elapsed = 0, fault = false, missing = false, paused = false, frameBias = 0
+    const native = fakeNative({ frames: sampleRate * 6, sampleRate })
+    native.captureStats = async () => ({ firstSampleCaptured: true, firstSampleHostNs: origin.toString(),
+      lastSampleHostNs: (origin + BigInt(Math.round(elapsed * 1e9))).toString(),
+      takeFrameHostNs: (origin + BigInt(Math.round(elapsed * 1e9))).toString(), takeFrame: Math.round(elapsed * sampleRate) + frameBias,
+      firstSampleQuality: 'hardware', sampleRate, inputLatencySource: 'reported', inputLatencyStable: true })
+    native.presentationQuery = async args => {
+      const at = Number(BigInt(args.firstSampleHostNs!) - origin) / 1e9
+      let edge = 0, start = 12, rate = tempo, transpose = 0, epoch = 0
+      for (const change of seams) {
+        if (at < change.at) break
+        start += (change.at - edge) * rate; edge = change.at; rate = change.tempo
+        transpose = change.transpose ?? 0; epoch++
+      }
+      return { ok: true, found: !missing && elapsed - at < 2.7, paused, sampleRate: 48000,
+        startPositionSec: start + (at - edge) * rate, rate, transposeSemitones: transpose,
+        discontinuitySerial: fault ? 9 : epoch, faultSerial: fault ? 1 : 0,
+        mappingStartCaptureHostNs: (origin + BigInt(Math.round(edge * 1e9))).toString(), mappingStartSongSeconds: start }
+    }
+    // Wall clock deliberately disagrees by minutes with the sample clock.
+    const s = new VoiceTakeStore({ rootDir: root, native, now: () => new Date(1_000_000 + elapsed * 100_000) })
+    const internal = s as unknown as { active: object; checkDiscontinuity(active: object): Promise<void> }
+    let id = ''
+    return { s, native, sampleRate,
+      async start() { const r = await s.start({ ...request, tempo }); expect(r.ok).toBe(true); id = r.ok ? r.takeId : '' },
+      async poll(at: number) { elapsed = at; await internal.checkDiscontinuity(internal.active) },
+      at: (at: number) => { elapsed = at },
+      read: () => JSON.parse(readFileSync(join(root, 'song-1', `${id}.json`), 'utf8')) as import('../../src/shared/voice-take').VoiceTakeSidecar,
+      write: (take: import('../../src/shared/voice-take').VoiceTakeSidecar) => writeFileSync(join(root, 'song-1', `${id}.json`), JSON.stringify(take)),
+      fault: () => { fault = true }, miss: () => { missing = true }, pause: () => { paused = true }, bias: (frames: number) => { frameBias = frames }
+    }
+  }
+
+  it.each([1, .5, 2])('records sample-domain anchors at tempo %s and persists them before finalization', async tempo => {
+    const f = timelineFixture(tempo); await f.start(); await f.poll(2); await f.poll(4)
+    const provisional = f.read()
+    expect(provisional.anchors).toEqual([0, 2, 4].map(t => ({ takeFrame: t * f.sampleRate, projectFrame: Math.round((12 + t * tempo) * f.sampleRate) })))
+    expect(provisional.status).toBe('recovered')
+    await f.s.stop()
+    expect(f.read().anchors?.at(-1)).toEqual({ takeFrame: 6 * f.sampleRate, projectFrame: Math.round((12 + 6 * tempo) * f.sampleRate) })
+    expect(f.read().effects).toEqual(defaultVoiceTakeEffects())
+  })
+
+  it('captures a landed tempo/transpose seam within one sample despite a false wall clock', async () => {
+    const f = timelineFixture(1, { at: 3.125, tempo: .5, transpose: 2 })
+    await f.start(); await f.poll(2); await f.poll(4); await f.s.stop()
+    const take = f.read(), seamFrame = Math.round(3.125 * f.sampleRate)
+    expect(take.status).toBe('complete') // Deliberate settings seam increments serial, never the fault token.
+    expect(take.startPositionSec).toBe(12)
+    expect(take.anchors).toContainEqual({ takeFrame: seamFrame, projectFrame: Math.round(15.125 * f.sampleRate) })
+    expect(take.settings[1]).toEqual({ atSec: seamFrame / f.sampleRate, tempo: .5, transposeSemitones: 2 })
+    // Negative control: old wall-clock replay would place the seam hundreds of seconds late.
+    const wrong = resolveVoiceTakeTimeline({ ...take, anchors: undefined,
+      settings: [take.settings[0]!, { atSec: 3.125 * 100, tempo: .5, transposeSemitones: 2 }] })
+    expect(Math.abs(wrong.anchors.at(-1)!.projectFrame - take.anchors!.at(-1)!.projectFrame) / f.sampleRate).toBeGreaterThan(.001)
+    expect(take.anchors?.at(-1)?.projectFrame).toBe(Math.round((15.125 + (6 - 3.125) * .5) * f.sampleRate))
+  })
+
+  it('uses the committed WAV cursor rather than elapsed host time after gap/drift adjustment', async () => {
+    const f = timelineFixture(); await f.start(); f.bias(17); await f.poll(2); await f.s.stop()
+    expect(f.read().anchors).toContainEqual({ takeFrame: 2 * f.sampleRate + 17, projectFrame: 14 * f.sampleRate })
+    // A host-time-only frame counter would silently erase these file frames.
+    expect(f.read().anchors).not.toContainEqual({ takeFrame: 2 * f.sampleRate, projectFrame: 14 * f.sampleRate })
+  })
+
+  it('does not lose multiple landed changes between polls or a seam in the final drained block', async () => {
+    const f = timelineFixture(1, [{ at: 3.125, tempo: .5 }, { at: 3.25, tempo: 2, transpose: 2 }, { at: 3.375, tempo: 1 }])
+    await f.start(); await f.poll(2); f.at(4); await f.s.stop()
+    const take = f.read()
+    expect(take.status).toBe('complete')
+    for (const at of [3.125, 3.25, 3.375])
+      expect(take.anchors?.some(anchor => anchor.takeFrame === Math.round(at * f.sampleRate))).toBe(true)
+    expect(take.settings.map(point => point.tempo)).toEqual([1, .5, 2, 1])
+  })
+
+  it('samples and atomically persists periodic anchors through the real recording timer', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const f = timelineFixture()
+    try {
+      await f.start(); f.at(2); await vi.advanceTimersByTimeAsync(250)
+      await vi.waitFor(() => expect(f.read().anchors).toHaveLength(2))
+      expect(f.read().status).toBe('recovered')
+      await f.s.stop()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('fails a changed file rate and refuses malformed additive sidecar fields without rewriting them', async () => {
+    const f = timelineFixture(); await f.start()
+    f.native.finishTake = async () => ({ ok: true, frames: 48000, sampleRate: 48000 })
+    expect((await f.s.stop()).take?.status).toBe('partial-error')
+    expect(f.read().anchors).toBeUndefined()
+    const malformed = { ...f.read(), effects: [{ id: 'unknown' }] } as unknown as import('../../src/shared/voice-take').VoiceTakeSidecar
+    f.write(malformed)
+    expect(await f.s.list('song-1')).toEqual([])
+    expect(f.read()).toEqual(malformed)
+  })
+
+  it('ends a discontinuous timeline without invalidating its start, even alongside a settings seam', async () => {
+    const f = timelineFixture(1, { at: 3.125, tempo: 2 }); await f.start(); await f.poll(2); f.fault(); await f.poll(4)
+    expect((await f.s.stop()).take?.status).toBe('complete')
+    expect(f.read().startPositionSec).toBe(12)
+    expect(f.read().anchors).toHaveLength(2)
+  })
+
+  it('ends without extrapolating when retained presentation coverage is lost', async () => {
+    const f = timelineFixture(); await f.start(); f.miss(); await f.poll(3)
+    expect((await f.s.stop()).take?.status).toBe('complete')
+    expect(f.read().anchors).toHaveLength(1)
+  })
+
+  it.each([
+    { end: 'seek', poll: true }, { end: 'pause', poll: true }, { end: 'song-end', poll: true },
+    { end: 'seek', poll: false }, { end: 'pause', poll: false }, { end: 'song-end', poll: false },
+    { end: 'Stop with pause before recordStop', poll: false }
+  ])('keeps a complete take on $end (poll=$poll)', async ({ end, poll }) => {
+    const f = timelineFixture(); await f.start(); await f.poll(2)
+    const anchors = f.read().anchors
+    if (end === 'seek') f.fault()
+    else if (end === 'song-end') f.miss()
+    else f.pause()
+    f.at(3)
+    if (poll) await f.poll(3)
+    expect((await f.s.stop(undefined, 'seek')).take?.status).toBe('complete')
+    expect(f.read()).toMatchObject({ startPositionSec: 12, latencySource: 'reported', anchors })
+    expect((await f.s.level()).takeActive).toBe(false)
+  })
+
+  it('discriminates the reviewed negative control that mislabeled a seek as a placement fault', async () => {
+    const f = timelineFixture(); await f.start(); await f.poll(2); f.fault()
+    // Reproduce the old faulty() branch, rather than merely asserting a constant.
+    ;(f.s as unknown as { active: { placementFault: boolean } }).active.placementFault = true
+    expect((await f.s.stop()).take?.status).toBe('partial-error')
+    expect(f.read().latencySource).toBe('measured-trim')
+  })
+
+  it.each([true, false])('finalizes despite rejecting captureStats (pending poll=%s)', async pending => {
+    const f = timelineFixture(); await f.start(); await f.poll(2)
+    const anchors = f.read().anchors
+    f.native.captureStats = async () => { throw new Error('captureStats rejected') }
+    const rejected = pending ? expect(f.poll(3)).rejects.toThrow('captureStats rejected') : undefined
+    expect((await f.s.stop()).take?.status).toBe('complete')
+    await rejected
+    expect(f.read()).toMatchObject({ anchors, latencySource: 'reported' })
+  })
+
+  it.each(['gapOverflow', 'gapRegressions'] as const)('retains partial-error for a real %s capture fault', async field => {
+    const f = timelineFixture(); await f.start(); await f.poll(2)
+    const stats = f.native.captureStats
+    f.native.captureStats = async () => ({ ...await stats(), [field]: field === 'gapOverflow' ? true : 1 })
+    await f.poll(3)
+    expect((await f.s.stop()).take?.status).toBe('partial-error')
+  })
+
+  it('loads old sidecars with an explicitly approximate integrated settings map and enabled default FX', async () => {
+    const f = timelineFixture(); await f.start(); await f.s.stop()
+    const old = f.read(); delete old.anchors; delete old.effects
+    old.durationSec = 4; old.settings = [{ atSec: 0, tempo: .5, transposeSemitones: 0 }, { atSec: 2, tempo: 2, transposeSemitones: 2 }]
+    const result = resolveVoiceTakeTimeline(old)
+    expect(result.approximate).toBe(true); expect(result.effects[0]?.enabled).toBe(true)
+    expect(result.anchors).toEqual([{ takeFrame: 0, projectFrame: 12 * f.sampleRate },
+      { takeFrame: 2 * f.sampleRate, projectFrame: 13 * f.sampleRate }, { takeFrame: 4 * f.sampleRate, projectFrame: 17 * f.sampleRate }])
+    f.write(old)
+    expect((await f.s.list('song-1'))[0]?.timelineApproximate).toBe(true)
+  })
+
+  it.each([
+    [{ takeFrame: 0, projectFrame: NaN }], [{ takeFrame: -1, projectFrame: 0 }], [{ takeFrame: 0, projectFrame: -1 }],
+    [{ takeFrame: 1, projectFrame: 0 }], [{ takeFrame: 0, projectFrame: 2 }, { takeFrame: 1, projectFrame: 1 }],
+    [{ takeFrame: 0, projectFrame: 0 }, { takeFrame: 0, projectFrame: 1 }], [{ takeFrame: 0, projectFrame: Infinity }],
+    [{ takeFrame: 0, projectFrame: .5 }], [{ takeFrame: 0, projectFrame: 0, extra: 1 }], [],
+    Array.from({ length: VOICE_TAKE_ANCHORS_MAX + 1 }, (_, i) => ({ takeFrame: i, projectFrame: i }))
+  ].map(anchors => ({ anchors })))('rejects malformed, unordered or oversized anchor maps: %#', ({ anchors }) => { expect(isVoiceTakeAnchors(anchors)).toBe(false) })
+
+  it.each([
+    [{ id: 'pitch-follow', enabled: true, params: { manualOffsetSemitones: NaN, preserveFormants: false } }],
+    [{ id: 'pitch-follow', enabled: true, params: { manualOffsetSemitones: 25, preserveFormants: false } }],
+    [{ id: 'pitch-follow', enabled: 1, params: { manualOffsetSemitones: 0, preserveFormants: false } }],
+    [{ id: 'unknown', enabled: true, params: {} }], [...defaultVoiceTakeEffects(), ...defaultVoiceTakeEffects()],
+    [{ id: 'pitch-follow', enabled: true, params: { manualOffsetSemitones: 0, preserveFormants: false, extra: 1 } }],
+    Array(VOICE_TAKE_EFFECTS_MAX + 1).fill(defaultVoiceTakeEffects()[0])
+  ].map(effects => ({ effects })))('rejects malformed or duplicate/oversized effect slots: %#', ({ effects }) => { expect(isVoiceTakeEffects(effects)).toBe(false) })
+
+  it('preserves an explicit pitch-follow bypass and rejects invalid recording settings', async () => {
+    const f = timelineFixture(); await f.start()
+    expect(await f.s.settings({ takeId: f.read().takeId, tempo: NaN, transposeSemitones: 0 })).toMatchObject({ ok: false })
+    await f.s.stop(); const take = f.read(); take.effects = [{ ...defaultVoiceTakeEffects()[0]!, enabled: false }]
+    expect(resolveVoiceTakeTimeline(take).effects[0]?.enabled).toBe(false)
+    take.anchors![1]!.takeFrame = Number.MAX_SAFE_INTEGER
+    expect(() => resolveVoiceTakeTimeline(take)).toThrow('Invalid take anchors.')
+    take.sampleRate = NaN
+    expect(() => resolveVoiceTakeTimeline(take)).toThrow('Invalid take timeline.')
+  })
+})
+
+
+describe('ADR 0016 persisted take effect slots', () => {
+  it('serializes FX, move and delete sidecar mutations so a delayed FX write cannot lose a drop or resurrect a take', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-fx-race-')); roots.push(root)
+    const s = store(root), start = await s.start(request)
+    if (!start.ok) throw new Error('start failed')
+    await s.stop()
+    const file = join(root, 'song-1', `${start.takeId}.json`), effects = [{ ...defaultVoiceTakeEffects()[0], enabled: false }]
+    const realWrite = (s as any).writeSidecar.bind(s)
+    let unblock!: () => void, entered!: () => void
+    const waiting = new Promise<void>(resolve => { entered = resolve })
+    const gate = new Promise<void>(resolve => { unblock = resolve })
+    const write = vi.spyOn(s as any, 'writeSidecar').mockImplementationOnce(async (...args: unknown[]) => {
+      entered(); await gate; await realWrite(...args)
+    })
+    const fx = s.setEffects('song-1', start.takeId, effects)
+    await waiting
+    const move = s.move({ songId: 'song-1', takeId: start.takeId, userOffsetSec: 2 })
+    await Promise.resolve(); expect(write).toHaveBeenCalledTimes(1)
+    unblock(); await fx; await move
+    const sidecar = JSON.parse(readFileSync(file, 'utf8'))
+    expect(sidecar.effects).toEqual(effects); expect(sidecar.userOffsetSec).toBe(2)
+    const editing = s.setEffects('song-1', start.takeId, [])
+    const removing = s.remove('song-1', start.takeId)
+    await editing; expect(await removing).toEqual({ ok: true })
+    expect(existsSync(file)).toBe(false)
+  })
+  it('persists an ordered slot without moving measured placement or anchors', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-voice-fx-')); roots.push(root)
+    const s = store(root)
+    const begun = await s.start(request)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) throw new Error('start failed')
+    await expect(s.setEffects('song-1', begun.takeId, [])).rejects.toThrow('recording')
+    await s.stop()
+    const file = join(root, 'song-1', `${begun.takeId}.json`), before = JSON.parse(readFileSync(file, 'utf8'))
+    const effects = [{ ...defaultVoiceTakeEffects()[0], enabled: false }]
+    await s.setEffects('song-1', begun.takeId, effects)
+    const after = JSON.parse(readFileSync(file, 'utf8'))
+    expect(after.effects).toEqual(effects); expect(after.startPositionSec).toBe(before.startPositionSec)
+    expect(after.anchors).toEqual(before.anchors)
+    expect((await s.list('song-1'))[0].effects).toEqual(effects)
+    await expect(s.setEffects('../x', begun.takeId, effects)).rejects.toThrow()
+    await expect(s.setEffects('song-1', begun.takeId, [{ id: 'unknown' } as never])).rejects.toThrow()
+  })
+})
+
+
+describe('ADR 0016 conform IPC leases and cancellation', () => {
+  const req = { songId: 'song', takeId: 'take', requestId: 'job-1', outputRate: 48000, songDurationProjectFrames: 480000 }
+  function register() {
+    const sender = Object.assign(new EventEmitter(), { id: 7, isDestroyed: () => false })
+    const store = { setEffects: vi.fn(async () => {}) }
+    registerVoiceTakeIpc(store as unknown as VoiceTakeStore)
+    const call = (name: string, value: unknown, owner = sender) => voiceIpc.handlers.get(name)!({ sender: owner }, value)
+    return { sender, store, call }
+  }
+  beforeEach(() => {
+    voiceIpc.handlers.clear(); voiceIpc.conform.mockReset(); voiceIpc.invalidate.mockClear(); voiceIpc.release.mockClear()
+    voiceIpc.conform.mockResolvedValue({ path: '/private/conformed-voice.wav', key: 'cache', cached: true, durationFrames: 48000 })
+  })
+  it('authorizes only the main-produced WAV and releases a renderer-scoped lease after replacement', async () => {
+    const { call } = register()
+    const result = await call('voice:conform', req)
+    expect(result).toMatchObject({ ok: true, leaseId: 'job-1' })
+    expect(isAllowed(result.path)).toBe(true)
+    expect(voiceIpc.conform).toHaveBeenCalledWith('song', 'take', expect.objectContaining({ retain: true, signal: expect.any(AbortSignal) }))
+    await call('voice:conform-invalidate', { songId: 'song', takeId: 'take', leaseId: 'job-1' }, Object.assign(new EventEmitter(), { id: 8, isDestroyed: () => false }))
+    expect(voiceIpc.release).not.toHaveBeenCalled()
+    await call('voice:conform-invalidate', { songId: 'song', takeId: 'take', leaseId: 'job-1' })
+    expect(voiceIpc.release).toHaveBeenCalledWith(result.path)
+    expect(voiceIpc.invalidate).toHaveBeenCalledWith('song', 'take', { cancelActive: false })
+  })
+  it('serializes FX writes and never starts an obsolete request after a newer request', async () => {
+    const { call, store } = register()
+    let finish!: () => void
+    store.setEffects.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    const old = call('voice:conform', { ...req, effects: defaultVoiceTakeEffects() })
+    await vi.waitFor(() => expect(store.setEffects).toHaveBeenCalledTimes(1))
+    const latest = call('voice:conform', { ...req, requestId: 'job-2', effects: [] })
+    finish()
+    expect(await old).toEqual({ ok: false, reason: 'cancelled' })
+    expect(await latest).toMatchObject({ ok: true, leaseId: 'job-2' })
+    expect(voiceIpc.conform).toHaveBeenCalledTimes(1)
+    expect(store.setEffects).toHaveBeenLastCalledWith('song', 'take', [])
+  })
+  it('cancels an in-flight conform and rejects invalid ids/rates/effects without throwing', async () => {
+    const { call } = register()
+    let finish!: (value: unknown) => void
+    voiceIpc.conform.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const pending = call('voice:conform', req)
+    await vi.waitFor(() => expect(voiceIpc.conform).toHaveBeenCalled())
+    await call('voice:conform-cancel', 'job-1')
+    finish({ path: '/late.wav', key: 'x', cached: false, durationFrames: 1 })
+    expect(await pending).toEqual({ ok: false, reason: 'cancelled' })
+    expect(voiceIpc.release).toHaveBeenCalledWith('/late.wav')
+    for (const patch of [{ songId: '../x' }, { outputRate: NaN }, { songDurationProjectFrames: 0 }, { effects: [{ id: 'unknown' }] }])
+      expect(await call('voice:conform', { ...req, ...patch })).toEqual({ ok: false, reason: 'conform-failed' })
+  })
+  it('releases pinned files when the owning renderer is destroyed', async () => {
+    const { call, sender } = register()
+    await call('voice:conform', req)
+    sender.emit('destroyed')
+    await vi.waitFor(() => expect(voiceIpc.release).toHaveBeenCalledWith('/private/conformed-voice.wav'))
   })
 })

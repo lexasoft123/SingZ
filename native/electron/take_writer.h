@@ -49,6 +49,7 @@ struct TakeFirstSample {
   AudioInputTimestampQuality quality = AudioInputTimestampQuality::Unknown;
 };
 struct TakeInputLevel { double peakDb = -120; double rmsDb = -120; };
+struct TakeFrameStamp { uint64_t hostNs = 0, takeFrame = 0; };
 
 // One permanent instance per capture owner. start/finish/cancel/result are
 // serialized by the owner's control mutex. append has exactly one producer;
@@ -72,6 +73,8 @@ class TakeWriter {
   TakeFirstSample firstSample() const noexcept;
   void resetLevel() noexcept;
   uint64_t lastSampleHostNs() const noexcept;
+  // First sample of the latest committed block, including preceding gap padding.
+  TakeFrameStamp frameStamp() const noexcept;
   // Call only with the capture delivery thread stopped, before a new capture.
   void resetCaptureTelemetry() noexcept;
   // Canonical mono PCM16 WAV only. An unfinished header's data length is
@@ -93,6 +96,7 @@ class TakeWriter {
   std::atomic<bool> accepting_{false}, done_{true};
   std::atomic<float> peak_{0}, meanSquare_{0};
   std::atomic<uint64_t> firstHostNs_{0}, lastHostNs_{0};
+  std::atomic<uint64_t> stampSequence_{0}, stampHost_{0}, stampFrame_{0};
   std::atomic<AudioInputTimestampQuality> firstQuality_{AudioInputTimestampQuality::Unknown};
   std::atomic<bool> firstCaptured_{false};
   std::filesystem::path path_;

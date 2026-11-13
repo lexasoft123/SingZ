@@ -123,6 +123,7 @@ void TakeWriter::start(const std::string& directory, const std::string& id,
   gapUntrustedTimestampBlocks_.store(0); gapRegressions_.store(0); gapOverflow_.store(false);
   firstCaptured_.store(false, std::memory_order_release);
   firstHostNs_.store(0); firstQuality_.store(AudioInputTimestampQuality::Unknown);
+  stampSequence_.store(0); stampHost_.store(0); stampFrame_.store(0);
   deviceLost_ = std::move(deviceLost);
   done_.store(false, std::memory_order_release);
   accepting_.store(true, std::memory_order_seq_cst);
@@ -180,6 +181,17 @@ TakeGapStats TakeWriter::gapStats() const noexcept {
 }
 void TakeWriter::resetLevel() noexcept { peak_.store(0); meanSquare_.store(0); }
 uint64_t TakeWriter::lastSampleHostNs() const noexcept { return lastHostNs_.load(std::memory_order_relaxed); }
+TakeFrameStamp TakeWriter::frameStamp() const noexcept {
+  for (unsigned attempt = 0; attempt < 8; ++attempt) {
+    const auto before = stampSequence_.load(std::memory_order_acquire);
+    if (before & 1u) continue;
+    const TakeFrameStamp stamp{stampHost_.load(std::memory_order_relaxed),
+                               stampFrame_.load(std::memory_order_relaxed)};
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (before == stampSequence_.load(std::memory_order_acquire)) return stamp;
+  }
+  return {};
+}
 void TakeWriter::resetCaptureTelemetry() noexcept { resetLevel(); lastHostNs_.store(0); }
 void TakeWriter::run() noexcept {
   try {
@@ -264,6 +276,12 @@ void TakeWriter::run() noexcept {
           put16(pcm.data() + i * 2, static_cast<uint16_t>(sample));
         }
         const auto written = std::fwrite(pcm.data(), 1, size_t(s.frames) * 2, file_);
+        if (written >= 2) {
+          stampSequence_.fetch_add(1, std::memory_order_acq_rel);
+          stampHost_.store(s.capture.sampleHostTimeNs, std::memory_order_relaxed);
+          stampFrame_.store(result_.frames, std::memory_order_relaxed);
+          stampSequence_.fetch_add(1, std::memory_order_release);
+        }
         result_.frames += written / 2;
         if (result_.frames && !firstCaptured_.load(std::memory_order_relaxed)) {
           firstHostNs_.store(result_.firstSampleHostNs, std::memory_order_relaxed);

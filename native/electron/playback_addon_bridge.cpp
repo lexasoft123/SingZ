@@ -2212,10 +2212,14 @@ napi_value presentationQuery(napi_env env, napi_callback_info info) {
   setValue(env, result, "projectFrame", makeNumber(env, source.projectFrame));
   setValue(env, result, "songSeconds", makeNumber(env, source.songSeconds));
   setValue(env, result, "rate", makeNumber(env, source.rate));
+  setValue(env, result, "transposeSemitones", makeNumber(env, source.transposeSemitones));
   setValue(env, result, "sampleRate", makeNumber(env, source.sampleRate));
   setValue(env, result, "outputLatencyFrames", makeNumber(env, source.outputLatencyFrames));
   setValue(env, result, "graphLatencyFrames", makeNumber(env, source.graphLatencyFrames));
   setCounter(env, result, "discontinuitySerial", source.discontinuitySerial);
+  setCounter(env, result, "faultSerial", source.faultSerial);
+  setCounter(env, result, "mappingStartHostNs", source.mappingStartHostNs);
+  setValue(env, result, "mappingStartSongSeconds", makeNumber(env, source.mappingStartSongSeconds));
   setCounter(env, result, "generation", source.generation);
   setValue(env, result, "paused", makeBool(env, source.paused));
   setValue(env, result, "seekDuringCallback", makeBool(env, source.nonAffine));

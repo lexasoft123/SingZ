@@ -46,6 +46,9 @@ const box: BoxAPI = {
 }
 
 export type VoiceTakeApi = {
+  conformTake(songId: string, takeId: string, options: import('../shared/voice-take').VoiceTakeConformOptions, requestId: string): Promise<import('../shared/voice-take').VoiceTakeConformResult>
+  cancelConform(requestId: string): Promise<void>
+  invalidateConformedTake(request: import('../shared/voice-take').VoiceTakeInvalidateRequest): Promise<void>
   arm(request: VoiceArmRequest): Promise<VoiceArmResult>
   disarm(): Promise<{ ok: boolean; error?: string }>
   recordStart(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult>
@@ -65,6 +68,9 @@ export type VoiceTakeApi = {
 }
 
 const voiceTakes: VoiceTakeApi = {
+  conformTake: (songId, takeId, options, requestId) => ipcRenderer.invoke(VOICE_IPC.conform, { ...options, songId, takeId, requestId }),
+  cancelConform: requestId => ipcRenderer.invoke(VOICE_IPC.cancelConform, requestId),
+  invalidateConformedTake: request => ipcRenderer.invoke(VOICE_IPC.invalidateConformed, request),
   arm: request => ipcRenderer.invoke('voice:arm', request),
   disarm: () => ipcRenderer.invoke('voice:disarm'),
   recordStart: request => ipcRenderer.invoke('voice:record-start', request),

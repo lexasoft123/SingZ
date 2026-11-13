@@ -38,7 +38,7 @@ import { micPreviewErrorCopy, micPreviewErrorKind } from '../../src/renderer/src
 import { takeIsSilent } from '../../src/renderer/src/components/voice-format'
 import VoiceTrackSettings from '../../src/renderer/src/components/VoiceTrackSettings'
 import { VoiceRecordButton } from '../../src/renderer/src/components/voice-record-button'
-import type { VoiceMonitorState, VoiceTakeSummary } from '../../src/shared/voice-take'
+import type { VoiceMonitorState, VoiceTakeSummary, VoiceTakeConformResult } from '../../src/shared/voice-take'
 
 const monState = (over: Partial<VoiceMonitorState> = {}): VoiceMonitorState => ({
   available: true,
@@ -87,6 +87,9 @@ function fakeEngine(): VoiceEnginePort & { _playing: boolean; _pos: number; _tem
 
 function fakeApi(over: Partial<VoiceTakeApi> = {}): VoiceTakeApi & Record<keyof VoiceTakeApi, ReturnType<typeof vi.fn>> {
   const api = {
+    conformTake: vi.fn(async () => ({ ok: true as const, path: '/private/take.wav', key: 'key', durationFrames: 480000, cached: false, leaseId: 'lease' })),
+    cancelConform: vi.fn(async () => {}),
+    invalidateConformedTake: vi.fn(async () => {}),
     recordStart: vi.fn(async () => ({ ok: true as const, takeId: 'take-1' })),
     recordStop: vi.fn(async () => ({ ok: true, take: summary() })),
     recordSettings: vi.fn(async () => ({ ok: true })),
@@ -2789,6 +2792,129 @@ describe('the strip input and Settings microphone are one setting', () => {
     expect(chosen).toEqual([['mic', 0]])
     c.setPreferredInput('gone', 0) // an unplugged device: nothing to follow
     expect(c.getSnapshot().input).toBe('mic#0')
+    c.dispose()
+  })
+})
+
+
+describe('ADR 0016 controller lane lifecycle', () => {
+  async function laneSetup(apiOver: Partial<VoiceTakeApi> = {}) {
+    const lane = vi.fn(async (_source: { path: string } | null) => ({ status: _source ? 'ready' : 'idle' } as const))
+    const control = vi.fn(async () => {})
+    const x = await setup({ list: vi.fn(async () => [summary()]), ...apiOver }, engine => {
+      Object.assign(engine, { voiceTakeOutputRate: 48000, setVoiceTakeLane: lane, setVoiceTakeControl: control })
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    return { ...x, lane, control }
+  }
+  it('conforms kept takes once, maps level/M/S to the native lane, and leaves the live monitor alone', async () => {
+    const { c, api, lane, control } = await laneSetup()
+    expect(api.conformTake).toHaveBeenCalledWith('song-1', 'take-1', {
+      outputRate: 48000, songDurationProjectFrames: 9600000, effects: INITIAL_VOICE_MODEL.effects
+    }, expect.any(String))
+    expect(c.getSnapshot().lane).toEqual({ status: 'ready' })
+    expect(lane).toHaveBeenLastCalledWith({ path: '/private/take.wav' })
+    lane.mockClear(); api.monitorSet.mockClear(); api.monitorGain.mockClear()
+    c.toggleTakeMute(); c.toggleSolo(); c.setLevel(50)
+    await Promise.resolve()
+    expect(control).toHaveBeenLastCalledWith({ gain: takeGain(50, false), muted: true, solo: true, suppressed: false }, false)
+    expect(lane).not.toHaveBeenCalled()
+    expect(api.monitorSet).not.toHaveBeenCalled(); expect(api.monitorGain).not.toHaveBeenCalled()
+    c.dispose()
+  })
+  it('silences before capture starts, never rebuilds until finalized, then replaces once and retires the old lease', async () => {
+    let finish!: (value: Awaited<ReturnType<VoiceTakeApi['recordStop']>>) => void
+    const x = await laneSetup({ recordStart: vi.fn(async () => ({ ok: true, takeId: 'take-new' })),
+      recordStop: vi.fn(() => new Promise(resolve => { finish = resolve })) })
+    x.lane.mockClear(); x.api.conformTake.mockClear(); x.control.mockClear()
+    await x.c.startRecording()
+    expect(x.control.mock.calls.some(args => (args[0] as any)?.suppressed === true)).toBe(true)
+    expect(x.lane).not.toHaveBeenCalled(); expect(x.api.conformTake).not.toHaveBeenCalled()
+    const stopped = x.c.stopRecording()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(x.lane).not.toHaveBeenCalled(); expect(x.api.conformTake).not.toHaveBeenCalled()
+    finish({ ok: true, take: summary({ takeId: 'take-new' }) })
+    await stopped; await vi.advanceTimersByTimeAsync(0)
+    expect(x.api.conformTake).toHaveBeenCalledTimes(1); expect(x.lane).toHaveBeenCalledTimes(1)
+    expect(x.api.invalidateConformedTake).toHaveBeenCalledWith({ songId: 'song-1', takeId: 'take-1', leaseId: 'lease' })
+    expect(x.control).toHaveBeenLastCalledWith(expect.objectContaining({ suppressed: false }), false)
+    x.c.dispose()
+  })
+  it('waits for an in-flight finalization on song change and never adopts it into the next song', async () => {
+    let finish!: (value: Awaited<ReturnType<VoiceTakeApi['recordStop']>>) => void
+    const x = await laneSetup({ list: vi.fn(async song => song === 'song-1' ? [summary()] : []),
+      recordStop: vi.fn(() => new Promise(resolve => { finish = resolve })) })
+    await x.c.startRecording()
+    x.lane.mockClear(); x.api.conformTake.mockClear()
+    const stopping = x.c.stopRecording(), switching = x.c.setSong('song-2')
+    await Promise.resolve()
+    expect(x.lane).not.toHaveBeenCalled()
+    finish({ ok: true, take: summary({ takeId: 'late-finished' }) })
+    await stopping; await switching; await vi.advanceTimersByTimeAsync(0)
+    expect(x.c.getSnapshot().songId).toBe('song-2')
+    expect(x.c.getSnapshot().take).toBeNull()
+    expect(x.lane).toHaveBeenLastCalledWith(null)
+    expect(x.api.conformTake).not.toHaveBeenCalled()
+    x.c.dispose()
+  })
+  it.each(['conform-failed', 'timeout', 'cancelled'] as const)('a %s result removes the voice lane without blocking transport', async reason => {
+    const { c, lane, engine } = await laneSetup({ conformTake: vi.fn(async () => ({ ok: false, reason })) })
+    expect(lane).toHaveBeenLastCalledWith(null)
+    expect(c.getSnapshot().lane).toEqual({ status: 'error', reason })
+    await engine.play(); expect(engine.playing).toBe(true)
+    c.toggleSolo(); expect(c.getSnapshot().solo).toBe(false)
+    c.dispose()
+  })
+  it('times out a stalled bridge, keeps transport usable, and releases a late result', async () => {
+    let publish!: (value: VoiceTakeConformResult) => void
+    const x = await laneSetup({ conformTake: vi.fn(() => new Promise(resolve => { publish = resolve })) })
+    await vi.advanceTimersByTimeAsync(100000)
+    expect(x.c.getSnapshot().lane).toEqual({ status: 'error', reason: 'timeout' })
+    expect(x.api.cancelConform).toHaveBeenCalled()
+    expect(x.lane).toHaveBeenLastCalledWith(null)
+    publish({ ok: true, path: '/late.wav', key: 'late', durationFrames: 1, cached: false, leaseId: 'late-timeout' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(x.api.invalidateConformedTake).toHaveBeenCalledWith(expect.objectContaining({ leaseId: 'late-timeout' }))
+    x.c.dispose()
+  })
+  it('debounces consecutive drops and Reset; delete removes before reclaiming raw/cache files', async () => {
+    const { c, api, lane } = await laneSetup()
+    api.conformTake.mockClear(); lane.mockClear()
+    await c.moveTake(31); await c.moveTake(32); await c.moveTake(33)
+    await vi.advanceTimersByTimeAsync(149); expect(api.conformTake).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); expect(api.conformTake).toHaveBeenCalledTimes(1)
+    await c.resetTakePosition(); await vi.advanceTimersByTimeAsync(150)
+    expect(api.conformTake).toHaveBeenCalledTimes(2)
+    c.selectTake(true); await c.deleteSelected()
+    expect(lane).toHaveBeenLastCalledWith(null); expect(c.getSnapshot().lane).toEqual({ status: 'idle' })
+    expect(api.remove).toHaveBeenCalledWith('song-1', 'take-1')
+    c.dispose()
+  })
+  it('cancels obsolete conforms and releases their unpublished result, including during recording', async () => {
+    let publish!: (value: Awaited<ReturnType<VoiceTakeApi['conformTake']>>) => void
+    const x = await laneSetup({ conformTake: vi.fn(() => new Promise(resolve => { publish = resolve })) })
+    expect(x.c.getSnapshot().lane.status).toBe('conforming')
+    x.lane.mockClear()
+    await x.c.startRecording()
+    expect(x.api.cancelConform).toHaveBeenCalledWith(expect.any(String))
+    publish({ ok: true, path: '/late.wav', key: 'late', durationFrames: 1, cached: false, leaseId: 'late' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(x.lane).not.toHaveBeenCalled()
+    expect(x.api.invalidateConformedTake).toHaveBeenCalledWith(expect.objectContaining({ leaseId: 'late' }))
+    x.c.dispose()
+  })
+  it('suppresses the new lane throughout legacy Listen-with-song and restores it after stopPlay settles', async () => {
+    let finish!: () => void
+    const { c, api, control, lane } = await laneSetup({ stopPlay: vi.fn(() => new Promise<void>(resolve => { finish = resolve })) })
+    lane.mockClear(); await c.listen('with-song')
+    expect(api.play).toHaveBeenCalledTimes(1)
+    expect(control).toHaveBeenLastCalledWith(expect.objectContaining({ suppressed: true }), false)
+    const stopped = c.stopListening()
+    await Promise.resolve()
+    expect(control).toHaveBeenLastCalledWith(expect.objectContaining({ suppressed: true }), false)
+    finish(); await stopped
+    expect(control).toHaveBeenLastCalledWith(expect.objectContaining({ suppressed: false }), false)
+    expect(lane).not.toHaveBeenCalled()
     c.dispose()
   })
 })
