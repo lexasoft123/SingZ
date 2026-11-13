@@ -443,6 +443,13 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
   endif()
 endif()
 
+# Standalone ADR 0017 measurement spike; never linked into the product.
+option(SINGZ_MONITOR_SPIKE "Build the isolated monitor measurement harness" OFF)
+if(SINGZ_MONITOR_SPIKE AND NOT ANDROID AND NOT IOS)
+  enable_testing()
+  add_subdirectory(tools/monitor-spike)
+endif()
+
 if(NOT SINGZ_BUILD_HOST_TOOLS)
   return()
 endif()
