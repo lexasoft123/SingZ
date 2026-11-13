@@ -1,20 +1,24 @@
 /*
- * The desktop's player-session: one singer's session replayed twice on the
- * built app — once on Web Audio (legacy), once on the native graph — and
- * judged by the SAME rules the phone harness uses (mobile/tests/player-
- * session/scenario.cjs): a timing rule passes when native ≤ legacy +
- * max(50 ms, 10%); CPU when native ≤ legacy + 2 ticks; footprint when native
- * ≤ legacy; the pitch change against an absolute ceiling only. The script is
- * the phone's, minus what a desktop has no equivalent for (backgrounding —
- * the desktop never suspends playback; those rows are reported n/a).
+ * The desktop's player-session: one singer's session replayed on the built
+ * app's native graph and measured.
+ *
+ * NO LEGACY COMPARISON ANY MORE. This driver used to run a second, Web Audio
+ * ("legacy") pass by flipping the 'Use native playback' toggle and judged native
+ * against it (native ≤ legacy + max(50 ms, 10%), CPU, footprint). That toggle is
+ * gone, native is the only desktop backend, and nothing in the app forces the
+ * Web Audio fallback, so the "legacy" pass silently played on native and printed
+ * misleading comparison numbers. Only absolute rules (the pitch-change ceiling,
+ * native releases the renderer's decode, quiet host, no fatal log line) are
+ * judged; the timing/CPU/footprint numbers are printed as measurements, not
+ * verdicts. The script is the phone's, minus what a desktop has no equivalent
+ * for (backgrounding — the desktop never suspends playback; reported n/a).
  *
  * Open a ~2 min six-lane song, Play, touch the metronome three times, scrub
  * four times, ride three faders, transpose +2, turn training on, pause and
  * resume, run the song out and Play again, back to the catalog, open the
  * second song, quit, relaunch, reopen the first. Every timing is sampled IN
  * THE RENDERER by a setInterval (the host's CDP round trip never lands inside
- * a number). Both passes run in one invocation, legacy first, native second,
- * on the same scratch profile with the toggle flipped between them.
+ * a number).
  *
  * Silent: SINGZ_MUTE mutes Chromium's output — which the NATIVE graph does
  * not go through (CoreAudio, straight from the core) — so every open also
@@ -27,7 +31,7 @@
  * back. A native pass in which the engine reports Web Audio is a HARNESS
  * FAIL naming the log's reason, never a measured pass.
  *
- * Usage: node tests/e2e/mac/player-session-e2e.cjs [--pass legacy|native|both]
+ * Usage: node tests/e2e/mac/player-session-e2e.cjs [--pass native]
  *        E2E_OUT=<dir>  ALLOW_BUSY_HOST=1  QUIET_LOAD=8
  *        PS_LIB=<dir>   a library already staged (the two seeded projects, each
  *                       with its stems and song file) — for a machine without
@@ -54,7 +58,11 @@ const { stageSongs } = require('../../../mobile/tests/player-session/seed.cjs')
 const { hostLoad, isQuiet, QUIET_LOAD } = require('../../../mobile/tests/player-session/host-load.cjs')
 
 const argv = process.argv.slice(2)
-const passArg = (() => { const i = argv.indexOf('--pass'); return i >= 0 ? argv[i + 1] : 'both' })()
+const passArg = (() => { const i = argv.indexOf('--pass'); return i >= 0 ? argv[i + 1] : 'native' })()
+if (passArg !== 'native') {
+  console.error(`HARNESS FAIL: --pass ${passArg}: the legacy (Web Audio) pass was removed — the 'Use native playback' toggle is gone and the fallback cannot be forced, so it would silently play on native. Only --pass native exists.`)
+  process.exit(2)
+}
 const OUT = process.env.E2E_OUT ?? tmpdir()
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 const MOBILE = join(__dirname, '..', '..', '..', 'mobile')
@@ -328,14 +336,13 @@ async function runPass(kind, songs) {
       const why = lines.filter((x) => /native|legacy|backend/i.test(x.line)).slice(-6).map((x) => x.line.slice(0, 200))
       throw new Error(`HARNESS: the native pass is playing on Web Audio at "${when}". Recent log: ${JSON.stringify(why)}`)
     }
-    if (kind === 'legacy' && native) throw new Error(`HARNESS: the legacy pass is playing on the native graph at "${when}"`)
   }
 
   // ---- launch, set the toggle, reload so boot reads it -------------------
   let { app, win } = await launch()
   liveWin = win
   liveApp = app
-  await val(win, `(() => { const p = JSON.parse(localStorage.getItem('singz.audio') || '{}'); p.nativePlayback = ${kind === 'native'}; localStorage.setItem('singz.audio', JSON.stringify(p)); localStorage.setItem('singz.desktop.native-playback', '${kind === 'native' ? 1 : 0}'); localStorage.setItem('singz.met', JSON.stringify({ click: false, countInBars: 0, volume: 0, accent: true, grid: true })); return 1 })()`)
+  await val(win, `(() => { const p = JSON.parse(localStorage.getItem('singz.audio') || '{}'); p.nativePlayback = true; localStorage.setItem('singz.audio', JSON.stringify(p)); localStorage.setItem('singz.desktop.native-playback', '1'); localStorage.setItem('singz.met', JSON.stringify({ click: false, countInBars: 0, volume: 0, accent: true, grid: true })); return 1 })()`)
   // PS_STREAM_LANES=1|0 pins the desktop's streamed-lanes preference for the
   // run. The platform default is what a singer gets; this is how the OTHER
   // answer is measured on a machine — the Windows streaming proof ran with it
@@ -513,58 +520,31 @@ async function runPass(kind, songs) {
   return pass
 }
 
-function judge(legacy, native) {
+function judge(native) {
   const rows = []
-  const budget = (l) => Math.max(50, l * 0.1)
   for (const spec of METRICS) {
-    const l = legacy.ms[spec.key] ?? null
     const n = native.ms[spec.key] ?? null
     if (spec.rule === 'n/a') { rows.push({ rule: `${spec.label}: n/a — ${spec.why}`, ok: null }); continue }
     if (spec.rule === 'absolute') {
-      rows.push({ rule: `${spec.label} < ${spec.limit} ms (absolute; not compared)`, ok: n !== null && n < spec.limit, detail: `native ${n} ms · legacy ${l} ms` })
+      rows.push({ rule: `${spec.label} < ${spec.limit} ms (absolute)`, ok: n !== null && n < spec.limit, detail: `native ${n} ms` })
       continue
     }
-    if (l === null || n === null) { rows.push({ rule: spec.label, ok: false, detail: `missing measurement (legacy ${l}, native ${n})` }); continue }
-    const allowed = l + budget(l)
-    rows.push({ rule: `${spec.label}: native ≤ legacy + max(50 ms, 10%)`, ok: n <= allowed, detail: `native ${n} ms vs legacy ${l} ms (budget ${Math.round(allowed)} ms, ${n - l >= 0 ? '+' : ''}${n - l} ms)` })
+    rows.push({ rule: `${spec.label}: measured, no baseline to judge against`, ok: null, detail: `native ${n} ms` })
   }
   for (const phase of CPU_PHASES) {
-    const l = legacy.cpu[phase]
     const n = native.cpu[phase]
-    if (!l || !n) continue
-    if (l.cpuPct === null || n.cpuPct === null) {
-      rows.push({ rule: `CPU and footprint (${phase}): n/a — not sampled on this platform`, ok: null })
-      continue
-    }
-    const tick = 0.5 // top's %CPU over a 2 s window resolves to about half a point per process
-    const cpuBudget = Math.round((l.cpuPct + 2 * tick) * 10) / 10
-    rows.push({ rule: `CPU (${phase}): native ≤ legacy + 2 ticks`, ok: n.cpuPct <= cpuBudget, detail: `native ${n.cpuPct}% vs legacy ${l.cpuPct}% (budget ${cpuBudget}%)${l.quiet && n.quiet ? '' : ' — host BUSY'}` })
-    // macOS reports the physical footprint; Windows the summed working set.
-    // Named for what it is, because the two are not the same measurement and a
-    // row that pretends otherwise invites a cross-platform comparison.
-    const memLabel = WIN ? 'working set' : 'footprint'
-    rows.push({ rule: `${memLabel} (${phase}): native ≤ legacy`, ok: n.footprintMb <= l.footprintMb, detail: `native ${n.footprintMb} MB vs legacy ${l.footprintMb} MB` })
+    if (!n) continue
+    rows.push({ rule: `CPU and footprint (${phase}): measured, no baseline to judge against`, ok: null,
+      detail: n.cpuPct === null ? 'not sampled on this platform' : `cpu ${n.cpuPct}% · ${WIN ? 'working set' : 'footprint'} ${n.footprintMb} MB` })
   }
-  // Web Audio plays FROM the renderer's buffers, so legacy must still hold
-  // them; the core plays from the stem files, so native must not.
-  //
-  // NECESSARY, NOT SUFFICIENT, and that is not a quibble: this rule passed for
-  // a build in which 675 MB of released lanes were still pinned by a memoized
-  // closure from an earlier render, because the two places it asks had both
-  // genuinely let go. `tests/e2e/mac/lane-residency-probe.cjs` is what answers
-  // the other half — whether the bytes actually come back.
-  rows.push({
-    rule: 'the renderer holds its own decode on legacy and has let it go on native',
-    ok: legacy.lanesResident === true && native.lanesResident === false,
-    detail: `legacy ${legacy.lanesResident} · native ${native.lanesResident}`
-  })
-  for (const p of [legacy, native]) {
-    const busy = CPU_PHASES.filter((ph) => p.cpu[ph] && !p.cpu[ph].quiet)
-    if (CPU_PHASES.every((ph) => !p.cpu[ph] || p.cpu[ph].load1 === null)) {
-      rows.push({ rule: `the host was quiet through every CPU phase — ${p.backend}: n/a — no load average on this platform`, ok: null })
-    } else rows.push({ rule: `the host was quiet (1-min load ≤ ${QUIET_LOAD}) through every CPU phase — ${p.backend}`, ok: busy.length === 0, detail: CPU_PHASES.filter((ph) => p.cpu[ph]).map((ph) => `${ph}=${p.cpu[ph].load1}`).join(' ') + (busy.length ? ` — BUSY during ${busy.join(', ')}: those CPU rows describe the host, not the app` : '') })
-    rows.push({ rule: `no fatal native line in the log — ${p.backend}`, ok: p.fatal.length === 0, detail: p.fatal.map((f) => f.hits[0]).join(' | ') })
-  }
+  // The core plays from the stem files, so the renderer must have let its own decode go.
+  // NECESSARY, NOT SUFFICIENT: tests/e2e/mac/lane-residency-probe.cjs answers whether the bytes actually come back.
+  rows.push({ rule: 'native has let the renderer\'s own decode go', ok: native.lanesResident === false, detail: `resident ${native.lanesResident}` })
+  const busy = CPU_PHASES.filter((ph) => native.cpu[ph] && !native.cpu[ph].quiet)
+  if (CPU_PHASES.every((ph) => !native.cpu[ph] || native.cpu[ph].load1 === null)) {
+    rows.push({ rule: 'the host was quiet through every CPU phase: n/a — no load average on this platform', ok: null })
+  } else rows.push({ rule: `the host was quiet (1-min load ≤ ${QUIET_LOAD}) through every CPU phase`, ok: busy.length === 0, detail: CPU_PHASES.filter((ph) => native.cpu[ph]).map((ph) => `${ph}=${native.cpu[ph].load1}`).join(' ') + (busy.length ? ` — BUSY during ${busy.join(', ')}: those CPU rows describe the host, not the app` : '') })
+  rows.push({ rule: 'no fatal native line in the log', ok: native.fatal.length === 0, detail: native.fatal.map((f) => f.hits[0]).join(' | ') })
   return rows
 }
 
@@ -609,20 +589,12 @@ function judge(legacy, native) {
   log(`library: ${LIB} (${songs.map((s) => `${s.name} ${s.seconds.toFixed(0)} s`).join(', ')})`)
 
   await warmUp(songs)
-  const passes = {}
-  for (const kind of passArg === 'both' ? ['legacy', 'native'] : [passArg]) {
-    log(`\n== ${kind} pass ==`)
-    passes[kind] = await runPass(kind, songs)
-  }
-  if (passArg !== 'both') {
-    log(JSON.stringify(passes, null, 1))
-    log('PASS (single backend measured; nothing compared)')
-    process.exit(0)
-  }
-  const rows = judge(passes.legacy, passes.native)
-  log('\n== comparison ==')
-  log(`${'metric'.padEnd(46)} ${'legacy'.padStart(8)} ${'native'.padStart(8)}`)
-  for (const spec of METRICS) log(`${spec.label.padEnd(46)} ${String(passes.legacy.ms[spec.key] ?? '—').padStart(8)} ${String(passes.native.ms[spec.key] ?? '—').padStart(8)}`)
+  log('\n== native pass ==')
+  const native = await runPass('native', songs)
+  const rows = judge(native)
+  log('\n== measurements ==')
+  log(`${'metric'.padEnd(46)} ${'native'.padStart(8)}`)
+  for (const spec of METRICS) log(`${spec.label.padEnd(46)} ${String(native.ms[spec.key] ?? '—').padStart(8)}`)
   let fails = 0
   let compared = 0
   for (const row of rows) {
