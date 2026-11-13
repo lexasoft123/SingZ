@@ -16,6 +16,7 @@ AudioHostInventory devices() {
   out.inputChannels=0;out.outputChannels=4;out.direction=AudioHostEndpointDirection::Output;
   return {{in,out},"in","out"};
 }
+bool perDeviceLatencies=false;
 struct Output final:AudioHostBackend {
   AudioHostRender callback{}; void* context{}; AudioHostStatus current{};
   unsigned opens=0,starts=0,stops=0,writes=0;
@@ -23,8 +24,10 @@ struct Output final:AudioHostBackend {
   AudioHostInventory enumerate() const override {return inventory;}
   AudioHostResult open(const AudioHostConfig& config,AudioHostRender cb,void* ctx) override {
     ++opens;callback=cb;context=ctx;current.state=AudioHostState::Open;
-    current.format={48000,config.maximumFrames,64,0,static_cast<uint32_t>(config.outputChannels.size())};
-    current.latency={0,0,64,0};
+    const auto period=config.requestedBufferFrames ? config.requestedBufferFrames : 64;
+    current.format={config.requestedSampleRate ? config.requestedSampleRate : 48000,config.maximumFrames,period,0,static_cast<uint32_t>(config.outputChannels.size())};
+    current.latency={0,perDeviceLatencies ? (config.outputDeviceUid=="out"?28u:96u) : 0u,period,0};
+    ++current.streamGeneration;
     return {true,AudioHostError::None,current.state,current.format,current.latency,{}};
   }
   AudioHostResult start() override {++starts;current.state=AudioHostState::Running;return {true,AudioHostError::None,current.state,current.format,current.latency,{}};}
@@ -38,7 +41,7 @@ struct Input final:AudioInputBackend {
   AudioInputResult open(const AudioInputConfig& cfg,AudioInputPush cb,void* ctx) override {
     config=cfg;push=cb;context=ctx;++opens;return success();
   }
-  AudioInputResult success() {auto r=AudioInputResult::success(AudioInputState::Running,48000,0);r.inputBufferFrames=64;return r;}
+  AudioInputResult success() {auto r=AudioInputResult::success(AudioInputState::Running,48000,0);r.inputBufferFrames=64;r.inputLatencyFrames=perDeviceLatencies?(config.deviceUid=="in"?148u:320u):0u;return r;}
   AudioInputResult start() override {++starts;return success();}
   void stop() override {++stops;}
   bool takeFailure(std::string& error) override {if(!failed)return false;error="input removed";return true;}
@@ -62,6 +65,22 @@ int main(){
   for(auto transport:{AudioHostTransport::Bluetooth,AudioHostTransport::AirPlay}){
     inventory.devices[1].transport=transport;
     CHECK(!classifyCommonVoiceMonitorRoute(inventory,"in",0,"out",true).available);
+  }
+  for(auto transport:{AudioHostTransport::BuiltIn,AudioHostTransport::Usb,AudioHostTransport::Virtual,AudioHostTransport::Aggregate,AudioHostTransport::Unknown}) {
+    inventory=devices();inventory.devices[1].transport=transport;
+    inventory.devices[0].monitoringSuitability=AudioHostMonitoringSuitability::Unsupported;
+    inventory.devices[1].monitoringSuitability=AudioHostMonitoringSuitability::HighLatency;
+    CHECK(classifyCommonVoiceMonitorRoute(inventory,"in",0,"out",true).available);
+  }
+  for (auto transport : {AudioHostTransport::Virtual, AudioHostTransport::Aggregate}) {
+    auto loop = devices(); loop.devices[0].outputChannels = 2; loop.devices[0].transport = transport;
+    const auto refused = classifyCommonVoiceMonitorRoute(loop,"in",0,"in",true);
+    CHECK(!refused.available && refused.reason=="route-feedback" && !refused.detail.empty());
+    CHECK(classifyCommonVoiceMonitorRoute(loop,"in",0,"out",true).available);
+  }
+  for (auto transport : {AudioHostTransport::BuiltIn, AudioHostTransport::Usb}) {
+    auto physical = devices(); physical.devices[0].outputChannels=2;physical.devices[0].transport=transport;
+    CHECK(classifyCommonVoiceMonitorRoute(physical,"in",0,"in",true).available);
   }
   CHECK(monitor.begin("in",0,true,0,1).ok);
   CHECK(capture.users(VoiceCaptureUser::Monitor)==1 && output->opens==1 && output->writes==0);
@@ -142,8 +161,9 @@ int main(){
   pcm.fill(std::numeric_limits<float>::infinity());render(32);
   for(float value:left)CHECK(std::isfinite(value));
   CHECK(service.configureOutput("in").ok==false); // Input-only endpoint cannot be chosen.
-  service.parkOutput();CHECK(!monitor.status().running && monitor.status().reason=="error");
-  CHECK(capture.users(VoiceCaptureUser::Monitor)==0 && capture.users(VoiceCaptureUser::Take)==1);
+  service.parkOutput();CHECK(monitor.status().running);
+  CHECK(capture.users(VoiceCaptureUser::Monitor)==1 && capture.users(VoiceCaptureUser::Take)==1);
+  CHECK(monitor.end(2).ok);
   capture.release(VoiceCaptureUser::Take);
   CHECK(!take.empty()); for(float sample:take)CHECK(sample==.25f);
   CHECK(!monitor.status().running); // Never auto-restart.
@@ -171,12 +191,12 @@ int main(){
   auto other=output->inventory.devices.back();other.uid="other";
   output->inventory.devices.push_back(other);service.refreshInventory();
   CHECK(service.configureOutput("other").ok);
-  // Route change gates voice before the next control status/release; it never
-  // leaks the old input into the newly selected output.
+  // A deliberate output change re-registers before callbacks resume.
   left.fill(1);right.fill(1);output->callback(output->context,block);
   CHECK(left[63]==0 && right[63]==0);
-  CHECK(!monitor.status().running && monitor.status().reason=="error");
-  CHECK(capture.users(VoiceCaptureUser::Monitor)==0);
+  CHECK(monitor.status().running && capture.users(VoiceCaptureUser::Monitor)==1);
+  pcm.fill(.25f);render(32);CHECK(std::abs(left[63]-.0625f)<1e-5);
+  CHECK(monitor.end(5).ok);
   // A take opened before monitoring keeps its buffer and transport; a song
   // on that same physical device is never retuned to the monitor target.
   output->inventory.devices[1].inputChannels=1;
@@ -210,5 +230,74 @@ int main(){
   CHECK(service.outputRouteGeneration()==cueRoute+1 && !service.activeOutputConfig().holdSharedDeviceBuffer);
   CHECK(input->opens==1 && input->starts==1);
   capture.release(VoiceCaptureUser::Take);
+  // Different sides must use their own opening snapshots, never a stale
+  // input field from the output host or a previous capture device.
+  perDeviceLatencies=true;
+  CHECK(service.configureOutput("other").ok && monitor.begin("in",0,true,0,7).ok);
+  auto measured=monitor.status().latency;
+  CHECK(measured.inputDeviceFrames==148 && measured.outputDeviceFrames==96);
+  CHECK(monitor.end(7).ok);
+  CHECK(service.configureOutput("out").ok && monitor.begin("out",0,true,0,8).ok);
+  measured=monitor.status().latency;
+  CHECK(measured.inputDeviceFrames==320 && measured.outputDeviceFrames==28);
+  CHECK(monitor.end(8).ok);
+  perDeviceLatencies=false;
+  output->inventory.devices[1].transport=AudioHostTransport::Unknown;
+  output->inventory.devices[1].monitoringSuitability=AudioHostMonitoringSuitability::Unsupported;
+  service.refreshInventory();CHECK(monitor.begin("in",0,true,0,9).ok);
+  output->current.latency.bufferFrames=32;
+  CHECK(monitor.status().latency.delayed && !monitor.status().warnings.empty());
+  output->inventory.devices[1].transport=AudioHostTransport::Usb;service.refreshInventory();
+  CHECK(!monitor.status().latency.delayed);
+  // A graph prepared before the monitor has a smaller cached capacity. Its
+  // first open must rebind the monitor on the same physical route/512 period.
+  pcm.fill(.25f);block.outputChannels=2;render(64);
+  AudioHostConfig reopened;reopened.outputDeviceUid="out";reopened.outputChannels={0,1};
+  reopened.requestedSampleRate=48000;reopened.maximumFrames=1024;reopened.requestedBufferFrames=512;
+  auto nextSong=service.playbackBackend(std::make_unique<Output>(),"coreaudio");
+  const auto oldGeneration=service.outputRouteGeneration();
+  CHECK(nextSong->open(reopened,song,&music).ok);
+  CHECK(service.outputRouteGeneration()>oldGeneration && output->current.state==AudioHostState::Running);
+  CHECK(monitor.status().running && input->opens==1 && input->starts==1);
+  measured=monitor.status().latency;
+  CHECK(measured.outputPeriodFrames==512 && measured.queueFloorFrames==1280 && measured.queueFrames==1280 && measured.delayed);
+  render(1); // The first post-gap block fades in, rather than resuming full-scale.
+  CHECK(left[0]>0 && left[0]<.001f && left[63]>left[0] && left[63]<.04f);
+  render(64);CHECK(std::abs(left[63]-.0625f)<1e-5); // Voice before first Play.
+  CHECK(nextSong->start().ok);render(8);CHECK(std::abs(left[63]-.09375f)<1e-5);
+  nextSong->stop();CHECK(service.setPlaybackOutputCurrent(false));
+  CHECK(monitor.status().running && capture.users(VoiceCaptureUser::Monitor)==1);
+  auto switchedSong=service.playbackBackend(std::make_unique<Output>(),"coreaudio");
+  reopened.maximumFrames=512;reopened.requestedBufferFrames=256;
+  CHECK(switchedSong->open(reopened,song,&music).ok);
+  CHECK(monitor.status().running && monitor.status().latency.outputPeriodFrames==256);
+  CHECK(monitor.status().latency.queueFrames==768);
+  render(64);CHECK(std::abs(left[63]-.0625f)<1e-5);
+  switchedSong->stop();CHECK(service.setPlaybackOutputCurrent(false));
+  CHECK(monitor.status().running && input->opens==1 && input->starts==1);
+  CHECK(monitor.end(0).ok && capture.users(VoiceCaptureUser::Monitor)==0);
+  output->inventory.devices[1].transport=AudioHostTransport::Virtual;service.refreshInventory();
+  CHECK(service.configureOutput("other").ok && monitor.begin("out",0,true,0,12).ok);
+  render(64);CHECK(std::abs(left[63]-.0625f)<1e-5);
+  CHECK(service.configureOutput("out").ok);render(1);
+  CHECK(left[0]==0 && left[63]==0); // No feedback leaks before the first control poll.
+  CHECK(!monitor.status().running && monitor.status().reason=="route-feedback");
+  output->inventory.devices[1].transport=AudioHostTransport::Usb;service.refreshInventory();
+  // Orphan reconciliation preserves the independent take owner.
+  const auto known=service.inputDevices();AudioInputConfig orphan;orphan.deviceUid="in";
+  CHECK(capture.retain(VoiceCaptureUser::Take,orphan,{},&known).ok);
+  CHECK(capture.retainExisting(VoiceCaptureUser::Monitor));
+  CHECK(!monitor.status().running && capture.users(VoiceCaptureUser::Monitor)==0 && capture.users(VoiceCaptureUser::Take)==1);
+  capture.release(VoiceCaptureUser::Take);
+  CHECK(monitor.begin("in",0,true,0,10).ok);
+  service.clearVoiceMonitorRenderer();
+  CHECK(!monitor.status().running && monitor.status().reason=="error" && capture.users(VoiceCaptureUser::Monitor)==0);
+  CHECK(monitor.begin("in",0,true,0,11).ok);
+  const auto removed=output->inventory.devices[1];
+  output->inventory.devices.erase(output->inventory.devices.begin()+1);service.refreshInventory();
+  CHECK(service.configureOutput("other").ok);
+  CHECK(monitor.status().lost && capture.users(VoiceCaptureUser::Monitor)==0);
+  output->inventory.devices.push_back(removed);service.refreshInventory();
+  CHECK(!monitor.status().running); // Genuine device removal never auto-restarts on fallback.
   std::puts("common monitor client: ok");
 }

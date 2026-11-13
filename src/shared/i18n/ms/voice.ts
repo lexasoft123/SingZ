@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "Pemantauan memerlukan input dan output pada satu peranti, seperti antara muka audio.",
   'player.voice.monReasonLatency': "Peranti ini tidak cukup pantas untuk memantau (melebihi 256 bingkai). Rakaman masih berfungsi.",
   'player.voice.monReasonBluetooth': "Bluetooth menambah kelewatan terlalu banyak untuk memantau. Rakaman masih berfungsi.",
+  'player.voice.monReasonFeedback': "Pemantauan laluan ini akan menghasilkan suap balik: pilih input atau output lain",
   'player.voice.monReasonWireless': "Audio tanpa wayar menambah kelewatan terlalu banyak untuk memantau. Rakaman masih berfungsi.",
   'player.voice.monReasonNoInput': "Tiada input untuk dipantau. Pilih mikrofon dahulu.",
   'player.voice.monReasonPermission': "Akses mikrofon diperlukan untuk memantau.",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "Ikut nada dimatikan",
   'player.voice.pitchFollowOffHelp': "Ikut nada dipintas. Klik untuk menghidupkannya.",
   'player.voice.manualOffsetHelp': "Anjakan tambahan pada vokal, dari -12 hingga +12 semiton.",
-  'player.voice.preserveFormantsHelp': "Mengekalkan timbre vokal semula jadi semasa dianjakkan."
+  'player.voice.preserveFormantsHelp': "Mengekalkan timbre vokal semula jadi semasa dianjakkan.",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "Laluan: {device} · penimbal {frames} bingkai · anggaran lengah ≈ {ms} ms · lengah",
+  'player.voice.routeMeasuredDelayed': "Laluan: {device} · penimbal {frames} bingkai · lengah diukur ≈ {ms} ms · lengah",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · lengah",
+  'player.voice.monitorBadgeDelayedTip': "Input dan output anda berada pada peranti berbeza atau menggunakan penimbal lebih besar: lengah akan ketara"
 }

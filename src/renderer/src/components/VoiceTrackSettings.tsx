@@ -13,11 +13,13 @@ function routeLine(m: VoiceModel): string {
   if (!m.monitor.on && m.monitor.avail !== 'ok' && m.monitor.reason) return t(REASON_KEY[m.monitor.reason])
   const lat = m.monitor.latency
   if (!m.monitor.on || !lat) return m.monitorOutputDevice ? t('player.voice.routeOutput', { device: m.monitorOutputDevice.name }) : t('player.voice.routeIdle')
-  return t(lat.source === 'measured' ? 'player.voice.routeMeasured' : 'player.voice.routeEstimated', {
-    device: m.monitorOutputDevice?.name ?? t('settings.common.systemDefault'),
-    frames: lat.bufferFrames,
-    ms: Math.round(lat.roundTripMs)
-  })
+  const out = m.monitorOutputDevice?.name ?? t('settings.common.systemDefault')
+  const inn = m.monitorInputDevice?.name
+  const device = inn && inn !== out ? t('player.voice.routeDevices', { input: inn, output: out }) : out
+  const key = lat.source === 'measured'
+    ? (lat.delayed ? 'player.voice.routeMeasuredDelayed' : 'player.voice.routeMeasured')
+    : (lat.delayed ? 'player.voice.routeEstimatedDelayed' : 'player.voice.routeEstimated')
+  return t(key, { device, frames: lat.bufferFrames, ms: Math.round(lat.roundTripMs) })
 }
 
 /** Renders slots in processing order; additional effects can supply their own controls. */

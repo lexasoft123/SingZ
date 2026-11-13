@@ -111,6 +111,7 @@ class VoiceMonitorCapture {
   uint32_t users(VoiceCaptureUser) const;
   AudioInputState state() const noexcept;
   AudioInputStats stats() const;
+  AudioInputResult openingResult() const;
   std::string lastError() const;
   VoiceMonitorSource& source() noexcept;
  private:

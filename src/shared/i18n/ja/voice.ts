@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "モニターには、オーディオインターフェースのように入力と出力が同じデバイスにある必要があります。",
   'player.voice.monReasonLatency': "このデバイスでは遅延が大きすぎてモニターできません（256フレーム超）。録音は使えます。",
   'player.voice.monReasonBluetooth': "Bluetoothは遅延が大きすぎてモニターできません。録音は使えます。",
+  'player.voice.monReasonFeedback': "この経路をモニターすると音声が循環します。別の入力または出力を選んでください",
   'player.voice.monReasonWireless': "ワイヤレス音声は遅延が大きすぎてモニターできません。録音は使えます。",
   'player.voice.monReasonNoInput': "モニターする入力がありません。先にマイクを選んでください。",
   'player.voice.monReasonPermission': "モニターにはマイクへのアクセスが必要です。",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "ピッチ追従オフ",
   'player.voice.pitchFollowOffHelp': "ピッチ追従はバイパス中です。クリックでオンにします。",
   'player.voice.manualOffsetHelp': "ボーカルに加える追加のシフト（-12〜+12半音）。",
-  'player.voice.preserveFormantsHelp': "シフト中もボーカルの音色を自然に保ちます。"
+  'player.voice.preserveFormantsHelp': "シフト中もボーカルの音色を自然に保ちます。",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "経路: {device} · バッファ {frames} フレーム · 推定遅延 ≈ {ms} ms · 遅延あり",
+  'player.voice.routeMeasuredDelayed': "経路: {device} · バッファ {frames} フレーム · 実測遅延 ≈ {ms} ms · 遅延あり",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · 遅延あり",
+  'player.voice.monitorBadgeDelayedTip': "入力と出力が別のデバイスにあるか、バッファが大きいため、はっきりとした遅延があります"
 }

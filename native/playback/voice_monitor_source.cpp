@@ -356,6 +356,12 @@ uint32_t VoiceMonitorCapture::users(VoiceCaptureUser user) const {
   return index < impl_->users.size() ? impl_->users[index] : 0;
 }
 AudioInputState VoiceMonitorCapture::state() const noexcept { return impl_->state.load(std::memory_order_acquire); }
+AudioInputResult VoiceMonitorCapture::openingResult() const {
+  std::lock_guard lock(impl_->control);
+  auto result = impl_->opened;
+  result.deviceUid = impl_->config.deviceUid;
+  return result;
+}
 AudioInputStats VoiceMonitorCapture::stats() const {
   std::lock_guard lock(impl_->control);
   auto result = impl_->finalStats;

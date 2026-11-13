@@ -400,8 +400,10 @@ function registerIpc(): void {
   registerBeatsIpc()
   registerAnalyze()
   registerDesktopAudioInput()
-  registerVoiceTakes()
-  voiceMonitor = registerVoiceMonitor()
+  let monitorTakeStore: ReturnType<typeof registerVoiceTakes> | undefined
+  voiceMonitor = registerVoiceMonitor(undefined, undefined, async () => { await monitorTakeStore?.releaseMonitorInput() }, undefined,
+    () => monitorTakeStore?.monitorInputCleanup() ?? (async () => undefined))
+  monitorTakeStore = registerVoiceTakes(voiceMonitor)
 
   ipcMain.handle(
     'lyrics:get',
@@ -717,12 +719,12 @@ function registerIpc(): void {
       audioLifetimes.set(sender, lifetime)
       const tracked = lifetime
       const rendererId = sender.id
-      const detached = (): void => { ++tracked.epoch; void voiceMonitor?.dispose(); captureOwner.rendererDetached(rendererId) }
+      const detached = (): void => { ++tracked.epoch; captureOwner.rendererDetached(rendererId) }
       sender.on('render-process-gone', detached)
       sender.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
         if (isMainFrame && !inPlace) detached()
       })
-      sender.once('destroyed', () => { ++tracked.epoch; void voiceMonitor?.dispose(); captureOwner.rendererGone(rendererId) })
+      sender.once('destroyed', () => { ++tracked.epoch; captureOwner.rendererGone(rendererId) })
     }
     const epoch = lifetime.epoch
     return () => !sender.isDestroyed() && lifetime.epoch === epoch
@@ -980,7 +982,6 @@ function registerIpc(): void {
   ipcMain.handle('audio-host:playback-output-current', async (event, current: unknown) => {
     if (typeof current !== 'boolean') return { ok: false, error: 'Invalid native output state' }
     const result = await captureOwner.setPlaybackOutputCurrent(event.sender.id, current)
-    if (result.ok && !current) await disposeWithin(voiceMonitor, 2000)
     return result
   })
 

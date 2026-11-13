@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "모니터링에는 오디오 인터페이스처럼 입력과 출력이 한 장치에 있어야 합니다.",
   'player.voice.monReasonLatency': "이 장치는 모니터링하기에 충분히 빠르지 않습니다(256프레임 초과). 녹음은 계속 사용할 수 있습니다.",
   'player.voice.monReasonBluetooth': "블루투스는 지연이 커서 모니터링할 수 없습니다. 녹음은 계속 사용할 수 있습니다.",
+  'player.voice.monReasonFeedback': "이 경로를 모니터링하면 소리가 되돌아와 피드백이 발생합니다. 다른 입력 또는 출력을 선택하세요",
   'player.voice.monReasonWireless': "무선 오디오는 지연이 커서 모니터링할 수 없습니다. 녹음은 계속 사용할 수 있습니다.",
   'player.voice.monReasonNoInput': "모니터링할 입력이 없습니다. 먼저 마이크를 선택하세요.",
   'player.voice.monReasonPermission': "모니터링하려면 마이크 접근 권한이 필요합니다.",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "피치 팔로우 꺼짐",
   'player.voice.pitchFollowOffHelp': "피치 팔로우가 우회 중입니다. 클릭하면 켭니다.",
   'player.voice.manualOffsetHelp': "보컬에 더하는 추가 시프트(-12~+12반음)입니다.",
-  'player.voice.preserveFormantsHelp': "시프트하는 동안에도 보컬의 음색을 자연스럽게 유지합니다."
+  'player.voice.preserveFormantsHelp': "시프트하는 동안에도 보컬의 음색을 자연스럽게 유지합니다.",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "경로: {device} · 버퍼 {frames}프레임 · 추정 지연 ≈ {ms} ms · 지연됨",
+  'player.voice.routeMeasuredDelayed': "경로: {device} · 버퍼 {frames}프레임 · 측정 지연 ≈ {ms} ms · 지연됨",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · 지연됨",
+  'player.voice.monitorBadgeDelayedTip': "입력과 출력이 다른 장치에 있거나 버퍼가 커서 눈에 띄는 지연이 있습니다"
 }

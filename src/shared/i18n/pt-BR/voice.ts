@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "O monitoramento precisa da entrada e da saída no mesmo dispositivo, como uma interface de áudio.",
   'player.voice.monReasonLatency': "Este dispositivo não monitora rápido o bastante (mais de 256 frames). A gravação continua funcionando.",
   'player.voice.monReasonBluetooth': "O Bluetooth adiciona atraso demais para monitorar. A gravação continua funcionando.",
+  'player.voice.monReasonFeedback': "Monitorar esta rota causaria realimentação: escolha outra entrada ou saída",
   'player.voice.monReasonWireless': "O áudio sem fio adiciona atraso demais para monitorar. A gravação continua funcionando.",
   'player.voice.monReasonNoInput': "Não há entrada para monitorar. Escolha um microfone primeiro.",
   'player.voice.monReasonPermission': "É preciso acesso ao microfone para monitorar.",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "Seguir tom desligado",
   'player.voice.pitchFollowOffHelp': "O seguimento de tom está ignorado. Clique para ligar.",
   'player.voice.manualOffsetHelp': "Deslocamento extra aplicado à voz, de -12 a +12 semitons.",
-  'player.voice.preserveFormantsHelp': "Mantém o timbre da voz natural enquanto ela é alterada."
+  'player.voice.preserveFormantsHelp': "Mantém o timbre da voz natural enquanto ela é alterada.",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "Rota: {device} · buffer de {frames} quadros · atraso estimado ≈ {ms} ms · com atraso",
+  'player.voice.routeMeasuredDelayed': "Rota: {device} · buffer de {frames} quadros · atraso medido ≈ {ms} ms · com atraso",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · com atraso",
+  'player.voice.monitorBadgeDelayedTip': "Entrada e saída estão em dispositivos diferentes ou usam um buffer maior: o atraso será perceptível"
 }

@@ -192,6 +192,7 @@ export interface VoiceModel {
   takeSelected: boolean
   /** The common output (display name) main resolved for the monitor, when it reported one. Display only: the monitor follows the app's output. */
   monitorOutputDevice: VoiceMonitorOutputDevice | null
+  monitorInputDevice: { name: string } | null
   /** True during the first monitoring episode of the session: shows the quiet headphones hint. */
   monitorHint: boolean
   /** A quiet, non-error note about monitoring (never an error state). */
@@ -246,6 +247,7 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   monitorGainDb: MONITOR_GAIN_DEFAULT_DB,
   takeSelected: false,
   monitorOutputDevice: null,
+  monitorInputDevice: null,
   monitorHint: false,
   monitorNote: null,
   error: null,
@@ -397,6 +399,7 @@ export class VoiceController {
   private monitorGainSending = false
   private monitorGainDirty = false
   private armToken = 0
+  private armMonitorOnly = false
   private armOpen = false
   private listenSettings: ListenSettings | null = null
   private listenTimelineIdx = 1
@@ -865,6 +868,7 @@ export class VoiceController {
     if (m.armed) {
       // Disarm only withdraws record-readiness: monitoring and a running take keep their own hold on the input.
       this.set({ armed: false, ...this.say('announceDisarmed') })
+      if (this.monitorHolds() && this.armOpen) await this.setMainArmOwnership(true)
       this.releaseInputIfUnused()
       return
     }
@@ -896,9 +900,13 @@ export class VoiceController {
     const m = this.model
     if (respectBlock ? recordBlock(m) !== null : setArmed && m.songId === null) return false
     if (this.armOpen) {
-      // Another reason already opened the input in main: share it.
-      if (setArmed) this.set({ armed: true, clipped: false, ...this.say('announceArmed') })
-      return true
+      // Keep the independent hold visible while its promotion IPC is pending.
+      if (setArmed) this.armPending++
+      try {
+        if (setArmed && !await this.setMainArmOwnership(false)) return false
+        if (setArmed) this.set({ armed: true, clipped: false, ...this.say('announceArmed') })
+        return true
+      } finally { if (setArmed) this.armPending-- }
     }
     if (m.perm !== 'granted') {
       const ok = await this.deps.askMicAccess().catch(() => false)
@@ -914,14 +922,36 @@ export class VoiceController {
     // open (never two api.arm calls racing on the token), and each caller then applies its own result.
     // An explicit arm still opening already holds the input (a monitor that goes stale meanwhile must not release it).
     if (setArmed) this.armPending++
-    let opened: boolean
     try {
-      opened = await this.openMain()
+      if (!await this.openMain()) return false
+      if (setArmed && !await this.setMainArmOwnership(false)) return false
+      if (setArmed) this.set({ armed: true, clipped: false, ...this.say('announceArmed') })
+      return true
     } finally {
       if (setArmed) this.armPending--
     }
-    if (!opened) return false
-    if (setArmed) this.set({ armed: true, clipped: false, ...this.say('announceArmed') })
+  }
+
+  private armOwnershipUpdate: Promise<boolean> = Promise.resolve(true)
+  private setMainArmOwnership(monitorOnly: boolean): Promise<boolean> {
+    const token = this.armToken
+    const update = this.armOwnershipUpdate.then(() => token !== this.armToken || this.disposed
+      ? false : this.updateMainArmOwnership(monitorOnly))
+    this.armOwnershipUpdate = update
+    return update
+  }
+
+  private async updateMainArmOwnership(monitorOnly: boolean): Promise<boolean> {
+    if (this.armMonitorOnly === monitorOnly) return true
+    const input = this.model.inputs.find(i => i.id === this.model.input)
+    const token = this.armToken
+    const result = await this.deps.api.arm({ input: inputRequest(input), monitorOnly }).catch(() => ({ ok: false }))
+    if (token !== this.armToken || this.disposed) {
+      if (result.ok) void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
+      return false
+    }
+    if (!result.ok) { this.set({ error: 'error' }); return false }
+    this.armMonitorOnly = monitorOnly
     return true
   }
 
@@ -946,8 +976,9 @@ export class VoiceController {
     await micOwnership.acquireForVoice()
     if (token !== this.armToken) return false
     let res: VoiceArmResult
+    const monitorOnly = this.armPending === 0
     try {
-      res = await this.deps.api.arm({ input: inputRequest(input) })
+      res = await this.deps.api.arm({ input: inputRequest(input), ...(monitorOnly ? { monitorOnly: true } : {}) })
     } catch (err) {
       if (token !== this.armToken) return false
       this.set(err instanceof Error && err.message === BRIDGE_MISSING ? { error: 'no-bridge' } : { error: 'error' })
@@ -965,6 +996,7 @@ export class VoiceController {
       return false
     }
     this.armOpen = true
+    this.armMonitorOnly = monitorOnly
     void this.refreshMonitorAvailability()
     return true
   }
@@ -1585,6 +1617,7 @@ export class VoiceController {
     this.set({
       ...(on ? {} : { monitorHint: false }),
       ...(st.outputDevice !== undefined ? { monitorOutputDevice: st.outputDevice } : {}),
+      ...(st.inputDevice !== undefined ? { monitorInputDevice: st.inputDevice } : {}),
       monitor: { avail, reason, on, latency: on ? st.latency : null, warnings: on ? st.warnings : [] },
       ...(wasOn !== on ? this.say(on ? 'announceMonitorOn' : 'announceMonitorOff') : {})
     })
@@ -1650,7 +1683,7 @@ export class VoiceController {
       await this.releaseMonitor() // mid-take this only releases the monitor: the take keeps the input
       return
     }
-    if (this.monitorPending || m.inputMissing || m.perm === 'denied') return
+    if (this.monitorPending) return
     if (m.error === 'monitor') this.set({ error: null }) // an explicit toggle starts afresh
     const token = ++this.monitorToken
     this.monitorPending = true

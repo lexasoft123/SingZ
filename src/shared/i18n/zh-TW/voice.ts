@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "監聽需要輸入與輸出在同一個裝置上，例如音訊介面。",
   'player.voice.monReasonLatency': "此裝置無法足夠快地監聽（超過 256 影格）。仍可錄音。",
   'player.voice.monReasonBluetooth': "藍牙延遲過大，無法監聽。仍可錄音。",
+  'player.voice.monReasonFeedback': "監聽此路由會造成音訊回授迴路：請選擇其他輸入或輸出",
   'player.voice.monReasonWireless': "無線音訊延遲過大，無法監聽。仍可錄音。",
   'player.voice.monReasonNoInput': "沒有可監聽的輸入。請先選擇麥克風。",
   'player.voice.monReasonPermission': "監聽需要麥克風權限。",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "音高跟隨已關閉",
   'player.voice.pitchFollowOffHelp': "音高跟隨已略過。點擊開啟。",
   'player.voice.manualOffsetHelp': "為聲音額外加入的移調，範圍 -12 至 +12 半音。",
-  'player.voice.preserveFormantsHelp': "移調時保持聲音音色自然。"
+  'player.voice.preserveFormantsHelp': "移調時保持聲音音色自然。",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "路徑：{device} · 緩衝 {frames} 幀 · 估計延遲 ≈ {ms} ms · 延遲較大",
+  'player.voice.routeMeasuredDelayed': "路徑：{device} · 緩衝 {frames} 幀 · 實測延遲 ≈ {ms} ms · 延遲較大",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · 延遲較大",
+  'player.voice.monitorBadgeDelayedTip': "輸入與輸出在不同裝置上，或緩衝較大：會有明顯延遲"
 }

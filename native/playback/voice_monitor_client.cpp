@@ -10,6 +10,13 @@ VoiceMonitorResult monitorFailure(const std::string& reason, const std::string& 
   result.error = detail;
   return result;
 }
+bool feedbackRoute(const AudioHostDeviceInfo& input, const AudioHostDeviceInfo& output) noexcept {
+  // The inventory currently has no aggregate sub-device membership. Compare
+  // opaque UIDs only; labels cannot establish whether devices are connected.
+  return input.uid == output.uid && (input.transport == AudioHostTransport::Virtual ||
+      input.transport == AudioHostTransport::Aggregate || output.transport == AudioHostTransport::Virtual ||
+      output.transport == AudioHostTransport::Aggregate);
+}
 std::vector<std::string> monitorWarnings(uint32_t flags) {
   std::vector<std::string> notes;
   if (flags & AudioBufferWarningExternalChange) notes.emplace_back("Audio buffer changed externally; saved size was not restored");
@@ -37,14 +44,10 @@ VoiceMonitorAvailability classifyCommonVoiceMonitorRoute(const AudioHostInventor
         return refuse("route-bluetooth", "Bluetooth monitoring is unavailable");
       case AudioHostTransport::AirPlay: case AudioHostTransport::ContinuityWireless:
         return refuse("route-wireless", "Wireless monitoring is unavailable");
-      case AudioHostTransport::Unknown: return refuse("platform", "The device transport is unknown");
-      default: break;
+      default: break; // Buffered history accepts built-in, wired, virtual and unknown routes.
     }
-    if (device->monitoringSuitability == AudioHostMonitoringSuitability::HighLatency)
-      return refuse("route-latency", "The route reports excessive monitoring latency");
-    if (device->monitoringSuitability == AudioHostMonitoringSuitability::Unsupported)
-      return refuse("platform", "The route does not support monitoring");
   }
+  if (feedbackRoute(*input, *sink)) return refuse("route-feedback", "Monitoring this route would feed back into itself: choose a different input or output");
   if (!permission) return refuse("permission", "Microphone permission must already be granted");
   result.available = true; result.deviceUid = uid;
   result.minBufferFrames = input->bufferFrames.minimumFrames;
@@ -76,9 +79,8 @@ VoiceMonitorResult CommonVoiceMonitor::begin(const std::string& uid, uint32_t ch
       config.requestedBufferFrames = chooseMonitorBufferFrames(device.bufferFrames, device.bufferFrames, 32, 256).value_or(0);
       break;
     }
-    if (!config.requestedBufferFrames) return monitorFailure("route-latency", "Input cannot negotiate a monitor buffer");
     config.allowSharedDeviceBufferChange = true;
-    config.maximumAcceptableBufferFrames = 256;
+    config.maximumAcceptableBufferFrames = config.requestedBufferFrames ? 256 : 0;
     // A physical same-device buffer is also the song host's period. Adopt it
     // while a song session holds that device; history accepts a delayed route
     // instead of retuning a playing song. A cross-device input may negotiate.
@@ -91,11 +93,13 @@ VoiceMonitorResult CommonVoiceMonitor::begin(const std::string& uid, uint32_t ch
   const auto capture = capture_.retain(VoiceCaptureUser::Monitor, config, {}, &devices);
   if (!capture.ok) return monitorFailure("error", capture.error);
   retained_ = true; input_ = uid; generation_ = generation;
-  inputLatencyFrames_ = capture.inputLatencyFrames;
+  channel_ = channel;
   route_ = service_.outputRouteGeneration(); lost_ = false; reason_.clear();
+  render_.owner = this;
   render_.source = &capture_.source(); render_.reader = {}; render_.queueFrames = queueFrames;
   render_.current = render_.destination = render_.step = 0; render_.remaining = 0;
-  render_.period.store(output.latency.bufferFrames, std::memory_order_relaxed);
+  render_.period.store(0, std::memory_order_relaxed);
+  render_.hostPeriod.store(service_.status().latency.bufferFrames, std::memory_order_release);
   render_.silent.store(1, std::memory_order_relaxed);
   render_.peak.store(0, std::memory_order_relaxed); render_.rms.store(0, std::memory_order_relaxed);
   setGain(gainDb);
@@ -104,7 +108,9 @@ VoiceMonitorResult CommonVoiceMonitor::begin(const std::string& uid, uint32_t ch
       (!floor && capture_.source().inputPeriod() && output.latency.bufferFrames)) {
     close(); return monitorFailure("route-latency", "Monitor queue is below the safe floor");
   }
-  service_.setVoiceMonitorRenderer(CommonVoiceMonitorRender::render, &render_);
+  service_.setVoiceMonitorRenderer(CommonVoiceMonitorRender::render, &render_, admit);
+  const auto admitted = availability(uid, channel, permission);
+  if (!admitted.available) { close(); return monitorFailure(admitted.reason, admitted.detail); }
   return {true, {}, {}, latency(), monitorWarnings(capture_.stats().bufferWarnings)};
 }
 bool CommonVoiceMonitor::setGain(float db) noexcept {
@@ -113,23 +119,36 @@ bool CommonVoiceMonitor::setGain(float db) noexcept {
                        std::memory_order_release);
   return true;
 }
-VoiceMonitorLatency CommonVoiceMonitor::latency() const {
+VoiceMonitorLatency CommonVoiceMonitor::latency() {
   const auto host = service_.status();
   VoiceMonitorLatency result;
   result.sampleRate = host.format.sampleRate; result.requestedFrames = 32;
   result.bufferFrames = host.latency.bufferFrames;
-  result.inputDeviceFrames = inputLatencyFrames_;
+  const auto input = capture_.openingResult();
+  result.inputDeviceFrames = !input.inputLatencyStable || input.inputLatencyStable->load(std::memory_order_acquire)
+      ? input.inputLatencyFrames : 0;
   result.inputBufferFrames = capture_.source().inputPeriod();
   result.inputSampleRate = capture_.source().sourceRate();
   result.outputDeviceFrames = host.latency.outputDeviceFrames;
-  const auto period = std::max(result.bufferFrames, render_.period.load(std::memory_order_relaxed));
-  result.queueFrames = render_.queueFrames ? render_.queueFrames : capture_.source().queueFloor(result.sampleRate, period);
+  // The current host owns the period. Old-generation callback telemetry must
+  // not keep a stale (larger or smaller) floor after a route/period change.
+  const auto period = std::max(result.bufferFrames, host.observedCallbackFrames);
+  render_.hostPeriod.store(period, std::memory_order_release);
+  result.outputPeriodFrames = result.bufferFrames;
+  result.observedOutputFrames = host.observedCallbackFrames;
+  result.queueFloorFrames = capture_.source().queueFloor(result.sampleRate, period);
+  result.queueFrames = std::max(render_.queueFrames, result.queueFloorFrames);
   const double sourceRate = capture_.source().sourceRate();
   result.roundTripMs = sourceRate > 0 && result.sampleRate > 0 ?
       1000.0 * ((double(result.queueFrames) + result.inputBufferFrames + result.inputDeviceFrames) / sourceRate +
           double(result.bufferFrames + result.outputDeviceFrames) / result.sampleRate) : 0;
   result.roundTripFrames = static_cast<uint64_t>(std::ceil(result.roundTripMs * result.sampleRate / 1000));
-  result.delayed = result.roundTripMs > 10.0; // ADR G2 same-device budget, also applied cross-device.
+  bool uncertain = false;
+  const auto output = service_.activeOutputUid();
+  for (const auto& device : service_.inventory().devices)
+    if ((device.uid == input_ || device.uid == output) && device.transport == AudioHostTransport::Unknown)
+      uncertain = true;
+  result.delayed = uncertain || result.roundTripMs > 10.0; // ADR G2 same-device budget, also applied cross-device.
   return result;
 }
 VoiceMonitorStatus CommonVoiceMonitor::status() {
@@ -138,21 +157,39 @@ VoiceMonitorStatus CommonVoiceMonitor::status() {
     const auto inventory = service_.inventory();
     const bool missing = std::none_of(inventory.devices.begin(), inventory.devices.end(),
         [&](const auto& d) { return d.uid == input_ && d.inputChannels; });
-    if (missing || host.state == AudioHostState::DeviceLost || capture_.state() == AudioInputState::Error) {
+    if (missing || service_.voiceMonitorOutputLost() || host.state == AudioHostState::DeviceLost || capture_.state() == AudioInputState::Error) {
       close(); lost_ = true; reason_ = "device-lost";
-    } else if (service_.outputRouteGeneration() != route_ || host.state != AudioHostState::Running) {
-      routeChanged();
+    } else {
+      const auto eligible = availability(input_, channel_, true);
+      if (!eligible.available) refuse(eligible.reason);
+      else if (!service_.hasVoiceMonitorRenderer(&render_)) refuse("error");
+      else if (host.state == AudioHostState::Error) refuse("error");
+      else if (host.state == AudioHostState::Stopped || host.state == AudioHostState::Closed) {
+        if (!service_.ensureOutput().ok) refuse("error");
+      }
+      // A song/output reopen is a migration, never a new capture user.
+      if (retained_) route_ = service_.outputRouteGeneration();
     }
+  } else if (!service_.hasVoiceMonitorRenderer(&render_)) {
+    // Reconcile a stranded Monitor reference even if the facade reads off.
+    if (capture_.users(VoiceCaptureUser::Monitor)) reason_ = "error";
+    while (capture_.users(VoiceCaptureUser::Monitor)) capture_.release(VoiceCaptureUser::Monitor);
   }
+
   VoiceMonitorStatus result;
   result.running = retained_; result.lost = lost_; result.reason = reason_;
   result.warnings = monitorWarnings(capture_.stats().bufferWarnings);
+  const auto output = service_.activeOutputUid();
+  for (const auto& device : service_.inventory().devices)
+    if ((device.uid == input_ || device.uid == output) &&
+        (device.transport == AudioHostTransport::Unknown || device.transport == AudioHostTransport::Virtual || device.transport == AudioHostTransport::Aggregate)) {
+      result.warnings.emplace_back("Virtual or unclassified route: latency is estimated"); break;
+    }
   if (retained_) {
     result.latency = latency();
-    const auto period = std::max(result.latency.bufferFrames, render_.period.load(std::memory_order_relaxed));
+    const auto period = std::max(result.latency.bufferFrames, service_.status().observedCallbackFrames);
     const auto floor = capture_.source().queueFloor(result.latency.sampleRate, period);
-    if ((render_.queueFrames && floor && render_.queueFrames < floor) ||
-        (!floor && capture_.source().inputPeriod() && period)) {
+    if (!floor && capture_.source().inputPeriod() && period) {
       close(); reason_ = "route-latency";
       result.running = false; result.reason = reason_; result.latency = {};
     }
@@ -163,7 +200,7 @@ VoiceMonitorStatus CommonVoiceMonitor::status() {
   return result;
 }
 VoiceMonitorResult CommonVoiceMonitor::end(uint64_t generation) {
-  if (generation_ && generation != generation_) return monitorFailure("error", "Stale monitor generation");
+  if (generation && generation_ && generation != generation_) return monitorFailure("error", "Stale monitor generation");
   if (retained_) {
     render_.target.store(0, std::memory_order_release);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kVoiceMonitorMuteWaitMs);
@@ -172,12 +209,27 @@ VoiceMonitorResult CommonVoiceMonitor::end(uint64_t generation) {
   }
   close(); generation_ = 0; return {true, {}, {}, {}, monitorWarnings(capture_.stats().bufferWarnings)};
 }
-void CommonVoiceMonitor::close() noexcept {
-  if (retained_) {
-    service_.clearVoiceMonitorRenderer(); // Reader joins before capture's last release.
-    capture_.release(VoiceCaptureUser::Monitor);
-    retained_ = false;
+bool CommonVoiceMonitor::admit(void* context, const AudioHostInventory& inventory, const AudioHostConfig& config, const AudioHostResult& result) noexcept {
+  auto& self = *static_cast<CommonVoiceMonitorRender*>(context);
+  self.hostPeriod.store(result.latency.bufferFrames, std::memory_order_release);
+  // The service has drained callbacks before admission: reset the callback-owned
+  // envelope so every successful reopen fades in through the existing ramp.
+  self.current = self.destination = self.step = 0; self.remaining = 0; // Re-admission ramp.
+  const auto& owner = *static_cast<const CommonVoiceMonitor*>(self.owner);
+  const AudioHostDeviceInfo* input = nullptr;
+  for (const auto& device : inventory.devices) if (device.uid == owner.input_ && device.inputChannels) input = &device;
+  // Check feedback before reopening the callback gate, not only on the next poll.
+  for (const auto& device : inventory.devices) if (device.uid == config.outputDeviceUid && device.outputChannels) {
+    return input && !feedbackRoute(*input, device) && device.transport != AudioHostTransport::Bluetooth && device.transport != AudioHostTransport::BluetoothLowEnergy &&
+        device.transport != AudioHostTransport::AirPlay && device.transport != AudioHostTransport::ContinuityWireless;
   }
+  return false;
 }
-void CommonVoiceMonitor::routeChanged() { close(); lost_ = false; reason_ = "error"; }
+void CommonVoiceMonitor::close() noexcept {
+  if (service_.hasVoiceMonitorRenderer(&render_)) service_.clearVoiceMonitorRenderer();
+  retained_ = false;
+  while (capture_.users(VoiceCaptureUser::Monitor)) capture_.release(VoiceCaptureUser::Monitor);
+}
+void CommonVoiceMonitor::refuse(const std::string& reason) { close(); lost_ = reason == "device-lost"; reason_ = reason; }
+void CommonVoiceMonitor::routeChanged() { status(); }
 }

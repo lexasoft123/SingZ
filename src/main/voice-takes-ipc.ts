@@ -159,11 +159,20 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
     void cleanup.finally(() => { if (recordingCleanup === cleanup) recordingCleanup = undefined }).catch(() => {})
     return cleanup
   }
-  const watchOwner = (sender: WebContents): void => {
+  const armOwners = new Map<number, { detached: boolean }>()
+  const watchOwner = (sender: WebContents): { detached: boolean } => {
     const owner = sender.id
-    if (watched.has(owner)) return
+    if (watched.has(owner)) return armOwners.get(owner)!
     watched.add(owner)
+    armOwners.set(owner, { detached: false })
     const releaseOwner = () => {
+      const lostArmOwner = armOwners.get(owner)
+      if (lostArmOwner) {
+        lostArmOwner.detached = true
+        const releaseArm = store.monitorInputCleanup?.(lostArmOwner)
+        if (releaseArm) void releaseArm().catch(() => log('voice-take', 'renderer arm cleanup failed', 'warn'))
+      }
+      armOwners.set(owner, { detached: false })
       for (const start of pendingStarts) if (start.owner === owner) start.detached = true
       if (recordingOwner === owner) {
         recordingOwner = undefined // Repeated crash/navigation/destroy signals are idempotent.
@@ -177,7 +186,8 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
     }
     sender.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => { if (isMainFrame && !inPlace) releaseOwner() })
     sender.on('render-process-gone', releaseOwner)
-    sender.once('destroyed', () => { releaseOwner(); watched.delete(owner) })
+    sender.once('destroyed', () => { releaseOwner(); watched.delete(owner); armOwners.delete(owner) })
+    return armOwners.get(owner)!
   }
   const validId = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(v)
   const key = (owner: number, id: string): string => `${owner}:${id}`
@@ -272,9 +282,19 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   }
   const armValid = (value: unknown): value is VoiceArmRequest => {
     const arm = value as VoiceArmRequest
-    return Boolean(arm && typeof arm === 'object' && arm.input && typeof arm.input.deviceName === 'string' && Number.isFinite(arm.input.channelIndex))
+    return Boolean(arm && typeof arm === 'object' && (arm.monitorOnly === undefined || typeof arm.monitorOnly === 'boolean') && arm.input && typeof arm.input.deviceName === 'string' && Number.isFinite(arm.input.channelIndex))
   }
-  ipcMain.handle(VOICE_IPC.arm, async (_event, request: unknown) => { try { return armValid(request) ? await store.arm(request) : { ok: false, reason: 'error' as const, message: 'Invalid arm request.' } } catch { return { ok: false, reason: 'error' as const, message: 'Microphone could not be armed.' } } })
+  ipcMain.handle(VOICE_IPC.arm, async (event, request: unknown) => { try {
+    if (!armValid(request)) return { ok: false, reason: 'error' as const, message: 'Invalid arm request.' }
+    if (!event?.sender || event.sender.isDestroyed()) return { ok: false, reason: 'error' as const, message: 'Microphone owner is unavailable.' }
+    const owner = watchOwner(event.sender)
+    const result = await store.arm(request, owner)
+    if (owner.detached || event.sender.isDestroyed()) {
+      await store.monitorInputCleanup(owner)()
+      return { ok: false, reason: 'error' as const, message: 'Microphone owner is unavailable.' }
+    }
+    return result
+  } catch { return { ok: false, reason: 'error' as const, message: 'Microphone could not be armed.' } } })
   ipcMain.handle(VOICE_IPC.disarm, async () => { try { return await store.disarm() } catch { return { ok: false, error: 'Microphone could not be disarmed.' } } })
   ipcMain.handle(VOICE_IPC.recordStart, async (event, request: unknown) => {
     if (!startValid(request)) return { ok: false, reason: 'error' as const, message: 'Invalid recording request.' }
@@ -337,17 +357,18 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   })
 }
 
-export function createRegisteredVoiceTakeStore(): VoiceTakeStore {
+export function createRegisteredVoiceTakeStore(monitor?: import('./voice-monitor').VoiceMonitorStore): VoiceTakeStore {
   // The native action surface is deliberately injected so the store remains testable
   // while older addons return a clear unavailable error through the RPC layer.
   return new VoiceTakeStore({
     native: process.env.SINGZ_VOICE_NATIVE === '0' ? createUnavailableVoiceNative() : createVoiceTakeNative(),
-    rootDir: undefined
+    rootDir: undefined,
+    monitor
   })
 }
 
-export function registerVoiceTakes(): VoiceTakeStore {
-  const store = createRegisteredVoiceTakeStore()
+export function registerVoiceTakes(monitor?: import('./voice-monitor').VoiceMonitorStore): VoiceTakeStore {
+  const store = createRegisteredVoiceTakeStore(monitor)
   registerVoiceTakeIpc(store)
   return store
 }

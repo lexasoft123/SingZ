@@ -29,6 +29,8 @@ constexpr bool monitorPlatformSupported() noexcept {
   return false;
 #endif
 }
+bool permissionGranted();
+inline bool permissionGrantedForMonitor() { return permissionGranted(); }
 // One-release escape hatch; no second output host is constructed by default.
 class Monitor {
   bool legacy_ = [] { const char* flag = std::getenv("SINGZ_LEGACY_VOICE_MONITOR"); return flag && std::string(flag) == "1"; }();
@@ -55,8 +57,14 @@ class Monitor {
         common_.begin(uid,channel,permission,gain,generation);
   }
   bool setGain(float value) { return legacy_ ? legacyHost_->setGain(value) : common_.setGain(value); }
-  VoiceMonitorStatus status() { return legacy_ ? legacyHost_->status() : common_.status(); }
-  VoiceMonitorResult end(uint64_t generation) { return legacy_ ? legacyHost_->end(generation) : common_.end(generation); }
+  VoiceMonitorStatus status() {
+    if (!legacy_ && !permissionGrantedForMonitor()) common_.refuse("permission");
+    return legacy_ ? legacyHost_->status() : common_.status();
+  }
+  VoiceMonitorResult end(uint64_t generation) {
+    if (legacy_ && !generation) { legacyHost_->close(); VoiceMonitorResult r; r.ok=true; return r; }
+    return legacy_ ? legacyHost_->end(generation) : common_.end(generation);
+  }
   void close() { if (legacy_) legacyHost_->close(); else common_.close(); }
   void routeChanged() { if (legacy_) legacyHost_->routeChanged(); else common_.routeChanged(); }
 };
@@ -68,6 +76,7 @@ std::vector<uint32_t> monitoredChannels;
 NativeAudioOwnership* ownership=nullptr;
 VoiceMonitorEnvironmentLifetime environments;
 
+std::optional<std::string> publishedOutput;
 std::string monitoredInput;
 uint32_t monitoredInputChannel=0;
 bool useAllowed() {
@@ -120,7 +129,7 @@ void latency(napi_env env,napi_value o,const VoiceMonitorLatency& l) {
   number(env,v,"sampleRate",l.sampleRate);number(env,v,"requestedFrames",l.requestedFrames);
   number(env,v,"bufferFrames",l.bufferFrames);number(env,v,"inputDeviceFrames",l.inputDeviceFrames);
   number(env,v,"outputDeviceFrames",l.outputDeviceFrames);number(env,v,"roundTripFrames",static_cast<double>(l.roundTripFrames));
-  number(env,v,"roundTripMs",l.roundTripMs);number(env,v,"queueFrames",l.queueFrames);number(env,v,"inputBufferFrames",l.inputBufferFrames);number(env,v,"inputSampleRate",l.inputSampleRate);boolean(env,v,"delayed",l.delayed);text(env,v,"source","estimated");napi_set_named_property(env,o,"latency",v);
+  number(env,v,"roundTripMs",l.roundTripMs);number(env,v,"queueFrames",l.queueFrames);number(env,v,"inputBufferFrames",l.inputBufferFrames);number(env,v,"inputSampleRate",l.inputSampleRate);number(env,v,"outputPeriodFrames",l.outputPeriodFrames);number(env,v,"observedOutputFrames",l.observedOutputFrames);number(env,v,"queueFloorFrames",l.queueFloorFrames);boolean(env,v,"delayed",l.delayed);text(env,v,"source","estimated");napi_set_named_property(env,o,"latency",v);
 }
 void outputs(napi_env env,napi_value o,const std::string& input,uint32_t channel,const std::string& output) {
   (void)input; (void)channel;
@@ -154,7 +163,7 @@ bool selection(napi_env env,napi_value o,std::string& uid,uint32_t& channel,bool
   uid.resize(length+1);if(napi_get_value_string_utf8(env,v,uid.data(),uid.size(),&length)!=napi_ok)return false;
   uid.resize(length);channel=static_cast<uint32_t>(n);return uid.find('\0')==std::string::npos;
 }
-bool generation(napi_env env,napi_value v,uint64_t& g){bool exact=false;return napi_get_value_bigint_uint64(env,v,&g,&exact)==napi_ok && exact && g;}
+bool generation(napi_env env,napi_value v,uint64_t& g,bool zero=false){bool exact=false;return napi_get_value_bigint_uint64(env,v,&g,&exact)==napi_ok && exact && (zero || g);}
 napi_value result(napi_env env,const VoiceMonitorResult& r) {
   auto o=object(env);boolean(env,o,"ok",r.ok);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
@@ -189,9 +198,15 @@ napi_value availability(napi_env env,napi_callback_info info) {
     if(napi_get_named_property(env,arg,"webAudioPlaying",&value)!=napi_ok ||
         napi_get_value_bool(env,value,&playing)!=napi_ok || !readUid("browserOutputUid",browser) ||
         !readUid("selectedOutputUid",selected)) return error(env,"Invalid playback context");
-    // Context publication never selects a monitor output. The app route RPC
-    // owns output changes, and the common client observes its generation.
-    (void)playing; (void)browser; (void)selected;
+    // Apply the app common-output selection even without a song or cue.
+    (void)playing; (void)browser;
+    if (!publishedOutput || *publishedOutput != selected) {
+      const auto changed = sharedAudioService().configureOutput(selected);
+      if (!changed.ok) {
+        auto o=object(env);boolean(env,o,"available",false);text(env,o,"reason","device-lost");text(env,o,"detail",changed.message);return o;
+      }
+      publishedOutput=selected;
+    }
     monitorHost().status();
     auto o=object(env);boolean(env,o,"available",true);return o;
   }
@@ -245,7 +260,10 @@ napi_value status(napi_env env,napi_callback_info) {
   std::lock_guard lock(control);
   const auto route=currentRoute();
   if(!useAllowed()) { monitorHost().close();monitoredOutput.clear();monitoredChannels.clear(); }
-  const auto r=monitorHost().status();auto o=object(env);boolean(env,o,"running",r.running);boolean(env,o,"lost",r.lost);
+  // Common status may reopen/re-admit a stopped output while preserving capture.
+  const auto r=monitorHost().status();
+  if(r.running){monitoredOutput=sharedAudioService().activeOutputUid();monitoredChannels=sharedAudioService().activeOutputConfig().outputChannels;}
+  auto o=object(env);boolean(env,o,"running",r.running);boolean(env,o,"lost",r.lost);
   if(r.running)latency(env,o,r.latency);
   if(!r.reason.empty())text(env,o,"reason",r.reason);
   text(env,o,"outputDeviceUid",monitoredOutput);
@@ -258,6 +276,20 @@ napi_value status(napi_env env,napi_callback_info) {
   text(env,o,"songHostRouteGeneration",std::to_string(route.song.routeGeneration));
   number(env,o,"songHostStateCode",static_cast<uint32_t>(route.song.state));
   number(env,o,"monitorObservedCallbackFrames",r.observedCallbackFrames);
+  number(env,o,"monitorPeak",r.peak);number(env,o,"monitorRms",r.rms);
+  auto& capture=sharedVoiceMonitorCapture();
+  text(env,o,"inputDeviceUid",capture.openingResult().deviceUid);
+  text(env,o,"inputCaptureState",audioInputStateName(capture.state()));
+  number(env,o,"monitorCaptureUsers",capture.users(VoiceCaptureUser::Monitor));
+  number(env,o,"armCaptureUsers",capture.users(VoiceCaptureUser::Arm));
+  number(env,o,"takeCaptureUsers",capture.users(VoiceCaptureUser::Take));
+  const auto history=capture.source().stats();auto historyStats=object(env);
+#define MONITOR_DIAG(name) text(env,historyStats,#name,std::to_string(history.name))
+  MONITOR_DIAG(publishedBlocks);MONITOR_DIAG(publishedFrames);MONITOR_DIAG(droppedBlocks);
+  MONITOR_DIAG(droppedFrames);MONITOR_DIAG(missingFrames);MONITOR_DIAG(estimatedTimestampBlocks);
+  MONITOR_DIAG(unknownTimestampBlocks);
+#undef MONITOR_DIAG
+  napi_set_named_property(env,o,"monitorHistoryDiagnostics",historyStats);
   number(env,o,"songProcessBufferFrames",route.song.latency.bufferFrames);
   number(env,o,"songBufferWarnings",route.song.bufferWarnings);
   number(env,o,"songObservedCallbackFrames",route.song.observedCallbackFrames);
@@ -276,7 +308,7 @@ napi_value status(napi_env env,napi_callback_info) {
 }
 napi_value end(napi_env env,napi_callback_info info) {
   size_t argc=1;napi_value arg{};napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);uint64_t g=0;
-  if(argc!=1 || !generation(env,arg,g)){auto o=object(env);boolean(env,o,"ok",false);return o;}
+  if(argc!=1 || !generation(env,arg,g,true)){auto o=object(env);boolean(env,o,"ok",false);return o;}
   std::lock_guard lock(control);auto r=monitorHost().end(g);if(r.ok){monitoredOutput.clear();monitoredChannels.clear();}
   auto o=object(env);boolean(env,o,"ok",r.ok);warnings(env,o,r.warnings);return o;
 }
@@ -320,7 +352,7 @@ bool cleanupVoiceMonitor() noexcept {
   std::lock_guard lock(control);
   if(!environments.detach())return false;
   monitorHost().close();monitoredOutput.clear();monitoredChannels.clear();ownership=nullptr;
-  monitoredInput.clear();
+  monitoredInput.clear();publishedOutput.reset();
   return true;
 }
 }

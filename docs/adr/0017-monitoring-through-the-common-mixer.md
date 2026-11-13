@@ -165,11 +165,30 @@ history mechanism. No CPU or jitter figure is recorded for either path.
    0016 cannot reach it; only the Speaker button and the master do.
 9. **Idle monitoring.** The service host runs with no song; the monitor is the
    only source. A song joins and leaves without a reopen (VS-MON-023 unchanged).
-10. **Route change and device loss.** Output change or loss: the service reopens
-    the preferred route as today; the history read reports missing frames and
-    the monitor turns off with the existing `device-lost` reason (output or
-    input gone) or `error` (route changed under it), never restarted
-    automatically. No new reason is added. Input loss: monitor off, song untouched. Never persisted on.
+10. **Output migration and device loss (Mac e2e correction).** A successful
+    song prepare, host period change, or deliberate app output selection retains
+    the capture user and re-registers the history client on the new output
+    generation. Keep an idle monitor audible while the song graph is prepared
+    but has not started. Gate the new sink against Bluetooth/wireless policy
+    before callbacks resume. Genuine input/output removal, permission loss,
+    refusal or an unrecoverable backend error turns monitoring off with a typed
+    reason and a main-process log; a fallback after removal never auto-restarts it.
+    The common Settings output context must actually configure the service,
+    including when there is no native song or training cue.
+    Period negotiation is order-dependent: monitoring first may acquire a
+    32..256 input-device buffer and the same physical output then uses it;
+    opening the song first keeps its existing period (for example 512). Never
+    shrink a song period for monitoring. Both the history read queue and the
+    reported estimate use the current host period, even across reopens and
+    callbacks smaller than that period. Input and output device delays are
+    read from their respective capture/output owners, with their own rates.
+    History routes ignore legacy duplex `monitoringSuitability`: built-in,
+    wired, virtual and aggregate devices are allowed; virtual/unclassified
+    routes carry an estimated-latency warning, and unknown transport is delayed.
+    A virtual/aggregate input and output sharing a UID is refused as
+    `route-feedback` before admission; physical same-device routes stay allowed.
+    Inventory has no aggregate sub-device list, so hidden membership cannot yet
+    be checked (add it to this guard when the provider exposes it).
 11. **Permission.** Nothing opens an input or prompts at app or song start.
     Speaker-on is a user gesture and asks through `src/main/mic-access.ts` like
     recording; a refusal is the typed `permission` reason.

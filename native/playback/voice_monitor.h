@@ -109,6 +109,7 @@ struct VoiceMonitorLatency {
   bool delayed{false};
   uint32_t inputBufferFrames{0};
   double inputSampleRate{0};
+  uint32_t outputPeriodFrames{0}, observedOutputFrames{0}, queueFloorFrames{0};
 };
 struct VoiceMonitorResult {
   bool ok{false};

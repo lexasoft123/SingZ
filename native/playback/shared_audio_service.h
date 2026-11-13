@@ -140,7 +140,10 @@ class SharedAudioService final {
   void setMicrophoneRenderer(AudioHostRender render, void* context);
   void clearMicrophoneRenderer();
   // Additive live voice, independent of song/lane lifetime; drained on detach.
-  void setVoiceMonitorRenderer(AudioHostRender render, void* context);
+  using MonitorAdmission = bool (*)(void*, const AudioHostInventory&, const AudioHostConfig&, const AudioHostResult&) noexcept;
+  void setVoiceMonitorRenderer(AudioHostRender render, void* context, MonitorAdmission admission = nullptr);
+  bool hasVoiceMonitorRenderer(const void* context) const;
+  bool voiceMonitorOutputLost() const;
   void clearVoiceMonitorRenderer();
   // Linear 0..4, ramped over 128 frames after ALL additive clients. Available
   // without a song; rejects invalid values without changing the target.

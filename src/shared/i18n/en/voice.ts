@@ -18,6 +18,7 @@ export const voice = {
   'player.voice.monReasonSeparateDevices': 'Monitoring needs the input and output on one device, like an audio interface.',
   'player.voice.monReasonLatency': 'This device cannot monitor fast enough (over 256 frames). Recording still works.',
   'player.voice.monReasonBluetooth': 'Bluetooth adds too much delay to monitor. Recording still works.',
+  'player.voice.monReasonFeedback': "Monitoring this route would feed back into itself: choose a different input or output",
   'player.voice.monReasonWireless': 'Wireless audio adds too much delay to monitor. Recording still works.',
   'player.voice.monReasonNoInput': 'No input to monitor. Choose a microphone first.',
   'player.voice.monReasonPermission': 'Microphone access is needed to monitor.',
@@ -140,5 +141,10 @@ export const voice = {
   'player.voice.pitchFollowOff': 'Pitch follow off',
   'player.voice.pitchFollowOffHelp': 'Pitch follow is bypassed. Click to turn it on.',
   'player.voice.manualOffsetHelp': 'Extra shift added to the voice, from -12 to +12 semitones.',
-  'player.voice.preserveFormantsHelp': 'Keeps the voice timbre natural while it is shifted.'
+  'player.voice.preserveFormantsHelp': 'Keeps the voice timbre natural while it is shifted.',
+  'player.voice.routeDevices': '{input} → {output}',
+  'player.voice.routeEstimatedDelayed': 'Route: {device} · buffer {frames} frames · estimated delay ≈ {ms} ms · delayed',
+  'player.voice.routeMeasuredDelayed': 'Route: {device} · buffer {frames} frames · measured delay ≈ {ms} ms · delayed',
+  'player.voice.monitorBadgeDelayed': '≈ {ms} ms · delayed',
+  'player.voice.monitorBadgeDelayedTip': 'Your input and output are on different devices or use a larger buffer: expect a noticeable delay'
 } as const

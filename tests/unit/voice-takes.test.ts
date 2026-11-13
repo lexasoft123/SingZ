@@ -9,6 +9,7 @@ import { isAllowed } from '../../src/main/media'
 import { createVoiceTakeNative, registerVoiceTakeIpc } from '../../src/main/voice-takes-ipc'
 import { ConformTakeError, type ConformTakeErrorCode } from '../../src/main/voice-take-conform'
 import { logEntries } from '../../src/main/log'
+import { VoiceMonitorStore, type VoiceMonitorNative } from '../../src/main/voice-monitor'
 
 const voiceIpc = vi.hoisted(() => ({ handlers: new Map<string, (...args: any[]) => Promise<any>>(),
   conform: vi.fn(), invalidate: vi.fn(async () => {}), release: vi.fn(async () => {}) }))
@@ -954,6 +955,107 @@ describe('ADR 0016 persisted take effect slots', () => {
 })
 
 
+describe('take monitoring metadata from main snapshots', () => {
+  const fixture = async (initialOn = false, bind = true) => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-monitoring-take-')); roots.push(root)
+    let running = false
+    const input = { deviceName: 'mic', channelIndex: 0 }
+    const native: VoiceMonitorNative = {
+      hostDevices: async () => ({ ok: true, platform: 'darwin', provider: 'coreaudio', defaultInputUid: 'mic', defaultOutputUid: 'mic',
+        devices: [{ uid: 'mic', label: 'Mic', direction: 'duplex', transport: 'usb', defaultInput: true, defaultOutput: true,
+          inputChannels: 1, outputChannels: 2, inputChannelLabels: [], outputChannelLabels: [], nominalSampleRate: 48000,
+          accessMode: 'shared', monitoringSuitability: 'low-latency', sampleRateRanges: [],
+          bufferFrames: { minimumFrames: 32, maximumFrames: 256, preferredFrames: 32, fundamentalFrames: 1 } }] }),
+      inputDevices: async () => ({ ok: true, devices: [{ uid: 'mic', label: 'Mic', channels: 1, isDefault: true }] }),
+      voiceMonitorAvailability: async () => ({ available: true }),
+      beginVoiceMonitor: async () => { running = true; return { ok: true } },
+      endVoiceMonitor: async () => { running = false; return { ok: true } },
+      voiceMonitorStatus: async () => ({ running }), setVoiceMonitorGain: async () => ({ ok: true })
+    }
+    const monitor = new VoiceMonitorStore(native, () => true, 'darwin')
+    const set = (on: boolean) => monitor.set({ input, on })
+    if (initialOn) expect((await set(true)).on).toBe(true)
+    const takeNative = fakeNative()
+    const store = new VoiceTakeStore({ rootDir: root, native: takeNative, monitor: bind ? monitor : undefined })
+    const path = (id: string) => join(root, request.songId, `${id}.json`)
+    const read = (id: string) => JSON.parse(readFileSync(path(id), 'utf8'))
+    return { monitor, native, takeNative, store, set, read, path }
+  }
+
+  it.each([
+    { initial: false, changes: [], expected: false },
+    { initial: true, changes: [], expected: true },
+    { initial: false, changes: [true], expected: true },
+    { initial: false, changes: [true, false], expected: true },
+    { initial: true, changes: [false], expected: true }
+  ])('records any monitoring use: initial=$initial changes=$changes', async ({ initial, changes, expected }) => {
+    const f = await fixture(initial)
+    const start = await f.store.start(request); expect(start.ok).toBe(true)
+    if (!start.ok) throw new Error('start failed')
+    expect(f.read(start.takeId).monitoring).toBe(initial)
+    for (const on of changes) await f.set(on) // Includes a pulse shorter than the 250 ms take poll.
+    await f.store.stop()
+    expect(f.read(start.takeId)).toMatchObject({ version: 1, monitoring: expected })
+    await f.monitor.dispose()
+  })
+
+  it('discriminates the old unbound-store negative control and ignores renderer claims', async () => {
+    const old = await fixture(true, false)
+    const legacy = await old.store.start(request); if (!legacy.ok) throw new Error('start failed')
+    await old.store.stop(); expect(old.read(legacy.takeId).monitoring).toBe(false)
+    await old.monitor.dispose()
+    const current = await fixture()
+    const spoofed = { ...request, monitoring: true }
+    const start = await current.store.start(spoofed); if (!start.ok) throw new Error('start failed')
+    await current.store.stop(); expect(current.read(start.takeId).monitoring).toBe(false)
+  })
+
+  it('does not count a declined monitor start, or a monitor enabled after capture has stopped', async () => {
+    const f = await fixture()
+    f.native.beginVoiceMonitor = async () => ({ ok: false, reason: 'error' })
+    const start = await f.store.start(request); if (!start.ok) throw new Error('start failed')
+    expect((await f.set(true)).on).toBe(false)
+    await f.store.stop()
+    f.native.beginVoiceMonitor = async () => ({ ok: true })
+    await f.set(true)
+    expect(f.read(start.takeId).monitoring).toBe(false)
+    await f.monitor.dispose()
+  })
+
+  it('latches a monitor pulse while recording start awaits its first sample', async () => {
+    const f = await fixture()
+    const stats = f.takeNative.captureStats
+    let release!: () => void
+    f.takeNative.captureStats = async () => { await new Promise<void>(resolve => { release = resolve }); return stats() }
+    const pending = f.store.start(request)
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    await f.set(true); await f.set(false)
+    f.takeNative.captureStats = stats; release()
+    const start = await pending; if (!start.ok) throw new Error('start failed')
+    await f.store.stop(); expect(f.read(start.takeId).monitoring).toBe(true)
+  })
+
+  it('resets the per-take latch after monitoring is switched off between takes', async () => {
+    const f = await fixture(true)
+    const first = await f.store.start(request); if (!first.ok) throw new Error('start failed')
+    await f.store.stop(); await f.set(false)
+    const second = await f.store.start(request); if (!second.ok) throw new Error('start failed')
+    await f.store.stop()
+    expect(f.read(first.takeId).monitoring).toBe(true)
+    expect(f.read(second.takeId).monitoring).toBe(false)
+  })
+
+  it('rejects a non-boolean monitoring sidecar without changing it', async () => {
+    const f = await fixture()
+    const start = await f.store.start(request); if (!start.ok) throw new Error('start failed')
+    await f.store.stop()
+    const malformed = { ...f.read(start.takeId), monitoring: 'true' }
+    writeFileSync(f.path(start.takeId), JSON.stringify(malformed))
+    expect(await f.store.list(request.songId)).toEqual([])
+    expect(f.read(start.takeId)).toEqual(malformed)
+  })
+})
+
 describe('recording IPC renderer lifetime', () => {
   const sender = (id: number) => Object.assign(new EventEmitter(), { id, isDestroyed: () => false })
   const fixture = () => {
@@ -1177,5 +1279,67 @@ describe('ADR 0016 conform IPC leases and cancellation', () => {
     await call('voice:conform', req)
     sender.emit(event, {}, 'url', false, true)
     await vi.waitFor(() => expect(voiceIpc.release).toHaveBeenCalledWith('/private/conformed-voice.wav'))
+  })
+})
+
+describe('monitor renderer meter-arm handoff', () => {
+  it('an old cleanup never disarms a replacement arm with a reused native generation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-monitor-arm-')); roots.push(root)
+    const native = fakeNative(); native.disarmCapture = vi.fn(native.disarmCapture)
+    const s = new VoiceTakeStore({ rootDir: root, native })
+    expect((await s.arm({ input: request.input })).ok).toBe(true)
+    const oldCleanup = s.monitorInputCleanup()
+    expect((await s.arm({ input: request.input })).ok).toBe(true)
+    await oldCleanup()
+    expect(native.disarmCapture).not.toHaveBeenCalled()
+    await s.monitorInputCleanup()()
+    expect(native.disarmCapture).toHaveBeenCalledTimes(1)
+    // Negative control: the former unscoped cleanup withdraws the new arm.
+    await s.arm({ input: request.input }); const unsafe = () => s.disarm()
+    await s.arm({ input: request.input }); await unsafe()
+    expect(native.disarmCapture).toHaveBeenCalledTimes(2)
+  })
+})
+
+
+describe('renderer meter arm ownership', () => {
+  it('releases later arms in the same renderer epoch, but preserves replacement epochs', async () => {
+    const native = fakeNative(); native.disarmCapture = vi.fn(native.disarmCapture)
+    const s = new VoiceTakeStore({ native }); const epoch = {}, replacement = {}
+    await s.arm({ input: request.input }, epoch)
+    const cleanup = s.monitorInputCleanup(epoch)
+    await s.arm({ input: request.input }, epoch)
+    await cleanup()
+    expect(native.disarmCapture).toHaveBeenCalledTimes(1)
+    await s.arm({ input: request.input }, replacement)
+    await cleanup()
+    expect(native.disarmCapture).toHaveBeenCalledTimes(1)
+    await s.monitorInputCleanup(replacement)()
+    expect(native.disarmCapture).toHaveBeenCalledTimes(2)
+  })
+  it('finishes a prior native disarm before a replacement can reuse its generation', async () => {
+    const native = fakeNative(); native.armCapture = vi.fn(native.armCapture)
+    let finish!: (value: { ok: boolean }) => void
+    native.disarmCapture = () => new Promise(resolve => { finish = resolve })
+    const s = new VoiceTakeStore({ native })
+    await s.arm({ input: request.input })
+    const disarm = s.disarm(), replacement = s.arm({ input: request.input })
+    expect(native.armCapture).toHaveBeenCalledTimes(1)
+    finish({ ok: true }); await disarm; await replacement
+    expect(native.armCapture).toHaveBeenCalledTimes(2)
+  })
+  it.each(['render-process-gone', 'destroyed', 'did-start-navigation'])('releases an arm after %s, including a late native reply', async event => {
+    voiceIpc.handlers.clear()
+    const native = fakeNative(); native.disarmCapture = vi.fn(native.disarmCapture)
+    let finish!: (value: { ok: boolean; generation: bigint }) => void
+    native.armCapture = () => new Promise(resolve => { finish = resolve })
+    const s = new VoiceTakeStore({ native })
+    registerVoiceTakeIpc(s)
+    const sender = Object.assign(new EventEmitter(), { id: 41, isDestroyed: () => false })
+    const arm = voiceIpc.handlers.get('voice:arm')!({ sender }, { input: request.input })
+    sender.emit(event, {}, 'url', false, true)
+    finish({ ok: true, generation: 1n })
+    expect(await arm).toMatchObject({ ok: false })
+    expect(native.disarmCapture).toHaveBeenCalledExactlyOnceWith(1n)
   })
 })

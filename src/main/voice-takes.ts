@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs
 import { basename, dirname, join } from 'node:path'
 import { fsyncDirectorySync, writeAllSync } from './atomic-file'
 import { log } from './log'
+import type { VoiceMonitorStore } from './voice-monitor'
 import type {
   VoiceRecordSettingsChange,
   VoiceRecordStartRequest,
@@ -41,6 +42,7 @@ export type VoiceTakeStoreOptions = {
   now?: () => Date
   native: VoiceTakeNative
   placementQuery?: VoiceTakeNative['presentationQuery']
+  monitor?: Pick<VoiceMonitorStore, 'subscribe'>
 }
 
 const validId = (id: string): boolean =>
@@ -62,6 +64,7 @@ type Active = {
   outputSampleRate?: number
   latencySource: 'reported' | 'measured-trim'
   settings: VoiceTakeSettingsPoint[]
+  monitoring: boolean
   generation: bigint
   firstSampleHostNs?: string
   firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'
@@ -82,7 +85,7 @@ type Active = {
   actualDeviceName?: string
   provisional?: VoiceTakeSidecar
 }
-type ArmedCapture = { generation: bigint; deviceName: string; channelIndex: number }
+type ArmedCapture = { generation: bigint; deviceName: string; channelIndex: number; owner?: object; monitorOnly?: boolean; requestedDeviceName?: string }
 
 const summary = (sidecar: VoiceTakeSidecar): VoiceTakeSummary => ({
   takeId: sidecar.takeId, songId: sidecar.songId, createdAt: sidecar.createdAt,
@@ -115,6 +118,7 @@ const validSettings = (point: { tempo: number; transposeSemitones: number }): bo
 const validTimelineFields = (sidecar: VoiceTakeSidecar): boolean =>
   (sidecar.anchors === undefined || isVoiceTakeAnchors(sidecar.anchors)) &&
   (sidecar.effects === undefined || isVoiceTakeEffects(sidecar.effects)) &&
+  typeof sidecar.monitoring === 'boolean' &&
   (sidecar.timelineApproximate === undefined || typeof sidecar.timelineApproximate === 'boolean')
 
 const wavDuration = (bytes: number, sampleRate: number): number => Math.max(0, bytes - 44) / 2 / sampleRate
@@ -181,9 +185,12 @@ export class VoiceTakeStore {
   private starting = false
   private arming = false
   private armed: ArmedCapture | null = null
+  private disarming: Promise<{ ok: boolean; error?: string }> | null = null
   private playGeneration: bigint | null = null
   private finalizedTake: VoiceTakeSummary | null = null
   private finalizedNote?: 'seek'
+  private monitoringOn = false
+  private monitoringDuringStart = false
   private readonly root: string
   private readonly now: () => Date
   private readonly query: VoiceTakeNative['presentationQuery']
@@ -192,13 +199,28 @@ export class VoiceTakeStore {
     this.root = options.rootDir ?? join(app.getPath('userData'), 'voice-takes')
     this.now = options.now ?? (() => new Date())
     this.query = options.placementQuery ?? options.native.presentationQuery
+    options.monitor?.subscribe(state => {
+      this.monitoringOn = state.on
+      if (!state.on) return
+      if (this.starting) this.monitoringDuringStart = true
+      if (this.active) {
+        this.active.monitoring = true
+        if (this.active.provisional) this.active.provisional.monitoring = true
+      }
+    })
   }
 
-  async arm(request: { input: { deviceName: string; channelIndex: number } }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; message?: string }> {
+  async arm(request: { monitorOnly?: boolean; input: { deviceName: string; channelIndex: number } }, owner?: object): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; message?: string }> {
     if (this.active || this.starting || this.arming) return { ok: false, reason: 'busy', message: 'A voice take is already recording or arming.' }
     if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) return { ok: false, reason: 'no-input', message: 'The selected microphone is unavailable.' }
+    if (request.monitorOnly !== undefined && this.armed?.owner === owner && this.armed?.channelIndex === request.input.channelIndex &&
+        this.armed.requestedDeviceName === request.input.deviceName) {
+      this.armed.monitorOnly = request.monitorOnly // Transfer the meter lease without reopening native capture.
+      return { ok: true }
+    }
     this.arming = true
     try {
+      if (this.disarming) await this.disarming
       const result = await this.options.native.armCapture(request.input)
       if (!result.ok || result.generation === undefined) {
         if (this.armed) {
@@ -208,16 +230,37 @@ export class VoiceTakeStore {
         }
         return { ok: false, reason: result.reason ?? 'error', message: result.error ?? 'The microphone could not be armed.' }
       }
-      this.armed = { generation: result.generation, deviceName: result.deviceName ?? request.input.deviceName, channelIndex: request.input.channelIndex }
+      this.armed = { generation: result.generation, deviceName: result.deviceName ?? request.input.deviceName, channelIndex: request.input.channelIndex, owner, monitorOnly: request.monitorOnly === true, requestedDeviceName: request.input.deviceName }
       return { ok: true }
     } finally { this.arming = false }
   }
 
+  /** Monitor-off withdraws only a meter lease acquired for monitoring. An
+   * independently armed strip and a take retain their own input readiness. */
+  async releaseMonitorInput(): Promise<unknown> {
+    if (!this.armed?.monitorOnly) return
+    return this.disarm()
+  }
+
+  /** A renderer cleanup may release this arm, but never a later replacement,
+   * even when the native backend reuses the same capture generation. */
+  monitorInputCleanup(owner = this.armed?.owner): () => Promise<unknown> {
+    const armed = this.armed
+    return async () => {
+      if (owner ? this.armed?.owner !== owner : !armed || this.armed !== armed) return
+      await this.disarm()
+    }
+  }
+
   async disarm(): Promise<{ ok: boolean; error?: string }> {
+    if (this.disarming) return this.disarming
     if (this.active || this.starting || this.arming) return { ok: false, error: 'A voice take is active or starting.' }
     const armed = this.armed
     this.armed = null
-    return this.options.native.disarmCapture(armed?.generation)
+    const pending = this.options.native.disarmCapture(armed?.generation)
+    this.disarming = pending
+    try { return await pending }
+    finally { if (this.disarming === pending) this.disarming = null }
   }
 
   private songDir(songId: string): string {
@@ -243,7 +286,9 @@ export class VoiceTakeStore {
     let captureAttempted = false
     let captureGeneration = generation
     this.starting = true
+    this.monitoringDuringStart = this.monitoringOn
     try {
+      if (this.disarming) await this.disarming
       if (this.armed) {
         const selected = await this.options.native.armCapture(request.input)
         if (!selected.ok || selected.generation === undefined) {
@@ -252,7 +297,7 @@ export class VoiceTakeStore {
           this.armed = null
           return { ok: false, reason: selected.reason ?? 'error', message: selected.reason === 'no-input' ? 'The selected microphone is unavailable.' : 'The microphone could not be armed.' }
         }
-        this.armed = { generation: selected.generation, deviceName: selected.deviceName ?? request.input.deviceName, channelIndex: request.input.channelIndex }
+        this.armed = { generation: selected.generation, deviceName: selected.deviceName ?? request.input.deviceName, channelIndex: request.input.channelIndex, owner: this.armed?.owner, monitorOnly: this.armed?.monitorOnly, requestedDeviceName: request.input.deviceName }
       }
       await mkdir(paths.dir, { recursive: true })
       captureAttempted = true
@@ -262,7 +307,7 @@ export class VoiceTakeStore {
       const active: Active = {
       request, takeId, dir: paths.dir, wavPath: paths.wav, createdAt: this.now().toISOString(),
       startPositionSec: 0, inputLatencyFrames: 0, outputLatencyFrames: 0, graphLatencyFrames: 0,
-      latencySource: 'reported', anchors: [],
+      latencySource: 'reported', anchors: [], monitoring: this.monitoringDuringStart,
       settings: [{ atSec: 0, tempo: request.tempo, transposeSemitones: request.transposeSemitones }], generation: result.generation ?? this.armed?.generation ?? generation
       }
       active.actualDeviceName = result.deviceName ?? this.armed?.deviceName ?? request.input.deviceName
@@ -320,17 +365,20 @@ export class VoiceTakeStore {
         }
       }
       if (!active.placementFault && active.firstSampleHostNs && active.sampleRate) {
+        active.monitoring ||= this.monitoringDuringStart
         active.provisional = {
           version: VOICE_TAKE_SIDECAR_VERSION, takeId: active.takeId, songId: request.songId,
           songTitle: request.songTitle, songArtist: request.songArtist, createdAt: active.createdAt,
           startPositionSec: active.startPositionSec, durationSec: 0, sampleRate: active.sampleRate, channels: 1,
           inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
           graphLatencyFrames: active.graphLatencyFrames, latencySource: active.latencySource, input: { ...request.input, deviceName: active.actualDeviceName ?? request.input.deviceName },
-          settings: active.settings, anchors: active.anchors, effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate, matchPercent: null, monitoring: false, status: 'recovered', name: null,
+          settings: active.settings, anchors: active.anchors, effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate, matchPercent: null, monitoring: active.monitoring, status: 'recovered', name: null,
           audio: { fileName: `${active.takeId}.wav`, format: 'wav-pcm16', byteSize: 0, checksum: null }
         }
         await this.writeSidecar(active.dir, active.takeId, active.provisional)
       }
+      active.monitoring ||= this.monitoringDuringStart
+      if (active.provisional) active.provisional.monitoring = active.monitoring
       this.active = active
       this.finalizedTake = null
       if (!active.firstSampleHostNs) {
@@ -541,7 +589,7 @@ export class VoiceTakeStore {
         startPositionSec: active.startPositionSec, durationSec, sampleRate, channels: 1,
         inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
         graphLatencyFrames: active.graphLatencyFrames, latencySource: placementMiss ? 'measured-trim' : active.latencySource, input: { ...active.request.input, deviceName: active.actualDeviceName ?? active.request.input.deviceName },
-        settings: active.settings, ...(active.anchors.length ? { anchors: active.anchors } : {}), effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate, matchPercent: null, monitoring: false,
+        settings: active.settings, ...(active.anchors.length ? { anchors: active.anchors } : {}), effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate, matchPercent: null, monitoring: active.monitoring,
         status: finished.deviceLost || reason === 'device-lost' ? 'partial-device-lost' : !finished.ok || reason === 'error' || active.finalizationError || placementMiss ? 'partial-error' : 'complete',
         name: null, audio: { fileName: basename(wavPath), format: 'wav-pcm16', byteSize: file.size, checksum: null }
       }

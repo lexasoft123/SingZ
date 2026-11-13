@@ -1,9 +1,14 @@
+import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import type { WebContents } from 'electron'
 import { describe, expect, it, vi } from 'vitest'
 const ipc = vi.hoisted(() => new Map<string, (event: unknown, request?: unknown) => unknown>())
 vi.mock('electron', async (importOriginal) => { const actual = await importOriginal<Record<string, unknown>>(); return { ...actual, ipcMain: { handle: (channel: string, fn: (event: unknown, request?: unknown) => unknown) => ipc.set(channel, fn) } } })
-import { registerVoiceMonitor } from '../../src/main/voice-monitor-ipc'
+vi.mock('../../src/main/log', () => ({ log: vi.fn() }))
+import { registerVoiceMonitor, VoiceMonitorRendererOwnership } from '../../src/main/voice-monitor-ipc'
 import { VOICE_IPC } from '../../src/shared/voice-take'
 import { VoiceMonitorStore, microphonePermission, type VoiceMonitorNative } from '../../src/main/voice-monitor'
+import { VoiceTakeStore, type VoiceTakeNative } from '../../src/main/voice-takes'
 import { disposeWithin } from '../../src/main/box-audio/microphones'
 
 const input = { deviceName: 'mic', channelIndex: 0 }
@@ -13,10 +18,10 @@ function fixture() {
     hostDevices: vi.fn(async () => ({ ok: true as const, platform: 'darwin' as const, provider: 'coreaudio' as const, defaultInputUid: 'mic', defaultOutputUid: 'mic', devices: [{ uid: 'mic', label: 'AirPods', direction: 'duplex' as const, transport: 'usb' as const, defaultInput: true, defaultOutput: true, inputChannels: 1, outputChannels: 2, inputChannelLabels: [], outputChannelLabels: [], nominalSampleRate: 48000, accessMode: 'shared' as const, monitoringSuitability: 'low-latency' as const, sampleRateRanges: [], bufferFrames: { minimumFrames: 32, maximumFrames: 256, preferredFrames: 32, fundamentalFrames: 1 } }] })),
     inputDevices: vi.fn(async () => ({ ok: true, devices: [device] })),
     voiceMonitorAvailability: vi.fn(async () => ({ available: true })),
-    beginVoiceMonitor: vi.fn(async () => ({ ok: true })),
+    beginVoiceMonitor: vi.fn(async () => { vi.mocked(native.voiceMonitorStatus).mockResolvedValue({ running: true }); return { ok: true } }),
     setVoiceMonitorGain: vi.fn(async () => ({ ok: true })),
     voiceMonitorStatus: vi.fn(async () => ({ running: true })),
-    endVoiceMonitor: vi.fn(async () => ({ ok: true }))
+    endVoiceMonitor: vi.fn(async () => { vi.mocked(native.voiceMonitorStatus).mockResolvedValue({ running: false }); return { ok: true } })
   }
   const permission = vi.fn(() => true)
   return { native, permission, store: new VoiceMonitorStore(native, permission, 'darwin') }
@@ -25,22 +30,18 @@ describe('voice monitoring', () => {
   it('uses native typed route decisions, not the AirPods label', async () => {
     const { store, native } = fixture()
     expect((await store.availability({ input })).available).toBe(true)
-    for (const reason of ['route-separate-devices', 'route-latency', 'route-bluetooth', 'route-wireless'] as const) {
+    for (const reason of ['route-separate-devices', 'route-latency', 'route-bluetooth', 'route-wireless', 'route-feedback'] as const) {
       vi.mocked(native.voiceMonitorAvailability).mockResolvedValueOnce({ available: false, reason })
       expect((await store.availability({ input })).available).toEqual({ reason })
     }
     expect(native.voiceMonitorAvailability).toHaveBeenCalledWith({ inputUid: 'mic', inputChannel: 0 })
   })
-  it('rejects missing typed direction or transport without guessing from the label', async () => {
+  it('uses native availability for virtual/unknown routes instead of duplex metadata', async () => {
     const { store, native } = fixture()
-    const inventory = await native.hostDevices()
-    if (!inventory.ok) throw new Error('fixture')
-    for (const field of ['direction', 'transport'] as const) {
-      const device = { ...inventory.devices[0], [field]: undefined }
-      vi.mocked(native.hostDevices).mockResolvedValueOnce({ ...inventory, devices: [device as typeof inventory.devices[0]] })
-      expect((await store.availability({ input })).available).toEqual({ reason: 'error' })
-    }
-    expect(native.voiceMonitorAvailability).not.toHaveBeenCalled()
+    vi.mocked(native.hostDevices).mockRejectedValue(new Error('legacy metadata must not decide availability'))
+    expect((await store.availability({ input })).available).toBe(true)
+    expect(native.hostDevices).not.toHaveBeenCalled()
+    expect(native.voiceMonitorAvailability).toHaveBeenCalledWith({ inputUid: 'mic', inputChannel: 0 })
   })
   it('keeps the monitor through song changes and unloads', async () => {
     const { store, native } = fixture()
@@ -322,7 +323,7 @@ describe('voice monitoring', () => {
     expect(vi.mocked(native.endVoiceMonitor).mock.calls.length).toBeLessThanOrEqual(1)
     expect(await store.set({ input, on: true })).toMatchObject({ on: false, latency: null, available: { reason: 'error' } })
     await store.dispose()
-    expect(vi.mocked(native.endVoiceMonitor).mock.calls.length).toBeLessThanOrEqual(1)
+    expect(vi.mocked(native.endVoiceMonitor).mock.calls.length).toBeLessThanOrEqual(2)
     vi.mocked(native.inputDevices).mockReset().mockResolvedValue({ ok: true, devices: [{ uid: 'mic', label: 'AirPods', isDefault: true, sampleRate: 48000, channels: 1, channelLabels: ['1'] }] })
     vi.mocked(native.voiceMonitorStatus).mockResolvedValue({ running: true })
     vi.mocked(native.endVoiceMonitor).mockResolvedValue({ ok: true })
@@ -346,12 +347,13 @@ describe('voice monitoring', () => {
     vi.mocked(native.voiceMonitorStatus).mockRejectedValueOnce(new Error('Audio process exited (9)'))
     expect(await store.set({ input, on: true })).toMatchObject({ on: false, latency: null, available: { reason: 'error' } })
   })
-  it('disposes at most once after a confirmed close', async () => {
+  it('forces orphan reconciliation even after a confirmed close', async () => {
     const { store, native } = fixture()
     await store.set({ input, on: true })
     await store.dispose()
     await store.dispose()
-    expect(native.endVoiceMonitor).toHaveBeenCalledTimes(1)
+    expect(native.endVoiceMonitor).toHaveBeenCalledTimes(2)
+    expect(native.endVoiceMonitor).toHaveBeenLastCalledWith(0n)
   })
   it('bounds disposal while preserving the pending retry', async () => {
     vi.useFakeTimers()
@@ -421,6 +423,184 @@ describe('voice monitoring', () => {
     const { native } = fixture()
     expect((await new VoiceMonitorStore(native, () => true, 'aix').availability({ input })).available).toEqual({ reason: 'platform' })
     vi.mocked(native.voiceMonitorAvailability).mockRejectedValueOnce(new Error('missing export'))
-    expect((await new VoiceMonitorStore(native, () => true, 'darwin').availability({ input })).available).toEqual({ reason: 'platform' })
+    expect((await new VoiceMonitorStore(native, () => true, 'darwin').availability({ input })).available).toEqual({ reason: 'error' })
+  })
+})
+
+describe('monitor renderer ownership', () => {
+  function sender(id: number): WebContents & EventEmitter {
+    return Object.assign(new EventEmitter(), { id, isDestroyed: () => false }) as unknown as WebContents & EventEmitter
+  }
+  it.each(['render-process-gone', 'destroyed', 'did-start-navigation'])('releases monitor and its meter arm on %s exactly once', async event => {
+    const { native, store } = fixture()
+    let armed = true
+    const release = vi.fn(async () => { armed = false })
+    const owner = sender(77), lifetime = new VoiceMonitorRendererOwnership(store, release)
+    lifetime.claim(owner)
+    await store.set({ input, on: true })
+    owner.emit(event, {}, 'reload', false, true)
+    owner.emit('render-process-gone', {})
+    await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1))
+    expect(armed).toBe(false)
+    expect((await store.state()).on).toBe(false)
+    expect(native.endVoiceMonitor).toHaveBeenCalledTimes(1)
+  })
+  it('the real monitor IPC binds renderer ownership even without capture:begin', async () => {
+    const { native } = fixture(), owner = sender(75), releaseArm = vi.fn(async () => undefined)
+    const store = registerVoiceMonitor(native, () => true, releaseArm, 'darwin')
+    expect(await ipc.get(VOICE_IPC.monitorSet)!({ sender: owner }, { input, on: true })).toMatchObject({ on: true })
+    owner.emit('render-process-gone', {})
+    await vi.waitFor(() => expect(releaseArm).toHaveBeenCalledTimes(1))
+    expect((await store.state()).on).toBe(false)
+    expect((await native.voiceMonitorStatus()).running).toBe(false)
+  })
+  it('negative control: without the lifetime handler a renderer loss leaves native capture running', async () => {
+    const { native, store } = fixture(), owner = sender(78)
+    await store.set({ input, on: true }); owner.emit('render-process-gone', {})
+    expect((await native.voiceMonitorStatus()).running).toBe(true)
+    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
+    await store.dispose()
+  })
+  it('ignores subframe/same-document events and an older window after ownership transfer', async () => {
+    const { native, store } = fixture(), first = sender(79), second = sender(80)
+    const lifetime = new VoiceMonitorRendererOwnership(store)
+    lifetime.claim(first); await store.set({ input, on: true })
+    first.emit('did-start-navigation', {}, 'fragment', true, true)
+    first.emit('did-start-navigation', {}, 'frame', false, false)
+    lifetime.claim(second);first.emit('destroyed')
+    expect((await store.state()).on).toBe(true)
+    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
+    second.emit('destroyed');await vi.waitFor(() => expect(native.endVoiceMonitor).toHaveBeenCalledTimes(1))
+  })
+  it('cleans a monitor that finishes opening after its renderer was lost', async () => {
+    const { native, store } = fixture(), owner = sender(81)
+    let finish!: (value: { ok: boolean }) => void
+    vi.mocked(native.beginVoiceMonitor).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const lifetime = new VoiceMonitorRendererOwnership(store);const live = lifetime.claim(owner)
+    const pending = store.set({ input, on: true })
+    await vi.waitFor(() => expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1))
+    owner.emit('render-process-gone', {});finish({ ok: true });await pending
+    await lifetime.release(owner)
+    expect(live()).toBe(false);expect((await store.state()).on).toBe(false)
+  })
+  it('off/dispose reconcile a native orphan without any JS generation', async () => {
+    const { store, native } = fixture()
+    expect(await store.set({ input, on: false })).toMatchObject({ on: false })
+    expect(native.endVoiceMonitor).toHaveBeenLastCalledWith(0n)
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValueOnce({ running: true })
+    expect((await store.state()).on).toBe(false)
+    expect(native.endVoiceMonitor).toHaveBeenCalledTimes(2)
+  })
+  it('logs terminal reasons and never restarts monitoring on a song change', async () => {
+    const { native } = fixture(); const report = vi.fn()
+    const store = new VoiceMonitorStore(native, () => true, 'darwin', report)
+    await store.set({ input, on: true })
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValueOnce({ running: false, lost: true, reason: 'device-lost' })
+    expect((await store.state()).available).toEqual({ reason: 'device-lost' })
+    expect(report).toHaveBeenCalledWith(expect.stringContaining('reason=device-lost'))
+    await store.songChanged('next');expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1)
+  })
+  it('refreshes the running route and latency from native status after app output selection', async () => {
+    const { store, native } = fixture()
+    const initial = { sampleRate: 48000, requestedFrames: 32, bufferFrames: 32, inputDeviceFrames: 148,
+      outputDeviceFrames: 28, roundTripFrames: 560, roundTripMs: 11.667, source: 'estimated' as const }
+    vi.mocked(native.beginVoiceMonitor).mockResolvedValueOnce({ ok: true, latency: initial, outputDevice: { id: 'zen', name: 'Zen' } })
+    await store.set({ input, on: true })
+    const migrated = { ...initial, bufferFrames: 512, outputDeviceFrames: 96, roundTripMs: 51.7, queueFrames: 1280, delayed: true }
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValueOnce({ running: true, latency: migrated, outputDevice: { id: 'cortex', name: 'Cortex' } })
+    const selected = await store.availability({ input, contextOnly: true, playbackContext: { webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: 'cortex' } })
+    expect(selected).toMatchObject({ on: true, outputDevice: { id: 'cortex' }, latency: migrated })
+    expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1);expect(native.endVoiceMonitor).not.toHaveBeenCalled()
+    await store.dispose()
+  })
+  it('the native context IPC applies the app output instead of discarding it', () => {
+    const source = readFileSync('native/electron/voice_monitor_bridge.cpp', 'utf8')
+    const context = source.slice(source.indexOf('  if(contextOnly) {'), source.indexOf('napi_value begin('))
+    const wired = (body: string) => body.includes('configureOutput(selected)')
+    expect(wired(context)).toBe(true)
+    expect(wired(context.replace('configureOutput(selected)', 'discardedSelection()'))).toBe(false)
+    expect(source).toContain('generation(env,arg,g,true)') // Orphan close accepts the zero generation.
+  })
+  it('song output handback never disposes the monitor (old-handler negative control)', () => {
+    const index = readFileSync('src/main/index.ts', 'utf8')
+    const handler = index.slice(index.indexOf("ipcMain.handle('audio-host:playback-output-current'"), index.indexOf("ipcMain.handle('stems:reveal'"))
+    const survives = (source: string) => !source.includes('disposeWithin(voiceMonitor')
+    expect(survives(handler)).toBe(true)
+    expect(survives(handler + 'await disposeWithin(voiceMonitor, 2000)')).toBe(false)
+  })
+})
+
+
+describe('monitor-off meter lease ownership', () => {
+  function meter() {
+    const armCapture = vi.fn(async () => ({ ok: true, generation: 1n }))
+    const disarmCapture = vi.fn(async () => ({ ok: true }))
+    const store = new VoiceTakeStore({ native: { armCapture, disarmCapture } as unknown as VoiceTakeNative })
+    return { store, armCapture, disarmCapture }
+  }
+  it.each([false, true])('monitor-only=%s: real monitor IPC preserves independent Arm and releases only its own meter lease', async monitorOnly => {
+    const { native } = fixture(), take = meter(), epoch = {}
+    const owner = Object.assign(new EventEmitter(), { id: 110, isDestroyed: () => false })
+    await take.store.arm({ input, monitorOnly }, epoch)
+    registerVoiceMonitor(native, () => true, () => take.store.releaseMonitorInput(), 'darwin', () => take.store.monitorInputCleanup(epoch))
+    await ipc.get(VOICE_IPC.monitorSet)!({ sender: owner }, { input, on: true })
+    await ipc.get(VOICE_IPC.monitorSet)!({ sender: owner }, { input, on: false })
+    expect(take.disarmCapture).toHaveBeenCalledTimes(monitorOnly ? 1 : 0)
+    if (!monitorOnly) {
+      await take.store.arm({ input, monitorOnly: false }, epoch)
+      expect(take.armCapture).toHaveBeenCalledTimes(1) // Still warm and record-ready in main.
+    }
+    await take.store.disarm()
+  })
+  it('negative control: the previous unconditional monitor-off cleanup destroys independent record readiness', async () => {
+    const { native } = fixture(), take = meter(), epoch = {}
+    const owner = Object.assign(new EventEmitter(), { id: 111, isDestroyed: () => false })
+    await take.store.arm({ input }, epoch)
+    registerVoiceMonitor(native, () => true, () => take.store.disarm(), 'darwin')
+    await ipc.get(VOICE_IPC.monitorSet)!({ sender: owner }, { input, on: true })
+    await ipc.get(VOICE_IPC.monitorSet)!({ sender: owner }, { input, on: false })
+    await take.store.arm({ input, monitorOnly: false }, epoch)
+    expect(take.armCapture).toHaveBeenCalledTimes(2) // Cold reopen despite the strip still showing armed.
+    await take.store.disarm()
+  })
+  it('promotes a monitor-only arm without reopening it and a replacement renderer survives old cleanup', async () => {
+    const take = meter(), first = {}, replacement = {}
+    await take.store.arm({ input, monitorOnly: true }, first)
+    const oldCleanup = take.store.monitorInputCleanup(first)
+    await take.store.arm({ input, monitorOnly: false }, first)
+    await take.store.releaseMonitorInput()
+    expect(take.disarmCapture).not.toHaveBeenCalled()
+    expect(take.armCapture).toHaveBeenCalledTimes(1)
+    await take.store.arm({ input, monitorOnly: true }, replacement)
+    await oldCleanup()
+    expect(take.disarmCapture).not.toHaveBeenCalled()
+    await take.store.monitorInputCleanup(replacement)()
+    expect(take.disarmCapture).toHaveBeenCalledExactlyOnceWith(1n)
+  })
+  it.each([false, true])('renderer reload releases its own Arm but preserves replacement=%s', async replace => {
+    const { native } = fixture(), take = meter(), epoch = {}, replacement = {}
+    const owner = Object.assign(new EventEmitter(), { id: 112, isDestroyed: () => false })
+    await take.store.arm({ input }, epoch)
+    const monitor = registerVoiceMonitor(native, () => true, () => take.store.releaseMonitorInput(), 'darwin', () => take.store.monitorInputCleanup(epoch))
+    await ipc.get(VOICE_IPC.monitorSet)!({ sender: owner }, { input, on: true })
+    if (replace) await take.store.arm({ input, monitorOnly: true }, replacement)
+    owner.emit('did-start-navigation', {}, 'reload', false, true)
+    await vi.waitFor(async () => expect((await monitor.state()).on).toBe(false))
+    await new Promise(resolve => setImmediate(resolve))
+    expect(take.disarmCapture).toHaveBeenCalledTimes(replace ? 0 : 1)
+    await take.store.disarm()
+  })
+  it('withdrawing explicit Arm transfers the remaining meter lease back to monitoring', async () => {
+    const take = meter(), owner = {}
+    await take.store.arm({ input }, owner)
+    await take.store.arm({ input, monitorOnly: true }, owner)
+    expect(take.armCapture).toHaveBeenCalledTimes(1)
+    await take.store.releaseMonitorInput()
+    expect(take.disarmCapture).toHaveBeenCalledExactlyOnceWith(1n)
+  })
+  it('the production monitor-off callback uses scoped monitor cleanup', () => {
+    const main = readFileSync(new URL('../../src/main/index.ts', import.meta.url), 'utf8')
+    expect(main).toContain('async () => { await monitorTakeStore?.releaseMonitorInput() }')
+    expect(main).not.toContain('async () => { await monitorTakeStore?.disarm() }')
   })
 })

@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "El monitoreo necesita la entrada y la salida en un mismo dispositivo, como una interfaz de audio.",
   'player.voice.monReasonLatency': "Este dispositivo no monitorea con la rapidez suficiente (más de 256 frames). La grabación sigue funcionando.",
   'player.voice.monReasonBluetooth': "Bluetooth añade demasiado retraso para monitorear. La grabación sigue funcionando.",
+  'player.voice.monReasonFeedback': "Monitorear esta ruta generaría realimentación: elige otra entrada o salida",
   'player.voice.monReasonWireless': "El audio inalámbrico añade demasiado retraso para monitorear. La grabación sigue funcionando.",
   'player.voice.monReasonNoInput': "No hay entrada para monitorear. Elige primero un micrófono.",
   'player.voice.monReasonPermission': "Se necesita acceso al micrófono para monitorear.",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "Seguir tono desactivado",
   'player.voice.pitchFollowOffHelp': "El seguimiento de tono está omitido. Haz clic para activarlo.",
   'player.voice.manualOffsetHelp': "Cambio adicional para la voz, de -12 a +12 semitonos.",
-  'player.voice.preserveFormantsHelp': "Mantiene natural el timbre de la voz mientras se transpone."
+  'player.voice.preserveFormantsHelp': "Mantiene natural el timbre de la voz mientras se transpone.",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "Ruta: {device} · búfer de {frames} fotogramas · retraso estimado ≈ {ms} ms · con retraso",
+  'player.voice.routeMeasuredDelayed': "Ruta: {device} · búfer de {frames} fotogramas · retraso medido ≈ {ms} ms · con retraso",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · con retraso",
+  'player.voice.monitorBadgeDelayedTip': "La entrada y la salida están en dispositivos distintos o usan un búfer mayor: se notará un retraso"
 }

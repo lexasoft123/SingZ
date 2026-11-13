@@ -982,7 +982,7 @@ describe('live monitoring (M2)', () => {
     fresh.c.dispose()
   })
   it('maps every unavailable reason to the two unavailable states and keeps the reason', async () => {
-    const reasons = ['route-separate-devices', 'route-latency', 'route-bluetooth', 'route-wireless', 'no-input', 'permission', 'output-not-native', 'platform', 'device-lost', 'error'] as const
+    const reasons = ['route-separate-devices', 'route-latency', 'route-bluetooth', 'route-wireless', 'route-feedback', 'no-input', 'permission', 'output-not-native', 'platform', 'device-lost', 'error'] as const
     for (const reason of reasons) {
       const { c, api } = await setup({ monitorAvailability: unavailable({ reason }) })
       await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe(reason))
@@ -2464,7 +2464,7 @@ describe('input ownership interleavings', () => {
     const promise = new Promise<T>((r) => { resolve = r })
     return { promise, resolve }
   }
-  it('arm clicked while the monitor is opening shares ONE api.arm and never disarms (negative control: two arms and a disarm)', async () => {
+  it('arm joining an opening monitor promotes its meter lease and never disarms it', async () => {
     const gate = deferred<{ ok: true }>()
     const { c, api } = await setup({ arm: vi.fn(() => gate.promise) as never })
     const monitoring = c.toggleMonitor()
@@ -2473,7 +2473,8 @@ describe('input ownership interleavings', () => {
     await Promise.resolve()
     gate.resolve({ ok: true })
     await Promise.all([monitoring, arming])
-    expect(api.arm).toHaveBeenCalledTimes(1)
+    expect(api.arm).toHaveBeenCalledTimes(2) // One native open, then an ownership-only promotion.
+    expect(api.arm).toHaveBeenLastCalledWith(expect.objectContaining({ monitorOnly: false }))
     expect(api.disarm).not.toHaveBeenCalled()
     expect(c.getSnapshot().armed).toBe(true)
     expect(c.getSnapshot().monitor.on).toBe(true)
@@ -3138,5 +3139,118 @@ describe('take lane state binding and themed effect controls', () => {
     expect(css).toMatch(/\.vs-effect input\[type='checkbox'\][^}]*accent-color: var\(--accent\)/)
     expect(css).not.toMatch(/\.vs-effect input\[type='checkbox'\][^}]*accent-color: (blue|#00|auto)/) // negative control
     x.c.dispose()
+  })
+})
+
+describe('delayed monitor route (VS-MON)', () => {
+  const route = async (delayed: boolean, input?: string) => {
+    const latency = { ...monState().latency!, bufferFrames: 512, roundTripMs: 52, delayed }
+    const x = await setup({ monitorSet: vi.fn(async (req: { on: boolean }) => monState({ on: req.on, latency, outputDevice: { id: 'q', name: 'Quad Cortex' }, ...(input ? { inputDevice: { name: input } } : {}) })) })
+    await x.c.toggleMonitor()
+    const strip = renderToStaticMarkup(createElement(VoiceStrip, { controller: x.c, engine: x.engine as never }))
+    const settings = renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: x.c, onClose: () => undefined }))
+    x.c.dispose()
+    return { strip, settings }
+  }
+  it('delayed: amber badge text, explanatory description and "delayed" in the route line', async () => {
+    const { strip, settings } = await route(true)
+    expect(strip).toMatch(/class="vs-badge delayed"[^>]*>≈ 52 ms · delayed</)
+    expect(strip).toContain('different devices or use a larger buffer: expect a noticeable delay')
+    expect(settings).toContain('estimated delay ≈ 52 ms · delayed')
+  })
+  it('not delayed: no marker anywhere (negative control)', async () => {
+    const { strip, settings } = await route(false)
+    expect(strip).toMatch(/class="vs-badge"[^>]*>≈ 52 ms</)
+    expect(strip).not.toContain('delayed')
+    expect(settings).not.toContain('delayed')
+  })
+  it('names the input device when it differs from the output, not when equal or missing', async () => {
+    expect((await route(true, 'MacBook Pro Microphone')).settings).toContain('MacBook Pro Microphone → Quad Cortex')
+    expect((await route(true, 'Quad Cortex')).settings).not.toContain('→')
+    expect((await route(true)).settings).not.toContain('→')
+  })
+  it('the delayed badge style is amber and outlined', () => {
+    const css = readFileSync(new URL('../../src/renderer/src/components/voice-strip.css', import.meta.url), 'utf8')
+    expect(css).toMatch(/\.vs-badge\.delayed \{[^}]*border-color: var\(--accent\)[^}]*color: var\(--accent\)/)
+  })
+})
+
+describe('native monitor availability is authoritative', () => {
+  it('allows the speaker when browser meter flags are stale but native accepts the route', async () => {
+    const { c, api, engine } = await setup()
+    Object.assign(c.getSnapshot(), { inputMissing: true, perm: 'denied' })
+    expect(c.getSnapshot().monitor.avail).toBe('ok')
+    const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
+    const speaker = html.match(/<button[^>]*class="[^"]*vs-mon[^>]*>/)?.[0]
+    expect(speaker).toContain('aria-disabled="false"')
+    // Negative control: the former UI guard contradicts the accepted route.
+    const oldGuard = !c.getSnapshot().monitor.on && (c.getSnapshot().monitor.avail !== 'ok' || c.getSnapshot().inputMissing || c.getSnapshot().perm === 'denied')
+    expect(oldGuard).toBe(true)
+    await c.toggleMonitor()
+    expect(api.monitorSet).toHaveBeenCalledWith(expect.objectContaining({ on: true }))
+    c.dispose()
+  })
+})
+
+
+describe('monitor feedback route explanation', () => {
+  it('maps the typed feedback refusal to visible, actionable localized copy', async () => {
+    const { c, engine } = await setup({ monitorAvailability: vi.fn(async () => monState({ available: { reason: 'route-feedback' } })) })
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('route-feedback'))
+    const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
+    expect(html).toContain(voiceEn['player.voice.monReasonFeedback'])
+    expect(html).toContain('aria-disabled="true"')
+    c.dispose()
+  })
+})
+
+
+describe('monitor meter arm promotion teardown', () => {
+  it('releases a late successful promotion after controller teardown', async () => {
+    const { c, api } = await setup()
+    await c.toggleMonitor()
+    let finish!: (result: { ok: true }) => void
+    api.arm.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const arming = c.arm()
+    await vi.waitFor(() => expect(api.arm).toHaveBeenLastCalledWith(expect.objectContaining({ monitorOnly: false })))
+    c.dispose()
+    await vi.waitFor(() => expect(api.disarm).toHaveBeenCalled())
+    api.disarm.mockClear()
+    finish({ ok: true }); await arming
+    expect(api.disarm).toHaveBeenCalled()
+    expect(c.getSnapshot().armed).toBe(false)
+  })
+})
+
+
+describe('independent arm withdrawal during monitoring', () => {
+  it('tells main that the remaining meter lease belongs solely to monitoring', async () => {
+    const { c, api } = await setup()
+    await c.arm(); await c.toggleMonitor(); await c.arm()
+    expect(c.getSnapshot().armed).toBe(false)
+    expect(c.getSnapshot().monitor.on).toBe(true)
+    expect(api.arm).toHaveBeenLastCalledWith(expect.objectContaining({ monitorOnly: true }))
+    expect(api.disarm).not.toHaveBeenCalled()
+    await c.toggleMonitor()
+    expect(api.disarm).toHaveBeenCalled()
+    c.dispose()
+  })
+})
+
+
+describe('meter ownership transfer ordering', () => {
+  it('an Arm click overtaking an in-flight withdrawal finishes with independent ownership', async () => {
+    const { c, api } = await setup()
+    await c.arm(); await c.toggleMonitor()
+    let finish!: (result: { ok: true }) => void
+    api.arm.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const withdrawing = c.arm()
+    await vi.waitFor(() => expect(api.arm).toHaveBeenLastCalledWith(expect.objectContaining({ monitorOnly: true })))
+    const arming = c.arm()
+    finish({ ok: true }); await Promise.all([withdrawing, arming])
+    expect(c.getSnapshot().armed).toBe(true)
+    expect(api.arm).toHaveBeenLastCalledWith(expect.objectContaining({ monitorOnly: false }))
+    expect(api.disarm).not.toHaveBeenCalled()
+    c.dispose()
   })
 })

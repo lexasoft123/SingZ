@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "Kailangan ng monitoring na nasa iisang device ang input at output, gaya ng audio interface.",
   'player.voice.monReasonLatency': "Hindi sapat ang bilis ng device na ito para sa monitoring (lampas 256 frame). Gumagana pa rin ang recording.",
   'player.voice.monReasonBluetooth': "Masyadong malaki ang delay ng Bluetooth para sa monitoring. Gumagana pa rin ang recording.",
+  'player.voice.monReasonFeedback': "Magdudulot ng feedback ang pag-monitor sa rutang ito: pumili ng ibang input o output",
   'player.voice.monReasonWireless': "Masyadong malaki ang delay ng wireless audio para sa monitoring. Gumagana pa rin ang recording.",
   'player.voice.monReasonNoInput': "Walang input na imo-monitor. Pumili muna ng mikropono.",
   'player.voice.monReasonPermission': "Kailangan ng access sa mikropono para sa monitoring.",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "Naka-off ang pitch follow",
   'player.voice.pitchFollowOffHelp': "Naka-bypass ang pitch follow. I-click para i-on.",
   'player.voice.manualOffsetHelp': "Dagdag na shift sa boses, mula -12 hanggang +12 semitone.",
-  'player.voice.preserveFormantsHelp': "Pinananatiling natural ang timbre ng boses habang ito ay nilipat."
+  'player.voice.preserveFormantsHelp': "Pinananatiling natural ang timbre ng boses habang ito ay nilipat.",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "Ruta: {device} · buffer na {frames} frame · tantiyang delay ≈ {ms} ms · may delay",
+  'player.voice.routeMeasuredDelayed': "Ruta: {device} · buffer na {frames} frame · nasukat na delay ≈ {ms} ms · may delay",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · may delay",
+  'player.voice.monitorBadgeDelayedTip': "Magkaibang device ang input at output mo o mas malaki ang buffer: mapapansin ang delay"
 }

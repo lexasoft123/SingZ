@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "Pemantauan memerlukan input dan output pada satu perangkat, seperti audio interface.",
   'player.voice.monReasonLatency': "Perangkat ini tidak cukup cepat untuk memantau (lebih dari 256 frame). Perekaman tetap berfungsi.",
   'player.voice.monReasonBluetooth': "Bluetooth menambah jeda terlalu besar untuk memantau. Perekaman tetap berfungsi.",
+  'player.voice.monReasonFeedback': "Memantau rute ini akan menimbulkan umpan balik: pilih input atau output lain",
   'player.voice.monReasonWireless': "Audio nirkabel menambah jeda terlalu besar untuk memantau. Perekaman tetap berfungsi.",
   'player.voice.monReasonNoInput': "Tidak ada input untuk dipantau. Pilih mikrofon dulu.",
   'player.voice.monReasonPermission': "Akses mikrofon diperlukan untuk memantau.",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "Ikuti nada nonaktif",
   'player.voice.pitchFollowOffHelp': "Ikuti nada dilewati. Klik untuk mengaktifkan.",
   'player.voice.manualOffsetHelp': "Pergeseran tambahan pada vokal, dari -12 hingga +12 semiton.",
-  'player.voice.preserveFormantsHelp': "Menjaga timbre vokal tetap alami saat digeser."
+  'player.voice.preserveFormantsHelp': "Menjaga timbre vokal tetap alami saat digeser.",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "Rute: {device} · buffer {frames} frame · perkiraan tunda ≈ {ms} ms · tertunda",
+  'player.voice.routeMeasuredDelayed': "Rute: {device} · buffer {frames} frame · tunda terukur ≈ {ms} ms · tertunda",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · tertunda",
+  'player.voice.monitorBadgeDelayedTip': "Input dan output Anda berada di perangkat berbeda atau memakai buffer lebih besar: akan terasa tertunda"
 }

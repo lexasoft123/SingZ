@@ -96,6 +96,7 @@ export interface VoiceTakeSidecar {
   effects?: VoiceTakeEffect[]
   timelineApproximate?: boolean
   matchPercent: number | null
+  /** True if the main-process live monitor was on at any point during capture. */
   monitoring: boolean
   status: VoiceTakeStatus
   name: string | null
@@ -180,6 +181,8 @@ export type VoiceRecordStartResult =
 
 /** Arm opens the chosen input so the meter is live (spec: armed = input open, meter live); disarm releases it. */
 export interface VoiceArmRequest {
+  /** True only for the meter arm opened on behalf of monitoring. Omitted = explicit Arm. */
+  monitorOnly?: boolean
   input: { deviceName: string; channelIndex: number }
 }
 
@@ -277,6 +280,7 @@ export type VoiceMonitorReason =
   | 'route-latency' // the device cannot reach VOICE_MONITOR_MAX_FRAMES
   | 'route-bluetooth'
   | 'route-wireless'
+  | 'route-feedback'
   | 'no-input'
   | 'permission'
   | 'output-not-native' // Web Audio is playing on a different physical output
@@ -301,6 +305,10 @@ export interface VoiceMonitorLatency {
   /** Negotiated/observed input period in capture-rate frames (inputSampleRate). */
   inputBufferFrames?: number
   inputSampleRate?: number
+  outputPeriodFrames?: number
+  observedOutputFrames?: number
+  /** Minimum safe history lookback in input-rate frames for the current output period. */
+  queueFloorFrames?: number
   /** Estimated round trip exceeds the 10 ms same-device budget. */
   delayed?: boolean
 }
@@ -313,6 +321,8 @@ export interface VoiceMonitorOutputCandidate extends VoiceMonitorOutputDevice {
 export interface VoiceMonitorState {
   /** Display-only name of the common output the monitor resolved to (feeds the route line). The id is deprecated (ADR 0017 WP6). */
   outputDevice?: VoiceMonitorOutputDevice | null
+  /** Display-only name of the input device the monitor opened (feeds the route line when it differs from the output). */
+  inputDevice?: { name: string } | null
   /** @deprecated No UI or controller reads this; the monitor follows the common output (ADR 0017 WP6 deletes it). */
   outputCandidates?: VoiceMonitorOutputCandidate[]
   available: true | { reason: VoiceMonitorReason; detail?: string }

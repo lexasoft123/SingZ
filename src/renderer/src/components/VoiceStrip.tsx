@@ -304,8 +304,12 @@ export default function VoiceStrip({
   const pitchHelp = pitch?.enabled === false ? t('player.voice.pitchFollowOffHelp') : t('player.voice.pitchFollowHelp')
   const pitchText = pitch?.enabled === false ? t('player.voice.pitchFollowOff') : t('player.voice.pitchFollowChip', { shift: sgn(shift) })
   const laneMessage = take && !rec ? laneText(m.lane) : ''
+  const lat = m.monitor.latency
+  const badgeTip = !lat ? '' : lat.delayed
+    ? t('player.voice.monitorBadgeDelayedTip')
+    : t(lat.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', { frames: lat.bufferFrames })
   const monitorWhy = monitorReasonText(m)
-  const monitorUnavailable = !m.monitor.on && (m.monitor.avail !== 'ok' || m.inputMissing || m.perm === 'denied')
+  const monitorUnavailable = !m.monitor.on && m.monitor.avail !== 'ok'
   const monitorLabel = m.monitor.on ? t('player.voice.monitorOn') : t('player.voice.monitorOff')
   const inputTip = m.inputs.find((i) => i.id === m.input) ? inputOptionText(m.inputs.find((i) => i.id === m.input)!) : t('player.voice.input')
   const takeInfo = !take
@@ -337,19 +341,9 @@ export default function VoiceStrip({
           </Tooltip>
           {settingsOpen && <VoiceTrackSettings controller={controller} onClose={closeSettings} />}
           {m.monitor.on && m.monitor.latency && (
-            <Tooltip
-              label={t(m.monitor.latency.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', {
-                frames: m.monitor.latency.bufferFrames
-              })}
-            >
-              <span
-                className="vs-badge"
-                tabIndex={0}
-                aria-label={t(m.monitor.latency.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', {
-                  frames: m.monitor.latency.bufferFrames
-                })}
-              >
-                {t('player.voice.monitorBadge', { ms: Math.round(m.monitor.latency.roundTripMs) })}
+            <Tooltip label={badgeTip}>
+              <span className={`vs-badge${m.monitor.latency.delayed ? ' delayed' : ''}`} tabIndex={0} aria-label={badgeTip}>
+                {t(m.monitor.latency.delayed ? 'player.voice.monitorBadgeDelayed' : 'player.voice.monitorBadge', { ms: Math.round(m.monitor.latency.roundTripMs) })}
               </span>
             </Tooltip>
           )}

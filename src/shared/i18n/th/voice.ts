@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "การมอนิเตอร์ต้องใช้อินพุตและเอาต์พุตบนอุปกรณ์เดียวกัน เช่น ออดิโออินเทอร์เฟซ",
   'player.voice.monReasonLatency': "อุปกรณ์นี้เร็วไม่พอสำหรับการมอนิเตอร์ (เกิน 256 เฟรม) การอัดเสียงยังใช้งานได้",
   'player.voice.monReasonBluetooth': "บลูทูธทำให้หน่วงมากเกินไปสำหรับการมอนิเตอร์ การอัดเสียงยังใช้งานได้",
+  'player.voice.monReasonFeedback': "การมอนิเตอร์เส้นทางนี้จะทำให้เกิดเสียงวนกลับ: เลือกอินพุตหรือเอาต์พุตอื่น",
   'player.voice.monReasonWireless': "เสียงไร้สายทำให้หน่วงมากเกินไปสำหรับการมอนิเตอร์ การอัดเสียงยังใช้งานได้",
   'player.voice.monReasonNoInput': "ไม่มีอินพุตให้มอนิเตอร์ เลือกไมโครโฟนก่อน",
   'player.voice.monReasonPermission': "ต้องได้รับสิทธิ์ใช้ไมโครโฟนเพื่อมอนิเตอร์",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "ปิดการปรับตามคีย์",
   'player.voice.pitchFollowOffHelp': "ข้ามการปรับตามคีย์อยู่ คลิกเพื่อเปิด",
   'player.voice.manualOffsetHelp': "การเปลี่ยนคีย์เพิ่มเติมของเสียงร้อง ตั้งแต่ -12 ถึง +12 เซมิโทน",
-  'player.voice.preserveFormantsHelp': "รักษาโทนเสียงร้องให้เป็นธรรมชาติขณะเปลี่ยนคีย์"
+  'player.voice.preserveFormantsHelp': "รักษาโทนเสียงร้องให้เป็นธรรมชาติขณะเปลี่ยนคีย์",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "เส้นทาง: {device} · บัฟเฟอร์ {frames} เฟรม · ความหน่วงโดยประมาณ ≈ {ms} ms · หน่วง",
+  'player.voice.routeMeasuredDelayed': "เส้นทาง: {device} · บัฟเฟอร์ {frames} เฟรม · ความหน่วงที่วัดได้ ≈ {ms} ms · หน่วง",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · หน่วง",
+  'player.voice.monitorBadgeDelayedTip': "อินพุตและเอาต์พุตอยู่คนละอุปกรณ์หรือใช้บัฟเฟอร์ใหญ่ขึ้น: จะรู้สึกถึงความหน่วงได้ชัดเจน"
 }

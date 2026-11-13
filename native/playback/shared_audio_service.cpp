@@ -57,6 +57,8 @@ struct SharedAudioService::Impl {
   } playback, training, microphone, monitor;
   ServiceMasterStage master;
   uint64_t monitorGeneration{0};
+  MonitorAdmission monitorAdmission{nullptr};
+  bool monitorOutputLost{false};
   mutable std::mutex mutex;
   std::unique_ptr<AudioHostBackend> backend;
   AudioHostInventory cached;
@@ -354,7 +356,12 @@ struct SharedAudioService::Impl {
       drain(playback.gate);
       playback.failed.store(true, std::memory_order_release);
     }
-    drain(monitor.gate); // Route seam: never replay live voice on a new route.
+    if (monitor.render && (current.state == AudioHostState::DeviceLost ||
+        (!route.outputDeviceUid.empty() && std::none_of(cached.devices.begin(), cached.devices.end(),
+            [&](const auto& device) { return device.uid == route.outputDeviceUid && device.outputChannels; }))))
+      monitorOutputLost = true;
+    const bool resumeMonitor = monitor.render && current.state == AudioHostState::Running;
+    drain(monitor.gate); // Join the old output generation before opening another.
     outputGeneration.fetch_add(1, std::memory_order_release);
     backend->stop();
     monitorBufferHeld = false;
@@ -380,6 +387,14 @@ struct SharedAudioService::Impl {
         monitorBufferHeld = true;
       route = std::move(config);
       rate.store(result.format.sampleRate, std::memory_order_release);
+      // Capture/history belongs to the monitor, not the song generation. Admit
+      // the new output before callbacks resume, including a paused song prepare.
+      if (monitor.render && !monitorOutputLost && (!monitorAdmission || monitorAdmission(monitor.context, cached, route, result))) {
+        monitorGeneration = outputGeneration.load(std::memory_order_acquire);
+        monitor.gate.open();
+        if (resumeMonitor) result = backend->start();
+        if (!result.ok) drain(monitor.gate);
+      }
     }
     return result;
   }
@@ -659,15 +674,28 @@ void SharedAudioService::setMicrophoneRenderer(AudioHostRender render, void* con
   else { impl_->completeIdleBufferHandbackLocked(); impl_->retireIdleBoxProducerLocked(); }
 }
 void SharedAudioService::clearMicrophoneRenderer() { setMicrophoneRenderer(nullptr, nullptr); }
-void SharedAudioService::setVoiceMonitorRenderer(AudioHostRender render, void* context) {
+void SharedAudioService::setVoiceMonitorRenderer(AudioHostRender render, void* context, MonitorAdmission admission) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   drain(impl_->monitor.gate);
   impl_->monitor.render = render;
   impl_->monitor.context = context;
+  impl_->monitorAdmission = admission;
+  if (render) impl_->monitorOutputLost = false;
   impl_->monitorGeneration = impl_->outputGeneration.load(std::memory_order_acquire);
   impl_->monitor.failed.store(false, std::memory_order_release);
-  if (render) impl_->monitor.gate.open();
-  else impl_->completeIdleBufferHandbackLocked();
+  if (render) {
+    const auto current = impl_->backend->status();
+    const AudioHostResult opening{true, AudioHostError::None, current.state, current.format, current.latency, {}};
+    if (!admission || admission(context, impl_->cached, impl_->route, opening)) impl_->monitor.gate.open();
+  } else impl_->completeIdleBufferHandbackLocked();
+}
+bool SharedAudioService::voiceMonitorOutputLost() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->monitorOutputLost;
+}
+bool SharedAudioService::hasVoiceMonitorRenderer(const void* context) const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->monitor.render && impl_->monitor.context == context;
 }
 void SharedAudioService::clearVoiceMonitorRenderer() { setVoiceMonitorRenderer(nullptr, nullptr); }
 bool SharedAudioService::setMasterGain(float gain) noexcept {

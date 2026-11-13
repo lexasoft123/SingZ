@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "İzleme için giriş ve çıkış, ses arayüzü gibi aynı cihazda olmalı.",
   'player.voice.monReasonLatency': "Bu cihaz izleme için yeterince hızlı değil (256 kareden fazla). Kayıt yine çalışır.",
   'player.voice.monReasonBluetooth': "Bluetooth izleme için çok fazla gecikme ekler. Kayıt yine çalışır.",
+  'player.voice.monReasonFeedback': "Bu yolu izlemek geri beslemeye neden olur: farklı bir giriş veya çıkış seçin",
   'player.voice.monReasonWireless': "Kablosuz ses izleme için çok fazla gecikme ekler. Kayıt yine çalışır.",
   'player.voice.monReasonNoInput': "İzlenecek giriş yok. Önce bir mikrofon seçin.",
   'player.voice.monReasonPermission': "İzleme için mikrofon erişimi gerekli.",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "Perde takibi kapalı",
   'player.voice.pitchFollowOffHelp': "Perde takibi atlanıyor. Açmak için tıklayın.",
   'player.voice.manualOffsetHelp': "Sese eklenen ek kaydırma, -12 ile +12 yarım ton arası.",
-  'player.voice.preserveFormantsHelp': "Ses kaydırılırken tınısını doğal tutar."
+  'player.voice.preserveFormantsHelp': "Ses kaydırılırken tınısını doğal tutar.",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "Yol: {device} · {frames} kare tampon · tahmini gecikme ≈ {ms} ms · gecikmeli",
+  'player.voice.routeMeasuredDelayed': "Yol: {device} · {frames} kare tampon · ölçülen gecikme ≈ {ms} ms · gecikmeli",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · gecikmeli",
+  'player.voice.monitorBadgeDelayedTip': "Giriş ve çıkış farklı cihazlarda ya da daha büyük bir tampon kullanıyor: belirgin bir gecikme olur"
 }

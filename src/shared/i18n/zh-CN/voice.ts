@@ -18,6 +18,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': '监听需要输入和输出在同一台设备上，例如音频接口。',
   'player.voice.monReasonLatency': '此设备无法足够快地监听（超过 256 帧）。仍可录音。',
   'player.voice.monReasonBluetooth': '蓝牙延迟过大，无法监听。仍可录音。',
+  'player.voice.monReasonFeedback': "监听此路由会造成音频反馈回路：请选择其他输入或输出",
   'player.voice.monReasonWireless': '无线音频延迟过大，无法监听。仍可录音。',
   'player.voice.monReasonNoInput': '没有可监听的输入。请先选择麦克风。',
   'player.voice.monReasonPermission': '监听需要麦克风权限。',
@@ -136,5 +137,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': '音高跟随已关闭',
   'player.voice.pitchFollowOffHelp': '音高跟随已旁路。点击开启。',
   'player.voice.manualOffsetHelp': '为人声额外增加的移调，范围 -12 至 +12 半音。',
-  'player.voice.preserveFormantsHelp': '移调时保持人声音色自然。'
+  'player.voice.preserveFormantsHelp': '移调时保持人声音色自然。',
+  'player.voice.routeDevices': '{input} → {output}',
+  'player.voice.routeEstimatedDelayed': '路径：{device} · 缓冲 {frames} 帧 · 估计延迟 ≈ {ms} ms · 延迟较大',
+  'player.voice.routeMeasuredDelayed': '路径：{device} · 缓冲 {frames} 帧 · 实测延迟 ≈ {ms} ms · 延迟较大',
+  'player.voice.monitorBadgeDelayed': '≈ {ms} ms · 延迟较大',
+  'player.voice.monitorBadgeDelayedTip': '输入和输出在不同设备上，或缓冲较大：会有明显延迟'
 }

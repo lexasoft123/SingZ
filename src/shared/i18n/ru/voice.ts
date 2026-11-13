@@ -18,6 +18,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': 'Для прослушивания вход и выход должны быть на одном устройстве, например на аудиоинтерфейсе.',
   'player.voice.monReasonLatency': 'Это устройство не успевает для прослушивания (больше 256 фреймов). Запись работает.',
   'player.voice.monReasonBluetooth': 'Bluetooth даёт слишком большую задержку для прослушивания. Запись работает.',
+  'player.voice.monReasonFeedback': "Мониторинг этого маршрута создаст петлю обратной связи: выберите другой вход или выход",
   'player.voice.monReasonWireless': 'Беспроводной звук даёт слишком большую задержку для прослушивания. Запись работает.',
   'player.voice.monReasonNoInput': 'Нет входа для прослушивания. Сначала выберите микрофон.',
   'player.voice.monReasonPermission': 'Для прослушивания нужен доступ к микрофону.',
@@ -136,5 +137,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': 'Следование тону выключено',
   'player.voice.pitchFollowOffHelp': 'Следование тону обойдено. Нажмите, чтобы включить.',
   'player.voice.manualOffsetHelp': 'Дополнительный сдвиг голоса от −12 до +12 полутонов.',
-  'player.voice.preserveFormantsHelp': 'Сохраняет естественный тембр голоса при сдвиге.'
+  'player.voice.preserveFormantsHelp': 'Сохраняет естественный тембр голоса при сдвиге.',
+  'player.voice.routeDevices': '{input} → {output}',
+  'player.voice.routeEstimatedDelayed': 'Маршрут: {device} · буфер {frames} кадров · оценочная задержка ≈ {ms} мс · с задержкой',
+  'player.voice.routeMeasuredDelayed': 'Маршрут: {device} · буфер {frames} кадров · измеренная задержка ≈ {ms} мс · с задержкой',
+  'player.voice.monitorBadgeDelayed': '≈ {ms} мс · задержка',
+  'player.voice.monitorBadgeDelayedTip': 'Вход и выход на разных устройствах или используют больший буфер: задержка будет заметна'
 }

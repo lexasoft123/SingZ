@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "मॉनिटरिंग के लिए इनपुट और आउटपुट एक ही डिवाइस पर होने चाहिए, जैसे ऑडियो इंटरफ़ेस।",
   'player.voice.monReasonLatency': "यह डिवाइस मॉनिटरिंग के लिए पर्याप्त तेज़ नहीं है (256 फ़्रेम से ज़्यादा)। रिकॉर्डिंग फिर भी काम करती है।",
   'player.voice.monReasonBluetooth': "ब्लूटूथ में मॉनिटरिंग के लिए बहुत ज़्यादा देरी होती है। रिकॉर्डिंग फिर भी काम करती है।",
+  'player.voice.monReasonFeedback': "इस ऑडियो रूट को मॉनिटर करने से फ़ीडबैक होगा: कोई दूसरा इनपुट या आउटपुट चुनें",
   'player.voice.monReasonWireless': "वायरलेस ऑडियो में मॉनिटरिंग के लिए बहुत ज़्यादा देरी होती है। रिकॉर्डिंग फिर भी काम करती है।",
   'player.voice.monReasonNoInput': "मॉनिटर करने के लिए कोई इनपुट नहीं है। पहले माइक्रोफ़ोन चुनें।",
   'player.voice.monReasonPermission': "मॉनिटरिंग के लिए माइक्रोफ़ोन की अनुमति चाहिए।",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "पिच फ़ॉलो बंद",
   'player.voice.pitchFollowOffHelp': "पिच फ़ॉलो बायपास है। चालू करने के लिए क्लिक करें।",
   'player.voice.manualOffsetHelp': "आवाज़ में जोड़ा जाने वाला अतिरिक्त बदलाव, -12 से +12 सेमीटोन तक।",
-  'player.voice.preserveFormantsHelp': "आवाज़ बदलने पर भी उसका स्वर-रंग स्वाभाविक रखता है।"
+  'player.voice.preserveFormantsHelp': "आवाज़ बदलने पर भी उसका स्वर-रंग स्वाभाविक रखता है।",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "रूट: {device} · बफ़र {frames} फ़्रेम · अनुमानित देरी ≈ {ms} ms · देरी के साथ",
+  'player.voice.routeMeasuredDelayed': "रूट: {device} · बफ़र {frames} फ़्रेम · मापी गई देरी ≈ {ms} ms · देरी के साथ",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · देरी",
+  'player.voice.monitorBadgeDelayedTip': "आपका इनपुट और आउटपुट अलग-अलग डिवाइस पर हैं या बड़ा बफ़र इस्तेमाल करते हैं: ध्यान देने लायक देरी होगी"
 }

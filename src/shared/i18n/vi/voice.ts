@@ -17,6 +17,7 @@ export const voice: Translation<typeof en> = {
   'player.voice.monReasonSeparateDevices': "Nghe lại giọng cần đầu vào và đầu ra trên cùng một thiết bị, như audio interface.",
   'player.voice.monReasonLatency': "Thiết bị này không đủ nhanh để nghe lại giọng (hơn 256 khung). Vẫn ghi âm được.",
   'player.voice.monReasonBluetooth': "Bluetooth trễ quá nhiều để nghe lại giọng. Vẫn ghi âm được.",
+  'player.voice.monReasonFeedback': "Giám sát tuyến này sẽ gây hồi tiếp âm thanh: hãy chọn đầu vào hoặc đầu ra khác",
   'player.voice.monReasonWireless': "Âm thanh không dây trễ quá nhiều để nghe lại giọng. Vẫn ghi âm được.",
   'player.voice.monReasonNoInput': "Không có đầu vào để nghe lại. Hãy chọn micro trước.",
   'player.voice.monReasonPermission': "Cần quyền truy cập micro để nghe lại giọng.",
@@ -131,5 +132,10 @@ export const voice: Translation<typeof en> = {
   'player.voice.pitchFollowOff': "Tắt bám theo cao độ",
   'player.voice.pitchFollowOffHelp': "Đang bỏ qua bám theo cao độ. Nhấp để bật.",
   'player.voice.manualOffsetHelp': "Độ dịch thêm cho giọng hát, từ -12 đến +12 nửa cung.",
-  'player.voice.preserveFormantsHelp': "Giữ âm sắc giọng hát tự nhiên khi bị dịch."
+  'player.voice.preserveFormantsHelp': "Giữ âm sắc giọng hát tự nhiên khi bị dịch.",
+  'player.voice.routeDevices': "{input} → {output}",
+  'player.voice.routeEstimatedDelayed': "Tuyến: {device} · bộ đệm {frames} khung · độ trễ ước tính ≈ {ms} ms · bị trễ",
+  'player.voice.routeMeasuredDelayed': "Tuyến: {device} · bộ đệm {frames} khung · độ trễ đo được ≈ {ms} ms · bị trễ",
+  'player.voice.monitorBadgeDelayed': "≈ {ms} ms · bị trễ",
+  'player.voice.monitorBadgeDelayedTip': "Đầu vào và đầu ra ở các thiết bị khác nhau hoặc dùng bộ đệm lớn hơn: sẽ có độ trễ đáng kể"
 }

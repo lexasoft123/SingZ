@@ -14,6 +14,7 @@ export const REASON_KEY: Record<VoiceMonitorReason, Key> = {
   'route-separate-devices': 'player.voice.monReasonSeparateDevices',
   'route-latency': 'player.voice.monReasonLatency',
   'route-bluetooth': 'player.voice.monReasonBluetooth',
+  'route-feedback': 'player.voice.monReasonFeedback',
   'route-wireless': 'player.voice.monReasonWireless',
   'no-input': 'player.voice.monReasonNoInput',
   permission: 'player.voice.monReasonPermission',

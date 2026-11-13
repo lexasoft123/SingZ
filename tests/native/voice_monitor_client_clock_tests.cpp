@@ -1,4 +1,7 @@
-#include "native/playback/voice_monitor_client.h"
+#ifndef VOICE_MONITOR_CLIENT_HEADER
+#define VOICE_MONITOR_CLIENT_HEADER "native/playback/voice_monitor_client.h"
+#endif
+#include VOICE_MONITOR_CLIENT_HEADER
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -39,12 +42,13 @@ void continuity(double nominal,double drift,bool negative=false) {
   }
   std::printf("%.0f second clock %.0f Hz %+0.3f%%: continuous, floor %u\n",seconds,nominal,drift*100,floor);
 }
-void pulse(){
+void pulse(uint32_t period=64){
   VoiceMonitorSource source;source.prepare(48000,64);CommonVoiceMonitorRender client;client.source=&source;client.target=1;
   std::array<float,64> input{},output{};float* planes[]{output.data()};
   AudioHostRenderBlock b;b.output=planes;b.outputChannels=1;b.frames=b.maximumFrames=64;b.sampleRate=48000;b.outputTimestampValid=true;
   uint64_t nextInput=0,heard=0;constexpr uint64_t pulseFrame=48000;
-  const auto floor=source.queueFloor(48000,64);
+  client.hostPeriod=period;
+  const auto floor=source.queueFloor(48000,period);
   for(uint64_t f=0;f<96000;f+=64){
     while(nextInput+64<=f){
       for(unsigned i=0;i<64;++i)input[i]=nextInput+i>=pulseFrame && nextInput+i<pulseFrame+128?.5f:0;
@@ -58,6 +62,6 @@ void pulse(){
 }
 int main(int argc,char**){
   if(argc>1){continuity(48000,.003,true);return 0;}
-  pulse();
+  pulse(); pulse(512);
   for(double rate:{48000.,44100.})for(double drift:{-.003,.003})continuity(rate,drift);
 }

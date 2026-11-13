@@ -8,11 +8,12 @@ namespace singz {
 // SINGZ_MONITOR_CLIENT_RT_BEGIN
 // Callback-owned reader/ramp; control only publishes target and reads meters.
 struct CommonVoiceMonitorRender {
+  const void* owner{}; // Control-only admission context.
   VoiceMonitorSource* source{};
   VoiceMonitorReader reader;
   std::array<float, kAudioHostMaxFrames> mono{};
   std::atomic<float> target{0}, peak{0}, rms{0};
-  std::atomic<uint32_t> period{0}, silent{1};
+  std::atomic<uint32_t> period{0}, hostPeriod{0}, silent{1};
   uint32_t queueFrames{0}; // Source frames; zero requests the publication floor.
   float current{0}, destination{0}, step{0};
   uint32_t remaining{0};
@@ -21,8 +22,10 @@ struct CommonVoiceMonitorRender {
     if (!self.source || block.frames > self.mono.size() || block.frames > block.maximumFrames ||
         block.outputChannels > kAudioHostMaxChannels) return true;
     self.period.store(block.frames, std::memory_order_relaxed);
+    const auto floor = self.source->queueFloor(block.sampleRate,
+        std::max(block.frames, self.hostPeriod.load(std::memory_order_acquire)));
     self.source->render(block, self.mono.data(), static_cast<uint32_t>(self.mono.size()),
-                        self.queueFrames, self.reader);
+                        floor ? std::max(self.queueFrames, floor) : kVoiceMonitorHistoryFrames, self.reader);
     const auto next = self.target.load(std::memory_order_acquire);
     if (next != self.destination) {
       self.destination = next; self.remaining = kVoiceMonitorRampFrames;
@@ -70,14 +73,16 @@ class CommonVoiceMonitor final {
   VoiceMonitorResult end(uint64_t generation);
   void close() noexcept;
   void routeChanged();
+  void refuse(const std::string& reason);
  private:
   SharedAudioService& service_;
   VoiceMonitorCapture& capture_;
   CommonVoiceMonitorRender render_;
   bool retained_{false}, lost_{false};
   uint64_t generation_{0}, route_{0};
-  uint32_t inputLatencyFrames_{0};
+  uint32_t channel_{0};
+  static bool admit(void*, const AudioHostInventory&, const AudioHostConfig&, const AudioHostResult&) noexcept;
   std::string input_, reason_;
-  VoiceMonitorLatency latency() const;
+  VoiceMonitorLatency latency();
 };
 }
