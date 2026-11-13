@@ -1,7 +1,10 @@
 # ADR 0014: Voice strip — recording and monitoring in the song player
 
 Status: accepted; milestone 2 (live monitoring on macOS) implemented on
-`codex/voice-monitor`, not merged; milestone 1 and 3 as in the spec table
+`codex/voice-monitor`, not merged; milestone 1 and 3 as in the spec table.
+The second monitor host, the monitor-output selection (`outputDeviceId`,
+`outputDevice`, `outputCandidates`) and the same-device-only rule are superseded
+by [ADR 0017](0017-monitoring-through-the-common-mixer.md) (proposed) when accepted<br>
 Date: 2026-11-12 (milestone 2 recorded 2026-11-13)
 Origin: issue #136 (input monitoring and recording)
 
