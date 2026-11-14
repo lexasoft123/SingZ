@@ -159,9 +159,21 @@ def main():
                 cpu, footprint = RESOURCE.process_usage(child.pid)
                 rss = rss_bytes(child.pid)
             except (OSError, ValueError, subprocess.SubprocessError):
-                if child.poll() is not None:
+                # The same exit race can make a sampler raise; give the exit time to be reaped.
+                try:
+                    child.wait(timeout=2)
                     break
+                except subprocess.TimeoutExpired:
+                    pass
                 raise
+            if rss <= 0 or footprint <= 0:
+                # An exiting process reads as zero memory before it can be reaped. Drop that
+                # sample only if the process really exits; a live process at zero stays a failure.
+                try:
+                    child.wait(timeout=2)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
             now = time.monotonic()
             foreground = foreground_pid()
             if foreground.get("pid") == child.pid:
