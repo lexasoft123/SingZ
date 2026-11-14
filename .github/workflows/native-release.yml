@@ -69,8 +69,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macos-14 is retired ("configuration ... is not supported"); arm64
+          # uses the image checks.yml pins for its arm64 jobs.
           - arch: arm64
-            runner: macos-14
+            runner: macos-15
           - arch: x64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
