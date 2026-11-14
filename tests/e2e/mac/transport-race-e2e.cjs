@@ -86,6 +86,7 @@ const { assertOpenedProject, clickLibrarySong, libraryName } = require('./librar
 const { holdProjects } = require('./project-hold.cjs')
 const { existsSync } = require('node:fs')
 const { join } = require('node:path')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { homedir } = require('node:os')
 
 const ROOT =
@@ -140,7 +141,7 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
     // Silent, hidden, and never touching the real Drive: this opens a project
     // from the singer's own library.
     env: {
-      ...process.env,
+      ...process.env, ...scratchProfileEnv({ projectsRoot: ROOT }),
       SINGZ_MUTE: '1',
       SINGZ_E2E_HIDDEN: '1',
       SINGZ_NO_SYNC: '1',

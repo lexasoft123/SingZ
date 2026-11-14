@@ -869,6 +869,11 @@ Rules learned the hard way:
 - Desktop driver, development and packaged launches all use `appData/SingZ`
   for userData and Chromium sessionData. Set `SINGZ_USERDATA_DIR` for each
   driver's isolated profile; shared models and packs have separate overrides.
+  Every E2E driver that launches the app does, through
+  `scratchProfileEnv()` in `tests/shared/scratch-profile.cjs` (a temp profile
+  removed on exit; `projectsRoot` seeds settings.json for library drivers), or
+  its own `SINGZ_USERDATA_DIR`; `tests/unit/e2e-scratch-profile.test.ts` fails a
+  launcher that does neither. Without it a driver runs in the real SingZ profile.
   Bootstrap migrates a distinct lowercase `appData/singz` only if `SingZ`
   is absent; if both exist it warns without merging, and if rename fails it
   keeps using the legacy directory. Case-insensitive aliases are left untouched.

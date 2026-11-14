@@ -43,6 +43,7 @@ const { _electron } = require('playwright-core')
 const { readFileSync, writeFileSync, rmSync, existsSync } = require('node:fs')
 const { scratchClone } = require('./project-hold.cjs')
 const { join } = require('node:path')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { homedir, tmpdir } = require('node:os')
 const { quietLaunch } = require('./quiet-launch.cjs')
 
@@ -73,7 +74,7 @@ const GT = JSON.parse(
     app = await _electron.launch({
       executablePath: require('electron'),
       args: [APP],
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, never the real Drive
+      env: { ...process.env, ...scratchProfileEnv({ projectsRoot: ROOT }), SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, never the real Drive
     })
     await quietLaunch(app)
     const win = await app.firstWindow()

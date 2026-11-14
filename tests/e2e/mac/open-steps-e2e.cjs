@@ -20,6 +20,7 @@
 require('../../shared/watchdog.cjs').arm('open-steps-e2e', { totalMinutes: 20 })
 
 const { join } = require('node:path')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { homedir } = require('node:os')
 const ROOT = join(__dirname, '..', '..', '..')
 const { _electron } = require('playwright-core')
@@ -78,7 +79,7 @@ function table(title, rows, marks) {
     app = await _electron.launch({
       executablePath: require('electron'),
       args: [join(ROOT, 'out', 'main', 'index.js')],
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
+      env: { ...process.env, ...scratchProfileEnv({ projectsRoot: PROJECTS }), SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
     })
     await quietLaunch(app)
     const win = await app.firstWindow()

@@ -104,7 +104,7 @@ async function run() {
   fs.mkdirSync(path.join(scratch, 'profile'), { mode: 0o700 })
   fs.writeFileSync(path.join(scratch, 'profile', 'microphones.json'), JSON.stringify({ version: 1, revision: '1', origin: 'user',
     device: 'fixture:absent', channels: { 'fixture:absent': [0, 1] } }), { mode: 0o600 })
-  const env = { ...process.env, SINGZ_BOX_AUDIO_SOCKET: socketPath, SINGZ_BOX_AUDIO_DATA_DIR: path.join(scratch, 'profile'), SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' }
+  const env = { ...process.env, SINGZ_BOX_AUDIO_SOCKET: socketPath, SINGZ_BOX_AUDIO_DATA_DIR: path.join(scratch, 'profile'), SINGZ_USERDATA_DIR: path.join(scratch, 'userdata'), SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.SINGZ_CAPTURE_ADDON
   child = spawn(executable, [...(packaged ? [] : [path.join(root, 'out/main/index.js')]), '--box-audio-host', '--ozone-platform=headless', '--disable-gpu'], { cwd: root, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
