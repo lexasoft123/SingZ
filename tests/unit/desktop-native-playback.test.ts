@@ -1635,6 +1635,7 @@ describe('desktop native playback facade', () => {
     expect(h.calls).toEqual(['prepare:1'])
     // A second prepare ahead while one stands is declined, not stacked.
     expect(await h.client.prepareAhead(request)).toBe(false)
+    expect(h.client.lastFailure?.code).toBe('native-audio-busy')
     h.calls.length = 0
     // Play with the same request: open and start the prepared generation.
     expect(await h.client.prepareAndStart(request)).toBe(true)

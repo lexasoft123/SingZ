@@ -4,11 +4,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MultitrackEngine } from '../../src/renderer/src/audio/engine'
 import PlaybackFailurePanel from '../../src/renderer/src/components/PlaybackFailurePanel'
 import { NATIVE_PLAYBACK_FAILURE_KEYS, nativePlaybackFailureCopy, type DesktopNativePlaybackFailureCode } from '../../src/renderer/src/audio/native-playback-failure'
-import { DesktopNativePlaybackClient } from '../../src/renderer/src/audio/desktop-native-playback'
+import { DesktopNativePlaybackClient, DesktopNativePlaybackError, prepareDesktopNativePlaybackAhead, type DesktopNativePlaybackEngineRequest } from '../../src/renderer/src/audio/desktop-native-playback'
 import { sanitizeAudioPrefs } from '../../src/renderer/src/model'
 import { MET_DEFAULTS } from '../../src/renderer/src/audio/beat'
 import { retainedStatus } from '../shared/box-retained-native-fixture'
-import type { DesktopPlaybackErrorCode, DesktopPlaybackResult, SingzApi } from '../../src/shared/types'
+import { DESKTOP_PLAYBACK_CAPABILITY, DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS, DESKTOP_PLAYBACK_CODEC_BASE_MASK, DESKTOP_PLAYBACK_CODEC_BASE_TAG, type DesktopPlaybackErrorCode, type DesktopPlaybackResult, type SingzApi } from '../../src/shared/types'
 
 const started = vi.fn(() => { throw new Error('Web Audio source must never start') })
 const source = vi.fn(() => ({ buffer: null, playbackRate: { value: 1 }, connect() {}, disconnect() {}, stop() {}, start: started }))
@@ -177,4 +177,183 @@ it('marks a prepare-ahead failure as background work, preserving the editor focu
   await vi.advanceTimersByTimeAsync(400)
   expect(engine.playbackError).toMatchObject({ failure, userInitiated: false })
   await engine.teardown()
+})
+
+const baseCapability = async () => ({ available: true, playbackCapability: DESKTOP_PLAYBACK_CAPABILITY,
+  mediaCodec: { abiVersion: 1, formatMask: DESKTOP_PLAYBACK_CODEC_BASE_MASK, dynamicallyLinkedFfmpeg: false,
+    runtimeVersion: '', capabilityTag: DESKTOP_PLAYBACK_CODEC_BASE_TAG, profile: '', target: '',
+    extensions: [...DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS] } })
+
+function busyAhead(failures: number, code: 'native-audio-busy' | 'recovery-required' = 'native-audio-busy') {
+  const engine = new MultitrackEngine()
+  const failure = { code, detail: 'Native preparation is busy or awaiting recovery' }
+  const client = { active: false, recoveryPending: false, preparedAhead: false,
+    lastFailure: null as typeof failure | null,
+    discardAhead: vi.fn(async () => { client.preparedAhead = false }) }
+  let attempts = 0
+  const prepareAhead = vi.fn(async (_client: unknown, _request: DesktopNativePlaybackEngineRequest) => {
+    if (++attempts <= failures) { client.lastFailure = failure; return false }
+    client.lastFailure = null
+    client.preparedAhead = true
+    return true
+  })
+  const tryStart = vi.fn(async () => true)
+  Object.assign(engine, { nativePlayback: client, ensureNativePlayback: async () => ({ client, prepareAhead, tryStart }) })
+  engine.load([{ id: 'guide', path: '/song/guide.flac', duration: 10, buffer: null }])
+  return { engine, client, failure, prepareAhead, tryStart }
+}
+
+describe('transient native prepare-ahead ownership', () => {
+  it.each([1, 2])('retries %i busy answers without showing a panel or starting Web Audio', async count => {
+    const { engine, client, prepareAhead } = busyAhead(count)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(prepareAhead).toHaveBeenCalledOnce()
+    expect(engine.playbackError).toBeNull()
+    await vi.advanceTimersByTimeAsync(count === 1 ? 100 : 300)
+    expect(prepareAhead).toHaveBeenCalledTimes(count + 1)
+    expect(client.preparedAhead).toBe(true)
+    expect(engine.playbackError).toBeNull()
+    expect(source).not.toHaveBeenCalled()
+    expect(started).not.toHaveBeenCalled()
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it.each(['native-audio-busy', 'recovery-required'] as const)('blocks persistent %s after six attempts and 2.7 seconds of backoff', async code => {
+    const { engine, failure, prepareAhead } = busyAhead(Infinity, code)
+    await vi.advanceTimersByTimeAsync(400 + 2699)
+    expect(prepareAhead).toHaveBeenCalledTimes(5)
+    expect(engine.playbackError).toBeNull()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(prepareAhead).toHaveBeenCalledTimes(6)
+    expect(engine.playbackError).toMatchObject({ failure, userInitiated: false })
+    const markup = renderToStaticMarkup(<PlaybackFailurePanel error={engine.playbackError!} onRetry={() => engine.retryPlayback()} onChooseDevice={() => {}} />)
+    expect(markup).toContain(`data-failure-code="${code}"`)
+    expect(markup).toContain('Retry')
+    expect(started).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(prepareAhead).toHaveBeenCalledTimes(6)
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it('waits for recovery to settle and then prepares automatically', async () => {
+    const { engine, client, prepareAhead } = busyAhead(0)
+    client.recoveryPending = true
+    await vi.advanceTimersByTimeAsync(400)
+    expect(prepareAhead).not.toHaveBeenCalled()
+    expect(engine.playbackError).toBeNull()
+    client.recoveryPending = false
+    await vi.advanceTimersByTimeAsync(100)
+    expect(client.preparedAhead).toBe(true)
+    expect(engine.playbackError).toBeNull()
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it('ends persistent pending recovery at the same bound', async () => {
+    const { engine, client, prepareAhead } = busyAhead(0)
+    client.recoveryPending = true
+    await vi.advanceTimersByTimeAsync(400 + 2700)
+    expect(prepareAhead).not.toHaveBeenCalled()
+    expect(engine.playbackError).toMatchObject({ failure: { code: 'recovery-required' } })
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it('still presents a malformed lane failure on the first background attempt', async () => {
+    const { engine, client, prepareAhead } = busyAhead(0)
+    const failure = { code: 'malformed-data', detail: 'guide.flac is malformed' }
+    prepareAhead.mockImplementation(async () => { Object.assign(client, { lastFailure: failure }); return false })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(prepareAhead).toHaveBeenCalledOnce()
+    expect(engine.playbackError).toMatchObject({ failure, userInitiated: false })
+    expect(started).not.toHaveBeenCalled()
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it('Play joins a transient background prepare and plays its resulting graph', async () => {
+    const { engine, client, tryStart } = busyAhead(2)
+    Object.assign(client, { prepareRetainedForPlay: vi.fn(async () => {}) })
+    await vi.advanceTimersByTimeAsync(400)
+    const play = engine.play()
+    await vi.advanceTimersByTimeAsync(299)
+    expect(tryStart).not.toHaveBeenCalled()
+    expect(engine.playbackError).toBeNull()
+    await vi.advanceTimersByTimeAsync(1)
+    await play
+    expect(tryStart).toHaveBeenCalledOnce()
+    expect(engine.playing).toBe(true)
+    expect(engine.playbackError).toBeNull()
+    expect(started).not.toHaveBeenCalled()
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it('cancels retries when the song is retired', async () => {
+    const { engine, prepareAhead } = busyAhead(Infinity)
+    await vi.advanceTimersByTimeAsync(400)
+    engine.retireForSongSwitch()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(prepareAhead).toHaveBeenCalledOnce()
+    expect(engine.playbackError).toBeNull()
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it('serializes loader prepare with a saved-take prepare and publishes the newest graph', async () => {
+    vi.stubGlobal('window', { singz: { desktopPlaybackCapability: baseCapability } })
+    const { engine, client, prepareAhead } = busyAhead(0)
+    let release!: () => void
+    const first = new Promise<void>(resolve => { release = resolve })
+    let inFlight = 0, maximum = 0
+    const paths: (string | undefined)[] = []
+    prepareAhead.mockImplementation(async (_client: unknown, request: DesktopNativePlaybackEngineRequest) => {
+      maximum = Math.max(maximum, ++inFlight)
+      paths.push(request.voiceTake?.path)
+      if (paths.length === 1) await first
+      client.preparedAhead = true
+      --inFlight
+      return true
+    })
+    await vi.advanceTimersByTimeAsync(400)
+    const take = engine.setVoiceTakeLane({ path: '/cache/take-three.wav' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(prepareAhead).toHaveBeenCalledOnce()
+    release()
+    await take
+    expect(maximum).toBe(1)
+    expect(paths).toEqual([undefined, '/cache/take-three.wav'])
+    expect(client.preparedAhead).toBe(true)
+    expect(engine.playbackError).toBeNull()
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it('does not omit an optional take or prepare twice for an ownership-busy answer', async () => {
+    vi.stubGlobal('window', { singz: { desktopPlaybackCapability: baseCapability } })
+    const { engine, client, prepareAhead } = busyAhead(Infinity)
+    const onVoiceTakeState = vi.fn()
+    Object.assign(client, { prepareAhead })
+    const request = (engine as any).nativePlaybackRequest(false) as DesktopNativePlaybackEngineRequest
+    expect(await prepareDesktopNativePlaybackAhead(client as unknown as DesktopNativePlaybackClient,
+      { ...request, voiceTake: { path: '/cache/take.wav', gain: 1, muted: false, solo: false, suppressed: false }, onVoiceTakeState })).toBe(false)
+    expect(prepareAhead).toHaveBeenCalledOnce()
+    expect(onVoiceTakeState).not.toHaveBeenCalledWith({ status: 'error', reason: 'prepare-failed' })
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
+
+  it('logs typed codes and messages as text instead of object coercions', async () => {
+    new DesktopNativePlaybackError('native-audio-busy', 'Native queue is busy')
+    expect(console.warn).toHaveBeenLastCalledWith(expect.stringContaining('"code":"native-audio-busy"'))
+    expect(console.warn).toHaveBeenLastCalledWith(expect.stringContaining('Native queue is busy'))
+    const { engine } = busyAhead(Infinity)
+    await vi.advanceTimersByTimeAsync(3100)
+    expect(console.error).toHaveBeenLastCalledWith(expect.stringContaining('"code":"native-audio-busy"'))
+    expect(console.error).toHaveBeenLastCalledWith(expect.stringContaining('Native preparation is busy or awaiting recovery'))
+    Object.assign(engine, { nativePlayback: null })
+    await engine.teardown()
+  })
 })

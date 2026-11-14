@@ -23,7 +23,7 @@ import type { AcceptedControlHost } from './accepted-controls'
 import { detectedDesktopPlatform, type DesktopNativePlaybackPolicy } from './native-playback-preference'
 import type { DesktopPlaybackProvider, DesktopPlaybackStatus } from '../../../shared/types'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
-import type { DesktopNativePlaybackFailure } from './native-playback-failure'
+import { transientNativePrepareFailure, type DesktopNativePlaybackFailure } from './native-playback-failure'
 
 export interface EngineTrackInput {
   id: string
@@ -498,17 +498,33 @@ export class MultitrackEngine {
       this.aheadTimer = null
       const songEpoch = this._songEpoch
       const aheadEpoch = this.aheadEpoch
-      const pending = this.prepareNativeAhead().catch((error) => {
+      void this.prepareNativeAhead().catch((error) => {
         if (songEpoch === this._songEpoch && aheadEpoch === this.aheadEpoch && !this.betweenSongs && !this.teardownStarted) this.reportPlaybackFailure(error)
-      })
-      this.nativeAheadPending = pending
-      void pending.finally(() => {
-        if (this.nativeAheadPending === pending) this.nativeAheadPending = null
       })
     }, 400)
   }
 
-  private async prepareNativeAhead(): Promise<void> {
+  private prepareNativeAhead(): Promise<void> {
+    // The loader and saved-take conformance both prepare while stopped. Their
+    // ownership checks must run in the same lane, not before the native queue:
+    // two callers can otherwise both see no graph and the second gets busy.
+    const previous = this.nativeAheadPending
+    const epoch = this._songEpoch
+    const ahead = this.aheadEpoch
+    const pending = (async () => {
+      if (previous) await previous.catch(() => {})
+      if (epoch !== this._songEpoch || ahead !== this.aheadEpoch) return
+      await this.performNativePrepareAhead()
+    })()
+    this.nativeAheadPending = pending
+    const settled = (): void => {
+      if (this.nativeAheadPending === pending) this.nativeAheadPending = null
+    }
+    void pending.then(settled, settled)
+    return pending
+  }
+
+  private async performNativePrepareAhead(): Promise<void> {
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
         this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs) return
     const epoch = this._songEpoch
@@ -519,24 +535,47 @@ export class MultitrackEngine {
       epoch !== this._songEpoch || ahead !== this.aheadEpoch || this._playing ||
       !this.aheadAllowed || this.teardownStarted ||
       this.betweenSongs
-    const module = await this.ensureNativePlayback()
-    if (stale() || module.client.recoveryPending) return
-    if (module.client.retainedPrepared) {
-      const { withVoiceTakeLane } = await import('./desktop-native-playback')
-      await module.client.reprepareRetainedAhead(withVoiceTakeLane(this.nativePlaybackRequest(true)).request)
-      if (stale()) await module.client.discardAhead()
-      return
+    // Six attempts, at most 2.7 seconds of backoff. Play joins this promise;
+    // genuine graph/codec/device failures still reach the panel on attempt one.
+    const backoffMs = [100, 200, 400, 800, 1200]
+    for (let attempt = 0; !stale(); attempt++) {
+      try {
+        // Leaving the preceding song can still be finishing its exact unload.
+        if (this.nativePlaybackUnload) await this.nativePlaybackUnload
+        const module = await this.ensureNativePlayback()
+        if (stale()) return
+        if (module.client.recoveryPending) {
+          throw Object.assign(new Error('Native prepare-ahead is awaiting recovery.'), {
+            failure: { code: 'recovery-required', detail: 'Native prepare-ahead is awaiting recovery.' }
+          })
+        }
+        let prepared: boolean
+        if (module.client.retainedPrepared) {
+          const { withVoiceTakeLane } = await import('./desktop-native-playback')
+          prepared = await module.client.reprepareRetainedAhead(withVoiceTakeLane(this.nativePlaybackRequest(true)).request)
+        } else {
+          if (module.client.active) return
+          if (module.client.preparedAhead) await module.client.discardAhead()
+          if (stale()) return
+          prepared = await module.prepareAhead(module.client, this.nativePlaybackRequest(true))
+        }
+        // A song switch/discard queues behind the native prepare and takes it
+        // with it. Never retry or publish an old song's error in the new one.
+        if (stale()) { await module.client.discardAhead(); return }
+        if (!prepared && module.client.lastFailure) {
+          throw Object.assign(new Error(module.client.lastFailure.detail), { failure: module.client.lastFailure })
+        }
+        return
+      } catch (error) {
+        if (stale()) return
+        const failure = (error as { failure?: DesktopNativePlaybackFailure })?.failure
+        if (!transientNativePrepareFailure(failure) || attempt >= backoffMs.length) {
+          this.reportPlaybackFailure(error)
+          return
+        }
+        await new Promise(resolve => setTimeout(resolve, backoffMs[attempt]))
+      }
     }
-    if (module.client.active) return
-    if (module.client.preparedAhead) await module.client.discardAhead()
-    if (stale()) return
-    const prepared = await module.prepareAhead(module.client, this.nativePlaybackRequest(true))
-    if (!stale() && !prepared && module.client.lastFailure) {
-      this.reportPlaybackFailure(Object.assign(new Error(module.client.lastFailure.detail), { failure: module.client.lastFailure }))
-    }
-    // Discarded while the prepare ran: it is serialized behind, so this
-    // lands after the prepare and takes it with it.
-    if (stale()) await module.client.discardAhead()
   }
 
   /** Drop a graph prepared ahead of Play: the app is leaving the song for
@@ -792,7 +831,8 @@ export class MultitrackEngine {
     this.syncClickWatcher()
     this.requestedPlaybackError = { reason, code, provider, message, cause, userInitiated,
       failure: candidate?.failure ?? this.nativePlayback?.lastFailure ?? { code: 'prepare-failed', detail: message } }
-    console.error('Playback request failed:', this.requestedPlaybackError)
+    console.error('Playback request failed: ' + JSON.stringify({ reason, code, message, userInitiated,
+      failure: this.requestedPlaybackError.failure }))
     this.emit()
   }
 

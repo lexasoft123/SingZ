@@ -72,7 +72,7 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
   it.each([0, -1, 0.24999, 4.00001, NaN, Infinity])('names invalid tempo %s', (playbackRate) => {
     const decision = selectDesktopPlaybackBackend('darwin', { ...features(), playbackRate })
     expect(decision).toMatchObject({ backend: 'rejected', failure: { code: 'graph-rejected', detail: expect.stringContaining('0.25..4') } })
-    expect(console.warn).toHaveBeenCalledWith('Native playback declined:', expect.objectContaining({ code: 'graph-rejected' }))
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"code":"graph-rejected"'))
   })
   it.each([-24.001, 24.001, NaN, Infinity])('names invalid transpose %s', (transpose) => {
     expect(selectDesktopPlaybackBackend('darwin', { ...features(), transpose })).toMatchObject({
@@ -128,7 +128,7 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
     const onDecline = vi.fn()
     expect(await decideDesktopNativePlayback(request(), onDecline)).toBeNull()
     expect(onDecline).toHaveBeenCalledWith({ code: 'addon-unavailable', detail: expect.stringContaining('addon did not load') })
-    expect(console.warn).toHaveBeenCalledWith('Native playback declined:', expect.objectContaining({ code: 'addon-unavailable' }))
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"code":"addon-unavailable"'))
   })
   it.each([tryStartDesktopNativePlayback, prepareDesktopNativePlaybackAhead])('retains selector failures on the boolean adapter client', async (admit) => {
     const client = new DesktopNativePlaybackClient(() => undefined)

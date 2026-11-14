@@ -16,6 +16,12 @@ export interface DesktopNativePlaybackFailure {
   format?: string
 }
 
+/** Ownership can still be settling while a background song/take prepare queues.
+ * Malformed lanes and all other admission failures must surface immediately. */
+export function transientNativePrepareFailure(failure: DesktopNativePlaybackFailure | null | undefined): boolean {
+  return failure?.code === 'native-audio-busy' || failure?.code === 'recovery-required'
+}
+
 /** Exhaustive over the shared desktop bridge union, including main-only errors. */
 export const NATIVE_PLAYBACK_FAILURE_KEYS = {
   'addon-unavailable': 'player.failure.addon',

@@ -582,7 +582,7 @@ describe('engine-owned training audio', () => {
     expect(engine.playing).toBe(false)
     // Preparing and teardown's pause are visible; the late rejection is silent.
     expect(emissions).toHaveBeenCalledTimes(2)
-    expect(logged).not.toHaveBeenCalledWith('Playback request failed:', expect.anything())
+    expect(logged).not.toHaveBeenCalledWith(expect.stringMatching(/^Playback request failed:/))
   })
 
   it('settles a load-triggered native unload already in flight at teardown', async () => {
@@ -942,7 +942,8 @@ describe('engine-owned training audio', () => {
     })
     expect(engine.playing).toBe(false)
     expect(context.bufferSources).toHaveLength(0)
-    expect(logged).toHaveBeenCalledWith('Playback request failed:', engine.playbackError)
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('"code":"provider-failure"'))
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining(engine.playbackError!.message))
 
     engine.toggle()
     await flushPlaybackRequest()

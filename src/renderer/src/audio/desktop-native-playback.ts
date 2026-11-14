@@ -101,7 +101,7 @@ export interface DesktopNativePlaybackFeatures {
 }
 
 export type { DesktopNativePlaybackFailureCode, DesktopNativePlaybackFailure } from './native-playback-failure'
-import type { DesktopNativePlaybackFailureCode, DesktopNativePlaybackFailure } from './native-playback-failure'
+import { transientNativePrepareFailure, type DesktopNativePlaybackFailureCode, type DesktopNativePlaybackFailure } from './native-playback-failure'
 
 export type DesktopPlaybackBackendDecision =
   | { backend: 'native'; provider: DesktopPlaybackProvider }
@@ -113,7 +113,7 @@ function decline(
   context: Pick<DesktopNativePlaybackFailure, 'laneId' | 'format'> = {}
 ): Extract<DesktopPlaybackBackendDecision, { backend: 'rejected' }> {
   const failure = { code, detail, ...context }
-  console.warn('Native playback declined:', failure)
+  console.warn('Native playback declined: ' + JSON.stringify(failure))
   return { backend: 'rejected', reason: detail, failure }
 }
 
@@ -452,7 +452,7 @@ export async function tryStartDesktopNativePlayback(
   })
   if (!prepare) return false
   const started = await client.prepareAndStart(prepare)
-  if (!started && request.voiceTake && prepare.lanes.some(lane => lane.id === VOICE_TAKE_LANE_ID) &&
+  if (!started && !transientNativePrepareFailure(client.lastFailure) && request.voiceTake && prepare.lanes.some(lane => lane.id === VOICE_TAKE_LANE_ID) &&
       !client.active && !client.recoveryPending) {
     request.onVoiceTakeState?.({ status: 'error', reason: 'prepare-failed' })
     return tryStartDesktopNativePlayback(client, { ...request, voiceTake: undefined }, onDecline)
@@ -474,7 +474,7 @@ export async function prepareDesktopNativePlaybackAhead(
   })
   if (!prepare) return false
   const prepared = await client.prepareAhead(prepare)
-  if (!prepared && request.voiceTake && prepare.lanes.some(lane => lane.id === VOICE_TAKE_LANE_ID) &&
+  if (!prepared && !transientNativePrepareFailure(client.lastFailure) && request.voiceTake && prepare.lanes.some(lane => lane.id === VOICE_TAKE_LANE_ID) &&
       !client.active && !client.recoveryPending) {
     request.onVoiceTakeState?.({ status: 'error', reason: 'prepare-failed' })
     return prepareDesktopNativePlaybackAhead(client, { ...request, voiceTake: undefined }, onDecline)
@@ -491,7 +491,7 @@ export class DesktopNativePlaybackError extends Error {
     super(detail, { cause })
     this.name = 'DesktopNativePlaybackError'
     this.failure = { code, detail }
-    console.warn('Native playback declined:', this.failure)
+    console.warn('Native playback declined: ' + JSON.stringify(this.failure))
   }
 }
 
@@ -541,7 +541,7 @@ export class DesktopNativeProviderError extends Error {
     this.name = 'DesktopNativeProviderError'
     this.failure = cause instanceof DesktopNativePlaybackError ? cause.failure
       : { code: 'provider-unavailable', detail: this.message }
-    console.warn('Native playback declined:', this.failure)
+    console.warn('Native playback declined: ' + JSON.stringify(this.failure))
   }
 }
 
@@ -571,7 +571,7 @@ export class DesktopNativeRecoveryError extends Error {
     super(message ?? (cause instanceof Error ? cause.message : String(cause)), { cause })
     this.name = 'DesktopNativeRecoveryError'
     this.failure = { code: 'recovery-required', detail: this.message }
-    console.warn('Native playback declined:', this.failure)
+    console.warn('Native playback declined: ' + JSON.stringify(this.failure))
   }
 }
 
@@ -635,7 +635,7 @@ export class DesktopNativePlaybackClient {
 
   private recordFailure(failure: DesktopNativePlaybackFailure): false {
     this.lastFailure = failure
-    console.warn('Native playback declined:', failure)
+    console.warn('Native playback declined: ' + JSON.stringify(failure))
     return false
   }
 
@@ -1426,7 +1426,7 @@ export class DesktopNativePlaybackClient {
 
   /** Prepare `request` now, ahead of Play: decode, graph build, nothing
    * opened; the native service keeps the route. False when native is busy, recovering
-   * or the core declines; the caller presents lastFailure as a blocking error. */
+   * or the core declines; background callers retry transient ownership failures. */
   async prepareAhead(request: DesktopNativePlaybackPrepare): Promise<boolean> {
     return this.serialize(() => this.prepareAheadUnlocked(request))
   }
@@ -1437,7 +1437,7 @@ export class DesktopNativePlaybackClient {
   ): Promise<boolean> {
     this.lastFailure = null
     if (this.ownsOutput || this.generation || this.ahead || this.recoveryPending) {
-      return this.recordFailure({ code: this.recoveryPending ? 'recovery-required' : 'graph-rejected',
+      return this.recordFailure({ code: this.recoveryPending ? 'recovery-required' : 'native-audio-busy',
         detail: 'native prepare-ahead is busy or awaiting recovery' })
     }
     try {
