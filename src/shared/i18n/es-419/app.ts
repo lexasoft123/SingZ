@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "Dispositivo de reproducción guardado desconectado — usando el predeterminado del sistema",
   "app.output.switchDenied": "SingZ no podía cambiar el dispositivo de reproducción – todavía en el anterior.",
   "app.output.switchFailed": "No se pudo cambiar al dispositivo — todavía está en el anterior.",
-  "app.monitor.stopped": "Monitorización con auriculares detenida: {message}",
   "app.native.beatNotApplied": "La actualización nativa de la rejilla de ritmo no se aplicó: {error}",
   "app.native.metronomeNotApplied": "La actualización nativa del metrónomo no se aplicó: {error}",
   "app.native.transposeNotApplied": "No se aplicó la actualización nativa de transposición: {error}",

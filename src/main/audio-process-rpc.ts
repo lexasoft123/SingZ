@@ -8,20 +8,23 @@ export interface AudioProcessEndpoint {
 export const AUDIO_RPC_LIMIT = 64
 export const AUDIO_RPC_BYTES = 64 * 1024 * 1024
 export const AUDIO_RPC_TIMEOUT_MS = 120_000
+export const AUDIO_CONFORM_TIMEOUT_MS = 10 * 60_000
 
 export const AUDIO_OWNER_METHODS: ReadonlySet<string> = new Set([
   'configureMicrophoneMix', 'stopMicrophoneMix', 'microphoneMixStatus', 'devices', 'hostDevices',
-  'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor', 'playbackProviders', 'playbackCapability',
+  'playbackProviders', 'playbackCapability',
   'preparePlayback', 'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback',
   'seekPlayback', 'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
   'setPlaybackMasterGain', 'playbackStatus', 'measurePlaybackLanes', 'unloadPlayback', 'begin', 'cancel',
   'rendererGone', 'rendererDetached', 'state', 'stats'
 ])
 export const AUDIO_BINDING_METHODS: ReadonlySet<string> = new Set([
+  'audioBufferSettings',
   'initializeSharedAudio', 'refreshSharedAudioInventory', 'inputDevices', 'beginCapture', 'cancelCapture',
-  'captureState', 'captureStats', 'scheduleTrainingCue', 'trainingCueStatus', 'cancelTrainingCues',
+  'captureState', 'captureStats', 'previewClick', 'scheduleTrainingCue', 'trainingCueStatus', 'cancelTrainingCues',
   'setTrainingCueGain', 'captureRecording', 'cancelAudioExport', 'recordTake', 'finishTake', 'cancelTake',
-  'playTake', 'stopTake', 'presentationQuery'
+  'conformTake', 'cancelTakeConform', 'presentationQuery', 'voiceMonitorAvailability', 'beginVoiceMonitor',
+  'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor'
 ])
 
 export interface AudioRequest {
@@ -107,7 +110,7 @@ export class AudioProcessRpc {
       const timer = setTimeout(() => {
         this.fail(new Error(`Audio process timed out during ${method}`))
         this.endpoint.kill()
-      }, this.timeoutMs)
+      }, method === 'conformTake' && this.timeoutMs === AUDIO_RPC_TIMEOUT_MS ? AUDIO_CONFORM_TIMEOUT_MS : this.timeoutMs)
       this.pending.set(id, { resolve: value => resolve(value as T), reject, timer, bytes })
       this.bytes += bytes
       try { this.endpoint.postMessage({ type: 'request', epoch: this.epoch, id, target, method, args, locale: getLocale() } satisfies AudioRequest) }

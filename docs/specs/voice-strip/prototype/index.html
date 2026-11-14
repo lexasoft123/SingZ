@@ -30,17 +30,18 @@
       <div class="voice-controls">
         <div class="vc-top">
           <h2 class="lane-name">Voice</h2>
+          <button class="ib gear" id="gearBtn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Track settings" title="Track settings"></button>
           <span class="badge" id="latBadge" hidden></span>
-          <button class="ib mon" id="monBtn" type="button" aria-pressed="false"></button>
         </div>
         <label class="sr-only" for="inputSel" id="inputLbl">Input</label>
         <div class="select-wrap"><select id="inputSel" aria-labelledby="inputLbl"></select></div>
         <div class="vc-btns">
           <button class="ib arm" id="armBtn" type="button" aria-pressed="false"></button>
+          <button class="ib mon" id="monBtn" type="button" aria-pressed="false"></button>
           <button class="chip mute" id="muteBtn" type="button" aria-pressed="false">M</button>
           <button class="chip solo" id="soloBtn" type="button" aria-pressed="false">S</button>
           <div class="fader">
-            <input class="vol" id="levelRng" type="range" min="0" max="100" value="80" aria-label="Voice level">
+            <input class="vol" id="levelRng" type="range" min="0" max="100" value="80" aria-label="Take playback level">
           </div>
         </div>
       </div>
@@ -56,19 +57,24 @@
         <div class="lane-head">
           <span class="note" id="msg" aria-live="polite"></span>
           <span class="take-info" id="takeInfo" hidden></span>
+          <button class="effect-chip" id="pitchChip" type="button" aria-pressed="true" hidden></button>
+          <span class="lane-state" id="laneState" tabindex="-1" role="status" hidden></span>
+          <button class="btn" id="retryBtn" type="button" hidden>Retry</button>
           <span class="take-actions" id="takebar" role="group" aria-label="Take actions" hidden>
             <button class="ib" id="keepBtn" type="button"></button>
-            <button class="ib" id="listenBtn" type="button"></button>
-            <button class="ib" id="listenSongBtn" type="button"></button>
+            <span class="listen-old" role="group" aria-label="Listen back (old)"><span>Listen back (old)</span>
+              <button class="ib" id="listenBtn" type="button"></button>
+              <button class="ib" id="listenSongBtn" type="button"></button></span>
             <button class="ib" id="addBtn" type="button"></button>
             <button class="ib danger" id="discardBtn" type="button"></button>
           </span>
         </div>
         <div class="voice-track" id="voiceTrack">
           <div class="voice-empty" id="voiceEmpty"></div>
-          <div class="clip" id="clip" hidden>
+          <div class="clip" id="clip" hidden role="option" aria-selected="false" tabindex="0" title="Click to select. Drag or use the arrow keys to move it (Shift for larger steps). Delete removes it, Esc deselects.">
             <canvas id="clipWave" aria-hidden="true"></canvas>
             <span class="clip-tag" id="clipTag"></span>
+            <span class="preparing" id="prep" hidden>Preparing take for playback</span>
           </div>
         </div>
       </div>
@@ -106,6 +112,15 @@
 </aside>
 
 <div class="sr-only" id="live" aria-live="polite"></div>
+<div class="modal-scrim" id="setModal" role="presentation" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Voice track settings">
+    <h2>Voice track settings</h2>
+    <div class="set-row"><label for="setMon">Monitor level</label><input id="setMon" type="range" min="0" max="100" value="50"><output id="setMonOut">-12 dB</output></div>
+    <div class="set-row"><label for="setTake">Take playback level</label><input id="setTake" type="range" min="0" max="100" value="80"><output id="setTakeOut">80%</output></div>
+    <p class="set-route" id="setRoute">Output: Scarlett 2i2 (Settings › Audio route)</p>
+    <div class="set-actions"><button type="button" id="setDone" class="btn">Done</button></div>
+  </div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>

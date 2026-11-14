@@ -1,15 +1,22 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BeatInfo } from '../audio/beat'
 import type { MultitrackEngine } from '../audio/engine'
 import { modalCoversApp, type TimeView, type UITrack } from '../model'
 import { createPlayheadWriter } from '../playhead-writes'
 import BeatGrid from './BeatGrid'
 import TrackLane from './TrackLane'
+import { wheelAction } from './stack-wheel'
 const StemExport = lazy(() => import('./StemExport'))
 import { t } from '../i18n'
 
 /** Ruler row height — the grid template and the beat overlay share it. */
 const RULER_H = 30
+/** The extra (Voice) lane row is as tall as a stem lane (same 1fr share); never below this, so the take's waveform reads. */
+const EXTRA_ROW_MIN_H = 104
+/** Lane row minimum: 64px for a few stems; 48px from DENSE_LANES on, so a 7-stem split plus the Voice row fits a 820px window without scrolling. */
+const LANE_MIN_H = 64
+const DENSE_LANE_MIN_H = 48
+const DENSE_LANES = 6
 
 /** When the lanes' played layer catches up with a rolling playhead: once the
  *  sliver the kit's edge layer draws behind the line is this many device
@@ -60,6 +67,12 @@ interface Props {
   onRemoveTrack: (id: string) => void
   /** Rename one of those added lanes (the label only — files stay put). */
   onRenameTrack: (id: string, label: string) => void
+  /**
+   * One extra lane in the stack's own grid, last row (the Voice strip): two grid cells, controls in
+   * column 1 and the time axis in column 2, placed with `grid-row: var(--extra-row)`. Because it is a
+   * row of this grid, the scrub overlay and the playhead run through it and it shares the lanes' view.
+   */
+  extra?: React.ReactNode
 }
 
 function SelectionRange({
@@ -131,12 +144,15 @@ export default function TrackStack({
   onVolume,
   onAddTrack,
   onRemoveTrack,
-  onRenameTrack
+  onRenameTrack,
+  extra
 }: Props): React.JSX.Element {
   const [exportOpen, setExportOpen] = useState(false)
   const stackRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
+  /** The same line again, above the Voice clip (which sits over the scrub overlay to catch its own clicks). */
+  const voiceHeadRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ mode: 'new' | 'resize'; anchor: number; x0: number; selecting: boolean } | null>(null)
   const [width, setWidth] = useState(0)
   const displayTracks = useMemo(() => {
@@ -161,6 +177,13 @@ export default function TrackStack({
   followShiftRef.current = onFollow
   const settleRef = useRef(settleView)
   settleRef.current = settleView
+
+  // The Voice lane's copy appears after the line has been written (writes are change-gated): catch it up.
+  const hasExtra = Boolean(extra)
+  useLayoutEffect(() => {
+    const v = playheadRef.current?.style.getPropertyValue('--p')
+    if (v) voiceHeadRef.current?.style.setProperty('--p', v)
+  }, [hasExtra])
 
   // One rAF loop drives the playhead + the bright "played" waveform clip for
   // every lane via the --p custom property, and keeps the viewport following
@@ -253,6 +276,7 @@ export default function TrackStack({
         })
         if (w.line !== null) {
           head.style.setProperty('--p', w.line)
+          voiceHeadRef.current?.style.setProperty('--p', w.line)
           edgeLine = w.line
         }
         if (w.reveal !== null) el.style.setProperty('--p', w.reveal)
@@ -304,6 +328,16 @@ export default function TrackStack({
     const el = overlayRef.current
     if (!el) return
     const onWheel = (e: WheelEvent): void => {
+      const stack = stackRef.current
+      const action = wheelAction({
+        zoomKey: e.ctrlKey || e.metaKey,
+        zoomed: viewRef.current.zoomed,
+        deltaX: e.deltaX,
+        deltaY: e.deltaY,
+        stackScrollable: !!stack && stack.scrollHeight > stack.clientHeight
+      })
+      // a vertical gesture over a scrolling stack is the browser's to scroll
+      if (action === 'scroll') return
       e.preventDefault()
       const v = viewRef.current
       const rect = el.getBoundingClientRect()
@@ -357,7 +391,11 @@ export default function TrackStack({
     <div
       className="stack"
       ref={stackRef}
-      style={{ gridTemplateRows: `${RULER_H}px repeat(${tracks.length}, minmax(64px, 1fr))` }}
+      data-dense={tracks.length >= DENSE_LANES ? '' : undefined}
+      style={{
+        gridTemplateRows: `${RULER_H}px repeat(${tracks.length}, minmax(${tracks.length >= DENSE_LANES ? DENSE_LANE_MIN_H : LANE_MIN_H}px, 1fr))${extra ? ` minmax(${EXTRA_ROW_MIN_H}px, 1fr)` : ''}`,
+        ['--extra-row' as string]: tracks.length + 2
+      }}
     >
       <div className="ruler-spacer" style={{ gridRow: 1 }}>
         <button
@@ -383,40 +421,42 @@ export default function TrackStack({
             {tick.label}
           </span>
         ))}
-        <div className="zoom-cluster no-drag">
-          <div className="zoom-seg">
-            <button
-              type="button"
-              title={t('player.stack.zoomOutTitle')}
-              onClick={(e) => {
-                e.currentTarget.blur()
-                onZoom(1.4)
-              }}
-            >
-              −
-            </button>
-            <button
-              type="button"
-              title={t('player.stack.zoomInTitle')}
-              onClick={(e) => {
-                e.currentTarget.blur()
-                onZoom(0.65)
-              }}
-            >
-              +
-            </button>
-            <button
-              type="button"
-              title={t('player.stack.showWholeSongTitle')}
-              disabled={!view}
-              onClick={(e) => {
-                e.currentTarget.blur()
-                onResetZoom()
-              }}
-            >
-              {t('player.stack.full')}
-            </button>
-          </div>
+      </div>
+      {/* A direct child of the stack, not of the sticky .ruler: the ruler is a stacking context at z 5
+          and would confine the cluster under the scrub overlay (z 5, later sibling). */}
+      <div className="zoom-cluster no-drag">
+        <div className="zoom-seg">
+          <button
+            type="button"
+            title={t('player.stack.zoomOutTitle')}
+            onClick={(e) => {
+              e.currentTarget.blur()
+              onZoom(1.4)
+            }}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            title={t('player.stack.zoomInTitle')}
+            onClick={(e) => {
+              e.currentTarget.blur()
+              onZoom(0.65)
+            }}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            title={t('player.stack.showWholeSongTitle')}
+            disabled={!view}
+            onClick={(e) => {
+              e.currentTarget.blur()
+              onResetZoom()
+            }}
+          >
+            {t('player.stack.full')}
+          </button>
         </div>
       </div>
 
@@ -458,16 +498,23 @@ export default function TrackStack({
           viewS={viewS}
           viewE={viewE}
           rulerH={RULER_H}
-          lanes={tracks.length}
+          lanes={tracks.length + (extra ? 1 : 0)}
           onMoveBar={onMoveBar}
           onClearBar={onClearBar}
         />
       )}
 
+      {extra}
+      {extra && (
+        <div className="playhead-over-voice" aria-hidden="true">
+          <div className="playhead" ref={voiceHeadRef} />
+        </div>
+      )}
+
       <div
         className="scrub-overlay"
         ref={overlayRef}
-        style={{ gridRow: `1 / ${tracks.length + 2}` }}
+        style={{ gridRow: `1 / ${tracks.length + 2 + (extra ? 1 : 0)}` }}
         onPointerDown={(e) => {
           const t = timeFromPointer(e.clientX)
           if (t === null) return

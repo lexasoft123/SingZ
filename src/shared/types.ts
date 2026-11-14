@@ -686,18 +686,7 @@ export type DesktopAudioHostInventoryResult =
       error: string
     }
 
-export interface DesktopMonitorConfig {
-  inputDeviceUid: string
-  outputDeviceUid: string
-  inputChannels: number[]
-  outputChannels: number[]
-  sampleRate: number
-  bufferFrames: number
-  maximumFrames: number
-  exclusive: boolean
-}
-
-export interface DesktopMonitorFormat {
+export interface AudioHostFormat {
   sampleRate: number
   maximumFrames: number
   nominalBufferFrames: number
@@ -709,79 +698,11 @@ export interface DesktopMonitorFormat {
 }
 
 /** Named provider components. This is deliberately not a round-trip total. */
-export interface DesktopMonitorLatency {
+export interface AudioHostLatency {
   inputDeviceFrames: number
   outputDeviceFrames: number
   bufferFrames: number
   externalRouteFrames: number
-}
-
-export type DesktopMonitorErrorCode =
-  | 'none'
-  | 'invalid-generation'
-  | 'already-running'
-  | 'invalid-configuration'
-  | 'platform-not-ready'
-  | 'unsupported-route'
-  | 'native-audio-busy'
-  | 'graph-failure'
-  | 'host-failure'
-  | 'queue-full'
-
-interface DesktopMonitorResultBase {
-  ownershipGeneration: string
-  state: AudioHostStateName
-  format: DesktopMonitorFormat
-  latency: DesktopMonitorLatency
-}
-
-export type DesktopMonitorResult =
-  | (DesktopMonitorResultBase & {
-      ok: true
-      errorCode: 'none'
-      error: ''
-    })
-  | (DesktopMonitorResultBase & {
-      ok: false
-      errorCode: Exclude<DesktopMonitorErrorCode, 'none'>
-      error: string
-    })
-
-export interface DesktopMonitorMeter {
-  peak: number
-  rms: number
-  frames: string
-}
-
-/** Scalar telemetry only. PCM and native graph ownership never cross IPC. */
-export interface DesktopMonitorStatus {
-  active: boolean
-  enabled: boolean
-  deviceLost: boolean
-  ownershipGeneration: string
-  gainDb: number
-  state: AudioHostStateName
-  error: string
-  pre: DesktopMonitorMeter
-  post: DesktopMonitorMeter
-  format: DesktopMonitorFormat
-  latency: DesktopMonitorLatency
-  routeGeneration: string
-  streamGeneration: string
-  callbacks: string
-  renderedFrames: string
-  xruns: string
-  deadlineMisses: string
-  renderFailures: string
-  adapterRenderFailures: number
-  terminalRenderFailures: number
-  adapterLastStatusCode: number
-  /** The `detail` beside that code — which check the graph refused on, where
-   *  the code alone collapses a dozen refusals into one value. */
-  adapterLastStatusDetail: number
-  parameterOverflows: number
-  nonFiniteSamples: number
-  rejectedBlocks: number
 }
 
 export type DesktopPlaybackProvider = 'coreaudio' | 'wasapi' | 'asio' | 'alsa'
@@ -1023,6 +944,7 @@ export type DesktopPlaybackErrorCode =
   | 'native-audio-busy'
   | 'platform-not-ready'
   | 'unauthorized-path'
+  | 'path-too-long'
 
 export interface DesktopPlaybackResult {
   ok: boolean
@@ -1030,8 +952,8 @@ export interface DesktopPlaybackResult {
   error: string
   generation: string
   state: DesktopPlaybackState
-  format: Omit<DesktopMonitorFormat, 'sampleFormat' | 'outputClockMaster' | 'accessMode'>
-  latency: DesktopMonitorLatency
+  format: Omit<AudioHostFormat, 'sampleFormat' | 'outputClockMaster' | 'accessMode'>
+  latency: AudioHostLatency
   cleanupComplete?: boolean
   retainedBytes?: string
   physicalOwnershipRetained?: boolean
@@ -1234,7 +1156,7 @@ export interface DesktopPlaybackStatus {
   rejectedBlocks: number
   error: string
   format: DesktopPlaybackResult['format']
-  latency: DesktopMonitorLatency
+  latency: AudioHostLatency
   lanes: DesktopPlaybackLaneStatus[]
   /** The addon's own media layer (zcore's decodedAudioCapabilityTag). */
   mediaCodecTag: string
@@ -1312,7 +1234,29 @@ export type DesktopMicrophoneMixStatus = {
   }[]
 } | { ok: false; error: string }
 
+/** Immutable native ADR 0004 projection. Components are explanatory; native
+ * graphToAudibleNs has already composed AutomaticComplete and user trim once. */
+export interface DesktopRouteLatencySnapshot {
+  readonly interfaceVersion: 1
+  readonly structSize: number
+  readonly routeGeneration: string
+  readonly provenance: 'platform-reported'
+  readonly flags: number
+  readonly confidencePermille: number
+  readonly measuredAtNs: string
+  readonly automaticPresentationNs: string
+  readonly renderDeviceNs: string
+  readonly externalRouteNs: string
+  readonly userTrimNs: string
+  readonly graphToAudibleNs: string
+}
+export type DesktopPreviewClickResult =
+  | { ok: true }
+  | { ok: false; errorCode: 'invalid-configuration' | 'output-unavailable' | 'queue-full' | 'addon-unavailable'; error: string }
+
 export interface DesktopTrainingAudioStatus {
+  routeLatency: DesktopRouteLatencySnapshot | null
+  previewClicks?: { enqueued: string; started: string; completed: string; pending: number }
   hostTimeNs: string
   outputLatencyMs: number
   renderedFrames?: string
@@ -1330,7 +1274,7 @@ export interface DesktopTrainingPcmCue {
   generation: string
 }
 export type DesktopTrainingPcmResult =
-  | { ok: true; startsAfterMs: number; durationMs: number; outputLatencyMs: number; processingMs: number }
+  | { ok: true; startsAfterMs: number; durationMs: number; outputLatencyMs: number; routeLatency: DesktopRouteLatencySnapshot; processingMs: number }
   | { ok: false; error: string }
 
 export type DesktopAudioInputEvent =
@@ -1425,6 +1369,7 @@ export interface SingzApi {
     channel?: number
   }): Promise<DesktopAudioInputStartResult>
   configureDesktopTrainingOutput(outputDeviceUid: string, provider: DesktopPlaybackProvider): Promise<{ ok: boolean; error?: string }>
+  previewDesktopClick(accent: boolean, gain: number): Promise<DesktopPreviewClickResult>
   desktopTrainingAudioStatus(): Promise<DesktopTrainingAudioStatus | null>
   configureMicrophoneMix(config: DesktopMicrophoneMixConfig): Promise<DesktopMicrophoneMixResult>
   stopMicrophoneMix(): Promise<DesktopMicrophoneMixResult>
@@ -1564,15 +1509,7 @@ export interface SingzApi {
   onCaptureWindow(cb: (window: CaptureAnalysisWindow) => void): () => void
   /** Full-duplex native host inventory. UIDs remain distinct from Chromium ids. */
   audioHostDevices(provider?: DesktopPlaybackProvider): Promise<DesktopAudioHostInventoryResult>
-  /** Starts muted. The main-process owner mints the monotonic native generation. */
-  beginMonitor(config: DesktopMonitorConfig): Promise<DesktopMonitorResult>
-  setMonitorGain(
-    ownershipGeneration: string,
-    gainDb: number,
-    enabled: boolean
-  ): Promise<DesktopMonitorResult>
-  monitorStatus(): Promise<DesktopMonitorStatus>
-  endMonitor(ownershipGeneration: string): Promise<DesktopMonitorResult>
+  audioBufferSettings(change?: { frames: number; deviceUids: string[] }): Promise<import('./audio-buffer').AudioBufferStatus>
   desktopPlaybackProviders(): Promise<DesktopPlaybackProviderInfo[]>
   desktopPlaybackCapability(): Promise<DesktopPlaybackRuntimeCapability>
   prepareDesktopPlayback(
@@ -1599,6 +1536,7 @@ export interface SingzApi {
     muted: boolean,
     solo: boolean
   ): Promise<DesktopPlaybackResult>
+  /** Generation '0' targets the shared service even with no song loaded. */
   setDesktopPlaybackMasterGain(
     generation: string,
     gain: number

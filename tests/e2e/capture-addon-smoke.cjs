@@ -78,7 +78,8 @@ ready.then(async () => {
   for (const name of [
     'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats',
     'recordTake', 'finishTake', 'cancelTake',
-    'audioHostDevices', 'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor',
+    'voiceMonitorAvailability', 'beginVoiceMonitor', 'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor', 'setPlaybackOutputCurrent',
+    'audioHostDevices',
     'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
     'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',
     'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
@@ -158,75 +159,97 @@ ready.then(async () => {
   if (process.argv.includes('--inventory')) {
     console.log(JSON.stringify({ input: devices, host: hostDevices }))
   }
-  const monitor = addon.monitorStatus()
-  assert.equal(monitor.active, false)
-  assert.equal(monitor.enabled, false)
-  assert.equal(typeof monitor.deviceLost, 'boolean')
-  assert.equal(typeof monitor.ownershipGeneration, 'string')
-  assert.equal(typeof monitor.pre.peak, 'number')
-  assert.equal(typeof monitor.post.rms, 'number')
-  assert.equal(typeof monitor.callbacks, 'string')
-  assert.equal(typeof monitor.adapterRenderFailures, 'number')
-  assert.equal(typeof monitor.terminalRenderFailures, 'number')
-  const invalidBegin = addon.beginMonitor({}, 1n)
-  assert.equal(invalidBegin.ok, false)
-  assert.equal(invalidBegin.errorCode, 'invalid-configuration')
-  assert.equal(typeof invalidBegin.format.sampleRate, 'number')
-  assert.equal(typeof invalidBegin.latency.bufferFrames, 'number')
-  const typedConfig = {
-    inputDeviceUid: 'smoke:never-opened',
-    outputDeviceUid: 'smoke:never-opened',
-    inputChannels: [2],
-    outputChannels: [0, 1],
-    sampleRate: 48000,
-    bufferFrames: 128,
-    maximumFrames: 256,
-    exclusive: false
+  const voiceMonitor = addon.voiceMonitorStatus()
+  assert.equal(voiceMonitor.running, false)
+  assert.equal(voiceMonitor.lost, false)
+  assert.deepEqual(voiceMonitor.warnings, [])
+  assert.equal(typeof voiceMonitor.outputDeviceUid, 'string')
+  assert.deepEqual(voiceMonitor.outputChannels, [])
+  assert.match(voiceMonitor.songOutputGeneration, /^(?:0|[1-9][0-9]*)$/)
+  assert.match(voiceMonitor.songStreamGeneration, /^(?:0|[1-9][0-9]*)$/)
+  assert.match(voiceMonitor.songHostRouteGeneration, /^(?:0|[1-9][0-9]*)$/)
+  assert.equal(typeof voiceMonitor.songHostStateCode, 'number')
+  assert.equal(typeof voiceMonitor.songProcessBufferFrames, 'number')
+  assert.equal(typeof voiceMonitor.songBufferWarnings, 'number')
+  assert.equal(typeof voiceMonitor.songObservedCallbackFrames, 'number')
+  assert.equal(typeof voiceMonitor.monitorObservedCallbackFrames, 'number')
+  assert.equal(voiceMonitor.songOutputCurrent, false)
+  for (const field of ['callbacks', 'deliveredFrames', 'periodChanges', 'sequenceGaps',
+    'timestampChanges', 'clockChanges', 'routeChanges', 'positiveSampleGapFrames', 'sampleRegressions',
+    'maxCallbackExcessNs', 'maxOutputExcessNs', 'periodOutputExcessNs', 'lastFlags', 'lastFrames'])
+    assert.match(voiceMonitor.songCallbackDiagnostics[field], /^(?:0|[1-9][0-9]*)$/)
+  assert.equal(addon.setPlaybackOutputCurrent(true).ok, false)
+  assert.equal(addon.setPlaybackOutputCurrent('false').ok, false)
+  assert.equal(addon.setPlaybackOutputCurrent(false).ok, true)
+  const voiceInput = { inputUid: 'smoke:never-opened', inputChannel: 0 }
+  const voiceAvailability = addon.voiceMonitorAvailability(voiceInput)
+  assert.equal(voiceAvailability.available, false)
+  assert.ok(['platform', 'no-input', 'permission'].includes(voiceAvailability.reason))
+  const idleContext = { contextOnly: true, webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: '' }
+  const idleAvailability = addon.voiceMonitorAvailability(idleContext)
+  if (process.platform === 'darwin') {
+    assert.equal(idleAvailability.available, true)
+  } else {
+    assert.equal(idleAvailability.reason, 'platform')
   }
-  for (const generation of [Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1, 2n ** 64n]) {
-    const rejected = addon.beginMonitor(typedConfig, generation)
-    assert.equal(rejected.ok, false)
-    assert.equal(rejected.errorCode, 'invalid-generation')
+  for (const invalid of [
+    { ...idleContext, webAudioPlaying: 'true' },
+    { ...idleContext, browserOutputUid: 'bad\0uid' },
+    { ...idleContext, selectedOutputUid: 7 }
+  ]) assert.equal(addon.voiceMonitorAvailability(invalid).reason, process.platform === 'darwin' ? 'error' : 'platform')
+  if (process.platform === 'darwin') {
+    // A nonexistent selected output must be refused, without opening hardware.
+    const missingOutput = addon.voiceMonitorAvailability({ ...idleContext, webAudioPlaying: true,
+      browserOutputUid: 'smoke:browser-output', selectedOutputUid: 'smoke:monitor-output' })
+    assert.equal(missingOutput.available, false)
+    assert.equal(missingOutput.reason, 'device-lost')
+    assert.equal(addon.voiceMonitorAvailability(idleContext).available, true)
   }
-  const maximumGeneration = addon.beginMonitor({}, (2n ** 64n) - 1n)
-  assert.equal(maximumGeneration.ok, false)
-  assert.equal(maximumGeneration.errorCode, 'invalid-configuration')
-  assert.equal(maximumGeneration.ownershipGeneration, '18446744073709551615')
-  for (const mutation of [
-    { sampleRate: Infinity },
-    { sampleRate: 48000.5 },
-    { bufferFrames: 128.5 },
-    { bufferFrames: 8193 },
-    { maximumFrames: 2n ** 32n },
-    { inputChannels: [2.5] },
-    { inputChannels: [64] },
-    { exclusive: 1 }
-  ]) {
-    const rejected = addon.beginMonitor({ ...typedConfig, ...mutation }, 2n)
-    assert.equal(rejected.ok, false)
-    assert.equal(rejected.errorCode, 'invalid-configuration')
+  const commonRoute = addon.voiceMonitorAvailability(voiceInput)
+  if (process.platform === 'darwin') assert.equal(typeof commonRoute.commonOutputName, 'string')
+  for (const inputChannel of [-1, 0.5, 64, Infinity, NaN]) {
+    const invalid = addon.voiceMonitorAvailability({ ...voiceInput, inputChannel })
+    assert.equal(invalid.available, false)
+    assert.equal(invalid.reason, 'error')
+    assert.equal(addon.beginVoiceMonitor({ ...voiceInput, inputChannel, gainDb: 0 }, 11n).ok, false)
   }
-  for (const [gain, enabled] of [
-    [Infinity, false], [12.0000001, false], [-60.000001, false],
-    [0, 0], [0, 'false']
-  ]) {
-    const rejected = addon.setMonitorGain(1n, gain, enabled)
-    assert.equal(rejected.ok, false)
-    assert.equal(rejected.errorCode, 'invalid-configuration')
+  // Zero is the explicit orphan-cleanup sentinel when the caller lost its generation.
+  assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: 0 }, 0n).ok, false)
+  assert.equal(addon.endVoiceMonitor(0n).ok, true)
+  for (const generation of [-1n, 1, 1.5, Infinity, 2n ** 64n]) {
+    assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: 0 }, generation).ok, false)
+    assert.equal(addon.endVoiceMonitor(generation).ok, false)
   }
-  assert.equal(addon.setMonitorGain(1.5, 0, false).errorCode,
-    'invalid-generation')
-  assert.equal(addon.endMonitor(Number.MAX_SAFE_INTEGER + 1).errorCode,
-    'invalid-generation')
+  assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: NaN }, 10n).ok, false)
+  assert.equal(addon.setVoiceMonitorGain(Infinity).ok, false)
+  // The native gain target accepts finite updates even while idle; begin
+  // supplies its own gain and resets that target for the new monitor.
+  assert.equal(addon.setVoiceMonitorGain(0).ok, true)
+  // Ending an already-idle valid generation is idempotent.
+  assert.equal(addon.endVoiceMonitor(10n).ok, true)
+  assert.equal(addon.voiceMonitorStatus().running, false)
+  // Loading/unloading a peer N-API environment must retain addon-wide hosts.
+  const { Worker } = require('node:worker_threads')
+  await new Promise((resolveWorker, rejectWorker) => {
+    const worker = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads')
+      const peer = require(workerData)
+      parentPort.postMessage(peer.voiceMonitorStatus())
+    `, { eval: true, workerData: addonPath })
+    worker.once('message', status => {
+      try { assert.equal(status.running, false) } catch (error) { rejectWorker(error) }
+    })
+    worker.once('error', rejectWorker)
+    worker.once('exit', code => code === 0 ? resolveWorker() : rejectWorker(new Error('Peer addon environment failed')))
+  })
+  assert.equal(addon.voiceMonitorStatus().running, false)
+  console.log('PASS voice monitor exports and rejected admission without hardware')
+  for (const name of ['beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor']) {
+    assert.equal(addon[name], undefined)
+  }
   for (const generation of [1.5, Number.MAX_SAFE_INTEGER + 1, 2n ** 64n]) {
     assert.throws(() => addon.beginCapture({}, generation, () => {}), TypeError)
   }
-  const staleGain = addon.setMonitorGain(1n, 0, false)
-  assert.equal(staleGain.ok, false)
-  assert.equal(staleGain.errorCode, 'invalid-generation')
-  const staleEnd = addon.endMonitor(1n)
-  assert.equal(staleEnd.ok, false)
-  assert.equal(staleEnd.errorCode, 'invalid-generation')
   const playback = addon.playbackStatus()
   assert.equal(playback.capability, PLAYBACK_CAPABILITY)
   assert.equal(playback.state, 'unloaded')
@@ -331,10 +354,15 @@ ready.then(async () => {
   // like, and skipping on it would turn that regression green on the very
   // machines that could catch it (line 93 only asserts the field is a string,
   // and '' is one).
+  if (process.argv.includes('--no-hardware-open')) {
+    console.log('PASS ABI and rejected-admission checks; hardware output open explicitly skipped')
+    finish()
+    return
+  }
   const outputs = hostDevices.devices.filter((device) => device.outputChannels > 0)
   if (outputs.length === 0) {
     console.log(
-      'prepared-graph accounting skipped: the host has no output device at all ' +
+      'prepared-graph accounting and native song-output open skipped: the host has no output device at all ' +
       `(provider ${hostDevices.provider}, ${hostDevices.devices.length} devices)`
     )
     finish()
@@ -356,6 +384,18 @@ ready.then(async () => {
       outputDeviceUid: hostDevices.defaultOutputUid || outputs[0].uid
     }
     delete preparedConfig.graphDocument
+    if (process.platform === 'darwin') {
+      const selectedOutput = outputs.find(device => device.uid === preparedConfig.outputDeviceUid)
+      assert.ok(selectedOutput)
+      // Exact app route inputs: request the current preferred buffer, rather
+      // than zero. Opening a silent prepared graph exercises the REAL AUHAL
+      // opt-in guard without starting any hardware callback or audible audio.
+      preparedConfig.sampleRate = Math.round(selectedOutput.nominalSampleRate)
+      preparedConfig.bufferFrames = selectedOutput.bufferFrames.preferredFrames || 512
+      preparedConfig.maximumFrames = 4096
+      preparedConfig.outputChannels = Array.from({ length: Math.min(2, selectedOutput.outputChannels) }, (_, index) => index)
+      preparedConfig.masterGain = 0
+    }
     const preparedResult = await addon.preparePlayback(preparedConfig, [{
       id: 'smoke', path: wav, gain: 1, muted: false, solo: false
     }], 4n)
@@ -368,6 +408,11 @@ ready.then(async () => {
       'aggregate retained bytes include the graph arena exactly once')
     assert.ok(prepared.graphSnapshot && prepared.graphSnapshot.nodes.length > 0,
       'prepared status exposes the actual compiled graph')
+    if (process.platform === 'darwin') {
+      const opened = addon.openPlaybackOutput(4n)
+      assert.equal(opened.ok, true, opened.error || opened.message)
+      console.log('PASS native song-output open with current preferred buffer and silent graph')
+    }
     const unloaded = addon.unloadPlayback(4n)
     assert.equal(unloaded.ok, true, unloaded.error)
     assert.equal(unloaded.cleanupComplete, true)

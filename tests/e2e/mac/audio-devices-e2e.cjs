@@ -1,15 +1,15 @@
 /*
  * Audio settings E2E (macOS): gear → Settings → Audio; device pickers, live
- * mic device switch while singing, resizable pitch strip, Esc close, output
- * sinkId move + boot-time re-apply. Permanent harness for the e2e-verifier.
+ * mic device switch while singing, resizable pitch strip, Esc close, native
+ * output move + boot-time re-apply. Permanent harness for the e2e-verifier.
  *
  * Runs against an isolated scratch profile (SINGZ_USERDATA_DIR) with a
  * pre-seeded stems cache, so no library is needed and demucs never runs. The
  * splitter pack still is: the song is split through the Split menu, as a
  * singer splits one, which refuses to start without the pack, and whose
  * second stage separates lead from backing vocals with the pack's own model.
- * SINGZ_FAKE_MIC grants capture without touching hardware. A renderer-only,
- * driver-installed stereo fixture then supplies silence on channel 1 and a
+ * SINGZ_FAKE_MIC supplies Chromium capture for the Web Audio half; native mode
+ * opens the real microphone. A renderer-only stereo fixture supplies silence on channel 1 and a
  * tone on channel 2. Device enumeration stays real, so the hardware picker
  * branch is still exercised without making meter assertions machine-dependent.
  *
@@ -45,15 +45,20 @@ require('../../shared/watchdog.cjs').arm('audio-devices-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { showCaptureWindow } = require('./capture-visibility.cjs')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { writeFileSync, mkdirSync, copyFileSync, createReadStream, rmSync } = require('node:fs')
 const { createHash } = require('node:crypto')
 const { join } = require('node:path')
 const { tmpdir } = require('node:os')
 
 const OUT = process.env.E2E_OUT ?? tmpdir()
-const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
+// Electron must use the package root: native pitch resolves assets/pitch from
+// app.getAppPath(), which is out/main when launching its script directly.
+const APP = join(__dirname, '..', '..', '..')
 const PROFILE = join(OUT, 'audio-e2e-userdata')
 const STEMS_6 = ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano']
+let activeApp
 
 /** 2s of 440 Hz mono 16-bit PCM — enough for a loaded, playable song. */
 function makeWav(path) {
@@ -92,12 +97,15 @@ const launch = async () => {
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
-    // SINGZ_MUTE silences the device only — enumeration, sinkId moves and the
+    // SINGZ_MUTE silences the device only — enumeration, native route moves and the
     // fake-mic pitch path stay real, so every assertion here is mute-proof.
-    env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' }
+    env: { ...process.env, ...scratchProfileEnv({ dir: PROFILE }), SINGZ_FAKE_MIC: '1', SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_LANG: 'en' }
   })
-  await quietLaunch(app) // measurement runs must not steal the singer's focus
+  activeApp = app
   const win = await app.firstWindow()
+  // A hidden document deliberately cannot start the Settings microphone.
+  // Exercise a singer-visible meter without activating the test window.
+  await showCaptureWindow(app, quietLaunch)
   await win.addInitScript(() => {
     const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
     const state = { active: 0, maxActive: 0 }
@@ -142,6 +150,7 @@ const launch = async () => {
     }
   })
   await win.reload()
+  await win.waitForFunction(() => !document.hidden, null, { timeout: 10000 })
   return app
 }
 
@@ -224,6 +233,9 @@ const coreProvenance = async (win) => {
   // Seed the splitter cache: six copies of the tone under the song's hash,
   // so the split's first stage returns instantly without running demucs.
   rmSync(PROFILE, { recursive: true, force: true })
+  scratchProfileEnv({ dir: PROFILE, projectsRoot: join(PROFILE, 'library'), settings: {
+    language: 'en', releaseNotesSeen: require(join(APP, 'package.json')).version
+  } })
   const stemDir = join(PROFILE, 'stems', await hashFile(wav), 'htdemucs_6s')
   mkdirSync(stemDir, { recursive: true })
   for (const s of STEMS_6) copyFileSync(wav, join(stemDir, `${s}.wav`))
@@ -244,49 +256,6 @@ const coreProvenance = async (win) => {
     null,
     { timeout: 20000 }
   )
-  // Phase 4A controls are inspected only. SINGZ_MUTE mutes Chromium, not the
-  // native host, so this driver must never confirm headphones or click Start.
-  await win.waitForSelector('.monitor-strip')
-  const monitorUi = await win.evaluate(async () => {
-    const start = document.querySelector('.monitor-actions button')
-    const style = start ? getComputedStyle(start) : null
-    return {
-      heading: document.querySelector('#monitor-heading')?.textContent,
-      confirmation: document.querySelector('.monitor-headphones-check input')?.checked,
-      startDisabled: start?.disabled,
-      startBackgroundImage: style?.backgroundImage,
-      startOpacity: style?.opacity,
-      routeHelp: start?.getAttribute('aria-describedby'),
-      active: (await window.singz.monitorStatus()).active,
-      state: document.querySelector('.monitor-state')?.textContent
-    }
-  })
-  if (monitorUi.heading !== 'Headphone monitoring') throw new Error('native monitor controls missing')
-  if (monitorUi.confirmation !== false) throw new Error('headphone confirmation was not fresh/off')
-  if (monitorUi.startDisabled !== true) throw new Error('native Start was enabled without headphone confirmation')
-  if (monitorUi.startBackgroundImage !== 'none' || monitorUi.startOpacity !== '1')
-    throw new Error(`disabled native Start still looked active: ${JSON.stringify(monitorUi)}`)
-  if (monitorUi.routeHelp !== 'monitor-route-status') throw new Error('disabled Start does not expose route help')
-  if (monitorUi.active !== false) throw new Error('audio-devices E2E unexpectedly started native output')
-  if (!monitorUi.state?.includes('Monitoring is off')) throw new Error(`monitor did not start off: ${monitorUi.state}`)
-  if (await win.$('.persistent-monitor')) throw new Error('persistent monitor control appeared while monitoring was off')
-  const settingsCloseCopy = await win.$eval('.settings-card .modal-actions .pill', (button) => button.textContent?.trim())
-  if (settingsCloseCopy !== 'Close') throw new Error(`Settings close still implies monitor teardown: ${settingsCloseCopy}`)
-  // Exercise only the Chromium release/restore half against this Electron.
-  // This proves the silent-sink overload exists without ever calling beginMonitor.
-  const sinkHandoff = await win.evaluate(async () => {
-    await window.__engine.releaseOutputForNativeMonitor()
-    const released = window.__engine.nativeMonitorOwnsOutput
-    await window.__engine.restoreOutputAfterNativeMonitor()
-    return {
-      released,
-      restored: !window.__engine.nativeMonitorOwnsOutput,
-      playing: window.__engine.playing,
-      nativeActive: (await window.singz.monitorStatus()).active
-    }
-  })
-  if (!sinkHandoff.released || !sinkHandoff.restored || sinkHandoff.playing || sinkHandoff.nativeActive)
-    throw new Error(`Chromium sink handoff probe failed: ${JSON.stringify(sinkHandoff)}`)
   const nativeInventory = await win.evaluate(() => window.singz.listDesktopAudioInputs())
   const nativeMode = nativeInventory.ok
   const inputPrefKey = nativeMode ? 'nativeInputUid' : 'inputId'
@@ -386,24 +355,6 @@ const coreProvenance = async (win) => {
     }
   }
   await win.screenshot({ path: join(OUT, 'settings-audio.png') })
-  await win.$eval('.monitor-strip', (section) => section.scrollIntoView({ block: 'start' }))
-  await new Promise((resolve) => setTimeout(resolve, 200))
-  const graphLayout = await win.$eval('.dsp-graph-viewport', (viewport) => ({
-    clientWidth: viewport.clientWidth,
-    scrollWidth: viewport.scrollWidth,
-    modules: viewport.querySelectorAll('.dsp-graph-node').length,
-    labels: [...viewport.querySelectorAll('.dsp-graph-node')].map((node) =>
-      (node.getAttribute('aria-label') ?? '').split(':')[0]
-    )
-  }))
-  if (graphLayout.modules !== 7) throw new Error(`DSP graph rendered ${graphLayout.modules} modules, expected 7`)
-  if (graphLayout.scrollWidth > graphLayout.clientWidth + 1)
-    throw new Error(`DSP graph clips at Settings width (${graphLayout.scrollWidth}px > ${graphLayout.clientWidth}px)`)
-  if (graphLayout.labels.join('|') !== 'Input|Pre meter|Gain|Channel map|Limiter|Post meter|Output')
-    throw new Error(`DSP graph order is wrong: ${graphLayout.labels.join(' → ')}`)
-  console.log(`DSP graph: ${graphLayout.modules} modules fit ${graphLayout.clientWidth}px`)
-  await win.screenshot({ path: join(OUT, 'settings-monitoring.png') })
-
   await win.selectOption('#settings-input', ins[0].v)
   await win.waitForFunction(
     ({ key, value }) => JSON.parse(localStorage.getItem('singz.audio') ?? '{}')[key] === value,
@@ -419,21 +370,19 @@ const coreProvenance = async (win) => {
     pickedOut = realOuts[0].v
     await win.selectOption('#settings-output', pickedOut)
     try {
-      await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
+      await win.waitForFunction((id) => window.__engine.outputDeviceId === id &&
+        JSON.parse(localStorage.getItem('singz.audio') ?? '{}').nativeOutputUid === id, pickedOut, {
         timeout: 10000
       })
     } catch (error) {
       const diagnosis = await win.evaluate(() => ({
-        sinkId: window.__engine.context.sinkId,
         desiredOutputId: window.__engine.outputDeviceId,
-        storedOutputId: JSON.parse(localStorage.getItem('singz.audio') ?? '{}').outputId,
+        storedOutputUid: JSON.parse(localStorage.getItem('singz.audio') ?? '{}').nativeOutputUid,
         selectedOutputId: document.querySelector('#settings-output')?.value ?? '',
         warnings: [...document.querySelectorAll('.settings-hint.warn')].map((node) => node.textContent),
-        monitorState: document.querySelector('.monitor-state')?.textContent ?? '',
-        monitorStateClass: document.querySelector('.monitor-state')?.className ?? '',
         previewStatus: document.querySelector('.mic-preview-status')?.textContent ?? ''
       }))
-      throw new Error(`playback sink did not switch: ${JSON.stringify(diagnosis)}; ${error.message}`)
+      throw new Error(`native playback output did not switch: ${JSON.stringify(diagnosis)}; ${error.message}`)
     }
     console.log('output moved to:', realOuts[0].t)
   } else {
@@ -650,8 +599,16 @@ const coreProvenance = async (win) => {
     { timeout: 15000 }
   )
   const restoredOwnership = await win.evaluate(() => window.__singzE2eMic)
-  if (restoredOwnership.active !== 1 || restoredOwnership.maxActive > 1)
+  if (restoredOwnership.active !== (nativeMode ? 0 : 1) || restoredOwnership.maxActive > 1)
     throw new Error(`karaoke capture did not restore exclusively: ${JSON.stringify(restoredOwnership)}`)
+  if (nativeMode) {
+    const restored = await win.evaluate(async () => ({
+      state: await window.singz.captureState(), stats: await window.singz.captureStats()
+    }))
+    if (restored.state.state !== 'running' || Number(restored.stats.deliveredFrames) <= 0)
+      throw new Error(`native karaoke capture did not restore: ${JSON.stringify(restored)}`)
+    console.log('restored native karaoke capture:', JSON.stringify(restored))
+  }
 
   // ---- pitch strip: drag the top edge, drawing scales, height persists ----
   const before = await win.$eval('.pitch-strip', (el) => el.clientHeight)
@@ -684,22 +641,22 @@ const coreProvenance = async (win) => {
   if (prefs[inputPrefKey] !== expectInput) throw new Error(`${inputPrefKey} pref lost across relaunch`)
   if (prefs.inputChannel !== expectedInputChannel) throw new Error(`input channel lost across relaunch: ${prefs.inputChannel}`)
   if (pickedOut) {
-    await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
+    await win.waitForFunction((id) => window.__engine.outputDeviceId === id, pickedOut, {
       timeout: 15000
     })
-    console.log('boot re-apply: sinkId restored')
+    console.log('boot re-apply: native output UID restored')
   }
   await app.close()
 
   console.log(
     'SCREENSHOTS:',
     join(OUT, 'settings-audio.png'),
-    join(OUT, 'settings-monitoring.png'),
     join(OUT, 'pitch-resized.png')
   )
   console.log('PASS')
   process.exit(0)
-})().catch((e) => {
+})().catch(async (e) => {
   console.error('FAIL', e.stack ?? e.message)
+  await activeApp?.close().catch(() => undefined)
   process.exit(1)
 })

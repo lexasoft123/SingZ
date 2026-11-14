@@ -65,6 +65,23 @@ bool validId(const std::string& id) {
   });
 }
 }
+long double detail::takeGapFrames(const AudioInputCaptureMetadata& previous, uint32_t previousFrames,
+                                 double previousRate, const AudioInputCaptureMetadata& current,
+                                 double currentRate) noexcept {
+  if (previous.timestampQuality != AudioInputTimestampQuality::Hardware ||
+      current.timestampQuality != AudioInputTimestampQuality::Hardware ||
+      previousRate != currentRate || !std::isfinite(currentRate) || currentRate <= 0 ||
+      current.sampleHostTimeNs < previous.sampleHostTimeNs) return 0;
+  const long double durationNs = previousFrames * 1.0e9L / previousRate;
+  // Pairwise differences keep nominal-vs-device clock error bounded to one
+  // block. Subtract uint64 timestamps first to retain precision at large epochs.
+  const long double excessNs = static_cast<long double>(current.sampleHostTimeNs - previous.sampleHostTimeNs) - durationNs;
+  const long double thresholdNs = std::max(2.0e6L, durationNs * .5L);
+  // Round each detected gap independently: at most half a sample of error per
+  // padded gap. No fractional remainder carries into later ordinary blocks.
+  const long double gapFrames = excessNs > thresholdNs ? std::round(excessNs * currentRate / 1.0e9L) : 0;
+  return gapFrames;
+}
 struct TakeWriter::Slot {
   uint32_t frames = 0;
   double rate = 0;
@@ -102,8 +119,11 @@ void TakeWriter::start(const std::string& directory, const std::string& id,
     throw std::runtime_error("Cannot write voice take WAV header");
   }
   write_.store(0); read_.store(0); dropped_.store(0);
+  gapPaddedFrames_.store(0); gapPaddedBlocks_.store(0);
+  gapUntrustedTimestampBlocks_.store(0); gapRegressions_.store(0); gapOverflow_.store(false);
   firstCaptured_.store(false, std::memory_order_release);
   firstHostNs_.store(0); firstQuality_.store(AudioInputTimestampQuality::Unknown);
+  stampSequence_.store(0); stampHost_.store(0); stampFrame_.store(0);
   deviceLost_ = std::move(deviceLost);
   done_.store(false, std::memory_order_release);
   accepting_.store(true, std::memory_order_seq_cst);
@@ -152,12 +172,37 @@ TakeInputLevel TakeWriter::level() const noexcept {
   const auto db = [](double linear) { return linear > 1e-6 ? 20 * std::log10(linear) : -120.; };
   return {db(peak_.load(std::memory_order_relaxed)), db(std::sqrt(meanSquare_.load(std::memory_order_relaxed)))};
 }
+TakeGapStats TakeWriter::gapStats() const noexcept {
+  return {gapPaddedFrames_.load(std::memory_order_relaxed),
+          gapPaddedBlocks_.load(std::memory_order_relaxed),
+          gapUntrustedTimestampBlocks_.load(std::memory_order_relaxed),
+          gapRegressions_.load(std::memory_order_relaxed),
+          gapOverflow_.load(std::memory_order_relaxed)};
+}
 void TakeWriter::resetLevel() noexcept { peak_.store(0); meanSquare_.store(0); }
 uint64_t TakeWriter::lastSampleHostNs() const noexcept { return lastHostNs_.load(std::memory_order_relaxed); }
+TakeFrameStamp TakeWriter::frameStamp() const noexcept {
+  for (unsigned attempt = 0; attempt < 8; ++attempt) {
+    const auto before = stampSequence_.load(std::memory_order_acquire);
+    if (before & 1u) continue;
+    const TakeFrameStamp stamp{stampHost_.load(std::memory_order_relaxed),
+                               stampFrame_.load(std::memory_order_relaxed)};
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (before == stampSequence_.load(std::memory_order_acquire)) return stamp;
+  }
+  return {};
+}
 void TakeWriter::resetCaptureTelemetry() noexcept { resetLevel(); lastHostNs_.store(0); }
 void TakeWriter::run() noexcept {
   try {
     std::vector<unsigned char> pcm(size_t(maxFrames_) * 2);
+    // Allocate once before consuming: all gap writes reuse this bounded zero buffer.
+    const std::array<unsigned char, 8192> silence{};
+    Slot previous;
+    bool havePrevious = false;
+    const auto trustworthy = [](AudioInputTimestampQuality q) {
+      return q == AudioInputTimestampQuality::Hardware;
+    };
     auto flushed = std::chrono::steady_clock::now();
     for (;;) {
       if (deviceLost_ && deviceLost_()) { result_.deviceLost = true; closeGate(); }
@@ -178,6 +223,52 @@ void TakeWriter::run() noexcept {
           result_.firstSampleHostNs = s.capture.sampleHostTimeNs;
           result_.firstSampleQuality = s.capture.timestampQuality;
         }
+        // Delivery metadata travels through the ring unchanged. Only this writer
+        // computes time gaps or writes silence; the capture sink remains bounded.
+        const bool trusted = trustworthy(s.capture.timestampQuality);
+        if (!trusted) {
+          ++result_.gapUntrustedTimestampBlocks;
+          gapUntrustedTimestampBlocks_.store(result_.gapUntrustedTimestampBlocks, std::memory_order_relaxed);
+        }
+        uint64_t padding = 0;
+        if (havePrevious && trusted && previous.rate == s.rate) {
+          if (s.capture.sampleHostTimeNs < previous.capture.sampleHostTimeNs) {
+            ++result_.gapRegressions;
+            gapRegressions_.store(result_.gapRegressions, std::memory_order_relaxed);
+          } else if (!result_.gapOverflow) {
+            const long double frames = detail::takeGapFrames(previous.capture, previous.frames, previous.rate,
+                                                             s.capture, s.rate);
+            // Reject the whole offending gap and latch off further padding.
+            // Keep writing real PCM so a bad clock cannot discard a performance.
+            const uint64_t perGapCap = uint64_t(result_.sampleRate) * 2;
+            const uint64_t perTakeCap = uint64_t(result_.sampleRate) * 10;
+            if (frames > perGapCap || frames > perTakeCap - result_.gapPaddedFrames) {
+              result_.gapOverflow = true;
+              gapOverflow_.store(true, std::memory_order_relaxed);
+            } else {
+              padding = static_cast<uint64_t>(frames);
+            }
+          }
+        }
+        if ((result_.frames + padding + s.frames) * 2 > maxDataBytes)
+          throw std::runtime_error("Voice take reached the WAV size limit");
+        if (padding) {
+          uint64_t remaining = padding;
+          while (remaining) {
+            const auto frames = std::min<uint64_t>(remaining, silence.size() / 2);
+            const auto written = std::fwrite(silence.data(), 1, size_t(frames) * 2, file_);
+            result_.frames += written / 2;
+            result_.gapPaddedFrames += written / 2;
+            gapPaddedFrames_.store(result_.gapPaddedFrames, std::memory_order_relaxed);
+            if (written != frames * 2) throw std::runtime_error("Cannot pad voice take audio (storage full or write failed)");
+            remaining -= frames;
+          }
+          ++result_.gapPaddedBlocks;
+          gapPaddedBlocks_.store(result_.gapPaddedBlocks, std::memory_order_relaxed);
+        }
+        previous = s;
+        // Untrusted blocks break the pair; never infer a gap across an estimate.
+        havePrevious = trusted;
         const auto* input = samples_.get() + (r % capacity_) * maxFrames_;
         for (uint32_t i = 0; i < s.frames; ++i) {
           const float v = std::isfinite(input[i]) ? std::clamp(input[i], -1.f, 1.f) : 0;
@@ -185,6 +276,12 @@ void TakeWriter::run() noexcept {
           put16(pcm.data() + i * 2, static_cast<uint16_t>(sample));
         }
         const auto written = std::fwrite(pcm.data(), 1, size_t(s.frames) * 2, file_);
+        if (written >= 2) {
+          stampSequence_.fetch_add(1, std::memory_order_acq_rel);
+          stampHost_.store(s.capture.sampleHostTimeNs, std::memory_order_relaxed);
+          stampFrame_.store(result_.frames, std::memory_order_relaxed);
+          stampSequence_.fetch_add(1, std::memory_order_release);
+        }
         result_.frames += written / 2;
         if (result_.frames && !firstCaptured_.load(std::memory_order_relaxed)) {
           firstHostNs_.store(result_.firstSampleHostNs, std::memory_order_relaxed);
@@ -219,6 +316,8 @@ void TakeWriter::run() noexcept {
   if (std::fclose(file_) && result_.error.empty()) result_.error = "Cannot close voice take WAV";
   file_ = nullptr;
   result_.droppedBlocks = dropped_.load(std::memory_order_relaxed);
+  if (result_.gapOverflow && result_.error.empty())
+    result_.error = "Voice take timestamp gap exceeds padding limit";
   done_.store(true, std::memory_order_release);
 }
 TakeWriteResult TakeWriter::finish() {

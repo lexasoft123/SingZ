@@ -40,7 +40,7 @@ without a second device owner. See the
 
 For the Desktop utility path, the Electron main process owns the service lifetime and file authorization.
 Playback and relay survive a renderer reload; renderer-owned microphone
-analysis and headphone monitoring release on detach. Destroying the owning
+analysis releases on detach. Destroying the owning
 webContents releases all of its native ownership; app quit closes the service.
 A replacement screen shows top-bar Stop controls for retained song playback
 and active relay audio, even before a song document has been reopened. This is not a system daemon: restarting Electron main stops audio,
@@ -527,6 +527,15 @@ the desktop stores; the phone reads only the grid back (metronome,
 count-in), and the desktop adopts the rest as-is.
 
 ## On-disk layout
+
+Desktop `<userData>` and Chromium `sessionData` are explicitly `<appData>/SingZ`
+for all launch modes, unless `SINGZ_USERDATA_DIR` selects an isolated profile.
+Before services load, a distinct legacy `<appData>/singz` is renamed when the
+canonical directory is absent. If both exist, the canonical profile wins and a
+warning identifies the untouched legacy directory; entries are never merged.
+Case-insensitive aliases are untouched. A failed rename keeps using the legacy
+profile and logs a warning. Models and packs retain the paths below, independent
+of the userData override.
 
 ```
 <userData>/stems/<sha1-16>/         per-song cache (stems, lyrics.json)

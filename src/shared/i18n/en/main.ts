@@ -172,19 +172,9 @@ export const main = {
   'main.error.nativeAudioHostInvalidInventory': 'Native audio host returned an invalid device inventory.',
   'main.error.nativeAudioHostInventoryFailed': 'Native audio host inventory failed: {message}',
   'main.error.nativeCaptureUnavailable': 'Native capture unavailable',
-  'main.error.monitorGenerationExhausted': 'The native monitor generation range is exhausted.',
-  'main.error.monitorFailedToStart': 'Native headphone monitoring failed to start: {message}',
-  'main.error.monitorInvalidResponse': 'Native headphone monitoring returned an invalid response.',
-  'main.error.monitorGenerationInactive': 'The headphone monitor generation is no longer active.',
-  'main.error.monitorGainInvalidResponse': 'Native headphone gain returned an invalid response.',
-  'main.error.monitorGainFailed': 'Native headphone gain failed: {message}',
-  'main.error.monitorInvalidStopResponse': 'Native headphone monitoring returned an invalid stop response.',
-  'main.error.monitorFailedToStop': 'Native headphone monitoring failed to stop: {message}',
   'main.error.nativePlaybackUnavailable': 'Native playback unavailable',
   'main.error.invalidMicOwnershipGeneration': 'Invalid microphone ownership generation.',
   'main.error.nativeMicSupportUnavailable': 'Native microphone support is unavailable: {message}',
-  'main.error.monitorFailedGeneric': 'Native headphone monitoring failed.',
-  'main.error.monitorEndActiveFirst': 'End the active headphone monitor before starting another.',
 
   // ── source registration (drag/drop, file picker) ──
   // {ext} is a file extension (e.g. ".txt") or the fallback "that file"

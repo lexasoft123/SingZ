@@ -3,6 +3,7 @@ import { CaptureOwner, loadCaptureBinding, type NativeCaptureBinding } from './c
 import { join } from 'node:path'
 import { boxRoutingPollTick } from './box-audio/poll'
 import { open } from 'node:fs/promises'
+import { audioBufferPreferences } from '../shared/audio-buffer'
 import {
   AUDIO_BINDING_METHODS,
   AUDIO_OWNER_METHODS,
@@ -22,6 +23,9 @@ let boxShutdown: (() => void) | undefined
 const native = (): NativeCaptureBinding => {
   if (binding) return binding
   const candidate = loadCaptureBinding()
+  if (process.env.SINGZ_SURFACE !== 'box') {
+    candidate.audioBufferSettings?.(audioBufferPreferences(JSON.parse(process.env.SINGZ_AUDIO_BUFFER_PREFERENCES || '{}')))
+  }
   // Local Box has the same private LoopZ tap as the persistent host. Desktop
   // never initializes routing here. Unsupported preview images remain explicit.
   if (process.env.SINGZ_SURFACE === 'box' && process.env.SINGZ_AUDIO_BOX_DATA_DIR) {
@@ -41,6 +45,24 @@ const native = (): NativeCaptureBinding => {
   return binding = candidate
 }
 const owner = new CaptureOwner(undefined, native)
+let bufferTelemetry = ''
+function pumpBufferSettings(): void {
+  try {
+    const status = binding?.audioBufferSettings?.()
+    if (!status) return
+    const telemetry = `output requested ${status.requestedFrames}, obtained ${status.obtainedFrames} frames; ` +
+      `input requested ${status.inputRequestedFrames}, obtained ${status.inputObtainedFrames} frames; ` +
+      `pending ${status.pending}${status.error ? `; error ${status.error}` : ''}`
+    if (telemetry !== bufferTelemetry) {
+      bufferTelemetry = telemetry; console.info(`Audio buffer · ${telemetry}`)
+      if (status.error) port.postMessage({ type: 'buffer-preferences-restored', epoch, preferences: status.preferences, error: status.error })
+    }
+  } catch (error) {
+    // A settings error must never prevent a stop/cancel command reaching native.
+    const telemetry = `Audio buffer apply failed: ${String(error)}`
+    if (telemetry !== bufferTelemetry) { bufferTelemetry = telemetry; console.error(telemetry) }
+  }
+}
 let inFlight = 0
 let inFlightBytes = 0
 let closed = false
@@ -175,6 +197,9 @@ port.on('message', async ({ data }) => {
     } else if (request.target === 'export' && request.method === 'paths') {
       result = await exportPaths(args)
     } else throw new Error('Unknown audio command')
+    // The only pending case is a recording take. Its finish/cancel RPC has
+    // just released the writer, so apply now even with no Settings UI open.
+    pumpBufferSettings()
     reply(result)
   } catch (error) { reply(undefined, String(error)) }
   finally { if (admitted) { --inFlight; inFlightBytes -= bytes } }

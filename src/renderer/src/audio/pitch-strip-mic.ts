@@ -1,5 +1,6 @@
 import { type MicDevice } from './mic'
 import { NativeTrainingMicSource, type TrainingMicSource } from './training-mic'
+import { micOwnership } from './mic-ownership'
 type PitchStripSource = TrainingMicSource & { read(): number }
 
 export type PitchStripMicState = 'off' | 'starting' | 'on' | 'denied'
@@ -103,9 +104,8 @@ export class PitchStripMicOwner {
     this.publish('starting', null)
     if (this.permissionGranted) {
       const route = this.route
-      // Let the closing Settings layout cleanup release its preview before
-      // getUserMedia is requested again, even if React visits this sibling's
-      // layout effect first during the same commit.
+      // Let Settings register its asynchronous release even if React visits
+      // this sibling first. begin then waits for the actual stop receipt.
       queueMicrotask(() => {
         if (this.owns(generation, route)) void this.begin(generation, route, 'off')
       })
@@ -161,6 +161,7 @@ export class PitchStripMicOwner {
     let mic: PitchStripSource | null = null
     try {
       await this.releasePending
+      await micOwnership.waitForRelease()
       if (!this.owns(generation, route)) return
       mic = this.makeMic()
       await mic.start(this.context, {
@@ -205,7 +206,7 @@ export class PitchStripMicOwner {
     const mic = this.mic
     this.mic = null
     if (mic)
-      this.releasePending = Promise.resolve(mic.stop()).then(
+      this.releasePending = micOwnership.trackRelease(Promise.resolve(mic.stop())).then(
         () => {},
         () => {}
       )

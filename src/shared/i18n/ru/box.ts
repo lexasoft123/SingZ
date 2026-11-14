@@ -227,7 +227,6 @@ export const box: Record<keyof typeof english | 'box.catalog.songs_few' | 'box.c
   'box.queue.saveError': 'Изменение очереди видно, но не сохранено: {error}',
   'box.details.openGuardFailed': 'SingZ не смог защитить проект от удаления кэша, поэтому он не был открыт. Проверьте хранилище и повторите.',
   'box.account.signOutFailed': 'Не удалось выйти. Повторите попытку.',
-  'box.nativeRequired': 'Нативное воспроизведение недоступно для этого проекта или аудиосистемы.',
   'box.retained.restoringTitle': 'Восстанавливаем предыдущую песню',
   'box.retained.restoringBody': 'Восстанавливаем песню и её текст.',
   'box.retained.dialogLabel': 'Предыдущая песня',

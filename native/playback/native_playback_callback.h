@@ -26,6 +26,14 @@ struct NativePlaybackCallbackState {
   float heldOutputPeak{0.0F}; // render-thread only
   std::atomic<float> outputPeak{0.0F};
   std::atomic<uint32_t> outputClippedBlocks{0};
+  // Final bus publications target only the graph admitted in that block.
+  std::atomic<std::atomic<float>*>* serviceMeterPeakTarget{nullptr};
+  std::atomic<std::atomic<float>*>* serviceMeterRmsTarget{nullptr};
+  std::atomic<std::atomic<uint32_t>*>* serviceMeterClipTarget{nullptr};
+  std::atomic<uint64_t>* serviceMeterResetEpoch{nullptr};
+  std::atomic<float> serviceOutputPeak{0}, serviceOutputRms{0};
+  std::atomic<uint32_t> serviceOutputClippedBlocks{0};
+  std::atomic<bool> serviceMeterStarted{false};
   AudioHostTerminalCauseLatch firstTerminalCause{};
   std::atomic<uint32_t> terminalFailures{0};
 };
@@ -63,6 +71,10 @@ struct NativePlaybackRenderRouter {
 };
 
 static_assert(std::atomic<float>::is_always_lock_free);
+static_assert(std::atomic<bool>::is_always_lock_free);
+static_assert(std::atomic<uint64_t>::is_always_lock_free);
+static_assert(std::atomic<std::atomic<float>*>::is_always_lock_free);
+static_assert(std::atomic<std::atomic<uint32_t>*>::is_always_lock_free);
 static_assert(std::atomic<NativePlaybackCallbackState*>::is_always_lock_free);
 static_assert(
     std::atomic<const NativePlaybackSwapRequest*>::is_always_lock_free);

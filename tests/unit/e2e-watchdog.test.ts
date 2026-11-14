@@ -276,6 +276,8 @@ describe('every E2E driver arms the watchdog', () => {
   const helpers = new Set([
     'tests/e2e/linux/fixtures.cjs',
     'tests/e2e/mac/library-song.cjs',
+    'tests/e2e/mac/native-output.cjs',
+    'tests/e2e/mac/capture-visibility.cjs',
     'tests/e2e/mac/project-hold.cjs',
     'tests/e2e/mac/quiet-launch.cjs',
     'mobile/tests/android-lib.cjs',

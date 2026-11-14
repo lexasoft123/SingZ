@@ -18,6 +18,7 @@ void PlaybackPresentationHistory::AtomicEntry::store(
   sampleRate.store(e.sampleRate, relaxed);
   project.store(e.projectFrame, relaxed);
   rate.store(e.rate, relaxed);
+  transpose.store(e.transposeSemitones, relaxed);
   generation.store(e.generation, relaxed);
   continuous.store(e.continuousFrame, relaxed);
   seeks.store(e.seekCount, relaxed);
@@ -34,6 +35,7 @@ PlaybackPresentationHistory::AtomicEntry::load() const noexcept {
   e.sampleRate = sampleRate.load(relaxed);
   e.projectFrame = project.load(relaxed);
   e.rate = rate.load(relaxed);
+  e.transposeSemitones = transpose.load(relaxed);
   e.generation = generation.load(relaxed);
   e.continuousFrame = continuous.load(relaxed);
   e.seekCount = seeks.load(relaxed);
@@ -48,7 +50,8 @@ bool PlaybackPresentationHistory::append(
     const PlaybackPresentationEntry &e) noexcept {
   if (!e.hostTimeNs || !e.frames || !e.generation ||
       !std::isfinite(e.sampleRate) || e.sampleRate <= 0 ||
-      !std::isfinite(e.projectFrame) || !std::isfinite(e.rate) || e.rate < 0)
+      !std::isfinite(e.projectFrame) || !std::isfinite(e.rate) || e.rate < 0 ||
+      !std::isfinite(e.transposeSemitones))
     return false;
   // A host clock restart discards old coverage; a query must not binary-search
   // an unordered ring or reuse a preceding clock incarnation.
@@ -57,8 +60,27 @@ bool PlaybackPresentationHistory::append(
       e.continuousFrame <= previous_.continuousFrame;
   const bool boundary = writerCount_ &&
       (e.seekCount != previous_.seekCount || e.loopCount != previous_.loopCount);
-  if (clockRestart || freshTimeline || boundary || e.nonAffine)
+  const bool generationChange = writerCount_ && e.generation != previous_.generation;
+  const bool pauseChange = writerCount_ && e.paused != previous_.paused;
+  // A settings seam adopts the continuous clock and source coordinate. Never
+  // excuse seek/loop, restart, pause or an interior non-affine callback merely
+  // because it happened to share a generation change.
+  const double expected = previous_.projectFrame +
+      double(e.continuousFrame - previous_.continuousFrame) * previous_.rate;
+  const bool affineSeam = generationChange && !clockRestart && !freshTimeline &&
+      !boundary && !pauseChange && !e.nonAffine && !previous_.nonAffine &&
+      (e.rate != previous_.rate || e.transposeSemitones != previous_.transposeSemitones) &&
+      e.sampleRate == previous_.sampleRate &&
+      std::abs(e.projectFrame - expected) < 1.0;
+  const bool fault = clockRestart || freshTimeline || boundary || e.nonAffine ||
+      pauseChange || (generationChange && !affineSeam);
+  if (fault || generationChange)
     ++writerSerial_;
+  if (fault) ++writerFaultSerial_;
+  if (!writerCount_ || fault || generationChange || e.rate != previous_.rate) {
+    mappingHost_ = e.hostTimeNs;
+    mappingSeconds_ = e.projectFrame / e.sampleRate;
+  }
   sequence_.fetch_add(1, std::memory_order_acq_rel);
   if (clockRestart || freshTimeline) writerHead_ = writerCount_ = 0;
   if (writerCount_ == kCapacity) {
@@ -66,6 +88,10 @@ bool PlaybackPresentationHistory::append(
     --writerCount_;
   }
   entries_[(writerHead_ + writerCount_) % kCapacity].store(e, writerSerial_);
+  auto &added = entries_[(writerHead_ + writerCount_) % kCapacity];
+  added.faultSerial.store(writerFaultSerial_, relaxed);
+  added.mappingHost.store(mappingHost_, relaxed);
+  added.mappingSeconds.store(mappingSeconds_, relaxed);
   ++writerCount_;
   head_.store(writerHead_, relaxed);
   count_.store(writerCount_, relaxed);
@@ -101,10 +127,14 @@ PlaybackPresentationHistory::query(uint64_t hostTimeNs) const noexcept {
       if (offset >= 0 && offset < e.frames) {
         result.generation = e.generation;
         result.discontinuitySerial = slot.serial.load(relaxed);
+        result.faultSerial = slot.faultSerial.load(relaxed);
+        result.mappingStartHostNs = slot.mappingHost.load(relaxed);
+        result.mappingStartSongSeconds = slot.mappingSeconds.load(relaxed);
         result.nonAffine = e.nonAffine;
         result.paused = e.paused;
         result.sampleRate = e.sampleRate;
         result.rate = e.rate;
+        result.transposeSemitones = e.transposeSemitones;
         if (!e.nonAffine) {
           result.projectFrame = static_cast<double>(e.projectFrame + offset * e.rate);
           result.songSeconds = result.projectFrame / e.sampleRate;

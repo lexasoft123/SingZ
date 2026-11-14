@@ -64,6 +64,7 @@ const { quietLaunch } = require('./quiet-launch.cjs')
 const { existsSync, readdirSync, rmSync } = require('node:fs')
 const { scratchClone } = require('./project-hold.cjs')
 const { join } = require('node:path')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { homedir, tmpdir } = require('node:os')
 
 const ROOT =
@@ -192,7 +193,7 @@ function judge(label, rows, { pans: wantPans = false } = {}) {
     executablePath: require('electron'),
     args: [APP],
     env: {
-      ...process.env,
+      ...process.env, ...scratchProfileEnv({ projectsRoot: ROOT }),
       ...(VISIBLE ? {} : { SINGZ_E2E_HIDDEN: '1' }),
       SINGZ_MUTE: '1',
       SINGZ_NO_SYNC: '1',

@@ -1,3 +1,4 @@
+import { canonicalFilePath } from './file-path'
 import { isDriveProject } from './drive-storage'
 import { existsSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
@@ -32,7 +33,12 @@ const empty = (): DirtyState => ({ seq: 0, dirs: {}, allSeq: 0 })
 export function dirtyState(): DirtyState {
   const s = readSettings().gdriveDirty
   if (!s || typeof s.seq !== 'number') return empty()
-  return { seq: s.seq, dirs: s.dirs ?? {}, allSeq: s.allSeq ?? 0, since: s.since }
+  const dirs: Record<string, number> = {}
+  for (const [dir, seq] of Object.entries(s.dirs ?? {})) {
+    const key = canonicalFilePath(dir)
+    dirs[key] = Math.max(dirs[key] ?? 0, seq)
+  }
+  return { seq: s.seq, dirs, allSeq: s.allSeq ?? 0, since: s.since }
 }
 
 const save = (next: DirtyState): void => writeSettings({ gdriveDirty: next })
@@ -63,6 +69,7 @@ function bump(state: DirtyState, reason: string): DirtyState {
 }
 
 export function markProjectDirty(dir: string, reason: string): void {
+  dir = canonicalFilePath(dir)
   if (isDriveProject(dir)) return // Reader copies never drive the upload reconciler.
   const state = bump(dirtyState(), `${dir} (${reason})`)
   state.dirs = { ...state.dirs, [dir]: state.seq }
@@ -125,5 +132,6 @@ export async function withDirty<T>(dir: string, reason: string, fn: () => Promis
  *  root, so these are never pushed. Silently ignoring them cost a real
  *  debugging session; the UI can now say so. */
 export function dirtyOutsideLibrary(root: string): string[] {
-  return dirtyDirs().filter((dir) => dir !== root && !dir.startsWith(root + sep))
+  root = canonicalFilePath(root)
+  return dirtyDirs().filter((dir) => dir !== root && !dir.startsWith(root.endsWith(sep) ? root : root + sep))
 }

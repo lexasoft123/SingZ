@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "已儲存的播放裝置未連線——正在使用系統預設裝置",
   "app.output.switchDenied": "SingZ 未獲得切換播放裝置的許可權——仍在使用之前的裝置",
   "app.output.switchFailed": "無法切換到該裝置——仍在使用之前的裝置",
-  "app.monitor.stopped": "耳機返聽已停止：{message}",
   "app.native.beatNotApplied": "原生節拍網格更新未生效：{error}",
   "app.native.metronomeNotApplied": "原生節拍器更新未生效：{error}",
   "app.native.transposeNotApplied": "原生移調更新未生效：{error}",

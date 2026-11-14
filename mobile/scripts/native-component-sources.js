@@ -45,12 +45,17 @@ const zdspSupportZcoreFiles = [
 const nativePlaybackCallbackFiles = [
   'playback/native_playback_callback.cpp',
   'playback/native_playback_callback.h',
+  'playback/presentation_history.cpp',
+  'playback/presentation_history.h',
 ]
 
 const nativePlaybackSessionFiles = [
   'playback/shared_audio_service.cpp',
   'playback/shared_audio_service.h',
   'playback/training_pcm_mixer.h',
+  'playback/preview_click_mixer.h',
+  'playback/record_placement.cpp',
+  'playback/record_placement.h',
   'playback/native_playback_graph_document.cpp',
   'playback/native_playback_graph_document.h',
   'playback/playback_cue_plan.cpp',
@@ -80,6 +85,7 @@ const signalsmithVendorFiles = [
 
 const nativePlaybackSessionSupportFiles = [
   'playback/native_playback_callback.h',
+  'playback/output_callback_diagnostics.h',
 ]
 
 const zcoreDeviceCallbackFiles = [

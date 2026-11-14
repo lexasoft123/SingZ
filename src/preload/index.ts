@@ -1,7 +1,8 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { boxAudioPersistentLifetime } from '../shared/box-audio'
 import type { BoxAPI } from '../shared/box-contract'
-import type { VoiceArmRequest, VoiceArmResult, VoiceRecordSettingsChange, VoiceRecordStartRequest, VoicePlayTakeRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
+import { VOICE_IPC, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorGainRequest, type VoiceMonitorState } from '../shared/voice-take'
+import type { VoiceTakeMoveRequest, VoiceTakeMoveResult, VoiceTakePeaksRequest, VoiceTakePeaksResult, VoiceArmRequest, VoiceArmResult, VoiceRecordSettingsChange, VoiceRecordStartRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
 import type {
   GlassVerdict,
   LogEntry,
@@ -45,29 +46,43 @@ const box: BoxAPI = {
 }
 
 export type VoiceTakeApi = {
+  conformTake(songId: string, takeId: string, options: import('../shared/voice-take').VoiceTakeConformOptions, requestId: string): Promise<import('../shared/voice-take').VoiceTakeConformResult>
+  cancelConform(requestId: string): Promise<void>
+  invalidateConformedTake(request: import('../shared/voice-take').VoiceTakeInvalidateRequest): Promise<void>
   arm(request: VoiceArmRequest): Promise<VoiceArmResult>
   disarm(): Promise<{ ok: boolean; error?: string }>
   recordStart(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult>
   recordStop(reason?: 'device-lost' | 'error'): Promise<VoiceRecordStopResult>
   recordSettings(change: VoiceRecordSettingsChange): Promise<{ ok: boolean; error?: string }>
   list(songId: string): Promise<VoiceTakeSummary[]>
-  play(request: VoicePlayTakeRequest): Promise<{ ok: boolean; error?: string }>
-  stopPlay(): Promise<{ ok: boolean; error?: string }>
   remove(songId: string, takeId: string): Promise<{ ok: boolean; error?: string }>
+  peaks(request: VoiceTakePeaksRequest): Promise<VoiceTakePeaksResult>
+  move(request: VoiceTakeMoveRequest): Promise<VoiceTakeMoveResult>
   level(): Promise<VoiceInputLevel>
+  monitorAvailability(request: VoiceMonitorAvailabilityRequest): Promise<VoiceMonitorState>
+  monitorSet(request: VoiceMonitorSetRequest): Promise<VoiceMonitorState>
+  monitorGain(request: VoiceMonitorGainRequest): Promise<VoiceMonitorState>
+  monitorState(): Promise<VoiceMonitorState>
 }
 
 const voiceTakes: VoiceTakeApi = {
+  conformTake: (songId, takeId, options, requestId) => ipcRenderer.invoke(VOICE_IPC.conform, { ...options, songId, takeId, requestId }),
+  cancelConform: requestId => ipcRenderer.invoke(VOICE_IPC.cancelConform, requestId),
+  invalidateConformedTake: request => ipcRenderer.invoke(VOICE_IPC.invalidateConformed, request),
   arm: request => ipcRenderer.invoke('voice:arm', request),
   disarm: () => ipcRenderer.invoke('voice:disarm'),
   recordStart: request => ipcRenderer.invoke('voice:record-start', request),
   recordStop: reason => ipcRenderer.invoke('voice:record-stop', reason),
   recordSettings: change => ipcRenderer.invoke('voice:record-settings', change),
   list: songId => ipcRenderer.invoke('voice:list', songId),
-  play: request => ipcRenderer.invoke('voice:play', request),
-  stopPlay: () => ipcRenderer.invoke('voice:stop-play'),
   remove: (songId, takeId) => ipcRenderer.invoke('voice:remove', songId, takeId),
-  level: () => ipcRenderer.invoke('voice:level')
+  peaks: request => ipcRenderer.invoke(VOICE_IPC.peaks, request),
+  move: request => ipcRenderer.invoke(VOICE_IPC.move, request),
+  level: () => ipcRenderer.invoke('voice:level'),
+  monitorAvailability: request => ipcRenderer.invoke(VOICE_IPC.monitorAvailability, request),
+  monitorSet: request => ipcRenderer.invoke(VOICE_IPC.monitorSet, request),
+  monitorGain: request => ipcRenderer.invoke(VOICE_IPC.monitorGain, request),
+  monitorState: () => ipcRenderer.invoke(VOICE_IPC.monitorState)
 }
 
 const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
@@ -227,12 +242,7 @@ const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
   },
 
   audioHostDevices: (provider) => ipcRenderer.invoke('audio-host:devices', provider),
-  beginMonitor: (config) => ipcRenderer.invoke('audio-host:monitor-begin', config),
-  setMonitorGain: (ownershipGeneration, gainDb, enabled) =>
-    ipcRenderer.invoke('audio-host:monitor-gain', ownershipGeneration, gainDb, enabled),
-  monitorStatus: () => ipcRenderer.invoke('audio-host:monitor-status'),
-  endMonitor: (ownershipGeneration) =>
-    ipcRenderer.invoke('audio-host:monitor-end', ownershipGeneration),
+  audioBufferSettings: (change) => ipcRenderer.invoke('audio-host:buffer-settings', change),
 
   desktopPlaybackProviders: () => ipcRenderer.invoke('audio-host:playback-providers'),
   desktopPlaybackCapability: () => ipcRenderer.invoke('audio-host:playback-capability'),
@@ -264,6 +274,7 @@ const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
   listDesktopAudioInputs: () => ipcRenderer.invoke('audio-input:list'),
   startDesktopAudioInput: (options) => ipcRenderer.invoke('audio-input:start', options),
   configureDesktopTrainingOutput: (uid, provider) => ipcRenderer.invoke('training:output-route', uid, provider),
+  previewDesktopClick: (accent, gain) => ipcRenderer.invoke('audio-host:preview-click', accent, gain),
   desktopTrainingAudioStatus: () => ipcRenderer.invoke('training:audio-status'),
   configureMicrophoneMix: config => ipcRenderer.invoke('audio-host:microphone-mix-configure', config),
   stopMicrophoneMix: () => ipcRenderer.invoke('audio-host:microphone-mix-stop'),

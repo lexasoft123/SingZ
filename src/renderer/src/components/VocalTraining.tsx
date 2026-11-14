@@ -34,7 +34,7 @@ import type { MultitrackEngine } from '../audio/engine'
 import type { DesktopTrainingCueController } from '../audio/training-audio'
 import type { DesktopTrainingMicCapture } from '../audio/training-mic'
 import type { MicDevice } from '../audio/mic'
-import { audioSafetyBlockedCopy } from '../audio/monitoring'
+import { trainingCleanupAudioBlockedCopy } from '../audio/training-cleanup'
 import {
   audibleCueEndTimeSec,
   claimIdentifySubmission,
@@ -233,7 +233,7 @@ let trainingSeedSequence = 0
 /** Evaluated at call time so a live language switch is reflected — never
  * cache this in a module-level constant. */
 export function trainingAudioLeaseCopy(): string {
-  return audioSafetyBlockedCopy(t('settings.subject.trainingAudio'))
+  return trainingCleanupAudioBlockedCopy()
 }
 
 export function runTrainingAudioAction(
@@ -265,7 +265,7 @@ export function shouldAutoStartTrainingPrompt(
 
 /** Returns an effect cleanup. Re-evaluating this helper after the app-shell
  * lease clears schedules the transition that was deliberately not consumed
- * while native monitoring owned audio. */
+ * while the app-shell audio lease was held. */
 export function scheduleTrainingFeedbackAdvance(
   audioLeaseBlocked: boolean,
   state: Pick<DesktopTrainingState, 'route' | 'exercisePhase' | 'session'>,
@@ -929,7 +929,7 @@ export default function VocalTraining({
         onPrepare={(choice) => {
           const preparation = songPreparation
           // An unknown key opens non-audio setup only. Keep that navigation
-          // available while native monitoring owns the audio lease; the
+          // available while the app-shell audio lease is held; the
           // eventual session start remains guarded from the setup screen.
           if (!preparation?.key) {
             dispatch({

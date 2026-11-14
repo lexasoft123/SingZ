@@ -17,6 +17,7 @@ import {
   CaptureOwner,
   captureAddonManifestPath,
   captureIntegrityMode,
+  validateCaptureBindingIdentity,
   judgeLaneStarvation,
   loadCaptureBindingWith,
   pruneStaleCaptureLoadDirs,
@@ -30,8 +31,6 @@ import { logEntries } from '../../src/main/log'
 import type {
   CaptureAnalysisWindow,
   CaptureStartResult,
-  DesktopMonitorResult,
-  DesktopMonitorStatus,
   DesktopPlaybackLaneConfig,
   DesktopPlaybackLaneStatus,
   DesktopPlaybackPrepareConfig,
@@ -78,46 +77,6 @@ const analysisWindow = (generation: string): CaptureAnalysisWindow => ({
   deliveredAtNs: '5', bridgeHostTimeNs: '6', callbackToBridgeMs: 0.001,
   sampleRate: 48000, frequency: 220, clarity: 0.99,
   peak: 0.5, rms: 0.25, dbfs: -12
-})
-
-const monitorResult = (generation = '1', ok = true): DesktopMonitorResult => {
-  const common = {
-    ownershipGeneration: generation,
-    state: ok ? 'running' as const : 'error' as const,
-    format: {
-    sampleRate: 48000, maximumFrames: 512, nominalBufferFrames: 128,
-    inputChannels: 1, outputChannels: 2, sampleFormat: 'float32-planar',
-    outputClockMaster: true, accessMode: 'shared'
-    } as const,
-    latency: { inputDeviceFrames: 32, outputDeviceFrames: 48, bufferFrames: 128, externalRouteFrames: 0 }
-  }
-  return ok
-    ? { ...common, ok: true, errorCode: 'none', error: '' }
-    : { ...common, ok: false, errorCode: 'host-failure', error: 'fixture failure' }
-}
-
-const monitorEndResult = (generation = '1'): DesktopMonitorResult => ({
-  ...monitorResult(generation),
-  state: 'stopped'
-})
-
-const monitorStatus = (generation = '0', active = false): DesktopMonitorStatus => ({
-  active,
-  enabled: active,
-  deviceLost: false,
-  ownershipGeneration: generation,
-  gainDb: -12,
-  state: active ? 'running' : 'closed',
-  error: '',
-  pre: { peak: 0, rms: 0, frames: '0' },
-  post: { peak: 0, rms: 0, frames: '0' },
-  format: monitorResult(generation).format,
-  latency: monitorResult(generation).latency,
-  routeGeneration: '0', streamGeneration: '0', callbacks: '0', renderedFrames: '0',
-  xruns: '0', deadlineMisses: '0', renderFailures: '0', adapterRenderFailures: 0,
-  terminalRenderFailures: 0, adapterLastStatusCode: 0,
-  adapterLastStatusDetail: 0, parameterOverflows: 0,
-  nonFiniteSamples: 0, rejectedBlocks: 0
 })
 
 const playbackResult = (generation = '1'): DesktopPlaybackResult => ({
@@ -246,26 +205,28 @@ const playbackLanes = (): DesktopPlaybackLaneConfig[] => [{
 function fakeBinding(): NativeCaptureBinding & {
   sink?: (window: CaptureAnalysisWindow) => void
   cancelled: bigint[]
-  endedMonitors: bigint[]
-  activeMonitorGeneration?: string
 } {
   return {
     cancelled: [],
-    endedMonitors: [],
     buildInfo: { electronVersion: 'test', sourceStamp: 'test' },
     initializeSharedAudio: () => ({ ok: true }),
     refreshSharedAudioInventory: () => ({ ok: true }),
+    previewClick: () => ({ ok: true }),
     scheduleTrainingCue: () => ({ ok: true, startHostTimeNs: '1000000000', durationMs: 550 }),
     cancelTrainingCues: () => ({ ok: true }),
     setTrainingCueGain: () => ({ ok: true }),
-    trainingCueStatus: () => ({ hostTimeNs: '950000000', outputLatencyMs: 10 }),
+    trainingCueStatus: () => ({ hostTimeNs: '950000000', outputLatencyMs: 10, routeLatency: null }),
     captureRecording: () => ({ ok: true }),
     recordTake: async () => ({ ok: true }),
     finishTake: async () => ({ ok: true }),
     cancelTake: async () => ({ ok: true }),
-    playTake: async () => ({ ok: true }),
-    stopTake: async () => ({ ok: true }),
     presentationQuery: () => ({ found: false }),
+    voiceMonitorAvailability: async () => ({ available: false, reason: 'platform' }),
+    beginVoiceMonitor: async () => ({ ok: false, reason: 'platform' }),
+    setVoiceMonitorGain: async () => ({ ok: false }),
+    voiceMonitorStatus: async () => ({ running: false }),
+    setPlaybackOutputCurrent: vi.fn(() => ({ ok: true })),
+    endVoiceMonitor: async () => ({ ok: true }),
     inputDevices: () => ({
       ok: true,
       devices: [{
@@ -308,21 +269,6 @@ function fakeBinding(): NativeCaptureBinding & {
         bufferFrames: { minimumFrames: 32, maximumFrames: 512, preferredFrames: 128, fundamentalFrames: 1 }
       }]
     }),
-    beginMonitor(_config, generation) {
-      this.activeMonitorGeneration = generation.toString()
-      return monitorResult(generation.toString())
-    },
-    setMonitorGain(generation) {
-      return monitorResult(generation.toString())
-    },
-    monitorStatus() {
-      return monitorStatus(this.activeMonitorGeneration ?? '0', Boolean(this.activeMonitorGeneration))
-    },
-    endMonitor(generation) {
-      this.endedMonitors.push(generation)
-      this.activeMonitorGeneration = undefined
-      return monitorEndResult(generation.toString())
-    },
     async preparePlayback(_config, _lanes, generation) {
       return playbackResult(generation.toString())
     },
@@ -513,6 +459,32 @@ describe('CaptureOwner', () => {
       errorCode: 'platform-not-ready'
     })
     expect(stalePrepares).toBe(0)
+  })
+
+  it('publishes idle service master gain with validation, mute policy and renderer ownership', async () => {
+    const binding = fakeBinding()
+    const master = vi.fn((generation: bigint, _gain: number) => playbackResult(generation.toString()))
+    binding.setPlaybackMasterGain = master
+    binding.preparePlayback = async (_config, _lanes, generation) => ({ ...playbackResult(generation.toString()), ownershipRetained: true })
+    const owner = new CaptureOwner(binding)
+    const before = process.env.SINGZ_MUTE
+    try {
+      delete process.env.SINGZ_MUTE
+      expect(owner.setPlaybackMasterGain(7, '0', 0.25).ok).toBe(true)
+      expect(master).toHaveBeenLastCalledWith(0n, 0.25)
+      for (const invalid of [-1, 5, NaN, Infinity])
+        expect(owner.setPlaybackMasterGain(7, '0', invalid).ok).toBe(false)
+      expect(master).toHaveBeenCalledTimes(1)
+      process.env.SINGZ_MUTE = '1'
+      expect(owner.setPlaybackMasterGain(7, '0', 1).ok).toBe(true)
+      expect(master).toHaveBeenLastCalledWith(0n, 0)
+      expect((await owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).ok).toBe(true)
+      expect(owner.setPlaybackMasterGain(8, '0', 1).ok).toBe(false)
+      expect(owner.setPlaybackMasterGain(7, '2', 1).ok).toBe(false)
+    } finally {
+      if (before === undefined) delete process.env.SINGZ_MUTE
+      else process.env.SINGZ_MUTE = before
+    }
   })
 
   it('mutes the native master gain under SINGZ_MUTE, at prepare and on every later set', async () => {
@@ -1154,7 +1126,7 @@ describe('CaptureOwner', () => {
     expect(binding.audioHostDevices).toHaveBeenCalledOnce()
   })
 
-  it('exposes exact HAL inventory and mints monotonic monitor generations in main', () => {
+  it('exposes exact HAL inventory in main', () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)
     expect(owner.hostDevices(undefined, 'darwin')).toMatchObject({
@@ -1163,194 +1135,6 @@ describe('CaptureOwner', () => {
       provider: 'coreaudio',
       defaultInputUid: 'fixture:24',
       devices: [{ uid: 'fixture:24', inputChannels: 24, outputChannels: 2 }]
-    })
-    const config = {
-      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
-      inputChannels: [2], outputChannels: [0, 1], sampleRate: 48000,
-      bufferFrames: 128, maximumFrames: 512, exclusive: false
-    }
-    const first = owner.beginMonitor(31, config)
-    expect(first).toMatchObject({ ok: true, ownershipGeneration: '1' })
-    expect(owner.endMonitor(99, '1')).toMatchObject({ ok: false, errorCode: 'invalid-generation' })
-    expect(binding.endedMonitors).toEqual([])
-    expect(owner.endMonitor(31, '1')).toMatchObject({ ok: true })
-    const second = owner.beginMonitor(31, config)
-    expect(second).toMatchObject({ ok: true, ownershipGeneration: '2' })
-  })
-
-  it('clears ownership after authoritative end when host cleanup leaves an error state', () => {
-    const binding = fakeBinding()
-    binding.endMonitor = ((generation) => ({
-      ...monitorEndResult(generation.toString()),
-      state: 'error'
-    }))
-    const owner = new CaptureOwner(binding)
-    const config = {
-      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
-      inputChannels: [2], outputChannels: [0, 1], sampleRate: 48000,
-      bufferFrames: 128, maximumFrames: 512, exclusive: false
-    }
-
-    expect(owner.beginMonitor(32, config)).toMatchObject({ ok: true, ownershipGeneration: '1' })
-    expect(owner.endMonitor(32, '1')).toMatchObject({ ok: true, state: 'error' })
-    expect(owner.beginMonitor(32, config)).toMatchObject({ ok: true, ownershipGeneration: '2' })
-  })
-
-  it('admits a SEAM — a prepare naming the active generation from its owner — and moves the active generation with it', async () => {
-    // The one prepare allowed while a player is active. The core prepares the
-    // candidate on the running generation's stream and retires the old graph
-    // itself, so no unload for the old generation ever arrives from the
-    // renderer; main's bookkeeping follows the seam forward. Anything else
-    // stays busy — and a seam naming a generation that is not the active one
-    // is refused before it reaches the addon.
-    const binding = fakeBinding()
-    // The real addon retains ownership of every generation it claims, and
-    // takes generations as BigInt — the seam's field included.
-    const swapFieldsSeen: unknown[] = []
-    binding.preparePlayback = async (config, _lanes, generation) => {
-      if ('swapFromGeneration' in config) swapFieldsSeen.push(config.swapFromGeneration)
-      return { ...playbackResult(generation.toString()), ownershipRetained: true }
-    }
-    const owner = new CaptureOwner(binding)
-    expect(await owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({ ok: true, generation: '1' })
-    expect(await owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
-      ok: false, errorCode: 'native-audio-busy', generation: '1'
-    })
-    expect(await owner.preparePlayback(8, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
-      ok: false, errorCode: 'native-audio-busy'
-    })
-    expect(await owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
-      ok: true, generation: '2'
-    })
-    expect(swapFieldsSeen).toEqual([1n])
-    // Commands follow: the new generation answers to its owner, the old one
-    // is no longer main's to command.
-    expect(owner.startPlayback(7, '2')).toMatchObject({ ok: true })
-    expect(owner.startPlayback(7, '1')).toMatchObject({ ok: false, errorCode: 'invalid-generation' })
-    // A seam naming a generation that is not the active one never reaches the addon.
-    expect(await owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
-      ok: false, errorCode: 'native-audio-busy'
-    })
-    expect(owner.unloadPlayback(7, '2')).toMatchObject({ ok: true })
-    expect(await owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '2' }, playbackLanes(), 'darwin')).toMatchObject({
-      ok: false, errorCode: 'invalid-generation'
-    })
-  })
-
-  it('stops an owned native monitor when its renderer disappears', () => {
-    const binding = fakeBinding()
-    const owner = new CaptureOwner(binding)
-    owner.beginMonitor(44, {
-      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
-      inputChannels: [0], outputChannels: [0, 1], sampleRate: 48000,
-      bufferFrames: 128, maximumFrames: 512, exclusive: false
-    })
-    owner.rendererGone(44)
-    expect(binding.endedMonitors).toEqual([1n])
-  })
-
-  it.each(['throwing', 'malformed'] as const)(
-    'retains an uncertain %s begin generation until same-generation end succeeds',
-    (mode) => {
-      const binding = fakeBinding()
-      binding.beginMonitor = mode === 'throwing'
-        ? (() => { throw new Error('bridge uncertain') })
-        : (() => ({ ok: true }) as DesktopMonitorResult)
-      let ends = 0
-      binding.endMonitor = ((generation: bigint) => {
-        binding.endedMonitors.push(generation)
-        ends++
-        return ends === 1 ? monitorResult(generation.toString(), false) : monitorEndResult(generation.toString())
-      })
-      const owner = new CaptureOwner(binding)
-      const begun = owner.beginMonitor(72, {
-        inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
-        inputChannels: [2], outputChannels: [0, 1], sampleRate: 48000,
-        bufferFrames: 128, maximumFrames: 512, exclusive: false
-      })
-      expect(begun).toMatchObject({ ok: false, ownershipGeneration: '1' })
-      expect(owner.beginMonitor(72, {
-        inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
-        inputChannels: [2], outputChannels: [0, 1], sampleRate: 48000,
-        bufferFrames: 128, maximumFrames: 512, exclusive: false
-      })).toMatchObject({ ok: false, errorCode: 'already-running' })
-      expect(owner.endMonitor(72, '1')).toMatchObject({ ok: true, state: 'stopped' })
-      expect(binding.endedMonitors).toEqual([1n, 1n])
-    }
-  )
-
-  it('retains a failed begin when status is uncertain and rollback is not confirmed', () => {
-    const binding = fakeBinding()
-    binding.beginMonitor = ((_config, generation) => monitorResult(generation.toString(), false))
-    binding.monitorStatus = () => { throw new Error('status bridge down') }
-    let ends = 0
-    binding.endMonitor = ((generation) => {
-      binding.endedMonitors.push(generation)
-      ends++
-      return ends === 1
-        ? ({ ok: true } as unknown as DesktopMonitorResult)
-        : monitorEndResult(generation.toString())
-    })
-    const owner = new CaptureOwner(binding)
-    expect(owner.beginMonitor(75, {
-      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
-      inputChannels: [0], outputChannels: [0, 1], sampleRate: 48000,
-      bufferFrames: 128, maximumFrames: 512, exclusive: false
-    })).toMatchObject({ ok: false, ownershipGeneration: '1' })
-    expect(owner.monitorStatus()).toMatchObject({
-      active: true,
-      ownershipGeneration: '1',
-      state: 'error'
-    })
-    expect(owner.endMonitor(75, '1')).toMatchObject({ ok: true, state: 'stopped' })
-    expect(binding.endedMonitors).toEqual([1n, 1n])
-  })
-
-  it('rejects contradictory monitor records by operation and status invariants', () => {
-    const binding = fakeBinding()
-    binding.beginMonitor = ((_config, generation) => ({
-      ...monitorResult(generation.toString()),
-      errorCode: 'host-failure'
-    }) as unknown as DesktopMonitorResult)
-    const owner = new CaptureOwner(binding)
-    expect(owner.beginMonitor(73, {
-      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
-      inputChannels: [0], outputChannels: [0, 1], sampleRate: 48000,
-      bufferFrames: 128, maximumFrames: 512, exclusive: false
-    })).toMatchObject({ ok: false, error: 'Native headphone monitoring returned an invalid response.' })
-
-    const active = fakeBinding()
-    const activeOwner = new CaptureOwner(active)
-    expect(activeOwner.beginMonitor(74, {
-      inputDeviceUid: 'fixture:24', outputDeviceUid: 'fixture:24',
-      inputChannels: [0], outputChannels: [0, 1], sampleRate: 48000,
-      bufferFrames: 128, maximumFrames: 512, exclusive: false
-    }).ok).toBe(true)
-    active.setMonitorGain = ((generation) => ({
-      ...monitorResult(generation.toString()), ownershipGeneration: '999'
-    }))
-    expect(activeOwner.setMonitorGain(74, '1', -12, true)).toMatchObject({
-      ok: false,
-      error: 'Native headphone gain returned an invalid response.'
-    })
-    active.monitorStatus = () => ({ ...monitorStatus('0', false), enabled: true })
-    expect(activeOwner.monitorStatus()).toMatchObject({
-      active: true,
-      enabled: false,
-      ownershipGeneration: '1',
-      state: 'error'
-    })
-    active.monitorStatus = () => ({ ...monitorStatus('1', true), state: 'stopped' })
-    expect(activeOwner.monitorStatus()).toMatchObject({
-      active: true,
-      enabled: false,
-      ownershipGeneration: '1',
-      state: 'error'
-    })
-    active.endMonitor = ((generation) => monitorResult(generation.toString()))
-    expect(activeOwner.endMonitor(74, '1')).toMatchObject({
-      ok: false,
-      error: 'Native headphone monitoring returned an invalid stop response.'
     })
   })
 })
@@ -1484,6 +1268,23 @@ describe('streamed-lane starvation', () => {
 })
 
 
+describe('voice monitor addon identity', () => {
+  it('requires the shared idle preview export in a current addon', () => {
+    const binding = { ...fakeBinding(), previewClick: undefined }
+    expect(() => validateCaptureBindingIdentity(binding, 'test', 'test')).toThrow('does not export previewClick')
+  })
+
+  it('rejects each missing monitor export', () => {
+    const methods = ['voiceMonitorAvailability', 'beginVoiceMonitor', 'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor', 'setPlaybackOutputCurrent'] as const
+    for (const method of methods) {
+      const binding = fakeBinding()
+      const stale = { ...binding, [method]: undefined }
+      expect(() => validateCaptureBindingIdentity(stale, 'test', 'test')).toThrow(`does not export ${method}`)
+    }
+    expect(validateCaptureBindingIdentity(fakeBinding(), 'test', 'test')).toBeTruthy()
+  })
+})
+
 describe('one process-wide native capture binding', () => {
   it('shares one successful staged module between independent audio adapters', () => {
     const native = fakeBinding()
@@ -1509,5 +1310,85 @@ describe('one process-wide native capture binding', () => {
     expect(invalid).toThrow('wrong exports')
     expect(invalid).toThrow('wrong exports')
     expect(fatal).toHaveBeenCalledOnce()
+  })
+})
+
+
+it('does not expose the removed browser handback command', () => {
+  expect('setPlaybackOutputCurrent' in new CaptureOwner(fakeBinding())).toBe(false)
+})
+
+
+describe('internal native song route handback', () => {
+  function fixture() {
+    const binding = fakeBinding()
+    binding.preparePlayback = async (_config, _lanes, generation) => ({
+      ...playbackResult(generation.toString()), ownershipRetained: true
+    })
+    const owner = new CaptureOwner(binding)
+    return { binding, owner, clear: vi.mocked(binding.setPlaybackOutputCurrent) }
+  }
+
+  it('clears the stale song route after proven unload, so idle output can follow a new device', async () => {
+    const { binding, owner, clear } = fixture()
+    let songRouteCurrent = true
+    let selectedOutput = 'device-A'
+    const currentOutput = (): string => songRouteCurrent ? 'device-A' : selectedOutput
+    clear.mockImplementation(current => { songRouteCurrent = current; return { ok: true } })
+    await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    owner.openPlayback(3, '1')
+    owner.startPlayback(3, '1')
+    expect(currentOutput()).toBe('device-A')
+    const result = owner.unloadPlayback(3, '1')
+    expect(result).toMatchObject({ ok: true, cleanupComplete: true })
+    expect(clear).toHaveBeenCalledExactlyOnceWith(false)
+    selectedOutput = 'device-B'
+    expect(currentOutput()).toBe('device-B')
+    expect(binding.unloadPlayback).toBeDefined()
+  })
+
+  it('does not clear the song route for stale or incomplete cleanup', async () => {
+    const { binding, owner, clear } = fixture()
+    await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    expect(owner.unloadPlayback(4, '1').ok).toBe(false)
+    expect(clear).not.toHaveBeenCalled()
+    binding.unloadPlayback = generation => ({ ...playbackResult(generation.toString()), cleanupComplete: false })
+    expect(owner.unloadPlayback(3, '1').cleanupComplete).toBe(false)
+    owner.stop()
+    expect(clear).not.toHaveBeenCalled()
+  })
+
+  it('clears internal native routing at owner shutdown after the last generation closes', async () => {
+    const { owner, clear } = fixture()
+    await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    owner.stop()
+    expect(clear).toHaveBeenCalledExactlyOnceWith(false)
+    expect('setPlaybackOutputCurrent' in owner).toBe(false)
+  })
+
+  it('keeps a pending native prepare authoritative until its cleanup is proven', async () => {
+    const { binding, owner, clear } = fixture()
+    let finish!: () => void
+    const preparing = new Promise<void>(resolve => { finish = resolve })
+    binding.preparePlayback = async (_config, _lanes, generation) => {
+      await preparing
+      return { ...playbackResult(generation.toString()), ownershipRetained: true }
+    }
+    binding.unloadPlayback = generation => ({ ...playbackResult(generation.toString()), cleanupComplete: false })
+    const prepare = owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    owner.stop()
+    expect(clear).not.toHaveBeenCalled()
+    finish()
+    await prepare
+    expect(clear).not.toHaveBeenCalled()
+    binding.unloadPlayback = generation => ({ ...playbackResult(generation.toString()), state: 'unloaded', cleanupComplete: true })
+    owner.stop()
+    expect(clear).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it('also clears a leftover idle route when shutdown has no generation', () => {
+    const { owner, clear } = fixture()
+    owner.stop()
+    expect(clear).toHaveBeenCalledExactlyOnceWith(false)
   })
 })

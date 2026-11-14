@@ -4,7 +4,7 @@ export function remoteScope(root: HTMLElement): HTMLElement {
   const visible = (element: HTMLElement): boolean =>
     element.getClientRects().length > 0 && !element.closest('[hidden], [inert], [aria-hidden="true"]')
   const dialogs = Array.from(root.querySelectorAll<HTMLElement>(
-    '[role="dialog"][data-surface], [role="dialog"] [data-surface]'
+    '[role="dialog"][data-surface], [role="dialog"] [data-surface], [role="alertdialog"][data-surface]'
   )).filter(visible)
   if (dialogs.length > 0) return dialogs[dialogs.length - 1]
   const mixers = Array.from(root.querySelectorAll<HTMLElement>('[data-surface="mix"]')).filter(visible)

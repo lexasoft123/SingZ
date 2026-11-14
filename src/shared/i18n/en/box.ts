@@ -224,7 +224,6 @@ export const box = {
   'box.queue.saveError': 'The queue change is visible but could not be saved: {error}',
   'box.details.openGuardFailed': 'SingZ could not protect this project from cache removal, so it was not opened. Check storage and try again.',
   'box.account.signOutFailed': 'Sign-out could not be completed. Try again.',
-  'box.nativeRequired': 'Native playback is unavailable for this project or audio runtime.',
   'box.retained.restoringTitle': 'Restoring previous song',
   'box.retained.restoringBody': 'The song and its lyrics are being restored.',
   'box.retained.dialogLabel': 'Previous song',

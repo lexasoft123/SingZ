@@ -47,6 +47,7 @@ const { assertOpenedProject, clickLibrarySong, libraryName } = require('./librar
 const { holdProjects } = require('./project-hold.cjs')
 const { existsSync } = require('node:fs')
 const { join } = require('node:path')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { homedir } = require('node:os')
 
 const ROOT =
@@ -79,7 +80,7 @@ const dspComplaints = (lines) =>
     executablePath: require('electron'),
     args: [APP],
     env: {
-      ...process.env,
+      ...process.env, ...scratchProfileEnv({ projectsRoot: ROOT }),
       SINGZ_MUTE: '1',
       SINGZ_E2E_HIDDEN: '1',
       SINGZ_NO_SYNC: '1',

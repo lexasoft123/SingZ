@@ -21,7 +21,6 @@ const PUBLIC_OWNER = 1
 const publicMethods = new Set(['configureMicrophoneMix', 'stopMicrophoneMix', 'preparePlayback',
   'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback', 'seekPlayback',
   'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback'])
-const privateMethods = new Set(['beginMonitor', 'endMonitor', 'setMonitorGain'])
 const playbackMutations = new Set(['openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback',
   'seekPlayback', 'reanchorPlayback', 'setPlaybackLoop', 'clearPlaybackLoop', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback'])
 function validatePaths(value: unknown, depth = 0): void {
@@ -56,7 +55,6 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
   const clients = new Set<Socket>()
   const pendingAssociations = new Map<string, { socket: Socket; generation: string; config: DesktopPlaybackPrepareConfig; lanes: DesktopPlaybackLaneConfig[] }>()
   let retained: { generation: string; descriptor: BoxRetainedProjectDescriptor } | null = null
-  let nextPrivate = 1000
   let nextConnection = 0
   let queue = Promise.resolve()
   let queuedBytes = 0
@@ -172,7 +170,6 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
     if (closed || clients.size >= 16) { socket.destroy(); return }
     clients.add(socket)
     const connectionId = ++nextConnection
-    const privateIds = new Map<number, number>()
     let lastId = 0n
     let pending = 0
     let frameTimer: ReturnType<typeof setTimeout> | undefined
@@ -245,17 +242,8 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
             if (request.method === 'rendererDetached' || request.method === 'rendererGone') {
               const renderer = Number(args[0])
               pendingAssociations.delete(`${connectionId}:${renderer}`)
-              const id = privateIds.get(renderer)
-              if (id !== undefined) await (runtime.owner.rendererDetached as (id: number) => unknown).call(runtime.owner, id)
             } else {
               if (publicMethods.has(request.method)) args[0] = PUBLIC_OWNER
-              if (privateMethods.has(request.method)) {
-                const renderer = args[0]
-                if (!Number.isSafeInteger(renderer) || (renderer as number) < 0) throw new Error('Invalid private owner')
-                let id = privateIds.get(renderer as number)
-                if (id === undefined) { id = ++nextPrivate; privateIds.set(renderer as number, id) }
-                args[0] = id
-              }
               if (request.method === 'preparePlayback') result = await prepare(args, socket, connectionId, Number(request.args[0]))
               else {
                 if (request.method === 'unloadPlayback') { retained = null; pendingAssociations.clear() }
@@ -285,7 +273,6 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
       clearTimeout(frameTimer)
       clients.delete(socket)
       for (const [key, pending] of pendingAssociations) if (pending.socket === socket) pendingAssociations.delete(key)
-      queue = queue.then(async () => { for (const id of privateIds.values()) await (runtime.owner.rendererDetached as (id: number) => unknown).call(runtime.owner, id) }).catch(() => {})
     })
   })
   await new Promise<void>((resolve, reject) => {

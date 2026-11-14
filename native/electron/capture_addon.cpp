@@ -8,12 +8,14 @@
 #include <span>
 #include <algorithm>
 
-#include "audio_monitor_session.h"
 #include "native_audio_ownership.h"
 #include "playback_addon_bridge.h"
 #include "../playback/shared_audio_service.h"
+#include "../playback/voice_monitor_source.h"
 #include "training_audio_session.h"
+#include "voice_monitor_bridge.h"
 #include "take_writer.h"
+#include "../playback/take_conform.h"
 #include "microphone_mix_bridge.h"
 #include <zcore/audio/capture_recording.h>
 #include <filesystem>
@@ -76,14 +78,40 @@ class CaptureInput {
       return box_->start(config, std::move(sink), inventory, enabledChannels);
     }
 #endif
-    if (!normal_) normal_ = std::make_unique<singz::AudioInput>();
-    return normal_->start(config, std::move(sink), inventory);
+    auto result = singz::sharedVoiceMonitorCapture().retain(
+        singz::VoiceCaptureUser::Arm, config, std::move(sink), inventory);
+    armHeld_ = result.ok;
+    return result;
+  }
+  bool retainTake() {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (box_) return true;
+#endif
+    takeHeld_ = singz::sharedVoiceMonitorCapture().retainExisting(singz::VoiceCaptureUser::Take);
+    return takeHeld_;
+  }
+  void releaseTake() {
+    if (takeHeld_) {
+      singz::sharedVoiceMonitorCapture().release(singz::VoiceCaptureUser::Take);
+      takeHeld_ = false;
+    }
+  }
+  void detachAnalysis(singz::AudioInputSink takeOnly) {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (box_) return;
+#endif
+    singz::sharedVoiceMonitorCapture().setDeliverySink(std::move(takeOnly));
   }
   void stop(bool retain = false) {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (box_) box_->stop(retain);
 #endif
-    if (normal_) normal_->stop(retain);
+    if (armHeld_) {
+      singz::sharedVoiceMonitorCapture().release(singz::VoiceCaptureUser::Arm, retain);
+      armHeld_ = false;
+    } else if (!retain) {
+      singz::sharedVoiceMonitorCapture().releasePrepared();
+    }
   }
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   singz::BoxInputMeter meter() const { return box_ ? box_->meter() : singz::BoxInputMeter{}; }
@@ -92,22 +120,23 @@ class CaptureInput {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (box_) return box_->stats();
 #endif
-    return normal_ ? normal_->stats() : singz::AudioInputStats{};
+    return singz::sharedVoiceMonitorCapture().stats();
   }
   singz::AudioInputState state() const {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (box_) return box_->state();
 #endif
-    return normal_ ? normal_->state() : singz::AudioInputState::Idle;
+    return singz::sharedVoiceMonitorCapture().state();
   }
   std::string lastError() const {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (box_) return box_->lastError();
 #endif
-    return normal_ ? normal_->lastError() : std::string{};
+    return singz::sharedVoiceMonitorCapture().lastError();
   }
  private:
-  std::unique_ptr<singz::AudioInput> normal_;
+  bool armHeld_ = false;
+  bool takeHeld_ = false;
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   std::unique_ptr<singz::BoxInputCapture> box_;
 #endif
@@ -138,7 +167,6 @@ struct CaptureOwner {
 };
 
 CaptureOwner owner;
-singz::AudioMonitorSession monitor;
 singz::NativeAudioOwnership nativeAudioOwnership{true};
 
 uint64_t hostTimeNowNs() noexcept {
@@ -480,15 +508,25 @@ bool getExactU32Array(napi_env env, napi_value object, const char* name,
 
 void stopLocked(uint64_t generation, bool force) {
   if (!force && generation != owner.generation) return;
-  const uint64_t releasedGeneration = owner.generation;
+  const uint64_t releasedGeneration = owner.generation ? owner.generation : owner.takeGeneration;
+  if (owner.input) owner.input->detachAnalysis([](const singz::AudioInputBlockView& block) {
+    owner.takeWriter.append(block);
+  });
   if (owner.analyzer) owner.analyzer->cancel(owner.generation);
+  if (owner.input) owner.input->stop(!force);
+  bool finishCaptureTake = force;
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  finishCaptureTake = finishCaptureTake || singz::boxRoutingOwnsCapture();
+#endif
+  if (finishCaptureTake && owner.takePresent) {
+    owner.takeWriter.finish();
+    if (owner.input) owner.input->releaseTake();
+  }
   if (owner.input) {
-    owner.input->stop(!force);
     owner.lastStats = owner.input->stats();
     owner.lastState = owner.input->state();
     owner.lastError = owner.input->lastError();
   }
-  if (owner.takePresent) owner.takeWriter.finish();
   owner.takeWriter.resetLevel();
   if (owner.bridge) {
     owner.lastDroppedEvents = owner.bridge->dropped.load(std::memory_order_relaxed);
@@ -502,7 +540,9 @@ void stopLocked(uint64_t generation, bool force) {
     owner.bridge = nullptr;
   }
   owner.generation = 0;
-  if (releasedGeneration != 0) {
+  // A disarmed take still owns the physical input and its arbitration lease.
+  // Forced environment cleanup must also release a previously disarmed take.
+  if (releasedGeneration != 0 && (force || !owner.takePresent)) {
     (void)nativeAudioOwnership.release(
         singz::NativeAudioOwnerKind::Capture, releasedGeneration);
   }
@@ -550,6 +590,94 @@ napi_value devices(napi_env env, napi_callback_info) {
   return result;
 }
 
+// Only an active take defers the transaction; every other owner is preserved
+// across the coordinated input/output reopen.
+singz::SharedAudioService::BufferPreferences desiredBuffers;
+singz::SharedAudioService::BufferPreferences appliedBuffers;
+bool bufferApplyNeeded = false;
+std::string bufferApplyError;
+napi_value audioBufferSettingsImpl(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value arg{};
+  napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr);
+  auto& service = singz::sharedAudioService();
+  const bool supported = service.providerId() == "coreaudio";
+  if (argc && supported) {
+    napi_value keys; uint32_t length = 0; napi_valuetype type;
+    if (napi_typeof(env, arg, &type) != napi_ok || type != napi_object ||
+        napi_get_property_names(env, arg, &keys) != napi_ok ||
+        napi_get_array_length(env, keys, &length) != napi_ok || length > 256) {
+      napi_throw_type_error(env, nullptr, "Invalid audio buffer preferences"); return undefined(env);
+    }
+    singz::SharedAudioService::BufferPreferences next;
+    for (uint32_t i = 0; i < length; ++i) {
+      napi_value key, value; size_t bytes = 0; uint32_t frames = 0;
+      napi_get_element(env, keys, i, &key);
+      if (napi_get_value_string_utf8(env, key, nullptr, 0, &bytes) != napi_ok || !bytes || bytes > 4096) {
+        napi_throw_type_error(env, nullptr, "Invalid audio device UID"); return undefined(env);
+      }
+      std::string uid(bytes + 1, '\0');
+      napi_get_value_string_utf8(env, key, uid.data(), uid.size(), &bytes); uid.resize(bytes);
+      if (uid.find('\0') != std::string::npos || napi_get_property(env, arg, key, &value) != napi_ok ||
+          !getExactU32Value(env, value, 16, 4096, &frames) || (frames & (frames - 1))) {
+        napi_throw_type_error(env, nullptr, "Invalid audio buffer size"); return undefined(env);
+      }
+      next.emplace(std::move(uid), frames);
+    }
+    if (next != desiredBuffers) { desiredBuffers = std::move(next); bufferApplyNeeded = true; bufferApplyError.clear(); }
+  }
+  auto& capture = singz::sharedVoiceMonitorCapture();
+  if (desiredBuffers == appliedBuffers) bufferApplyNeeded = false;
+  const bool capturing = capture.users(singz::VoiceCaptureUser::Arm) || capture.users(singz::VoiceCaptureUser::Monitor) ||
+      capture.users(singz::VoiceCaptureUser::Take);
+  if (supported && bufferApplyNeeded && !capture.users(singz::VoiceCaptureUser::Take)) {
+    const auto previousInput = capture.openingResult();
+    singz::SharedAudioService::BufferChangeHooks hooks;
+    hooks.inputUid = previousInput.deviceUid;
+    hooks.pauseInput = [&] { return capture.pauseForBufferChange(); };
+    if (capturing) hooks.resumeInput = [&](uint32_t frames) {
+      const auto result = capture.resumeAfterBufferChange(frames);
+      if (!result.ok) return result.error.empty() ? std::string{"Native capture could not resume"} : result.error;
+      return result.sampleRate == previousInput.sampleRate ? std::string{} : std::string{"Capture sample rate changed during buffer reopen"};
+    };
+    hooks.prepareCues = singz::prepareTrainingCuesForBufferResume;
+    const auto applied = service.applyBufferPreferences(desiredBuffers, hooks);
+    bufferApplyNeeded = false;
+    bufferApplyError = applied.ok ? std::string{} : applied.message.empty() ? "Audio buffer could not be applied" : applied.message;
+    if (applied.ok) appliedBuffers = desiredBuffers;
+    else desiredBuffers = appliedBuffers;
+    if (capturing && owner.generation) {
+      owner.inputResult = capture.openingResult();
+      owner.sampleRate = owner.inputResult.sampleRate;
+    }
+  }
+  const auto host = service.status();
+  const auto input = capture.openingResult();
+  const auto outputUid = service.activeOutputUid();
+  auto requested = [](const std::string& uid) { const auto found = desiredBuffers.find(uid); return found == desiredBuffers.end() ? 128u : found->second; };
+  napi_value result, preferences; napi_create_object(env, &result); napi_create_object(env, &preferences);
+  for (const auto& [uid, frames] : desiredBuffers) set(env, preferences, uid.c_str(), uintValue(env, frames));
+  set(env, result, "ok", boolValue(env, supported && bufferApplyError.empty()));
+  set(env, result, "pending", boolValue(env, bufferApplyNeeded));
+  if (!supported) set(env, result, "reason", stringValue(env, "unsupported-platform"));
+  else if (bufferApplyNeeded) set(env, result, "reason", stringValue(env, "take-recording"));
+  if (!bufferApplyError.empty()) set(env, result, "error", stringValue(env, bufferApplyError));
+  set(env, result, "preferences", preferences);
+  set(env, result, "outputUid", stringValue(env, outputUid));
+  set(env, result, "requestedFrames", uintValue(env, requested(outputUid)));
+  set(env, result, "obtainedFrames", uintValue(env, host.latency.bufferFrames));
+  set(env, result, "inputUid", stringValue(env, capturing ? input.deviceUid : ""));
+  set(env, result, "inputRequestedFrames", uintValue(env, requested(input.deviceUid)));
+  set(env, result, "inputObtainedFrames", uintValue(env, capturing ? input.inputBufferFrames : 0));
+  return result;
+}
+
+napi_value audioBufferSettings(napi_env env, napi_callback_info info) noexcept {
+  try { return audioBufferSettingsImpl(env, info); }
+  catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); }
+  catch (...) { napi_throw_error(env, nullptr, "Audio buffer settings failed"); }
+  return undefined(env);
+}
+
 napi_value beginImpl(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3];
@@ -569,6 +697,7 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
 
   singz::AudioInputConfig config;
   config.deviceUid = getString(env, argv[0], "deviceUid");
+  config = singz::sharedAudioService().inputBufferConfig(std::move(config));
   if (!getExactU32(env, argv[0], "inputChannel", 0,
                    singz::kAudioHostMaxChannels - 1, false, 0,
                    &config.channel) ||
@@ -608,6 +737,11 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
       return undefined(env);
     }
   }
+  {
+    std::lock_guard<std::mutex> lock(owner.mutex);
+    if (owner.takeWriter.active() && generation != owner.generation)
+      return captureBusyResult(env, generation);
+  }
   const singz::NativeAudioAcquireResult acquired =
       nativeAudioOwnership.acquire(singz::NativeAudioOwnerKind::Capture,
                                    generation);
@@ -635,7 +769,9 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
   owner.lastOverwrittenWindows = 0;
   owner.sampleRate = 0;
   owner.inputResult = {};
-  owner.takeWriter.resetCaptureTelemetry();
+  singz::sharedVoiceMonitorCapture().synchronizeDelivery([] {
+    if (!owner.takeWriter.active()) owner.takeWriter.resetCaptureTelemetry();
+  });
   const auto modelPath = getString(env, argv[0], "crepeModelPath");
   try {
     owner.analyzer = std::make_unique<zdsp::analysis::PitchAnalysisModule>(
@@ -778,7 +914,16 @@ napi_value stats(napi_env env, napi_callback_info) {
   set(env, result, "inputLatencyStable", boolValue(env, inputLatencyStable));
   set(env, result, "inputLatencySource", stringValue(env,
       inputLatencyStable ? "reported" : "unknown"));
+  const auto gaps = owner.takeWriter.gapStats();
+  setU64(env, result, "gapPaddedFrames", gaps.gapPaddedFrames);
+  setU64(env, result, "gapPaddedBlocks", gaps.gapPaddedBlocks);
+  setU64(env, result, "gapUntrustedTimestampBlocks", gaps.gapUntrustedTimestampBlocks);
+  setU64(env, result, "gapRegressions", gaps.gapRegressions);
+  set(env, result, "gapOverflow", boolValue(env, gaps.gapOverflow));
   setU64(env, result, "lastSampleHostNs", owner.takeWriter.lastSampleHostNs());
+  const auto frameStamp = owner.takeWriter.frameStamp();
+  setU64(env, result, "takeFrameHostNs", frameStamp.hostNs);
+  setU64(env, result, "takeFrame", frameStamp.takeFrame);
   const auto firstSample = owner.takeWriter.firstSample();
   set(env, result, "firstSampleCaptured", boolValue(env, owner.takePresent && firstSample.captured));
   setU64(env, result, "firstSampleHostNs", firstSample.hostNs);
@@ -789,6 +934,7 @@ napi_value stats(napi_env env, napi_callback_info) {
   setU64(env, result, "deliveredFrames", value.deliveredFrames);
   setU64(env, result, "overruns", value.overruns);
   setU64(env, result, "deliveryWakeups", value.deliveryWakeups);
+  setU64(env, result, "renderSliceDrops", value.renderSliceDrops);
   setU64(env, result, "droppedEvents", owner.bridge
       ? owner.bridge->dropped.load(std::memory_order_relaxed)
       : owner.lastDroppedEvents);
@@ -821,20 +967,6 @@ napi_value stats(napi_env env, napi_callback_info) {
   }
 #endif
   return result;
-}
-
-const char* hostStateName(singz::AudioHostState state) {
-  switch (state) {
-    case singz::AudioHostState::Closed: return "closed";
-    case singz::AudioHostState::Open: return "open";
-    case singz::AudioHostState::Running: return "running";
-    case singz::AudioHostState::Stopped: return "stopped";
-    case singz::AudioHostState::DeviceLost: return "device-lost";
-    case singz::AudioHostState::Error: return "error";
-    case singz::AudioHostState::Unsupported: return "unsupported";
-    case singz::AudioHostState::Suspended: return "suspended";
-  }
-  return "error";
 }
 
 const char* directionName(singz::AudioHostEndpointDirection direction) {
@@ -886,48 +1018,6 @@ const char* monitoringSuitabilityName(
       return "unsupported";
   }
   return "unknown";
-}
-
-void setHostFormat(napi_env env, napi_value object,
-                   const singz::AudioHostFormat& format) {
-  napi_value value;
-  napi_create_object(env, &value);
-  set(env, value, "sampleRate", numberValue(env, format.sampleRate));
-  set(env, value, "maximumFrames", uintValue(env, format.maximumFrames));
-  set(env, value, "nominalBufferFrames",
-      uintValue(env, format.nominalBufferFrames));
-  set(env, value, "inputChannels", uintValue(env, format.inputChannels));
-  set(env, value, "outputChannels", uintValue(env, format.outputChannels));
-  set(env, value, "sampleFormat", stringValue(env, "float32-planar"));
-  set(env, value, "outputClockMaster", boolValue(env, format.outputClockMaster));
-  set(env, value, "accessMode", stringValue(env, accessName(format.accessMode)));
-  set(env, object, "format", value);
-}
-
-void setHostLatency(napi_env env, napi_value object,
-                    const singz::AudioHostLatency& latency) {
-  napi_value value;
-  napi_create_object(env, &value);
-  set(env, value, "inputDeviceFrames", uintValue(env, latency.inputDeviceFrames));
-  set(env, value, "outputDeviceFrames", uintValue(env, latency.outputDeviceFrames));
-  set(env, value, "bufferFrames", uintValue(env, latency.bufferFrames));
-  set(env, value, "externalRouteFrames", uintValue(env, latency.externalRouteFrames));
-  set(env, object, "latency", value);
-}
-
-napi_value monitorResultValue(napi_env env,
-                              const singz::AudioMonitorResult& source) {
-  napi_value result;
-  napi_create_object(env, &result);
-  set(env, result, "ok", boolValue(env, source.ok));
-  set(env, result, "errorCode",
-      stringValue(env, singz::audioMonitorErrorName(source.error)));
-  set(env, result, "error", stringValue(env, source.message));
-  setU64(env, result, "ownershipGeneration", source.ownershipGeneration);
-  set(env, result, "state", stringValue(env, hostStateName(source.state)));
-  setHostFormat(env, result, source.format);
-  setHostLatency(env, result, source.latency);
-  return result;
 }
 
 std::unique_ptr<singz::AudioHostBackend> playbackBackend(
@@ -1151,199 +1241,6 @@ napi_value audioHostDevices(napi_env env, napi_callback_info info) {
   return result;
 }
 
-napi_value beginMonitor(napi_env env, napi_callback_info info) {
-#if defined(SINGZ_BOX_LOOPZ_ROUTING)
-  if (singz::boxRoutingOwnsCapture()) {
-    napi_throw_error(env, nullptr, "Direct monitoring is unavailable while Box routing owns audio inputs");
-    return undefined(env);
-  }
-#endif
-  size_t argc = 2;
-  napi_value argv[2];
-  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-  if (argc != 2) {
-    napi_throw_type_error(env, nullptr,
-                          "beginMonitor requires config and generation");
-    return undefined(env);
-  }
-  uint64_t generation = 0;
-  const bool validGeneration = getExactU64(env, argv[1], &generation);
-  singz::AudioMonitorConfig config;
-  config.inputDeviceUid = getString(env, argv[0], "inputDeviceUid");
-  config.outputDeviceUid = getString(env, argv[0], "outputDeviceUid");
-  uint32_t sampleRate = 0;
-  const bool validConfig =
-      getExactU32Array(env, argv[0], "inputChannels", &config.inputChannels) &&
-      getExactU32Array(env, argv[0], "outputChannels",
-                       &config.outputChannels) &&
-      getExactU32(env, argv[0], "sampleRate", 8000, 384000, true, 0,
-                  &sampleRate) &&
-      getExactU32(env, argv[0], "bufferFrames", 1,
-                  singz::kAudioHostMaxFrames, true, 0,
-                  &config.bufferFrames) &&
-      getExactU32(env, argv[0], "maximumFrames", 1,
-                  singz::kAudioHostMaxFrames, true, 0,
-                  &config.maximumFrames) &&
-      getExactBool(env, argv[0], "exclusive", false, false,
-                   &config.exclusive);
-  config.sampleRate = static_cast<double>(sampleRate);
-  if (!validGeneration)
-    return monitorResultValue(env, monitor.begin(config, 0));
-  if (!validConfig) {
-    const singz::AudioMonitorStatus status = monitor.status();
-    return monitorResultValue(
-        env, {false, singz::AudioMonitorError::InvalidConfiguration,
-              generation, status.host.state, status.host.format,
-              status.host.latency,
-              "Monitor configuration values must have exact bounded types"});
-  }
-  if (singz::microphoneMixActive()) {
-    const auto status = monitor.status();
-    return monitorResultValue(env,
-        {false, singz::AudioMonitorError::NativeAudioBusy, generation,
-         status.host.state, status.host.format, status.host.latency,
-         "Stop microphone mixing before starting exclusive headphone monitoring"});
-  }
-  const singz::NativeAudioAcquireResult acquired =
-      nativeAudioOwnership.acquire(singz::NativeAudioOwnerKind::Monitor,
-                                   generation);
-  if (acquired != singz::NativeAudioAcquireResult::Acquired) {
-    const singz::AudioMonitorStatus status = monitor.status();
-    const singz::AudioMonitorError error =
-        acquired == singz::NativeAudioAcquireResult::Busy
-            ? singz::AudioMonitorError::NativeAudioBusy
-            : singz::AudioMonitorError::InvalidGeneration;
-    return monitorResultValue(
-        env, {false, error, generation, status.host.state, status.host.format,
-              status.host.latency,
-              error == singz::AudioMonitorError::NativeAudioBusy
-                  ? "Another native microphone owner is already active"
-                  : "Monitor generation is invalid"});
-  }
-  {
-    std::lock_guard<std::mutex> lock(owner.mutex);
-    // An idle prepared capture holds no ownership lease, but exclusive
-    // monitoring must retire even its stopped platform unit before opening.
-    if (owner.input) { owner.input->stop(); owner.input.reset(); }
-  }
-  singz::sharedAudioService().parkOutput();
-  singz::AudioMonitorResult result = monitor.begin(config, generation);
-  if (!result.ok) {
-    const singz::AudioMonitorStatus status = monitor.status();
-    const uint64_t retainedGeneration =
-        status.active ? status.ownershipGeneration : 0;
-    (void)singz::releaseUnretainedMonitorBeginLease(
-        &nativeAudioOwnership, generation, retainedGeneration);
-  }
-  return monitorResultValue(env, result);
-}
-
-napi_value setMonitorGain(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
-  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-  if (argc != 3) {
-    napi_throw_type_error(env, nullptr,
-                          "setMonitorGain requires generation, gainDb and enabled");
-    return undefined(env);
-  }
-  uint64_t generation = 0;
-  const bool validGeneration = getExactU64(env, argv[0], &generation);
-  double gainDb = std::numeric_limits<double>::quiet_NaN();
-  napi_valuetype gainType = napi_undefined;
-  napi_valuetype enabledType = napi_undefined;
-  bool enabled = false;
-  const bool validGain =
-      napi_typeof(env, argv[1], &gainType) == napi_ok &&
-      gainType == napi_number &&
-      napi_get_value_double(env, argv[1], &gainDb) == napi_ok &&
-      std::isfinite(gainDb) &&
-      gainDb >= static_cast<double>(singz::kMonitorMinimumGainDb) &&
-      gainDb <= static_cast<double>(singz::kMonitorMaximumGainDb);
-  const bool validEnabled =
-      napi_typeof(env, argv[2], &enabledType) == napi_ok &&
-      enabledType == napi_boolean &&
-      napi_get_value_bool(env, argv[2], &enabled) == napi_ok;
-  if (!validGeneration)
-    return monitorResultValue(env, monitor.setGain(0, 0.0F, false));
-  if (!validGain || !validEnabled) {
-    const singz::AudioMonitorStatus status = monitor.status();
-    return monitorResultValue(
-        env, {false, singz::AudioMonitorError::InvalidConfiguration,
-              generation, status.host.state, status.host.format,
-              status.host.latency,
-              "Gain must be between -60 and +12 dB and enabled must be a boolean"});
-  }
-  return monitorResultValue(
-      env, monitor.setGain(generation,
-                           static_cast<float>(gainDb), enabled));
-}
-
-void setMonitorMeter(napi_env env, napi_value object, const char* name,
-                     const singz::AudioMonitorMeter& source) {
-  napi_value meter;
-  napi_create_object(env, &meter);
-  set(env, meter, "peak", numberValue(env, source.peak));
-  set(env, meter, "rms", numberValue(env, source.rms));
-  setU64(env, meter, "frames", source.frames);
-  set(env, object, name, meter);
-}
-
-napi_value monitorStatus(napi_env env, napi_callback_info) {
-  const singz::AudioMonitorStatus source = monitor.status();
-  napi_value result;
-  napi_create_object(env, &result);
-  set(env, result, "active", boolValue(env, source.active));
-  set(env, result, "enabled", boolValue(env, source.enabled));
-  set(env, result, "deviceLost", boolValue(env, source.deviceLost));
-  setU64(env, result, "ownershipGeneration", source.ownershipGeneration);
-  set(env, result, "gainDb", numberValue(env, source.gainDb));
-  set(env, result, "state", stringValue(env, hostStateName(source.host.state)));
-  set(env, result, "error", stringValue(env, source.error));
-  setMonitorMeter(env, result, "pre", source.pre);
-  setMonitorMeter(env, result, "post", source.post);
-  setHostFormat(env, result, source.host.format);
-  setHostLatency(env, result, source.host.latency);
-  setU64(env, result, "routeGeneration", source.host.routeGeneration);
-  setU64(env, result, "streamGeneration", source.host.streamGeneration);
-  setU64(env, result, "callbacks", source.host.callbacks);
-  setU64(env, result, "renderedFrames", source.host.renderedFrames);
-  setU64(env, result, "xruns", source.host.xruns);
-  setU64(env, result, "deadlineMisses", source.host.deadlineMisses);
-  setU64(env, result, "renderFailures", source.host.renderFailures);
-  set(env, result, "adapterRenderFailures",
-      uintValue(env, source.adapterRenderFailures));
-  set(env, result, "terminalRenderFailures",
-      uintValue(env, source.terminalRenderFailures));
-  set(env, result, "adapterLastStatusCode",
-      uintValue(env, source.adapterLastStatusCode));
-  set(env, result, "adapterLastStatusDetail",
-      uintValue(env, source.adapterLastStatusDetail));
-  set(env, result, "parameterOverflows",
-      uintValue(env, source.parameterOverflows));
-  set(env, result, "nonFiniteSamples",
-      uintValue(env, source.nonFiniteSamples));
-  set(env, result, "rejectedBlocks", uintValue(env, source.rejectedBlocks));
-  return result;
-}
-
-napi_value endMonitor(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-  if (argc != 1) {
-    napi_throw_type_error(env, nullptr, "endMonitor requires generation");
-    return undefined(env);
-  }
-  uint64_t generation = 0;
-  if (!getExactU64(env, argv[0], &generation))
-    return monitorResultValue(env, monitor.end(0));
-  singz::AudioMonitorResult result = monitor.end(generation);
-  (void)singz::releaseMonitorLeaseAfterEnd(
-      &nativeAudioOwnership, generation, result.ok);
-  return monitorResultValue(env, result);
-}
-
 napi_value captureRecording(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3]{};
@@ -1405,6 +1302,11 @@ napi_value takeResult(napi_env env, const singz::TakeWriteResult& r) {
   set(env, result, "sampleRate", uintValue(env, r.sampleRate));
   set(env, result, "firstSampleQuality", stringValue(env, qualityName(r.firstSampleQuality)));
   set(env, result, "droppedBlocks", numberValue(env, static_cast<double>(r.droppedBlocks)));
+  set(env, result, "gapPaddedFrames", numberValue(env, static_cast<double>(r.gapPaddedFrames)));
+  set(env, result, "gapPaddedBlocks", numberValue(env, static_cast<double>(r.gapPaddedBlocks)));
+  set(env, result, "gapUntrustedTimestampBlocks", numberValue(env, static_cast<double>(r.gapUntrustedTimestampBlocks)));
+  set(env, result, "gapRegressions", numberValue(env, static_cast<double>(r.gapRegressions)));
+  set(env, result, "gapOverflow", boolValue(env, r.gapOverflow));
   set(env, result, "deviceLost", boolValue(env, r.deviceLost));
   if (r.deviceLost) set(env, result, "reason", stringValue(env, "device-lost"));
   if (!r.error.empty()) {
@@ -1435,6 +1337,7 @@ napi_value recordTake(napi_env env, napi_callback_info info) {
   if (owner.takePresent) return takeError(env, "busy", "A voice take is already active or awaiting finish");
   try {
     auto* input = owner.input.get();
+    if (!input->retainTake()) return takeError(env, "no-input", "No microphone input is open");
     owner.takeWriter.start(getStringValue(env, argv[0], 32768), getStringValue(env, argv[1], 128), owner.sampleRate,
         [input] { return input->state() != singz::AudioInputState::Running; });
     owner.takePresent = true; owner.takeGeneration = generation;
@@ -1442,7 +1345,10 @@ napi_value recordTake(napi_env env, napi_callback_info info) {
     napi_create_object(env, &result);
     set(env, result, "ok", boolValue(env, true));
     return result;
-  } catch (const std::exception& e) { return takeError(env, "error", e.what()); }
+  } catch (const std::exception& e) {
+    if (owner.input) owner.input->releaseTake();
+    return takeError(env, "error", e.what());
+  }
 }
 napi_value finishTake(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value argv[1]{};
@@ -1453,7 +1359,10 @@ napi_value finishTake(napi_env env, napi_callback_info info) {
       !owner.takePresent || generation != owner.takeGeneration)
     return takeError(env, "error", "No voice take exists for this microphone session");
   const auto result = owner.takeWriter.finish();
+  if (owner.input) owner.input->releaseTake();
   owner.takePresent = false; owner.takeGeneration = 0;
+  if (owner.generation == 0)
+    (void)nativeAudioOwnership.release(singz::NativeAudioOwnerKind::Capture, generation);
   return takeResult(env, result);
 }
 napi_value cancelTake(napi_env env, napi_callback_info info) {
@@ -1464,7 +1373,13 @@ napi_value cancelTake(napi_env env, napi_callback_info info) {
   const bool matched = argc == 1 && getExactU64(env, argv[0], &generation) &&
       owner.takePresent && generation == owner.takeGeneration;
   try {
-    if (matched) { owner.takeWriter.cancel(); owner.takePresent = false; owner.takeGeneration = 0; }
+    if (matched) {
+      owner.takeWriter.cancel();
+      if (owner.input) owner.input->releaseTake();
+      owner.takePresent = false; owner.takeGeneration = 0;
+      if (owner.generation == 0)
+        (void)nativeAudioOwnership.release(singz::NativeAudioOwnerKind::Capture, generation);
+    }
     napi_value result;
     napi_create_object(env, &result);
     set(env, result, "ok", boolValue(env, true));
@@ -1473,19 +1388,139 @@ napi_value cancelTake(napi_env env, napi_callback_info info) {
   } catch (const std::exception& e) { return takeError(env, "error", e.what()); }
 }
 
+// Offline jobs run on libuv workers in the audio utility process. Cancellation
+// never takes the capture owner mutex and is checked once per DSP block.
+struct ConformJob {
+  napi_env env{}; napi_async_work work{}; napi_deferred deferred{};
+  std::string id, inputPath, outputPath, error, errorCode;
+  singz::TakeConformRequest request;
+  std::shared_ptr<std::atomic<bool>> cancelled;
+  uint64_t frames{0}; uint32_t inputLatency{0}, outputLatency{0}; bool registered{false}, outputComplete{false};
+};
+std::mutex conformMutex;
+std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> conformJobs;
+napi_value conformProperty(napi_env env, napi_value obj, const char *name) {
+  napi_value v{};
+  if (napi_get_named_property(env, obj, name, &v) != napi_ok) throw std::runtime_error("Missing conform property");
+  return v;
+}
+double conformNumber(napi_env env, napi_value obj, const char *name) {
+  double value = 0;
+  if (napi_get_value_double(env, conformProperty(env, obj, name), &value) != napi_ok || !std::isfinite(value))
+    throw std::runtime_error("Invalid conform number");
+  return value;
+}
+uint64_t conformFrame(napi_env env, napi_value obj, const char *name) {
+  const double n = conformNumber(env, obj, name);
+  if (n < 0 || n > 9007199254740991.0 || std::floor(n) != n) throw std::runtime_error("Invalid conform frame");
+  return static_cast<uint64_t>(n);
+}
+bool conformBool(napi_env env, napi_value obj, const char *name) {
+  bool value{};
+  if (napi_get_value_bool(env, conformProperty(env, obj, name), &value) != napi_ok) throw std::runtime_error("Invalid conform boolean");
+  return value;
+}
+template<class F> void conformArray(napi_env env, napi_value obj, const char *name, uint32_t max, F item) {
+  auto v = conformProperty(env, obj, name); bool array = false; uint32_t length = 0;
+  if (napi_is_array(env, v, &array) != napi_ok || !array || napi_get_array_length(env, v, &length) != napi_ok || length > max)
+    throw std::runtime_error("Invalid conform array");
+  for (uint32_t i = 0; i < length; ++i) { napi_value row{}; if (napi_get_element(env, v, i, &row) != napi_ok) throw std::runtime_error("Invalid conform row"); item(row); }
+}
+napi_value conformTake(napi_env env, napi_callback_info info) {
+  size_t argc = 4; napi_value argv[4]{}; napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  auto job = std::make_unique<ConformJob>(); job->env = env;
+  const auto cleanupFailedJob = [&] {
+    if (job->registered) { std::lock_guard lock(conformMutex); conformJobs.erase(job->id); job->registered = false; }
+    if (job->work) { napi_delete_async_work(env, job->work); job->work = nullptr; }
+  };
+  try {
+    if (argc != 4) throw std::runtime_error("conformTake requires input, output, request and job id");
+    for (size_t i=0;i<2;++i) {
+      size_t bytes=0;
+      if (napi_get_value_string_utf8(env,argv[i],nullptr,0,&bytes)!=napi_ok) throw std::runtime_error("Invalid conform path");
+      if (bytes>131068) throw singz::TakeConformError(singz::TakeConformFailure::PathTooLong,"Conform path exceeds UTF-8 length limit");
+    }
+    job->inputPath = getStringValue(env, argv[0], 131072); job->outputPath = getStringValue(env, argv[1], 131072);
+    job->id = getStringValue(env, argv[3], 128);
+    if (job->id.empty() || job->inputPath.empty() || job->outputPath.empty() || job->inputPath == job->outputPath ||
+      job->inputPath.find('\0') != std::string::npos || job->outputPath.find('\0') != std::string::npos)
+      throw std::runtime_error("Invalid conform paths/id");
+    auto &r = job->request; const auto config = argv[2];
+    const auto rate = conformFrame(env, config, "outputRate");
+    if (rate < 8000 || rate > 192000) throw std::runtime_error("Invalid conform output rate");
+    r.outputRate = static_cast<uint32_t>(rate);
+    r.songDurationProjectFrames = conformFrame(env, config, "songDurationProjectFrames");
+    r.startPositionSec = conformNumber(env, config, "startPositionSec"); r.userOffsetSec = conformNumber(env, config, "userOffsetSec");
+    conformArray(env, config, "anchors", 20000, [&](napi_value a) { r.anchors.push_back({conformFrame(env, a, "takeFrame"), conformNumber(env, a, "projectFrame")}); });
+    conformArray(env, config, "settings", 20000, [&](napi_value s) { r.settings.push_back({conformFrame(env, s, "takeFrame"), conformNumber(env, s, "transposeSemitones")}); });
+    conformArray(env, config, "effects", 16, [&](napi_value e) {
+      auto params = conformProperty(env, e, "params");
+      r.effects.push_back({getStringValue(env, conformProperty(env, e, "id"), 32), conformBool(env, e, "enabled"),
+        conformNumber(env, params, "manualOffsetSemitones"), conformBool(env, params, "preserveFormants")});
+    });
+    job->cancelled = std::make_shared<std::atomic<bool>>(false);
+    { std::lock_guard lock(conformMutex);
+      if (conformJobs.size() >= 4 || conformJobs.count(job->id)) throw std::runtime_error("Conform queue full or duplicate id");
+      conformJobs.emplace(job->id, job->cancelled); job->registered = true;
+    }
+    napi_value promise{}, resource{};
+    if (napi_create_promise(env, &job->deferred, &promise) != napi_ok) throw std::runtime_error("Could not create conform promise");
+    napi_create_string_utf8(env, "offlineTakeConform", NAPI_AUTO_LENGTH, &resource);
+    const auto created = napi_create_async_work(env, nullptr, resource,
+      [](napi_env, void *data) {
+        auto *j = static_cast<ConformJob *>(data);
+        try {
+          const auto input=singz::takeConformFilePath(j->inputPath).u8string(),output=singz::takeConformFilePath(j->outputPath).u8string();
+          j->inputPath.assign(input.begin(),input.end());j->outputPath.assign(output.begin(),output.end());
+          auto result = singz::conformTakeFile(j->inputPath, j->outputPath, j->request, j->cancelled.get());
+          if (j->cancelled->load()) { std::error_code ignored; std::filesystem::remove(std::filesystem::path(std::u8string(j->outputPath.begin(), j->outputPath.end())), ignored); throw singz::TakeConformError(singz::TakeConformFailure::Cancelled,"Take conform cancelled"); }
+          j->outputComplete = true;
+          j->frames = result.durationFrames; j->inputLatency = result.inputLatencyFrames; j->outputLatency = result.outputLatencyFrames;
+        } catch (const singz::TakeConformError &e) { j->error = e.what(); j->errorCode = singz::takeConformFailureCode(e.code()); }
+        catch (const std::exception &e) { j->error = e.what(); j->errorCode = "conform-error"; }
+      }, [](napi_env env, napi_status status, void *data) {
+        std::unique_ptr<ConformJob> j(static_cast<ConformJob *>(data));
+        { std::lock_guard lock(conformMutex); conformJobs.erase(j->id); }
+        if (status != napi_ok && j->error.empty()) j->error = "Take conform worker cancelled";
+        napi_value result{}; napi_create_object(env, &result);
+        set(env, result, "ok", boolValue(env, j->error.empty() && !j->cancelled->load()));
+        set(env, result, "error", stringValue(env, j->cancelled->load() ? "Take conform cancelled" : j->error));
+        if (j->cancelled->load() && j->outputComplete) { std::error_code ignored; std::filesystem::remove(std::filesystem::path(std::u8string(j->outputPath.begin(), j->outputPath.end())), ignored); }
+        if (j->cancelled->load() || status != napi_ok) j->errorCode = "cancelled";
+        if (!j->errorCode.empty()) {
+          set(env, result, "errorCode", stringValue(env, j->errorCode));
+          set(env, result, "detail", stringValue(env, j->cancelled->load() ? "Take conform cancelled" : j->error));
+        }
+        set(env, result, "durationFrames", numberValue(env, static_cast<double>(j->frames)));
+        set(env, result, "inputLatencyFrames", uintValue(env, j->inputLatency)); set(env, result, "outputLatencyFrames", uintValue(env, j->outputLatency));
+        napi_resolve_deferred(env, j->deferred, result); napi_delete_async_work(env, j->work);
+      }, job.get(), &job->work);
+    if (created != napi_ok || napi_queue_async_work(env, job->work) != napi_ok) throw std::runtime_error("Could not queue conform worker");
+    job.release(); return promise;
+  } catch (const singz::TakeConformError &e) {
+    cleanupFailedJob();
+    napi_throw_error(env, singz::takeConformFailureCode(e.code()), e.what()); return nullptr;
+  } catch (const std::exception &e) {
+    cleanupFailedJob();
+    napi_throw_error(env, "conform-error", e.what()); return nullptr;
+  }
+}
+napi_value cancelTakeConform(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1]{}; napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  if (argc != 1) { napi_throw_error(env, nullptr, "cancelTakeConform requires a job id"); return nullptr; }
+  const auto id = getStringValue(env, argv[0], 128);
+  std::lock_guard lock(conformMutex); const auto found = conformJobs.find(id);
+  if (found != conformJobs.end()) found->second->store(true);
+  napi_value result{}; napi_get_undefined(env, &result); return result;
+}
+
 void cleanup(void*) {
+  if (!singz::cleanupVoiceMonitor()) return; // Other N-API environments still own shared hosts.
   singz::cleanupMicrophoneMix();
   singz::cleanupTrainingAudio();
   singz::cleanupPlaybackBridge();
   std::lock_guard<std::mutex> lock(owner.mutex);
   stopLocked(owner.generation, true);
-  const auto status = monitor.status();
-  if (status.active) {
-    const singz::AudioMonitorResult ended =
-        monitor.end(status.ownershipGeneration);
-    (void)singz::releaseMonitorLeaseAfterEnd(
-        &nativeAudioOwnership, status.ownershipGeneration, ended.ok);
-  }
   singz::sharedAudioService().shutdown();
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   singz::shutdownBoxRouting();
@@ -1494,6 +1529,7 @@ void cleanup(void*) {
 
 napi_value init(napi_env env, napi_value exports) {
   singz::defineAudioExport(env, exports);
+  singz::defineVoiceMonitorExports(env, exports, &nativeAudioOwnership);
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
   singz::defineBoxRoutingExports(env, exports);
 #endif
@@ -1502,20 +1538,19 @@ napi_value init(napi_env env, napi_value exports) {
   napi_add_env_cleanup_hook(env, cleanup, nullptr);
   napi_property_descriptor properties[] = {
       {"inputDevices", nullptr, devices, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"audioBufferSettings", nullptr, audioBufferSettings, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"beginCapture", nullptr, begin, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cancelCapture", nullptr, cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureState", nullptr, state, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"recordTake", nullptr, recordTake, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"conformTake", nullptr, conformTake, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"cancelTakeConform", nullptr, cancelTakeConform, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"finishTake", nullptr, finishTake, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cancelTake", nullptr, cancelTake, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureRecording", nullptr, captureRecording, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureStats", nullptr, stats, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostProviders", nullptr, audioHostProviders, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostDevices", nullptr, audioHostDevices, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"beginMonitor", nullptr, beginMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"setMonitorGain", nullptr, setMonitorGain, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"monitorStatus", nullptr, monitorStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"endMonitor", nullptr, endMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   singz::definePlaybackExports(env, exports, &nativeAudioOwnership,

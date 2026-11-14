@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { desktopNativePlaybackPreferred, DESKTOP_NATIVE_PLAYBACK_KEY, DESKTOP_STREAM_LANES_KEY } from '../../src/renderer/src/audio/native-playback-preference'
+import { DESKTOP_STREAM_LANES_KEY } from '../../src/renderer/src/audio/native-playback-preference'
 import { boxNativePlaybackPolicy } from '../../src/renderer/src/box/playback-policy'
 import { desktopLaneMeasureApplies } from '../../src/renderer/src/audio/lane-measure'
 import { decideDesktopNativePlayback, DesktopNativePlaybackClient } from '../../src/renderer/src/audio/desktop-native-playback'
@@ -28,18 +28,16 @@ describe('Box native in-memory policy', () => {
     const getItem = vi.fn(() => '0')
     const setItem = vi.fn()
     vi.stubGlobal('localStorage', { getItem, setItem })
-    expect(boxNativePlaybackPolicy('linux')).toEqual({ playback: true, streamLanes: true, requireNative: true })
+    expect(boxNativePlaybackPolicy('linux')).toEqual({ streamLanes: true })
     expect(boxNativePlaybackPolicy('darwin')).toBeUndefined()
-    expect(desktopNativePlaybackPreferred('linux')).toBe(false)
-    expect(desktopNativePlaybackPreferred('linux', true)).toBe(true)
     const applies = await desktopLaneMeasureApplies([{ id: 'vocals', path: '/p/vocals.flac' }], {
       platform: 'linux',
-      nativePlaybackEnabled: true,
+
       api: { desktopPlaybackCapability: async () => runtime(), measureDesktopPlaybackLanes: vi.fn() }
     })
     expect(applies).toBe(true)
     expect(setItem).not.toHaveBeenCalled()
-    expect(getItem).toHaveBeenCalledWith(DESKTOP_NATIVE_PLAYBACK_KEY)
+    expect(getItem).not.toHaveBeenCalled()
     expect(getItem).not.toHaveBeenCalledWith(DESKTOP_STREAM_LANES_KEY)
   })
 
@@ -63,7 +61,7 @@ describe('Box native in-memory policy', () => {
       loop: null,
       nativeAudioProvider: 'wasapi' as const,
       graphDocument: null,
-      nativePlaybackEnabled: true,
+
       streamLanes: true
     }
     const prepared = await decideDesktopNativePlayback(request)

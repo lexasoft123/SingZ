@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 
 using namespace singz;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, #x); std::abort(); } } while (false)
@@ -53,6 +54,24 @@ void pauseAndRateChange() {
   // BEFORE it. Subtracting delay at today's .85 rate gives a different answer.
   CHECK(std::abs(recordPlacement(h, input(250)).startPositionSec - .1) < 1e-12);
 }
+void nonUnityStartupAndLongTake() {
+  for (double rate : {.25, .5, 2.0}) {
+    PlaybackPresentationHistory h;
+    append(h, 0, 720000, rate);
+    auto early = input(10); early.inputLatencyFrames = 0;
+    early.outputLatencyFrames = 480; early.graphLatencyFrames = 7200;
+    // Negative control: first block before graph presentation has no mapping.
+    CHECK(recordPlacement(h, early).fault == RecordPlacementFault::HistoryMiss);
+    for (unsigned ms = 100; ms <= 300000; ms += 100)
+      append(h, ms, 720000 + ms * 48 * rate, rate);
+    auto ready = early; ready.firstSampleHostNs = origin + 300050000000ull;
+    const auto placed = recordPlacement(h, ready);
+    CHECK(placed.fault == RecordPlacementFault::None);
+    CHECK(std::abs(placed.startPositionSec - (15 + 299.89 * rate)) < 1e-8);
+    // Wrong song-seconds subtraction would remove 160ms at every rate.
+    CHECK(std::abs(placed.startPositionSec - (15 + 300.05 * rate - .16)) > .07);
+  }
+}
 void missingAndSeek() {
   PlaybackPresentationHistory h;
   append(h, 100, 4800);
@@ -73,8 +92,27 @@ void missingAndSeek() {
   i = input(200); i.inputLatencyFrames = UINT64_MAX;
   CHECK(recordPlacement(h, i).fault == RecordPlacementFault::ClockUnavailable);
 }
+void deliberateSeamAndFaultToken() {
+  PlaybackPresentationHistory h;
+  append(h, 0, 480000);
+  const auto first = recordPlacement(h, input(100));
+  CHECK(first.fault == RecordPlacementFault::None);
+  PlaybackPresentationEntry seam;
+  seam.hostTimeNs = origin + 100000000; seam.frames = 4800; seam.sampleRate = 48000;
+  seam.projectFrame = 484800; seam.rate = .5; seam.generation = 2; seam.continuousFrame = 4800;
+  CHECK(h.append(seam));
+  auto i = input(200); i.hasInitialDiscontinuitySerial = true; i.initialDiscontinuitySerial = first.discontinuitySerial;
+  // Legacy consumers fail closed; the new token exempts only proven settings seams.
+  CHECK(recordPlacement(h, i).fault == RecordPlacementFault::SeekDuringTake);
+  i.hasInitialFaultSerial = true; i.initialFaultSerial = first.faultSerial;
+  const auto p = recordPlacement(h, i);
+  CHECK(p.fault == RecordPlacementFault::None && std::abs(p.startPositionSec - 10.12) < 1e-10);
+  seam.hostTimeNs += 100000000; seam.projectFrame = 960000; seam.continuousFrame += 4800; seam.seekCount = 1;
+  CHECK(h.append(seam)); i.firstSampleHostNs += 100000000;
+  CHECK(recordPlacement(h, i).fault == RecordPlacementFault::SeekDuringTake);
+}
 }
 int main() {
-  steadyAndSign(); pauseAndRateChange(); missingAndSeek();
+  steadyAndSign(); pauseAndRateChange(); nonUnityStartupAndLongTake(); missingAndSeek(); deliberateSeamAndFaultToken();
   std::puts("record placement tests passed");
 }

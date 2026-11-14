@@ -94,7 +94,8 @@ async function identity(expected) {
   assert.equal(value.name, runtimeName)
   assert.equal(value.appData, configHome)
   assert.equal(value.home, home)
-  assert.equal(value.userData, path.join(configHome, runtimeName))
+  const profileName = expected.product === 'box' ? 'SingZ Box' : 'SingZ'
+  assert.equal(value.userData, path.join(configHome, profileName))
   assert.equal(value.resourcesPath, path.join(path.dirname(expected.executable), 'resources'))
   assert.ok(value.appPath.startsWith(value.resourcesPath), value.appPath)
   assert.ok(!value.argv.includes('--box') && !value.argv.includes('--box-audio-host'), value.argv.join(' '))

@@ -1,8 +1,9 @@
 import { MicPitch, type MicDevice, type MicLevel } from './mic'
 import { NativeTrainingMicSource } from './training-mic'
 import { t } from '../i18n'
+import { micOwnership } from './mic-ownership'
 
-export type MicPreviewErrorKind = 'permission' | 'busy' | 'unavailable' | 'unknown'
+export type MicPreviewErrorKind = 'permission' | 'busy' | 'owner' | 'unavailable' | 'unknown'
 
 /** Settings-owned capture with no timer and no destination connection. */
 export class MicrophonePreview {
@@ -74,6 +75,11 @@ export class MicrophonePreview {
       }
       await context.resume()
       this.assertCurrent(generation)
+      // Join the outgoing karaoke owner. Snapshot the receipt: a later stop
+      // invalidates this generation and waits for this start to finish itself.
+      const release = micOwnership.releaseSnapshot()
+      if (release) await release
+      this.assertCurrent(generation)
       await mic.start(context, options)
       this.assertCurrent(generation)
       this.context = context
@@ -104,8 +110,7 @@ export class MicrophonePreview {
   readLevel(): MicLevel { return this.mic?.readLevel() ?? { rms: 0, dbfs: -72, signal: false } }
 
   stop(): void {
-    this.generation++
-    void this.stopOwned().catch(() => {
+    void this.stopAndWait().catch(() => {
       // A later stopAndWait/start retries the retained owner. Fire-and-forget
       // UI cleanup must never become an unhandled rejection.
     })
@@ -141,7 +146,7 @@ export class MicrophonePreview {
 
   async stopAndWait(): Promise<void> {
     this.generation++
-    await this.stopOwned()
+    await micOwnership.trackRelease(this.stopOwned())
   }
 
   private async stopCleanupOwner(owner: {
@@ -161,6 +166,9 @@ export class MicPreviewError extends Error {
 
 export function micPreviewErrorKind(error: unknown): MicPreviewErrorKind {
   if (error instanceof MicPreviewError) return error.kind
+  // Another SingZ owner (the Voice strip, training) holds the one native microphone: its own message, not 'unknown'.
+  const message = error instanceof Error ? error.message : ''
+  if (/another (?:native |training )?microphone (?:owner )?is (?:already )?active/i.test(message)) return 'owner'
   const name = error instanceof DOMException ? error.name : ''
   if (name === 'NotAllowedError' || name === 'SecurityError') return 'permission'
   if (name === 'NotReadableError' || name === 'AbortError') return 'busy'
@@ -171,6 +179,7 @@ export function micPreviewErrorKind(error: unknown): MicPreviewErrorKind {
 export function micPreviewErrorCopy(kind: MicPreviewErrorKind): string {
   if (kind === 'permission') return t('settings.micPreview.accessBlocked')
   if (kind === 'busy') return t('settings.micPreview.busy')
+  if (kind === 'owner') return t('settings.micPreview.owner')
   if (kind === 'unavailable') return t('settings.micPreview.unavailable')
   return t('settings.micPreview.unknown')
 }

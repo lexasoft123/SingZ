@@ -44,9 +44,22 @@ void latchTerminal(NativePlaybackCallbackState* state,
   saturate(&state->terminalFailures);
 }
 
+void registerServiceMeter(NativePlaybackCallbackState* state) noexcept {
+  if (state->serviceMeterPeakTarget != nullptr) {
+    if (!state->serviceMeterStarted.load(std::memory_order_relaxed)) {
+      state->serviceMeterResetEpoch->fetch_add(1, std::memory_order_release);
+      state->serviceMeterStarted.store(true, std::memory_order_release);
+    }
+    state->serviceMeterPeakTarget->store(&state->serviceOutputPeak, std::memory_order_relaxed);
+    state->serviceMeterRmsTarget->store(&state->serviceOutputRms, std::memory_order_relaxed);
+    state->serviceMeterClipTarget->store(&state->serviceOutputClippedBlocks, std::memory_order_relaxed);
+  }
+}
+
 // One generation's render of one (sub)block: today's whole callback body.
 bool renderGeneration(NativePlaybackCallbackState* state,
                       const AudioHostRenderBlock& block) noexcept {
+  registerServiceMeter(state);
   if (state->firstTerminalCause.current().reason !=
       AudioHostTerminalReason::None) {
     saturate(&state->terminalFailures);
@@ -157,6 +170,9 @@ bool nativePlaybackRender(void* context,
   // it is touched after the stores below.
   NativePlaybackCallbackState* incoming = swap->incoming;
   swap->land(swap->context, outgoing);
+  // Retarget before retirement becomes observable, including failed incoming
+  // renders: the outgoing state may be freed as soon as swapsLanded advances.
+  registerServiceMeter(incoming);
   router->current.store(incoming, std::memory_order_release);
   router->swap.store(nullptr, std::memory_order_release);
   router->swapsLanded.fetch_add(1u, std::memory_order_acq_rel);

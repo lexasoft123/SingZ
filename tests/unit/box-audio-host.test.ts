@@ -15,7 +15,6 @@ function fake() {
   const runtime: BoxAudioHostRuntime = {
     owner: { startPlayback: (...args: unknown[]) => { calls.push(['start', ...args]); return { ok: true } },
       playbackStatus: () => ({ state: 'playing', generation: '9007199254740993' }),
-      beginMonitor: (...args: unknown[]) => { calls.push(['monitor', ...args]); return { ok: true } },
       rendererDetached: (id: number) => { calls.push(['detach', id]) } },
     binding: {}, routingRequest: () => '{"version":1}', routingCapabilities: () => ({ supported: true }),
     shutdown: () => { calls.push(['shutdown']) }
@@ -43,7 +42,7 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       expect(await client.call('owner', 'hostDevices', [undefined, 'keep-position', undefined])).toEqual({ ok: false, provider: null, received: [null, 'keep-position'] })
     } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
   })
-  it('maps public ownership, detaches only private capture, and survives UI reconnect', async () => {
+  it('maps public ownership and survives UI reconnect without detaching the shared owner', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-audio-'))
     const path = join(dir, 'audio.sock')
     const { runtime, calls } = fake()
@@ -52,13 +51,12 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       expect((await stat(path)).mode & 0o777).toBe(0o600)
       const first = createBoxAudioClient(path)
       await first.call('owner', 'startPlayback', [45, '1'])
-      await first.call('owner', 'beginMonitor', [45, {}])
       await first.shutdown()
       const second = createBoxAudioClient(path)
       expect(await second.call('owner', 'playbackStatus', [])).toEqual({ state: 'playing', generation: '9007199254740993' })
       await second.reconcile()
       expect(calls[0]).toEqual(['start', 1, '1'])
-      expect(calls.some(row => row[0] === 'detach' && row[1] !== 1)).toBe(true)
+      expect(calls.some(row => row[0] === 'detach')).toBe(false)
       expect(calls.some(row => row[0] === 'shutdown')).toBe(false)
       await second.shutdown()
     } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
@@ -223,7 +221,6 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       expect(await first.call('service', 'microphones', [])).toMatchObject({ generation: '123' })
       await expect(first.call('owner', 'begin', [2, {}, '9', () => {}])).rejects.toThrow('owned by the audio host')
       await expect(first.call('owner', 'cancel', [2, '123'])).rejects.toThrow('owned by the audio host')
-      await first.call('owner', 'beginMonitor', [2, {}])
       await first.call('owner', 'rendererDetached', [2])
       await first.shutdown()
       expect(await second.call('service', 'microphones', [])).toMatchObject({ generation: '123', epoch: host.epoch })
@@ -536,7 +533,7 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       expect(await client.call('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])).toMatchObject({ ok: false })
     } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
   })
-  it('does not clear recovery for private monitor or capture teardown with a coincident generation', async () => {
+  it('does not clear recovery for a client capture teardown with a coincident generation', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'box-retained-private-'))
     const path = join(dir, 'audio.sock')
     const { runtime, calls } = fake()
@@ -544,9 +541,6 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
     let current: ReturnType<typeof status> | null = null
     runtime.owner.playbackStatus = () => current
     runtime.owner.preparePlayback = () => { current = status('7'); return { ok: true, generation: '7' } }
-    runtime.owner.endMonitor = (id: number, generation: string) => {
-      calls.push(['endMonitor', id, generation]); return { ok: false }
-    }
     runtime.owner.cancel = (id: number, generation: string) => {
       calls.push(['cancel', id, generation]); return undefined
     }
@@ -558,12 +552,11 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       await client.call('service', 'associateRetainedProject', [{
         expected: { epoch: prepared.epoch, generation: '7' }, descriptor
       }])
-      await client.call('owner', 'endMonitor', [51, '7'])
       await expect(client.call('owner', 'cancel', [51, '7'])).rejects.toThrow('owned by the audio host')
       const snapshot = await client.reconcile() as { recovery?: { generation: string } }
       expect(snapshot.recovery?.generation).toBe('7')
       expect(current).toMatchObject({ generation: '7' })
-      expect(calls).toEqual([['endMonitor', 1001, '7']])
+      expect(calls).toEqual([])
     } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
   })
   it('rejects oversized incomplete frames, PCM and malformed JSON', () => {

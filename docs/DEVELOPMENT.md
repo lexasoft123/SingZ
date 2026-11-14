@@ -7,6 +7,14 @@ product/platform invariants. Load the runbooks below when the task needs them.
 `CLAUDE.md` is only an `@AGENTS.md` entry point; the instructions below explain
 the tooling.
 
+Settings > Audio groups the native output device and microphone controls under
+Audio route. Output choices persist a native UID; legacy browser sink IDs migrate
+by an unambiguous device match; if no match is available, the saved browser ID
+is retained for the next launch and the system default is used for this session
+with a notice. The route status shows only telemetry reported by playback. The old
+native-playback switch is ignored and no longer written; Web Audio fallback is
+retained until ADR 0015 WP3.
+
 ## Setup
 
 ```bash
@@ -34,7 +42,7 @@ playback, renderer reload, stop/unload, pending-prepare cancellation, and helper
 crash. A successful mocked RPC test does not qualify hardware buffer sizes.
 
 Renderer reload retains song/relay audio but releases private microphone
-analysis and monitoring. The replacement screen exposes top-bar Stop controls
+analysis. The replacement screen exposes top-bar Stop controls
 for audio that remains active without a loaded song. Destroying the owning
 webContents releases its native ownership; app quit tears down the helper. A helper crash or
 control timeout fails closed and needs an app restart; status polls must not
@@ -134,6 +142,27 @@ the path is retained (even if compiled identity is then refused) for the
 process lifetime because Windows may keep the DLL mapped. Bounded stale cleanup
 removes only old, strictly named, same-owner directories whose recorded PID is
 confirmed dead; every live PID (including another worktree's SingZ) is preserved.
+**Stale addon refuses to start.** Native playback is the only desktop path
+(ADR 0015), so at startup (`src/main/addon-startup-gate.ts`, wired in
+`src/main/index.ts` before any window or IPC) main checks the selected addon's
+manifest against this checkout. A provenance mismatch ("older or different
+checkout") or, in an unpackaged run, missing `current.json` metadata logs the
+reason, shows one error box with `npm run capture:addon -- <platform>-<arch>`
+and both fingerprints, and exits 1 before any window exists. With
+`SINGZ_E2E_HIDDEN` set there is no dialog: the reason goes to stderr and the
+exit code is 1. A packaged build treats the same failures as a corrupt install
+(reinstall message). Only two causes gate: the fingerprint mismatch and a
+manifest that is absent (ENOENT) or not JSON. Every other error, including I/O
+errors during the source-fingerprint walk (retried once), a missing binary, ABI
+and unsupported platform, is not gated and keeps the lazy-load behaviour. The
+fingerprint is computed once and passed to the audio process (only the
+unpackaged audio process honours it, and only a 40-hex value; main always
+walks the tree itself). It is cached for main's lifetime, so a rebuild after
+startup shows as a mismatch on audio-process respawn (conservative). `SINGZ_ALLOW_STALE_ADDON=1` opts out for tooling
+that deliberately loads a stale addon; it is ignored when `app.isPackaged`.
+Check: `node tests/e2e/mac/stale-addon-gate-e2e.cjs` (scratch manifest, needs
+a built `out/`).
+
 `SINGZ_CAPTURE_ADDON=/absolute/file.node` overrides the selected path
 for diagnostics only; it does not bypass identity checks. The file must match
 this checkout (in development) and carry its own matching
@@ -819,7 +848,7 @@ the skeleton:
 const { _electron } = require('playwright-core')
 const app = await _electron.launch({
   executablePath: '<repo>/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
-  args: ['<repo>/out/main/index.js'],          // or a packaged .app binary
+  args: ['<repo>'],                          // package.json loads out/main/index.js
   env: { ...process.env, /* hooks below */ }
 })
 const win = await app.firstWindow()
@@ -829,6 +858,12 @@ await win.setInputFiles('input[type=file]', song)   // same path as drag-drop
 Rules learned the hard way:
 
 - `npm run build` before driving — drivers run `out/`, not `src/`.
+- Launch development builds from the package root. `app.getAppPath()` anchors
+  asset reads there; launching `out/main/index.js` directly points it at
+  `out/main`, so native microphone pitch cannot find `assets/pitch/crepe-tiny.bin`.
+- A hidden document deliberately suspends the Settings microphone preview.
+  Live meter checks use a visible, non-activating window (see
+  `tests/e2e/mac/capture-visibility.cjs`) and wait for `document.hidden === false`.
 - `npm run build` and `npm run dev` never install, so after a pull that moved
   `package-lock.json` (a new `@singz/ui` pin, most often) run `npm ci` first.
   Both refuse to start on a `node_modules` that is not the lockfile's
@@ -837,8 +872,17 @@ Rules learned the hard way:
   on the source where it describes those same files);
   `SINGZ_ALLOW_STALE_DEPS=1` builds anyway, for a package put there by hand at
   another version on purpose (a locally built kit, tried before its tag).
-- Driver runs get userData **"Electron"**, dev runs **"singz"**, packaged
-  **"SingZ"**: their stem caches are separate. Shared models are not.
+- Desktop driver, development and packaged launches all use `appData/SingZ`
+  for userData and Chromium sessionData. Set `SINGZ_USERDATA_DIR` for each
+  driver's isolated profile; shared models and packs have separate overrides.
+  Every E2E driver that launches the app does, through
+  `scratchProfileEnv()` in `tests/shared/scratch-profile.cjs` (a temp profile
+  removed on exit; `projectsRoot` seeds settings.json for library drivers), or
+  its own `SINGZ_USERDATA_DIR`; `tests/unit/e2e-scratch-profile.test.ts` fails a
+  launcher that does neither. Without it a driver runs in the real SingZ profile.
+  Bootstrap migrates a distinct lowercase `appData/singz` only if `SingZ`
+  is absent; if both exist it warns without merging, and if rename fails it
+  keeps using the legacy directory. Case-insensitive aliases are left untouched.
 - After clicking something that triggers an async re-render, wait for the
   *new* state (e.g. `.variant:has-text(...)`, or a button's label returning to
   idle) — stale rows accept clicks while disabled and the click silently dies.
@@ -864,7 +908,7 @@ Rules learned the hard way:
 | `SINGZ_NO_LAUNCH_SYNC=1` | the older, narrower opt-out: skips only the launch reconcile |
 | `SINGZ_SYNC_DEBOUNCE_MS` | shrink the 4 s coalescing window so a driver need not wait for it |
 | `SINGZ_GDRIVE_CONFIG` | JSON OAuth config — point the app at a fake Drive (`tests/shared/fake-drive-http.ts`) |
-| `SINGZ_USERDATA_DIR` | isolate userData (drivers sharing "Electron" crash each other) |
+| `SINGZ_USERDATA_DIR` | isolate userData and sessionData (drivers sharing the default SingZ profile crash each other); bypass profile migration |
 | `SINGZ_MODELS_DIR` | relocate the shared model cache |
 | `SINGZ_PACK_DIR` | relocate the GPU pack install dir |
 | `SINGZ_GPU_PACK_URL` | pack download URL (point at a local http server) |

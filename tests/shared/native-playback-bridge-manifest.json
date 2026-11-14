@@ -23,6 +23,11 @@
       "partialRuntimeTag": "singz-prepared-audio-fd-ffmpeg-partial-runtime-v2"
     }
   },
+  "offlineTakeAddon": {
+    "conformTake": { "arity": 4, "synchronous": false, "target": "binding" },
+    "cancelTakeConform": { "arity": 1, "synchronous": true, "target": "binding" },
+    "note": "Separate capture-addon control surface; never enters the playback callback."
+  },
   "methods": {
     "phone": [
       {
@@ -225,8 +230,17 @@
       },
       {
         "name": "setPlaybackMasterGain",
+        "note": "Generation 0 sets the shared service master without a song; positive generations retain owner and stale-generation checks. Desktop graph app gain is unity; all service clients share the ramp and ceiling.",
         "ipc": "audio-host:playback-master",
         "preload": "setDesktopPlaybackMasterGain",
+        "dormant": false,
+        "synchronous": true
+      },
+      {
+        "name": "previewClick",
+        "ipc": "audio-host:preview-click",
+        "preload": "previewDesktopClick",
+        "note": "Shared service client; boolean accent and linear client gain, no song or generation required. Bounded to 16 pending clicks; failures never fall back to Chromium.",
         "dormant": false,
         "synchronous": true
       },
@@ -234,6 +248,14 @@
         "name": "playbackStatus",
         "ipc": "audio-host:playback-status",
         "preload": "desktopPlaybackStatus",
+        "dormant": false,
+        "synchronous": true
+      },
+      {
+        "name": "presentationQuery",
+        "ipc": null,
+        "preload": null,
+        "internal": true,
         "dormant": false,
         "synchronous": true
       },

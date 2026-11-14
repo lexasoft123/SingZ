@@ -59,17 +59,6 @@ vi.mock('electron', () => ({
   }
 }))
 
-vi.mock('../../src/main/index', async () => {
-  const { existsSync } = await import('node:fs')
-  electron.state.importSurface = process.env.SINGZ_SURFACE
-  const userData = electron.state.paths.get('userData')
-  electron.state.importProfileReady = Boolean(userData && existsSync(userData))
-  electron.state.events.push(
-    `import:${electron.state.name}:${userData ?? 'unset'}:${electron.state.paths.get('sessionData') ?? 'unset'}`
-  )
-  return {}
-})
-
 const originalArgv = process.argv
 const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
 const envNames = [
@@ -91,6 +80,18 @@ function writePackage(metadata: unknown): void {
 
 async function loadBootstrap(): Promise<void> {
   vi.resetModules()
+  // resetModules does not re-run a cached vi.mock factory. Re-register it so
+  // every launch observes the paths at the moment main is first imported.
+  vi.doMock('../../src/main/index', async () => {
+    const { existsSync } = await import('node:fs')
+    electron.state.importSurface = process.env.SINGZ_SURFACE
+    const userData = electron.state.paths.get('userData')
+    electron.state.importProfileReady = Boolean(userData && existsSync(userData))
+    electron.state.events.push(
+      `import:${electron.state.name}:${userData ?? 'unset'}:${electron.state.paths.get('sessionData') ?? 'unset'}`
+    )
+    return {}
+  })
   await import('../../src/main/bootstrap')
 }
 
@@ -176,17 +177,25 @@ describe('early bootstrap identity and profile setup', () => {
     expect(JSON.parse(readFileSync(desktopSettings, 'utf8'))).toEqual({ gdrive: { access: 'desktop-only' } })
   })
 
-  it('leaves Electron-chosen Desktop name and paths untouched', async () => {
+  it.each(['darwin', 'linux', 'win32'])('sets the Desktop profile before main imports on %s', async platform => {
+    Object.defineProperty(process, 'platform', { value: platform, configurable: true })
     writePackage({ singzProduct: 'desktop' })
-    const userData = path('userData')
+    const userData = join(path('appData'), 'SingZ')
 
     await loadBootstrap()
 
     expect(electron.app.getName()).toBe('Electron-chosen')
     expect(path('userData')).toBe(userData)
     expect(process.env.SINGZ_SURFACE).toBeUndefined()
-    expect(electron.state.paths.has('sessionData')).toBe(false)
-    expect(electron.state.events.filter(event => !event.startsWith('import:'))).toEqual([])
+    expect(path('sessionData')).toBe(userData)
+    expect(electron.state.importProfileReady).toBe(true)
+    expect(electron.state.events).toEqual([
+      `path:userData:${userData}`,
+      `path:sessionData:${userData}`,
+      `import:Electron-chosen:${userData}:${userData}`
+    ])
+    expect(modelsDir()).toBe(join(userData, 'models'))
+    expect(packDir()).toBe(join(userData, 'gpu-splitter'))
   })
 
   it('keeps --box as a development selector and honors the explicit test profile override', async () => {
@@ -203,17 +212,39 @@ describe('early bootstrap identity and profile setup', () => {
     expect(existsSync(join(path('appData'), 'SingZ Box'))).toBe(false)
   })
 
+  it('makes legacy settings and recordings available at the canonical path before main imports', async () => {
+    writePackage({ singzProduct: 'desktop' })
+    const legacy = join(path('appData'), 'singz')
+    mkdirSync(join(legacy, 'voice-takes'), { recursive: true })
+    writeFileSync(join(legacy, 'settings.json'), JSON.stringify({ language: 'ru' }))
+    writeFileSync(join(legacy, 'voice-takes', 'take.wav'), 'private recording')
+
+    await loadBootstrap()
+
+    const canonical = join(path('appData'), 'SingZ')
+    expect(path('userData')).toBe(canonical)
+    expect(path('sessionData')).toBe(canonical)
+    expect(electron.state.importProfileReady).toBe(true)
+    expect(readSettings()).toEqual({ language: 'ru' })
+    expect(readFileSync(join(canonical, 'voice-takes', 'take.wav'), 'utf8')).toBe('private recording')
+  })
+
   it('preserves the explicit Desktop test profile override', async () => {
     writePackage({ singzProduct: 'desktop' })
     const override = join(electron.state.root, 'desktop test profile')
-    mkdirSync(override)
     process.env.SINGZ_USERDATA_DIR = override
+    const legacy = join(path('appData'), 'singz')
+    mkdirSync(legacy)
+    writeFileSync(join(legacy, 'settings.json'), 'legacy settings')
 
     await loadBootstrap()
 
     expect(path('userData')).toBe(override)
     expect(electron.app.getName()).toBe('Electron-chosen')
-    expect(electron.state.paths.has('sessionData')).toBe(false)
+    expect(path('sessionData')).toBe(override)
+    expect(electron.state.importProfileReady).toBe(true)
+    expect(readFileSync(join(legacy, 'settings.json'), 'utf8')).toBe('legacy settings')
+    expect(existsSync(join(override, 'settings.json'))).toBe(false)
     expect(process.env.SINGZ_SURFACE).toBeUndefined()
   })
 

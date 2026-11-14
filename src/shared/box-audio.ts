@@ -18,7 +18,7 @@ export const boxAudioCounter = (value: unknown): value is string =>
 export const boxAudioReadOnly = (target: BoxAudioTarget, method: string): boolean =>
   target === 'service' && (method === 'reconcile' || method === 'associateRetainedProject' || method === 'microphones') ||
   target === 'routing' && method === 'capabilities' ||
-  target === 'owner' && new Set(['devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus',
+  target === 'owner' && new Set(['devices', 'hostDevices', 'microphoneMixStatus',
     'playbackProviders', 'playbackCapability', 'playbackStatus', 'state', 'stats']).has(method)
 
 /** Expose lifetime only; socket paths remain private to main/preload. */

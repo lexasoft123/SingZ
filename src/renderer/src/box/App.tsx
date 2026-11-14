@@ -1,3 +1,4 @@
+import PlaybackFailurePanel from '../components/PlaybackFailurePanel'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { flushSync } from 'react-dom'
 import { applyPlatformClasses } from '@singz/ui'
@@ -55,9 +56,7 @@ export default function BoxApp(): React.JSX.Element {
   const transportRef = useRef<BoxTransport | null>(null)
   if (!transportRef.current) {
     const nativePolicy = boxNativePlaybackPolicy()
-    transportRef.current = new BoxTransport(window.singz, new MultitrackEngine(nativePolicy), {
-      nativePlaybackEnabled: nativePolicy?.playback
-    })
+    transportRef.current = new BoxTransport(window.singz, new MultitrackEngine(nativePolicy))
   }
   const transport = transportRef.current
   const microphones = useMemo(() => new BoxMicrophones(boxApi), [])
@@ -1060,6 +1059,11 @@ export default function BoxApp(): React.JSX.Element {
           onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }}
         />}
         {route === 'player' && mixOpen && <Mixer microphones={microphones} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} status={playbackStatus(snapshot)} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
+        {snapshot.playbackError && route !== 'settings' && <PlaybackFailurePanel error={snapshot.playbackError} fullscreen
+          onRetry={async () => {
+            await transport.retryPlayback()
+            if (transport.getSnapshot().active && !transport.getSnapshot().playbackError) goCurrent()
+          }} onChooseDevice={() => { settingsReturn.current = active ? 'player' : 'catalog'; settingsNavigator.go('settings') }} />}
         {pendingSwitch?.local && <SwitchDialog active={active} mode={pendingSwitchMode.current} target={pendingSwitch.local} onCancel={() => { advance.current = null; setPendingSwitch(null) }} onConfirm={() => void openNow(pendingSwitch, pendingSwitchMode.current !== 'paused')} />}
         {(queueError || queueSnapshot.loading) && route !== 'player' && route !== 'home' && <div className="box-state-toast" role="alert">
           <span>{queueSnapshot.loading ? t('box.queue.loading') : queueError}</span>

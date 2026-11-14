@@ -8,13 +8,11 @@ NativeAudioAcquireResult NativeAudioOwnership::acquire(
     return NativeAudioAcquireResult::InvalidGeneration;
   std::lock_guard<std::mutex> lock(mutex_);
   if (sharedCapturePlayback_ && kind == NativeAudioOwnerKind::Capture) {
-    if (captureGeneration_ != 0 || kind_ == NativeAudioOwnerKind::Monitor)
+    if (captureGeneration_ != 0)
       return NativeAudioAcquireResult::Busy;
     captureGeneration_ = generation;
     return NativeAudioAcquireResult::Acquired;
   }
-  if (kind == NativeAudioOwnerKind::Monitor && captureGeneration_ != 0)
-    return NativeAudioAcquireResult::Busy;
   if (kind_ != NativeAudioOwnerKind::None)
     return NativeAudioAcquireResult::Busy;
   kind_ = kind;
@@ -59,21 +57,6 @@ NativeAudioOwnershipSnapshot NativeAudioOwnership::snapshot() const {
   return kind_ == NativeAudioOwnerKind::None && captureGeneration_ != 0
       ? NativeAudioOwnershipSnapshot{NativeAudioOwnerKind::Capture, captureGeneration_}
       : NativeAudioOwnershipSnapshot{kind_, generation_};
-}
-
-bool releaseUnretainedMonitorBeginLease(
-    NativeAudioOwnership* ownership, uint64_t failedGeneration,
-    uint64_t retainedMonitorGeneration) {
-  if (ownership == nullptr || failedGeneration == 0 ||
-      retainedMonitorGeneration == failedGeneration)
-    return false;
-  return ownership->release(NativeAudioOwnerKind::Monitor, failedGeneration);
-}
-
-bool releaseMonitorLeaseAfterEnd(NativeAudioOwnership* ownership,
-                                 uint64_t generation, bool endedCleanly) {
-  if (!endedCleanly || ownership == nullptr || generation == 0) return false;
-  return ownership->release(NativeAudioOwnerKind::Monitor, generation);
 }
 
 }  // namespace singz

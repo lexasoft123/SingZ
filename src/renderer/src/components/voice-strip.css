@@ -1,30 +1,24 @@
 /* Voice strip (ADR 0014). Look and behaviour follow docs/specs/voice-strip/prototype. */
+/* The voice lane is two cells of the song stack's own grid (controls | time axis), in its last row, so it
+   shares the stems' zoom, scroll, duration, left offset and playhead (the scrub overlay spans it). */
 .voice-row {
   --voice: #5be3b0;
   --stem: var(--voice);
-  --vs-controls-w: var(--controls-w, 228px);
-  flex: none;
-  position: relative;
-  display: grid;
-  grid-template-columns: var(--vs-controls-w) minmax(0, 1fr);
-  height: 104px;
-  padding: 0 22px 0 10px;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: linear-gradient(90deg, color-mix(in srgb, var(--voice) 5%, transparent), transparent 40%);
+  display: contents;
 }
-.voice-row::before {
+.vs-controls::before {
   content: '';
   position: absolute;
-  left: 0;
+  left: -10px;
   top: 0;
   bottom: 0;
   width: 3px;
   background: var(--voice);
   opacity: 0.35;
 }
-.voice-row[data-phase='recording']::before { background: var(--danger); opacity: 1; }
-.voice-row[data-phase='armed']::before { background: var(--danger); opacity: 0.7; }
+.voice-row[data-phase='recording'] .vs-controls::before { background: var(--danger); opacity: 1; }
+.voice-row[data-phase='armed'] .vs-controls::before, .voice-row[data-armed='true'] .vs-controls::before { background: var(--danger); opacity: 0.7; }
+.voice-row[data-phase='recording'] .vs-controls::before { opacity: 1; }
 
 .vs-sr-only {
   position: absolute;
@@ -36,6 +30,12 @@
 }
 
 .vs-controls {
+  grid-column: 1;
+  grid-row: var(--extra-row);
+  position: relative;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--voice) 5%, transparent), transparent 90%);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -145,7 +145,7 @@
 /* vertical peak meter on the right edge of the control box */
 .vs-vmeter {
   position: absolute;
-  left: calc(10px + var(--vs-controls-w) - 26px);
+  right: 15px;
   top: 8px;
   bottom: 8px;
   width: 11px;
@@ -169,39 +169,66 @@
 .vs-meter i.peak.peak.peak.peak { background: #f4efe6; }
 
 /* take lane */
-.vs-tl { display: flex; flex-direction: column; min-width: 0; }
-.vs-head { height: 30px; display: flex; align-items: center; gap: 10px; padding: 4px 0 0 12px; min-width: 0; }
+.vs-tl { grid-column: 2; grid-row: var(--extra-row); display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+/* The stack's scrub overlay (z 5) covers this lane for seeking and the playhead; real controls sit above it. */
+.vs-note .vs-btn, .vs-take-actions, .vs-head > .sz-tip-wrap > .vs-effect-chip, .vs-head > .sz-tip-wrap > .vs-lane-state, .vs-head > .sz-tip-wrap > .vs-btn { position: relative; z-index: 6; } /* above the stack's scrub overlay (z 5); the playhead layer (z 7) stays pointer-events: none */
+.vs-head { container-type: inline-size; container-name: vs-head; height: 30px; display: flex; align-items: center; gap: 10px; padding: 4px 0 0 12px; min-width: 0; }
 .vs-note { flex: 1; min-width: 0; font-size: 11px; color: var(--dim); display: flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; }
 .vs-note > span { overflow: hidden; text-overflow: ellipsis; }
 .vs-note.warn { color: var(--accent); }
 .vs-note.err { color: var(--danger); }
 .vs-btn { height: 20px; padding: 0 8px; flex: none; border-radius: 8px; border: 1px solid var(--line-strong); background: rgba(255, 240, 214, 0.04); color: var(--text); font: inherit; font-size: 10.5px; font-weight: 600; cursor: pointer; }
 .vs-btn:hover { background: rgba(255, 240, 214, 0.09); }
-.vs-take-info { font-family: var(--font-mono); font-size: 10.5px; color: var(--dim); white-space: nowrap; }
 .vs-take-actions { display: inline-flex; gap: 2px; }
-.vs-track { position: relative; flex: 1; min-height: 0; }
-.vs-track::before { content: ''; position: absolute; left: 0; right: 0; top: calc(50% + 8px); border-top: 1px dashed var(--line); }
+/* Takes stack like a DAW: one row per take, the newest on top; the selected take is the audible one. */
+/* The rows fill the whole track area and share it evenly: one take is the full lane height, many get thinner
+   down to a legible minimum, then the track scrolls. The lane never grows the strip (its height is whatever
+   the controls column gives it), and there is no max height, so no empty band is left above, below or between. */
+.vs-track { position: relative; flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; }
+.vs-take-row { position: relative; flex: 1 1 0; min-height: 30px; }
+.vs-take-row + .vs-take-row { border-top: 1px solid var(--line); }
+.vs-take-row::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed var(--line); }
 .vs-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 11.5px; text-align: center; padding: 0 20px; }
+/* Each take has its own hue, cycled by the take's number (voice-format takeHue), so a take keeps its colour
+   across reloads. The palette avoids the accent orange and the danger red (selection and recording). */
+.voice-row { --take: var(--voice); --take-0: #5be3b0; --take-1: #6cb8ff; --take-2: #c3a4ff; --take-3: #ff93c4; --take-4: #ffd75e; --take-5: #5fe0e6; }
+[data-sz-palette='atelier'] .voice-row { --take-0: #0b7a55; --take-1: #1a62b3; --take-2: #6a3fc4; --take-3: #b02a72; --take-4: #8a5a00; --take-5: #0a727c; }
+.vs-hue-0 { --take: var(--take-0); }
+.vs-hue-1 { --take: var(--take-1); }
+.vs-hue-2 { --take: var(--take-2); }
+.vs-hue-3 { --take: var(--take-3); }
+.vs-hue-4 { --take: var(--take-4); }
+.vs-hue-5 { --take: var(--take-5); }
 .vs-clip {
   position: absolute;
-  top: 20px;
-  bottom: 6px;
+  top: 1px;
+  bottom: 1px;
   min-width: 6px;
+  z-index: 6; /* above the stack's scrub overlay: only the clip itself captures the click */
   border-radius: 8px;
-  border: 1px solid color-mix(in srgb, var(--voice) 70%, transparent);
-  background:
-    repeating-linear-gradient(90deg, color-mix(in srgb, var(--voice) 38%, transparent) 0 2px, transparent 2px 5px),
-    color-mix(in srgb, var(--voice) 12%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--take) 70%, transparent);
+  background: color-mix(in srgb, var(--take) 12%, var(--panel));
+  touch-action: none;
 }
+.vs-clip.selectable { cursor: grab; }
+.vs-clip.dragging { cursor: grabbing; border-style: dashed; }
+/* Unselected takes dim but keep their hue. */
+.vs-clip:not(.audible):not(.recording) { opacity: 0.68; }
+/* The audible take is the strongest: full opacity, a solid hue border and an inset glow (an outer shadow or
+   outline would be cut by the lane's overflow). */
+.vs-clip.selected { border-color: var(--take); box-shadow: inset 0 0 0 1px var(--take), inset 0 0 14px color-mix(in srgb, var(--take) 35%, transparent); background: color-mix(in srgb, var(--take) 20%, var(--panel)); }
+.vs-clip:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.vs-clip-ghost { z-index: 5; pointer-events: none; opacity: 0.35; border-style: dashed; background: none; }
+.vs-wave-mid { stroke: color-mix(in srgb, var(--take) 80%, transparent); stroke-width: 1.5; }
+.vs-clip.recording .vs-wave-mid { stroke: color-mix(in srgb, var(--danger) 85%, transparent); }
 .vs-clip.recording { border-color: var(--danger); background: rgba(255, 122, 92, 0.1); }
 .vs-clip.partial { border-style: dashed; }
-.vs-clip.playing { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--voice) 30%, transparent); }
-.vs-clip-tag { position: absolute; left: -1px; top: -19px; font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }
+.vs-wave { position: absolute; inset: 2px 0; width: 100%; height: calc(100% - 4px); fill: color-mix(in srgb, var(--take) 78%, transparent); pointer-events: none; }
+.vs-clip.recording .vs-wave { fill: color-mix(in srgb, var(--danger) 75%, transparent); }
+.vs-clip-tags { position: absolute; left: 4px; right: 4px; top: 3px; z-index: 1; display: flex; gap: 4px; white-space: nowrap; overflow: hidden; }
+.vs-clip-tag { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.vs-clip-tag.silent { color: var(--danger); border-color: var(--danger); }
 .vs-clip-tag.changed { color: var(--accent); border-color: var(--accent); }
-
-/* a take playing alone: the stems are not playing, so they read as off */
-.main-col.voice-listening-alone .lane-controls,
-.main-col.voice-listening-alone .lane-wave { opacity: 0.35; }
 
 /* Infinite animations pause under a modal (PROJECT-RULES perf rules). */
 body.modal-open .voice-row[data-phase='recording'] .vs-arm.active { animation-play-state: paused; }
@@ -226,5 +253,106 @@ body.modal-open .vs-rec-t.armed .vs-rec-core,
 body.modal-open .vs-rec-t.recording .vs-rec-core { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) { .vs-rec-t, .vs-rec-t * { animation: none !important; transition: none !important; } }
 .vs-rec-t:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.voice-host { display: contents; }
 .voice-record-slot { display: contents; }
+.vs-ib.vs-mon.active { color: #12100d; background: var(--voice); }
+.vs-badge { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--voice) 45%, transparent); color: var(--voice); background: color-mix(in srgb, var(--voice) 10%, transparent); white-space: nowrap; }
+
+/* Track settings popup: the kit Modal card with the app's own label, slider and select styles. */
+.vs-settings { width: min(440px, 92vw); }
+.vs-set-field { display: flex; flex-direction: column; margin: 0 0 4px; min-width: 0; }
+.vs-set-field .sz-tip-wrap { width: 100%; }
+.vs-set-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.vs-set-head output { font: 600 12px var(--font-mono); color: var(--accent); }
+.vs-unity { position: relative; height: 14px; margin: -4px 0 4px; }
+.vs-unity-tick { position: absolute; top: 0; transform: translateX(-50%); font-size: 10px; line-height: 14px; color: var(--text-muted, currentColor); opacity: 0.7; }
+.vs-unity-tick::before { content: ''; position: absolute; left: 50%; top: -3px; width: 1px; height: 4px; background: currentColor; }
+.vs-set-warn { font-size: 11px; color: var(--warn, #d9822b); margin: 0 0 4px; }
+.vs-vol-accent { --voice: var(--accent); height: 4px; margin: 6px 0 8px; }
+.vs-vol-accent::-webkit-slider-thumb { width: 14px; height: 14px; }
+.vs-set-select { min-width: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.vs-set-select:focus-visible, .vs-vol-accent:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.vs-set-select option { background: #1b1814; color: var(--text); }
+.vs-set-note { min-height: 1.3em; font-size: 12px; color: var(--accent); margin: 10px 0 0; }
+.vs-set-route { font-family: var(--font-mono); font-size: 11px; color: var(--dim); margin: 4px 0 0; overflow-wrap: anywhere; }
+
+/* In-app tooltip (Tooltip.tsx): the app's popover surface, small. The wrapper is a flex item of the
+   toolbars (inline-flex keeps their gap and sizing); .contents wraps absolutely placed or inline children. */
+.sz-tip-wrap { display: inline-flex; min-width: 0; }
+.sz-tip-wrap.grow { flex: 1; }
+.sz-tip-wrap.contents { display: contents; }
+/* a disabled control swallows pointer events: the wrapper takes them so its reason still shows */
+.sz-tip-wrap > :disabled { pointer-events: none; }
+.sz-tip {
+  position: fixed;
+  z-index: 2147483000; /* above the Modal overlay, a body sibling */
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 5px 9px;
+  background: #1d1915;
+  color: var(--text, #f4efe6);
+  border: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2));
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 11.5px;
+  line-height: 1.4;
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+.sz-tip::after {
+  content: '';
+  position: absolute;
+  left: var(--tip-arrow, 50%);
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  background: #1d1915;
+  transform: rotate(45deg);
+}
+.sz-tip.above::after { bottom: -5px; border-right: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2)); border-bottom: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2)); }
+.sz-tip.below::after { top: -5px; border-left: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2)); border-top: 1px solid var(--line-strong, rgba(255, 240, 214, 0.2)); }
+@media (prefers-reduced-motion: no-preference) {
+  .sz-tip { animation: sz-tip-in 0.12s ease-out; }
+}
+@keyframes sz-tip-in { from { opacity: 0; } }
+
+/* Voice strip input select: a full-width block in the controls column (no flex growth: no stray gap). */
+.sz-tip-wrap.block { display: flex; width: 100%; flex: none; }
+.vs-select { flex: 1; min-width: 0; }
+.vs-select select { display: block; min-width: 0; text-overflow: ellipsis; }
+.vs-select::after { right: 9px; }
+
+/* App-level monitor chip (title bar): shown while a monitor runs with no strip on screen. */
+.vs-mon-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, #5be3b0 55%, transparent); background: color-mix(in srgb, #5be3b0 12%, transparent); color: #5be3b0; font: 600 11px var(--font-mono); cursor: pointer; }
+.vs-mon-chip svg { width: 14px; height: 14px; }
+.vs-mon-chip:hover { background: color-mix(in srgb, #5be3b0 22%, transparent); }
+.vs-mon-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.vs-effect-chip { flex: none; height: 18px; padding: 0 8px; border-radius: 9px; border: 1px solid var(--line-strong); background: var(--accent-soft); color: var(--accent); font: inherit; font-size: 10.5px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.vs-effect-chip.dim { background: transparent; color: var(--dim); }
+.vs-effect-chip:hover { border-color: var(--accent); }
+.vs-effect-chip:focus-visible, .vs-lane-state:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vs-lane-state { flex: 0 1 auto; min-width: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--dim); }
+.vs-lane-state.bad { color: var(--danger); }
+.vs-chip[aria-disabled='true'] { opacity: 0.35; cursor: not-allowed; }
+.vs-preparing { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; background: rgba(23, 19, 16, 0.55); color: var(--text); font-size: 10.5px; pointer-events: none; }
+.vs-preparing::before { content: ''; width: 10px; height: 10px; margin-right: 6px; border-radius: 50%; border: 2px solid var(--dim); border-top-color: var(--accent); animation: vs-spin 0.9s linear infinite; }
+.vs-preparing { grid-auto-flow: column; justify-content: center; align-items: center; }
+body.modal-open .vs-preparing::before { animation-play-state: paused; }
+@keyframes vs-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .vs-preparing::before { animation: none; } }
+.vs-effects { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 10px; }
+.vs-effects > li { border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; }
+.vs-effect { display: grid; gap: 8px; }
+.vs-effect label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.vs-effect input[type='range'] { flex: 1; min-width: 0; }
+.vs-effect output { min-width: 3.5em; text-align: right; font-family: var(--font-mono); }
+
+.vs-head > .sz-tip-wrap:has(> .vs-lane-state) { flex: 0 1 auto; min-width: 0; }
+.vs-effect-chip, .vs-head .vs-btn, .vs-take-actions { flex: none; }
+/* Narrow lane: the status text goes first (its tooltip and Retry keep the detail); take actions stay reachable. */
+@container vs-head (max-width: 560px) { .vs-lane-state { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } .vs-head > .sz-tip-wrap:has(> .vs-lane-state) { width: 0; } }
+
+.vs-effect input[type='checkbox'] { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.vs-effect input[type='range'].vs-vol-accent { flex: 1; min-width: 0; margin: 6px 0; }
+.vs-effect input:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.vs-badge.delayed { border-color: var(--accent); color: var(--accent); background: transparent; border-width: 1.5px; }

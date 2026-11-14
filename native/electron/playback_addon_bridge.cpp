@@ -8,6 +8,7 @@
 #include "../playback/shared_audio_service.h"
 
 #include <lane_measure.h>
+#include <file_path.h>
 #include <zcore/media/decoded_audio.h>
 #include <native_playback_session.h>
 
@@ -71,9 +72,6 @@ DesktopPlaybackOwner playback;
 // Session lifetime is the addon's static owner, including graph seams. The
 // training renderer stores only this function pointer; it never borrows a
 // prepared graph or copies a reference-counted owner on the render thread.
-PlaybackPresentationQuery takePresentation(uint64_t hostTimeNs) noexcept {
-  return playback.session.presentationQueryRealtime(hostTimeNs);
-}
 
 /**
  * Wait out an in-flight prepare, having first asked it to stop.
@@ -154,6 +152,7 @@ struct MeasureJob {
   napi_async_work work{nullptr};
   std::vector<LaneMeasureRequest> requests;
   std::vector<LaneMeasure> results;
+  std::vector<std::string> pathFailures;
   uint64_t epoch{0};
 };
 
@@ -510,7 +509,8 @@ bool objectWithOnlyKeys(napi_env env, napi_value value,
   return true;
 }
 
-bool exactU64(napi_env env, napi_value value, uint64_t *result) {
+bool exactU64(napi_env env, napi_value value, uint64_t *result,
+              bool allowZero = false) {
   napi_valuetype type{};
   if (result == nullptr || napi_typeof(env, value, &type) != napi_ok)
     return false;
@@ -518,12 +518,12 @@ bool exactU64(napi_env env, napi_value value, uint64_t *result) {
     bool lossless = false;
     return napi_get_value_bigint_uint64(env, value, result, &lossless) ==
                napi_ok &&
-           lossless && *result != 0;
+           lossless && (allowZero || *result != 0);
   }
   double number = 0.0;
   if (type != napi_number ||
       napi_get_value_double(env, value, &number) != napi_ok ||
-      !std::isfinite(number) || std::floor(number) != number || number < 1.0 ||
+      !std::isfinite(number) || std::floor(number) != number || number < (allowZero ? 0.0 : 1.0) ||
       number > static_cast<double>(kNativePlaybackMaximumJsSafeInteger))
     return false;
   *result = static_cast<uint64_t>(number);
@@ -948,17 +948,10 @@ bool parseInitialTransport(napi_env env, napi_value value,
   return true;
 }
 
-int openReadOnly(const std::string &utf8Path) noexcept {
-#if defined(_WIN32)
-  try {
-    return _wopen(std::filesystem::u8path(utf8Path).c_str(),
-                  _O_RDONLY | _O_BINARY);
-  } catch (...) {
-    return -1;
-  }
-#else
-  return ::open(utf8Path.c_str(), O_RDONLY | O_CLOEXEC);
-#endif
+int openReadOnly(const std::string &path,std::string *failure=nullptr) noexcept {
+  try {return openNativeReadOnly(path);}
+  catch(const FilePathError &e) {if(failure)*failure=e.code()==FilePathFailure::TooLong?"path-too-long":"invalid-path";return -1;}
+  catch(...) {return -1;}
 }
 
 bool validMeasureWaveformKey(const std::string &key) noexcept {
@@ -1014,7 +1007,7 @@ bool parseWaveformSeed(napi_env env, napi_value value,
 }
 
 bool parseLanes(napi_env env, napi_value value,
-                std::vector<NativePlaybackLaneSource> *result) {
+                std::vector<NativePlaybackLaneSource> *result, std::string *pathFailure=nullptr) {
   bool isArray = false;
   uint32_t length = 0;
   if (result == nullptr || napi_is_array(env, value, &isArray) != napi_ok ||
@@ -1032,7 +1025,7 @@ bool parseLanes(napi_env env, napi_value value,
         !objectWithOnlyKeys(env, laneValue,
                             {"id", "path", "gain", "muted", "solo", "sourceKey", "waveform"}) ||
         !stringProperty(env, laneValue, "id", 96, &lane.id) ||
-        !stringProperty(env, laneValue, "path", 32768, &path) ||
+        !stringProperty(env, laneValue, "path", 131072, &path) ||
         !numberProperty(env, laneValue, "gain", 0.0,
                         kNativePlaybackMaximumLinearGain, 1.0, true, &gain) ||
         !boolProperty(env, laneValue, "muted", false, true, &lane.muted) ||
@@ -1042,7 +1035,7 @@ bool parseLanes(napi_env env, napi_value value,
           return prior.id == lane.id;
         }))
       return false;
-    const int descriptor = openReadOnly(path);
+    const int descriptor = openReadOnly(path,pathFailure);
     if (descriptor < 0)
       return false;
     lane.descriptor = OwnedFileDescriptor(descriptor);
@@ -1325,6 +1318,7 @@ bool parseConfig(napi_env env, napi_value value,
         return false;
   config.requestedSampleRate = sampleRate;
   config.masterGain = static_cast<float>(masterGain);
+  config.serviceOwnsMasterGain = true;
   config.decodeOptions.requiredSampleRate = sampleRate;
 
   napi_value playbackValue{};
@@ -1560,15 +1554,15 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
   NativePlaybackPrepareConfig config;
   std::string provider;
   std::vector<NativePlaybackLaneSource> lanes;
+  std::string pathFailure;
   if (argc != 3 || !exactU64(env, argv[2], &generation) ||
       !parseConfig(env, argv[0], &config, &provider) ||
-      !parseLanes(env, argv[1], &lanes))
-    return settledPromise(
-        env, resultValue(env,
-                         simpleFailure(
-                             NativePlaybackError::InvalidConfiguration,
-                             generation,
-                             "Playback configuration or lane paths are invalid")));
+      !parseLanes(env, argv[1], &lanes,&pathFailure)) {
+    auto result=resultValue(env,simpleFailure(NativePlaybackError::InvalidConfiguration,generation,
+      pathFailure=="path-too-long"?"A lane path exceeds the Windows extended-length limit":"Playback configuration or lane paths are invalid"));
+    if(pathFailure=="path-too-long") setValue(env,result,"errorCode",makeString(env,"path-too-long"));
+    return settledPromise(env,result);
+  }
 
   std::lock_guard<std::mutex> lock(playback.mutex);
   // One at a time. The facade serializes its own calls, but the refusal is
@@ -1646,7 +1640,6 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
                     : unavailableReason),
             "platform-not-ready"));
   backend = sharedPlaybackBackend(std::move(backend), provider);
-  setTakePresentationProvider(nullptr);
   if (!playback.session.replaceAudioHostBackend(std::move(backend)))
     return settledPromise(
         env,
@@ -1674,7 +1667,6 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
   playback.handoffLease = 0;
   playback.generation = generation;
   playback.provider = provider;
-  setTakePresentationProvider(takePresentation);
   config.handoffLease = handoff;
   auto job = std::make_unique<PrepareJob>();
   job->config = std::move(config);
@@ -1810,6 +1802,35 @@ napi_value clearPlaybackLoop(napi_env env, napi_callback_info info) {
   });
 }
 
+// Service client, deliberately independent of a prepared song/generation.
+napi_value previewClick(napi_env env, napi_callback_info info) noexcept {
+  const auto reply = [&](bool ok, const char* code, const std::string& message) {
+    napi_value result{}; napi_create_object(env, &result);
+    setValue(env, result, "ok", makeBool(env, ok));
+    if (!ok) {
+      setValue(env, result, "errorCode", makeString(env, code));
+      setValue(env, result, "error", makeString(env, message));
+    }
+    return result;
+  };
+  try {
+    size_t argc = 2; napi_value args[2]{};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool accent = false; double gain = 0;
+    if (argc != 2 || napi_get_value_bool(env, args[0], &accent) != napi_ok ||
+        napi_get_value_double(env, args[1], &gain) != napi_ok ||
+        !std::isfinite(gain) || gain < 0 || gain > 4)
+      return reply(false, "invalid-configuration", "Invalid preview click configuration");
+    const auto result = sharedAudioService().previewClick(accent, static_cast<float>(gain));
+    using Error = SharedAudioService::PreviewClickError;
+    const char* code = result.error == Error::QueueFull ? "queue-full" :
+        result.error == Error::InvalidConfiguration ? "invalid-configuration" : "output-unavailable";
+    return reply(result.ok, code, result.message);
+  } catch (const std::exception& error) {
+    return reply(false, "output-unavailable", error.what());
+  } catch (...) { return reply(false, "output-unavailable", "Native click preview failed"); }
+}
+
 napi_value setPlaybackMasterGain(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2]{};
@@ -1817,7 +1838,7 @@ napi_value setPlaybackMasterGain(napi_env env, napi_callback_info info) {
   uint64_t generation = 0;
   napi_valuetype type{};
   double gain = 0.0;
-  if (argc != 2 || !exactU64(env, argv[0], &generation) ||
+  if (argc != 2 || !exactU64(env, argv[0], &generation, true) ||
       napi_typeof(env, argv[1], &type) != napi_ok || type != napi_number ||
       napi_get_value_double(env, argv[1], &gain) != napi_ok ||
       !std::isfinite(gain) || gain < 0 ||
@@ -1826,6 +1847,15 @@ napi_value setPlaybackMasterGain(napi_env env, napi_callback_info info) {
         env, simpleFailure(NativePlaybackError::InvalidConfiguration,
                            generation, "Playback master gain is invalid"));
   std::lock_guard<std::mutex> lock(playback.mutex);
+  // Generation zero is the process master control, also with no song loaded.
+  // It never creates a host or alters song ownership/presentation state.
+  if (generation == 0) {
+    NativePlaybackResult result;
+    result.ok = sharedAudioService().setMasterGain(static_cast<float>(gain));
+    result.error = result.ok ? NativePlaybackError::None
+                            : NativePlaybackError::InvalidConfiguration;
+    return resultValue(env, result);
+  }
   return resultValue(env, playback.session.setMasterGain(
                               generation, static_cast<float>(gain)));
 }
@@ -1955,7 +1985,6 @@ napi_value unloadPlaybackWithRetention(napi_env env,
   NativePlaybackUnloadReceipt receipt =
       playback.session.unloadWithCleanup(generation, retention);
   if (receipt.cleanup.globallyComplete()) {
-    setTakePresentationProvider(nullptr);
     playback.handoffLease = receipt.cleanup.handoffLease;
     if (playback.generation != 0)
       playback.ownership->release(NativeAudioOwnerKind::Playback,
@@ -2212,10 +2241,14 @@ napi_value presentationQuery(napi_env env, napi_callback_info info) {
   setValue(env, result, "projectFrame", makeNumber(env, source.projectFrame));
   setValue(env, result, "songSeconds", makeNumber(env, source.songSeconds));
   setValue(env, result, "rate", makeNumber(env, source.rate));
+  setValue(env, result, "transposeSemitones", makeNumber(env, source.transposeSemitones));
   setValue(env, result, "sampleRate", makeNumber(env, source.sampleRate));
   setValue(env, result, "outputLatencyFrames", makeNumber(env, source.outputLatencyFrames));
   setValue(env, result, "graphLatencyFrames", makeNumber(env, source.graphLatencyFrames));
   setCounter(env, result, "discontinuitySerial", source.discontinuitySerial);
+  setCounter(env, result, "faultSerial", source.faultSerial);
+  setCounter(env, result, "mappingStartHostNs", source.mappingStartHostNs);
+  setValue(env, result, "mappingStartSongSeconds", makeNumber(env, source.mappingStartSongSeconds));
   setCounter(env, result, "generation", source.generation);
   setValue(env, result, "paused", makeBool(env, source.paused));
   setValue(env, result, "seekDuringCallback", makeBool(env, source.nonAffine));
@@ -2224,7 +2257,13 @@ napi_value presentationQuery(napi_env env, napi_callback_info info) {
 
 napi_value playbackStatus(napi_env env, napi_callback_info) {
   std::lock_guard<std::mutex> lock(playback.mutex);
-  const NativePlaybackStatus source = playback.session.status();
+  NativePlaybackStatus source = playback.session.status();
+  // The desktop shared bus can render training/voice before the first song.
+  if (source.generation == 0) {
+    const auto meter = sharedAudioService().outputMeter();
+    source.outputPeak = meter.peak;
+    source.outputClippedBlocks = 0; // Song consumers must not see lifetime bus clips.
+  }
   napi_value result{};
   napi_create_object(env, &result);
   setCounter(env, result, "generation", source.generation);
@@ -2465,7 +2504,7 @@ napi_value laneMeasureResultValue(napi_env env, const MeasureJob &job,
     setValue(env, lane, "id", makeString(env, measure.id));
     setValue(env, lane, "ok", makeBool(env, measure.ok));
     setValue(env, lane, "error",
-             makeString(env, decodedAudioStatusName(measure.status)));
+             makeString(env, index<job.pathFailures.size() && !job.pathFailures[index].empty()?job.pathFailures[index]:decodedAudioStatusName(measure.status)));
     setValue(env, lane, "sampleRate", makeNumber(env, measure.sampleRate));
     setValue(env, lane, "channels", makeNumber(env, measure.channels));
     // A number, not a decimal string: this is a length the renderer does
@@ -2560,7 +2599,7 @@ napi_value measurePlaybackLanes(napi_env env, napi_callback_info info) {
     if (napi_get_element(env, lanesValue, index, &laneValue) != napi_ok ||
         !objectWithOnlyKeys(env, laneValue, {"id", "path"}) ||
         !stringProperty(env, laneValue, "id", 96, &request.id) ||
-        !stringProperty(env, laneValue, "path", 32768, &path))
+        !stringProperty(env, laneValue, "path", 131072, &path))
       return refuse("Native lane measure lanes failed schema validation");
     if (std::any_of(job->requests.begin(), job->requests.end(),
                     [&](const LaneMeasureRequest &prior) {
@@ -2570,7 +2609,9 @@ napi_value measurePlaybackLanes(napi_env env, napi_callback_info info) {
     // A file that will not open is that ONE lane's refusal (the source
     // reports it), not the call's: the renderer decodes it and measures the
     // rest, exactly as it would for a lane the source cannot read.
-    request.descriptor = OwnedFileDescriptor(openReadOnly(path));
+    std::string pathFailure;
+    request.descriptor = OwnedFileDescriptor(openReadOnly(path,&pathFailure));
+    job->pathFailures.push_back(pathFailure);
     request.policy = policy;
     job->requests.push_back(std::move(request));
   }
@@ -2621,7 +2662,6 @@ void definePlaybackExports(napi_env env, napi_value exports,
                            DesktopPlaybackBackendFactory backendFactory) {
   playback.ownership = ownership;
   playback.backendFactory = backendFactory;
-  setTakePresentationProvider(takePresentation);
   napi_property_descriptor properties[] = {
       {"preparePlayback", nullptr, preparePlayback, nullptr, nullptr, nullptr,
        napi_default, nullptr},
@@ -2647,6 +2687,8 @@ void definePlaybackExports(napi_env env, napi_value exports,
        napi_default, nullptr},
       {"setPlaybackMasterGain", nullptr, setPlaybackMasterGain, nullptr,
        nullptr, nullptr, napi_default, nullptr},
+      {"previewClick", nullptr, previewClick, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"playbackStatus", nullptr, playbackStatus, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"presentationQuery", nullptr, presentationQuery, nullptr, nullptr, nullptr,
@@ -2666,7 +2708,6 @@ void definePlaybackExports(napi_env env, napi_value exports,
 }
 
 void cleanupPlaybackBridge() noexcept {
-  setTakePresentationProvider(nullptr);
   // The env is going away: a worker still decoding would outlive it, and its
   // completion callback would touch an env that is closing. The lane measure
   // is a worker of the same kind and drains the same way.
@@ -2679,7 +2720,6 @@ void cleanupPlaybackBridge() noexcept {
   NativePlaybackUnloadReceipt receipt =
       playback.session.unloadWithCleanup(generation);
   if (receipt.cleanup.globallyComplete()) {
-    setTakePresentationProvider(nullptr);
     playback.handoffLease = receipt.cleanup.handoffLease;
     playback.ownership->release(NativeAudioOwnerKind::Playback, generation);
     playback.generation = 0;

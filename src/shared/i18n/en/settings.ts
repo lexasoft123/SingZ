@@ -1,5 +1,22 @@
 /* English strings for the `settings` namespace — see ../index.ts. */
 export const settings = {
+  "settings.buffer.mixed": "Mixed buffer sizes",
+  "settings.buffer.label": "Buffer size",
+  "settings.buffer.option": "{frames} frames · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} frames (saved, unavailable)",
+  "settings.buffer.hint": "Smaller buffers reduce latency and use more CPU. The time shown is one buffer, not the total sound delay.",
+  "settings.buffer.pending": "Saved. Applies as soon as this take recording stops.",
+  "settings.buffer.applyHint": "Changes apply immediately and may briefly interrupt sound.",
+  "settings.buffer.outputStatus": "Output: requested {requested}, obtained {actual} frames",
+  "settings.buffer.inputStatus": "Input: requested {requested}, obtained {actual} frames",
+  "settings.buffer.unsupported": "Buffer size control is available with CoreAudio on macOS.",
+  "settings.buffer.failed": "Could not apply buffer size: {error}",
+
+  'settings.route.title': 'Audio route',
+  'settings.route.retryNextStart': 'The saved device will be tried again next time SingZ starts.',
+  'settings.route.inventoryUnavailable': 'Audio device inventory is unavailable.',
+  'settings.route.notOpen': 'No audio route open',
+  'settings.route.buffer': 'buffer {frames}',
   // ── shared actions/labels, reused across dialogs in this namespace ──
   'settings.action.close': 'Close',
   'settings.common.systemDefault': 'System default',
@@ -24,8 +41,6 @@ export const settings = {
   'settings.output.retryBlocked': 'Playback route retry could not start until audio cleanup is confirmed.',
 
   // ── SettingsModal: native DSP playback checkbox ──
-  'settings.playback.useNativeLabel': 'Use native DSP playback',
-  'settings.playback.hint': "Uses the selected native provider when the song's features exactly match the native graph.",
 
   // ── SettingsModal: Windows audio provider ──
   'settings.windows.providerLabel': 'Windows audio provider',
@@ -43,14 +58,15 @@ export const settings = {
   'settings.mic.channelLevelAriaLabel': 'Selected microphone channel level',
   // shown while the mic preview is still connecting
   'settings.mic.startingPreview': 'Starting microphone preview…',
-  'settings.mic.usedByMonitoring': 'Used by headphone monitoring',
   'settings.mic.unavailableTrainingCleanup': 'Unavailable while Vocal training audio cleanup is unresolved.',
   // {channel} is a 1-based channel number
   'settings.mic.noSignal': 'No signal on channel {channel}',
   // {dbfs} is a signal level in dBFS (a negative number), {channel} a 1-based channel number
   'settings.mic.dbfsOnChannel': '{dbfs} dBFS on channel {channel}',
   'settings.mic.pausedByOtherOwner': 'Microphone preview is paused by another app audio owner.',
-  'settings.mic.pausedByMonitoring': 'Microphone preview is paused while headphone monitoring is active.',
+  'settings.mic.sharedWithVoice': 'Shared with the Voice strip · {dbfs} dBFS',
+  'settings.mic.sharedWithVoiceRoute': 'The Voice strip is using this microphone. Its level is shown here.',
+  'settings.micPreview.owner': 'Another part of SingZ (the Voice strip or training) is using the microphone. Stop it, then choose the input again.',
   // {device} is the microphone's label, {channel}/{count} are 1-based channel numbers
   'settings.mic.listeningThrough': 'Listening through {device} · channel {channel} of {count}',
   // fallback device name when the microphone has no label
@@ -68,137 +84,24 @@ export const settings = {
   // {error} is a technical reason string reported by the OS
   'settings.mic.nativeUnavailable': 'Native microphone capture unavailable: {error} Browser capture may expose fewer input channels.',
 
-  // ── SettingsModal: headphone monitoring section ──
-  'settings.monitor.heading': 'Headphone monitoring',
-  'settings.monitor.subheading': 'Hear this mic through the native DSP graph',
-  'settings.monitor.experimentalBadge': 'Experimental',
-  'settings.monitor.nativeInputLabel': 'Native monitoring input',
-  'settings.monitor.chooseNativeDevice': 'Choose an exact native device…',
-  'settings.monitor.savedInputMissing': 'Saved native input (not connected)',
-  'settings.monitor.osUidHint': 'This is an OS audio UID. SingZ never matches it from a Chromium device name.',
-  'settings.monitor.outputLabel': 'Audio interface playback',
-  'settings.monitor.choosePlaybackDevice': 'Choose playback device…',
-  'settings.monitor.savedOutputMissing': 'Saved native output (not connected)',
-  'settings.monitor.micChannelLabel': 'Mic channel',
-  'settings.monitor.playbackLeft': 'Playback L',
-  'settings.monitor.playbackRight': 'Playback R',
-  'settings.monitor.playbackGeneric': 'Playback',
-  'settings.monitor.playbackLeftChannel': 'Playback left channel',
-  'settings.monitor.playbackRightChannel': 'Playback right channel',
-  'settings.monitor.playbackChannelGeneric': 'Playback channel',
-  'settings.monitor.gainLabel': 'Monitor gain',
-  'settings.monitor.headphonesConfirmLabel': 'Wired headphones are connected to this device',
-  'settings.monitor.stopButton': 'Stop monitoring',
-  'settings.monitor.preparingButton': 'Preparing…',
-  'settings.monitor.startButton': 'Start monitoring',
-  'settings.monitor.notReported': 'Not reported',
-  // {frames} is a frame count
-  'settings.monitor.framesValue': '{frames} frames',
-  'settings.monitor.framesProviderReported': '{frames} frames · provider-reported',
-  'settings.monitor.unknownNotMeasured': 'Unknown · not measured',
-  // channel-count unit abbreviations, e.g. "2 ch", "3 in", "2 out"
-  'settings.monitor.channelsUnit': 'ch',
-  'settings.monitor.inputsUnit': 'in',
-  'settings.monitor.outputsUnit': 'out',
-  // the joining word in a list of channel numbers, e.g. "1, 2 and 3"
-  'settings.monitor.channelListAnd': 'and',
-  'settings.monitor.chooseChannels': 'Choose physical input and output channels that are available on this device.',
-  'settings.monitor.previewMustConfirm': 'The microphone preview must confirm this exact native device and channel before monitoring can start.',
-  'settings.monitor.unavailableCleanup': 'Monitoring is unavailable while another app audio owner finishes cleanup.',
-  // {channels} is a formatted list of playback channel numbers, e.g. "1 and 2"
-  'settings.monitor.zenQuadroHelp':
-    'Zen Quadro: in Antelope Control Panel → Monitors & Headphones, assign USB 1 PLAY {channels} to the Monitor/HP1 or Headphones 2 mixer you use.',
-  'settings.monitor.playbackLanesHelp':
-    'These are playback lanes, not physical jack names. In your interface mixer, route OUT {channels} to the headphone bus you use.',
-  // {channel} is an input channel label, {db} a level in dBFS
-  'settings.monitor.signalNearSilenceInput':
-    'Monitoring is running, but {channel} is near silence ({db} dBFS). Check the input channel and interface preamp, then sing into the microphone.',
-  'settings.monitor.signalNearSilenceOutput':
-    'The microphone reaches the DSP graph, but its output is near silence ({db} dBFS). Raise Monitor gain.',
-  // {channels} is a formatted list of output channel labels, e.g. "OUT 1 and OUT 2"
-  'settings.monitor.signalLive':
-    'DSP audio is live at {db} dBFS on {channels}. If the headphones are silent, route those playback lanes to their headphone bus in the interface mixer.',
-  'settings.monitor.routeInspecting': 'Inspecting native audio routes…',
-  'settings.monitor.routeWindowsUnavailable':
-    'Headphone monitoring is not available on Windows yet. WASAPI inventory is shown, but native output stays off in this version.',
-  'settings.monitor.routePlatformUnavailable': 'Headphone monitoring is not available on this desktop platform yet.',
-  'settings.monitor.routeChooseInput': 'Choose a native monitoring input. SingZ will not guess from a device name.',
-  'settings.monitor.routeChooseOutput': 'Choose a native playback device.',
-  'settings.monitor.routeNeedsSameDuplexDevice': 'macOS monitoring needs the microphone and headphones on the same duplex audio device.',
-  'settings.monitor.routeHighLatency': 'This is a delayed wireless or vehicle-style route. Choose wired headphones on a low-latency device.',
-  'settings.monitor.routeNotApproved': 'This route is not approved for low-latency monitoring. Choose a provider-confirmed wired device.',
-  // {device} is the playback device's label
-  'settings.monitor.routeApproved': '{device} is approved for low-latency duplex monitoring.',
-  // {subject} is a translated word/phrase supplied by the caller at call
-  // time (see settings.subject.* below) — e.g. "Microphone", "Training
-  // audio", "Song playback".
-  'settings.monitor.audioSafetyBlocked':
-    '{subject} is unavailable while another audio owner or route change is active. Open Settings to review the audio owner or retry the output route.',
+  // channel-count unit abbreviation shown after a device's channel count, e.g. "2 ch"
+  'settings.mic.channelsUnit': 'ch',
 
-  // ── audioSafetyBlockedCopy() subjects: the {subject} passed into settings.monitor.audioSafetyBlocked ──
+  // ── subjects for RetainedAudioControl status labels ──
   'settings.subject.microphone': 'Microphone',
-  'settings.subject.trainingAudio': 'Training audio',
   'settings.subject.songPlayback': 'Song playback',
-
-  // ── SettingsModal: native host diagnostics panel ──
-  'settings.monitor.diagnosticsAriaLabel': 'Native host diagnostics',
-  'settings.monitor.diagnostic.inputDevice': 'Input device',
-  'settings.monitor.diagnostic.buffer': 'Buffer',
-  'settings.monitor.diagnostic.outputDevice': 'Output device',
-  'settings.monitor.diagnostic.externalRoute': 'External route',
-  'settings.monitor.diagnostic.xruns': 'Xruns',
-  'settings.monitor.diagnostic.deadlineMisses': 'Deadline misses',
-  'settings.monitor.diagnostic.renderFailures': 'Render failures',
 
   // ── SettingsModal: microphone/output disconnect + channel-route waits ──
   'settings.mic.disconnected': 'The microphone disconnected. Reconnect it or choose another input.',
   'settings.mic.channelRoutePending': 'Wait for the selected microphone to connect before choosing its channel.',
-  'settings.output.channelRoutePending': 'Wait for the selected playback device to connect before choosing its channels.',
-
-  // ── audio/monitoring.ts: DesktopMonitorCoordinator status messages ──
-  'settings.monitorCoordinator.idle': 'Monitoring is off.',
-  'settings.monitorCoordinator.releasing': 'Releasing the microphone and song output…',
-  'settings.monitorCoordinator.startingNative': 'Starting the native DSP path…',
-  'settings.monitorCoordinator.active': 'Native DSP monitoring is active.',
-  'settings.monitorCoordinator.generationChanged': 'The native monitor generation changed before it became ready.',
-  'settings.monitorCoordinator.deviceDisconnected': 'The monitoring device disconnected. Reconnect it and start again.',
-  'settings.monitorCoordinator.hostStopped': 'The native monitoring host stopped.',
-  'settings.monitorCoordinator.callbackTimeout': 'The native DSP path did not confirm an audio callback in time.',
-  'settings.monitorCoordinator.routeStopped': 'The native monitoring route stopped.',
-  'settings.monitorCoordinator.stopping': 'Stopping native monitoring…',
-  'settings.monitorCoordinator.shutdownUnconfirmed': 'Native monitoring did not confirm shutdown. Song output remains released for safety.',
-  // {error} is the underlying error's message
-  'settings.monitorCoordinator.outputRestoreFailed': 'Song output could not be restored: {error}',
-  'settings.monitorCoordinator.error.platformNotReady': 'Headphone monitoring is not available on Windows yet. Native output stayed off.',
-  'settings.monitorCoordinator.error.unsupportedRoute': 'That route is not approved for low-latency monitoring. Choose a wired audio device.',
-  'settings.monitorCoordinator.error.micBusy': 'The microphone is still in use. Stop the preview or exercise, then try again.',
-  'settings.monitorCoordinator.error.queueFull': 'The DSP control queue is busy. Wait a moment, then try again.',
-  'settings.monitorCoordinator.error.couldNotStart': 'Native headphone monitoring could not start.',
 
   // ── SettingsRoute.tsx: lazy-load / runtime failure states ──
   'settings.route.opening': 'Opening audio settings…',
   'settings.route.failedTitle': 'Settings didn’t open',
   'settings.route.restartHint': 'Restart SingZ before trying to open Settings again.',
   'settings.route.failure.none': 'Audio settings could not be loaded. No Settings preview was started.',
-  'settings.route.failure.appShellStop':
-    'Audio settings could not be loaded. Microphone or headphone audio is still owned; use the top-bar Stop control to release it.',
-  'settings.route.failure.routeOnly':
-    'Audio settings could not be loaded. The output route still needs attention; after restarting SingZ, open Settings to finish or retry the route before starting audio.',
-  'settings.route.failure.settingsPreview':
-    'Audio settings could not be loaded. A Settings microphone preview still owns the device; restart SingZ before reopening Settings.',
-  'settings.route.failure.unknown':
-    'Audio settings could not be loaded while another audio owner is unresolved. Restart SingZ before reopening Settings.',
-  'settings.route.unavailableTitle': 'Audio settings unavailable',
   'settings.route.stoppedTitle': 'Audio settings stopped',
-  'settings.route.confirmingStopped': 'Confirming that native headphone monitoring has stopped…',
-  'settings.route.unsafeCleanup':
-    'Microphone or native monitoring cleanup is still unconfirmed. Retry audio stop to release its exact owner. If cleanup still cannot be confirmed, quit SingZ before disconnecting devices.',
-  'settings.route.pendingMessage':
-    'An audio route change is still in progress. It cannot be cancelled safely here; wait for it to finish before reopening Settings.',
-  'settings.route.unconfirmedMessage':
-    'The physical playback route is still unconfirmed. Retry settings to choose or confirm the output. Audio starts stay blocked until that route is repaired.',
-  'settings.route.offMessage': 'Native headphone monitoring is off. You can retry audio settings or close this window.',
-  'settings.route.retryStopButton': 'Retry audio stop',
+  'settings.route.offMessage': 'Audio settings hit an error and were closed safely. You can retry audio settings or close this window.',
   'settings.route.retrySettingsButton': 'Retry settings',
 
   // ── SetupWizard.tsx: model manager / first-run setup ──
@@ -238,24 +141,9 @@ export const settings = {
   'settings.demucs.recheckButton': 'Re-check',
   'settings.demucs.githubLink': 'Demucs on GitHub ↗',
 
-  // ── PersistentMonitorControl.tsx ──
-  'settings.persistentMonitor.routeNeedsAttention': 'Audio route needs attention',
-  'settings.persistentMonitor.changingRoute': 'Changing audio route…',
-  'settings.persistentMonitor.cleanupNeeded': 'Microphone cleanup needed',
-  'settings.persistentMonitor.starting': 'Starting monitor',
-  'settings.persistentMonitor.stopping': 'Stopping monitor',
+  // ── RetainedAudioControl.tsx ──
   'settings.persistentMonitor.needsAttention': 'Monitor needs attention',
-  'settings.persistentMonitor.micMonitoring': 'Mic monitoring',
-  'settings.persistentMonitor.openCleanupSettings': 'Open audio cleanup settings',
-  'settings.persistentMonitor.openRouteSettings': 'Open audio route settings',
-  'settings.persistentMonitor.openMonitoringSettings': 'Open headphone monitoring settings',
-  // {label} is the status label above (e.g. "Mic monitoring")
-  'settings.persistentMonitor.ariaLabel': '{label}. New song and training audio starts are blocked. Open audio settings.',
-  'settings.persistentMonitor.retryCleanupAria': 'Retry microphone cleanup and release audio',
-  'settings.persistentMonitor.stopAria': 'Stop monitoring and release microphone audio',
   'settings.persistentMonitor.stopButton': 'Stop',
-  // aria-label for the group wrapping the status button + stop button
-  'settings.persistentMonitor.groupAriaLabel': 'Headphone monitoring controls',
 
   // ── LazyDialogRoute.tsx: generic lazy-loaded dialog scaffolding ──
   'settings.dialogRoute.retryButton': 'Retry',

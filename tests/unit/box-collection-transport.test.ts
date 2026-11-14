@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { nativeLaneMeasureFixture } from '../shared/native-lane-measure-fixture'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+beforeEach(() => { vi.stubGlobal('navigator', { platform: 'Linux aarch64' }) })
 import { MultitrackEngine, type EngineTrackInput, type TrackState } from '../../src/renderer/src/audio/engine'
 import type { ParsedGraphDocument } from '../../src/shared/graph-document'
 import type { ProjectInfo, ProjectListItem, SingzApi } from '../../src/shared/types'
@@ -65,7 +68,7 @@ const project: ProjectInfo = {
   stems: { vocals: '/a/vocals.flac' }, hasLyrics: true, inLibrary: true
 }
 const api = {
-  registerSource: vi.fn(async () => ({ ok: true, path: item.songPath, name: item.name, size: 0, project })),
+  ...nativeLaneMeasureFixture(),  registerSource: vi.fn(async () => ({ ok: true, path: item.songPath, name: item.name, size: 0, project })),
   readProjectGraph: vi.fn(async () => ({ ok: true, graph: null })),
   getCachedLyrics: vi.fn(async () => ({
     ok: true, cached: true, source: 'edited',

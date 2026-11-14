@@ -7,11 +7,6 @@
 #include <cstdint>
 #include <mutex>
 #include <vector>
-#include <memory>
-#include <string>
-#include <thread>
-#include <cstdio>
-#include "presentation_history.h"
 
 namespace singz {
 // Portable shared-output cue mixer. Only render() belongs to the callback
@@ -23,30 +18,6 @@ static_assert(std::atomic<uint64_t>::is_always_lock_free &&
               std::atomic<uint32_t>::is_always_lock_free &&
               std::atomic<bool>::is_always_lock_free &&
               std::atomic<float>::is_always_lock_free);
-// Three leased PCM16 windows: the disk worker is the only file reader. The
-// callback only leases immutable Ready windows; a miss produces silence rather
-// than waiting or playing stale PCM. Storage/destruction belongs to control.
-struct TakeStream {
-  static constexpr uint64_t kWindowFrames = 262144;
-  static constexpr size_t kBytes = 3 * kWindowFrames * sizeof(int16_t);
-  enum State : uint32_t { Empty, Filling, Ready, Reading };
-  struct Window {
-    std::atomic<uint32_t> state{Empty};
-    uint64_t first = 0, count = 0;
-    std::vector<int16_t> pcm;
-  };
-  std::array<Window, 3> windows;
-  std::atomic<uint64_t> requested{0};
-  std::atomic<bool> stopping{false};
-  std::thread worker;
-  FILE* file = nullptr;
-  uint64_t frames = 0;
-  double sampleRate = 0;
-  ~TakeStream();
-  bool open(const std::string& path);
-  bool fill(Window&, uint64_t first);
-  void run() noexcept;
-};
 struct Voice {
   enum State : uint32_t { Finished, Writing, Ready, Playing };
   std::atomic<uint32_t> state{Finished};
@@ -58,17 +29,26 @@ struct Voice {
   uint32_t cancellationFrames = 0;
   double sourceCursor = 0;
   bool cursorStarted = false;
-  bool projectAnchored = false, wasPaused = true;
-  double startPositionSec = 0, recordedTempo = 1;
-  uint64_t transportSerial = 0;
-  uint32_t onsetFrames = 0;
-  float currentGain = 0;
-  std::unique_ptr<TakeStream> take;
+  bool resumeAfterGap = false;
   std::vector<std::vector<float>> planes;
 };
 
  public:
   static constexpr size_t kMaximumBytes = 64 * 1024 * 1024;
+  // Control-only with callbacks joined. The first resumed callback measures
+  // the complete gap (including device startup) and shifts ONLY these voices.
+  void prepareForBufferResume(uint64_t expectedCallbackNs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    resumeExpectedNs_ = expectedCallbackNs;
+    for (auto& voice : voices_)
+      if (voice.state.load(std::memory_order_acquire) != Voice::Finished) voice.resumeAfterGap = true;
+  }
+  bool active() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& voice : voices_)
+      if (voice.state.load(std::memory_order_acquire) != Voice::Finished) return true;
+    return false;
+  }
   bool canSchedule(size_t frames, size_t channels) {
     std::lock_guard<std::mutex> lock(mutex_);
     return canScheduleLocked(frames,channels);
@@ -82,26 +62,10 @@ struct Voice {
     for (const auto& voice : voices_) {
       if (voice.state.load(std::memory_order_acquire) == Voice::Finished) free = true;
       else {
-        if (voice.take) bytes += TakeStream::kBytes;
         for (const auto& plane : voice.planes) bytes += plane.size() * sizeof(float);
       }
     }
     return free && bytes <= kMaximumBytes;
-  }
- public:
-  // WAV is WP1's canonical 44-byte mono PCM16 container. Takes have no
-  // duration limit and do not enter the song's time/pitch stage. tempo is the
-  // recorded song ratio, used only when locating PCM after a transport jump.
-  // startNs=0 starts standalone playback at its first callback after preload.
-  bool scheduleTake(const std::string& path, uint64_t generation,
-                    double startPositionSec, bool withSong, uint64_t startNs,
-                    float gain = 1, double tempo = 1);
-  void cancelTakes(uint64_t generation = 0) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& voice : voices_)
-      if (voice.state.load(std::memory_order_acquire) != Voice::Finished &&
-          voice.take && (!generation || voice.generation == generation))
-        voice.cancelled.store(true, std::memory_order_release);
   }
  public:
   bool schedule(std::vector<std::vector<float>> planes, uint64_t generation,
@@ -131,6 +95,7 @@ struct Voice {
       voice.gain.store(std::min(gain, voice.maximumGain), std::memory_order_relaxed);
       voice.cancellationFrames = 0;
       voice.sourceCursor = 0; voice.cursorStarted = false;
+      voice.resumeAfterGap = false;
       voice.cancelled.store(false, std::memory_order_relaxed);
       voice.state.store(Voice::Ready, std::memory_order_release);
       return true;
@@ -139,31 +104,32 @@ struct Voice {
   }
   void cancel(uint64_t generation) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) != Voice::Finished && !voice.take && voice.generation == generation)
+    for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) != Voice::Finished && voice.generation == generation)
       voice.cancelled.store(true, std::memory_order_release);
   }
   void setGain(uint64_t generation, float gain) {
     if (!std::isfinite(gain) || gain < 0 || gain > 8) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) != Voice::Finished && !voice.take && voice.generation == generation)
+    for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) != Voice::Finished && voice.generation == generation)
       voice.gain.store(std::min(gain, voice.maximumGain), std::memory_order_relaxed);
   }
   void clearQuiesced() {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& voice : voices_) { voice.state.store(Voice::Finished, std::memory_order_release); voice.planes.clear(); voice.take.reset(); }
+    for (auto& voice : voices_) { voice.state.store(Voice::Finished, std::memory_order_release); voice.planes.clear(); }
   }
-bool render(const AudioHostRenderBlock& block,
-            const PlaybackPresentationQuery& transport = {}) noexcept {
+bool render(const AudioHostRenderBlock& block) noexcept {
   if (!block.output || !std::isfinite(block.sampleRate) || block.sampleRate <= 0) return true;
   // Cue timing is the render/callback clock; consumers add physical output
   // latency exactly once when matching captured voice.
   const uint64_t blockNs = block.callbackHostTimeNs;
   if (!blockNs) return true;
+  const uint64_t gap = resumeExpectedNs_ && blockNs > resumeExpectedNs_ ? blockNs - resumeExpectedNs_ : 0;
+  resumeExpectedNs_ = 0;
   for (auto& voice : voices_) {
     uint32_t expected = Voice::Ready;
     voice.state.compare_exchange_strong(expected, Voice::Playing, std::memory_order_acq_rel);
     if (voice.state.load(std::memory_order_acquire) != Voice::Playing) continue;
-    if (voice.take) { renderTake(voice, block, transport); continue; }
+    if (voice.resumeAfterGap) { voice.startNs += gap; voice.resumeAfterGap = false; }
     const float gain = voice.gain.load(std::memory_order_relaxed);
     const bool cancelled = voice.cancelled.load(std::memory_order_acquire);
     // Host time anchors onset. After onset, advance by the rendered sample
@@ -199,12 +165,11 @@ bool render(const AudioHostRenderBlock& block,
 }
 
  private:
-  static void renderTake(Voice&, const AudioHostRenderBlock&,
-                         const PlaybackPresentationQuery&) noexcept;
   void reclaimFinished() {
-    for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) == Voice::Finished) { voice.planes.clear(); voice.take.reset(); }
+    for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) == Voice::Finished) { voice.planes.clear(); }
   }
   std::array<Voice, 32> voices_;
+  uint64_t resumeExpectedNs_{0}; // Callback-owned; control writes only with callbacks joined.
   std::mutex mutex_;
 };
 }
