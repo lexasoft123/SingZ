@@ -20,6 +20,7 @@ fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     generate_detector_versions(&root);
     embed_analyzer_source_hash(&root);
+    embed_uikit_source();
     for directive in build_config::rerun_directives(&root) {
         println!("{directive}");
     }
@@ -99,6 +100,19 @@ fn embed_analyzer_source_hash(root: &std::path::Path) {
             "cargo:warning=Analyzer source fingerprint unavailable; runtime provenance will be unchecked"
         );
     }
+}
+
+// The accessibility receipt names the shared UIKit actually compiled: the locked git source, not a sibling checkout.
+fn embed_uikit_source() {
+    println!("cargo:rerun-if-changed=Cargo.lock");
+    let lock = fs::read_to_string("Cargo.lock").expect("Cargo.lock must be readable");
+    let mut packages = lock.split("[[package]]");
+    let source = packages
+        .find(|package| package.lines().any(|line| line == "name = \"singz-uikit\""))
+        .and_then(|package| package.lines().find_map(|line| line.strip_prefix("source = \"")))
+        .and_then(|line| line.strip_suffix('"'))
+        .expect("Cargo.lock must pin singz-uikit to a git source");
+    println!("cargo:rustc-env=SINGZ_UIKIT_SOURCE={source}");
 }
 
 // Detector stamps belong to the native implementation, not to this port.

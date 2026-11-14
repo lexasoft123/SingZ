@@ -13,13 +13,19 @@ from pathlib import Path
 from native_ui_observer import REPO, TESTS, run, sha
 
 
+def locked_uikit_source():
+    for package in (TESTS.parent / 'Cargo.lock').read_text().split('[[package]]'):
+        if '\nname = "singz-uikit"\n' in package:
+            return next(line[len('source = "'):-1] for line in package.splitlines() if line.startswith('source = "'))
+    raise AssertionError('Cargo.lock does not pin singz-uikit')
+
 
 def isolated(app, out):
     from PIL import Image  # only the isolated probe reads screenshots
     iso = out
     result, observation = run(app, iso, lambda out: {'SINGZ_GPUI_ACCESSIBILITY_TEST': str(out)})
     assert result['passed'] and result['hidden'] and result['liveFPS'] == 'unmeasured'
-    assert result['compiledControlsSha256'] == sha(REPO.parent / 'singz-ui/gpui/src/controls.rs')
+    assert result['compiledUikitSource'] == locked_uikit_source()
     assert result['compiledAdapterSha256'] == sha(TESTS.parent / 'src/ui_accessibility.rs')
     assert {c['width'] for c in result['cases']} == {1060, 1280} and len(result['cases']) == 2
     for case in result['cases']:

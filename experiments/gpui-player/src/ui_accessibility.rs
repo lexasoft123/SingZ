@@ -350,7 +350,7 @@ pub fn run(handle: AnyWindowHandle, _view: Entity<Player>, out: PathBuf, cx: &mu
                 cases.push(serde_json::json!({"width":width,"nativeAXPress":true,"nativeAXToggle":true,"nativeAXIncrementDecrementSetValue":true,"disabledRefused":true,"modalBackgroundRefused":true,"nativeAXSelect":true,"nativeAXCheckboxTabLink":true,"nativeMixedKeyboardAX":mixed,"frameworkSameFrameMixed":framework_mixed,
                     "selectorExpanded":{"gpuiTreeOpen":true,"gpuiTreeClosed":false,"nativeGetterOpen":native_expanded_open,"nativeGetterClosed":native_expanded_closed,"nativeExpandedQualified":false,"limitation":"Pinned macOS adapter has no explicit expanded-state bridge; inherited/unsupported getter is not qualification"}}));
             }
-            std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"passed":true,"scope":"shared UIKit isolated host, real native macOS AX; not whole-app/accessibility certification","cases":cases,"hidden":true,"liveFPS":"unmeasured","compiledControlsSha256":hash(include_bytes!("../../../../singz-ui/gpui/src/controls.rs")),"compiledAdapterSha256":hash(include_bytes!("ui_accessibility.rs"))}))?)?;
+            std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"passed":true,"scope":"shared UIKit isolated host, real native macOS AX; not whole-app/accessibility certification","cases":cases,"hidden":true,"liveFPS":"unmeasured","compiledUikitSource":env!("SINGZ_UIKIT_SOURCE"),"compiledAdapterSha256":hash(include_bytes!("ui_accessibility.rs"))}))?)?;
             // Explicit observation tail for independent process/resource sampling.
             cx.background_executor().timer(Duration::from_secs(2)).await;
             Ok(())
