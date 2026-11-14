@@ -105,6 +105,8 @@ VoiceMonitorResult CommonVoiceMonitor::begin(const std::string& uid, uint32_t ch
   render_.source = &capture_.source(); render_.reader = {}; render_.queueFrames = queueFrames;
   render_.current = render_.destination = render_.step = 0; render_.remaining = 0;
   render_.period.store(0, std::memory_order_relaxed);
+  render_.outputLeadFrames.store(0, std::memory_order_relaxed);
+  render_.outputLeadWindow.reset();
   render_.hostPeriod.store(service_.status().latency.bufferFrames, std::memory_order_release);
   render_.silent.store(1, std::memory_order_relaxed);
   render_.peak.store(0, std::memory_order_relaxed); render_.rms.store(0, std::memory_order_relaxed);
@@ -146,12 +148,21 @@ VoiceMonitorLatency CommonVoiceMonitor::latency() {
   render_.hostPeriod.store(period, std::memory_order_release);
   result.outputPeriodFrames = result.bufferFrames;
   result.observedOutputFrames = host.observedCallbackFrames;
-  result.queueFloorFrames = capture_.source().queueFloor(result.sampleRate, period);
+  result.queueFloorFrames = capture_.source().queueFloor(result.sampleRate, period,
+      render_.outputLeadFrames.load(std::memory_order_relaxed));
   result.queueFrames = std::max(render_.queueFrames, result.queueFloorFrames);
   const double sourceRate = capture_.source().sourceRate();
+  // Timestamp-domain delay: source.render reads exactly outputHostTimeNs minus
+  // queueFrames/sourceRate. macOS passes AUHAL's input/output mHostTime through
+  // unchanged (audio_input_macos.cpp and audio_host_macos.cpp/renderCallback).
+  // Apple AudioDeviceIOProc defines these as first-frame hardware acquisition /
+  // handoff times: https://developer.apple.com/documentation/coreaudio/audiodeviceioproc
+  // Callback periods, capture age and output lead are already inside that gap.
+  // Report device/safety latency separately: the bundled fields do not identify
+  // a residual ADC/DAC delay excluded by those timestamps. This estimate is not
+  // an acoustic loopback measurement; adding the bundles would double count IO.
   result.roundTripMs = sourceRate > 0 && result.sampleRate > 0 ?
-      1000.0 * ((double(result.queueFrames) + result.inputBufferFrames + result.inputDeviceFrames) / sourceRate +
-          double(result.bufferFrames + result.outputDeviceFrames) / result.sampleRate) : 0;
+      1000.0 * double(result.queueFrames) / sourceRate : 0;
   result.roundTripFrames = static_cast<uint64_t>(std::ceil(result.roundTripMs * result.sampleRate / 1000));
   bool uncertain = false;
   const auto output = service_.activeOutputUid();
@@ -200,7 +211,8 @@ VoiceMonitorStatus CommonVoiceMonitor::status() {
   if (retained_) {
     result.latency = latency();
     const auto period = std::max(result.latency.bufferFrames, service_.status().observedCallbackFrames);
-    const auto floor = capture_.source().queueFloor(result.latency.sampleRate, period);
+    const auto floor = capture_.source().queueFloor(result.latency.sampleRate, period,
+        render_.outputLeadFrames.load(std::memory_order_relaxed));
     if (!floor && capture_.source().inputPeriod() && period) {
       close(); reason_ = "route-latency";
       result.running = false; result.reason = reason_; result.latency = {};
@@ -226,6 +238,8 @@ bool CommonVoiceMonitor::admit(void* context, const AudioHostInventory& inventor
   auto& self = *static_cast<CommonVoiceMonitorRender*>(context);
   if (!self.owner) return false; // Admission requires a live control owner.
   self.hostPeriod.store(result.latency.bufferFrames, std::memory_order_release);
+  self.outputLeadFrames.store(0, std::memory_order_relaxed);
+  self.outputLeadWindow.reset();
   // The service has drained callbacks before admission: reset the callback-owned
   // envelope so every successful reopen fades in through the existing ramp.
   self.current = self.destination = self.step = 0; self.remaining = 0; // Re-admission ramp.

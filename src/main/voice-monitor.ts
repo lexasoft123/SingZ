@@ -5,7 +5,7 @@ import type { CaptureInputDevice, DesktopAudioHostInventoryResult } from '../sha
 
 type OutputDetails = Pick<VoiceMonitorState, 'outputDevice' | 'outputCandidates'>
 // Native-only diagnostics stay in main; VoiceMonitorState is the renderer API.
-type MonitorDiagnostics = { monitorHistoryDiagnostics?: Record<string, string>; monitorPeak?: number; monitorRms?: number; monitorObservedCallbackFrames?: number }
+type MonitorDiagnostics = { monitorHistoryDiagnostics?: Record<string, string>; monitorPeak?: number; monitorRms?: number; monitorObservedCallbackFrames?: number; latency?: VoiceMonitorLatency }
 type Availability = OutputDetails & { available: boolean; reason?: VoiceMonitorReason; detail?: string; deviceUid?: string; minBufferFrames?: number; maxBufferFrames?: number }
 export interface VoiceMonitorNative {
   hostDevices(): Promise<DesktopAudioHostInventoryResult>
@@ -43,7 +43,9 @@ export class VoiceMonitorStore {
     const now = Date.now()
     if (now - this.lastDiagnosticsAt < 1000) return
     this.lastDiagnosticsAt = now
-    this.emit(`monitor diagnostics ${JSON.stringify({ ...status.monitorHistoryDiagnostics, peak: status.monitorPeak, rms: status.monitorRms, outputFrames: status.monitorObservedCallbackFrames })}`)
+    this.emit(`monitor diagnostics ${JSON.stringify({ ...status.monitorHistoryDiagnostics, peak: status.monitorPeak, rms: status.monitorRms, outputFrames: status.monitorObservedCallbackFrames,
+      queueFrames: status.latency?.queueFrames, queueFloorFrames: status.latency?.queueFloorFrames,
+      inputDeviceFrames: status.latency?.inputDeviceFrames, outputDeviceFrames: status.latency?.outputDeviceFrames })}`)
   }
   private serial<T>(fn: () => Promise<T>, offReason?: string): Promise<T> {
     const run = async (): Promise<T> => {

@@ -30,9 +30,9 @@ AudioHostRenderBlock block(uint64_t frame, uint32_t frames = 32, double rate = 4
 }
 bool floorTest() {
   const auto floor=voiceMonitorQueueFloor(48000,48000,32,512,192,128);
-  REQUIRE(floor==640);
-  REQUIRE(voiceMonitorQueueFloor(48000,44100,64,32,192,128)==396);
-  REQUIRE(voiceMonitorQueueFloor(48000,48000,32,32,1024)==1024);
+  REQUIRE(floor==864);
+  REQUIRE(voiceMonitorQueueFloor(48000,44100,64,32,192,128)==422);
+  REQUIRE(voiceMonitorQueueFloor(48000,48000,32,32,1024)==1216);
   REQUIRE(!voiceMonitorQueueFloor(0,48000,32,512));
   REQUIRE(!voiceMonitorQueueFloor(48000,48000,0,512));
   REQUIRE(!voiceMonitorQueueFloor(48000,48000,32,0));

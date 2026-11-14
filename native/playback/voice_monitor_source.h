@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -17,11 +18,29 @@ inline constexpr uint32_t kVoiceMonitorQuantum = 256;
 inline constexpr uint32_t kVoiceMonitorMaximumCaptureFrames = 16384;
 inline constexpr zcore::routing::SampleClockPhaseConfig kVoiceMonitorPhaseConfig{2, 8};
 
-// All periods, lookback, jitter and the result are in SOURCE frames, except
-// outputPeriod, which is in OUTPUT frames. Zero means invalid/too large.
+// All periods, ages, lookback, jitter and the result are in SOURCE frames,
+// except outputPeriod/outputLead, which are in OUTPUT frames.
+// Capture age is first-sample to publication; output lead is callback entry to
+// presentation. Zero means invalid/too large; absent timing uses period floors.
 uint32_t voiceMonitorQueueFloor(double sourceRate, double outputRate,
     uint32_t outputPeriod, uint32_t inputPeriod, uint32_t lookback = 192,
-    uint32_t jitterMargin = 128, uint32_t quantum = kVoiceMonitorQuantum) noexcept;
+    uint32_t jitterMargin = 128, uint32_t quantum = kVoiceMonitorQuantum,
+    uint32_t captureAge = 0, uint32_t outputLead = 0) noexcept;
+uint32_t voiceMonitorPresentationLead(const AudioHostRenderBlock&) noexcept;
+
+// One callback owns this state; only its returned estimate is published through
+// the owner's atomic. Two half-second windows retain the third-largest sample:
+// isolated wakes cannot raise it, sustained timing changes do, and old timing
+// expires within one second. Reset only after that callback has joined.
+class VoiceMonitorTimingWindow {
+ public:
+  void reset() noexcept;
+  uint32_t observe(uint32_t frames, uint32_t period, uint64_t ns, uint32_t deviceFrames = 0) noexcept;
+ private:
+  std::array<uint32_t, 3> largest_{};
+  uint32_t previous_{}, warmup_{}, estimate_{};
+  uint64_t startNs_{};
+};
 
 class VoiceMonitorOutputClock {
  public:
@@ -44,22 +63,25 @@ struct VoiceMonitorSourceStats {
   uint64_t publishedBlocks{}, publishedFrames{}, droppedBlocks{}, droppedFrames{}, missingFrames{};
   uint64_t estimatedTimestampBlocks{}, unknownTimestampBlocks{};
   uint64_t phaseCorrections{}, correctedSamples{}, rejectedIntervals{}, discontinuities{};
+  uint64_t maximumCaptureAgeFrames{}; // Robust window estimate, not a lifetime maximum.
 };
 
 class VoiceMonitorSource {
  public:
   VoiceMonitorSource();
   // Control domain, with capture joined. Storage and readers survive stop.
-  void prepare(double sourceRate, uint32_t inputPeriod) noexcept;
+  void prepare(double sourceRate, uint32_t inputPeriod, uint32_t inputDeviceFrames = 0) noexcept;
   void stop() noexcept;
   bool publish(const float*, uint32_t, uint64_t, AudioInputTimestampQuality,
-               AudioInputSourcePosition = {}) noexcept;
+               AudioInputSourcePosition = {}, uint64_t callbackHostTimeNs = 0) noexcept;
   // Mono, zero-filled on absent history. queueFrames is explicit source-frame
   // delay and must meet queueFloor(); zero requests that floor. Missing audio
   // is counted silence, never an output-host failure. capacity bounds writes.
+  // A common client passes its already computed floor to keep one snapshot
+  // across a concurrent capture publication; direct callers may omit it.
   zcore::routing::AudioReadResult render(const AudioHostRenderBlock&, float* mono,
-      uint32_t capacity, uint32_t queueFrames, VoiceMonitorReader&) noexcept;
-  uint32_t queueFloor(double outputRate, uint32_t outputPeriod) const noexcept;
+      uint32_t capacity, uint32_t queueFrames, VoiceMonitorReader&, uint32_t preparedFloor = 0) noexcept;
+  uint32_t queueFloor(double outputRate, uint32_t outputPeriod, uint32_t outputLead = 0) const noexcept;
   double sourceRate() const noexcept { return rate_.load(std::memory_order_relaxed); }
   uint32_t inputPeriod() const noexcept { return inputPeriod_.load(std::memory_order_relaxed); }
   VoiceMonitorSourceStats stats() const noexcept;
@@ -67,6 +89,9 @@ class VoiceMonitorSource {
   zcore::routing::AudioHistory history_;
   std::atomic<double> rate_{0};
   std::atomic<uint32_t> inputPeriod_{0};
+  std::atomic<uint32_t> captureAgeFrames_{0};
+  uint32_t inputDeviceFrames_{0}; // Control writes only with capture joined.
+  VoiceMonitorTimingWindow captureAgeWindow_; // Capture-callback owned.
   std::atomic<uint64_t> publishedBlocks_{0}, publishedFrames_{0}, droppedBlocks_{0}, droppedFrames_{0}, missingFrames_{0};
   std::atomic<uint64_t> estimated_{0}, unknown_{0};
 };

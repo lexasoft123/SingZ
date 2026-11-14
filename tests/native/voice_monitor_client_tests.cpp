@@ -136,7 +136,7 @@ int main(){
   output->current.latency.bufferFrames=32;block.frames=32;render(4);
   CHECK(!monitor.status().latency.delayed);
   output->current.latency.bufferFrames=64;block.frames=64;render(4);
-  CHECK(monitor.status().latency.delayed);
+  CHECK(!monitor.status().latency.delayed); // 384 timestamp frames = 8 ms, not 512 frames.
   // Other additive clients may join/leave without detaching live voice.
   float cue=.125f;
   service.setMicrophoneRenderer(song,&cue);render(4);CHECK(std::abs(left[63]-.09375f)<1e-5);
@@ -262,6 +262,11 @@ int main(){
   CHECK(service.configureOutput("other").ok && monitor.begin("in",0,true,0,7).ok);
   auto measured=monitor.status().latency;
   CHECK(measured.inputDeviceFrames==148 && measured.outputDeviceFrames==96);
+  output->current.latency.bufferFrames=32;
+  const auto timestampDelay=monitor.status().latency;
+  CHECK(timestampDelay.queueFrames<=480 && !timestampDelay.delayed);
+  CHECK(std::abs(timestampDelay.roundTripMs-1000.0*timestampDelay.queueFrames/timestampDelay.inputSampleRate)<1e-9);
+  CHECK(timestampDelay.roundTripFrames==timestampDelay.queueFrames);
   CHECK(monitor.end(7).ok);
   CHECK(service.configureOutput("out").ok && monitor.begin("out",0,true,0,8).ok);
   measured=monitor.status().latency;
@@ -345,5 +350,26 @@ int main(){
   CHECK(monitor.status().lost && capture.users(VoiceCaptureUser::Monitor)==0);
   output->inventory.devices.push_back(removed);service.refreshInventory();
   CHECK(!monitor.status().running); // Genuine device removal never auto-restarts on fallback.
+  CHECK(service.configureOutput("out").ok && monitor.begin("in",0,true,0,16).ok);
+  uint64_t timingFrame=0;
+  auto timedCapture=[&](uint32_t age){
+    const auto at=1000000000ULL+static_cast<uint64_t>(timingFrame*1e9L/48000);
+    CHECK(capture.source().publish(pcm.data(),64,at,AudioInputTimestampQuality::Hardware,
+      {double(timingFrame),true},at+static_cast<uint64_t>(age*1e9L/48000)));
+    timingFrame+=64;
+  };
+  for(unsigned n=0;n<20;++n)timedCapture(128);
+  const auto ordinary=monitor.status().latency.queueFrames;
+  for(auto outlier:{2000u,20000u}){
+    timedCapture(128+outlier);
+    const auto state=monitor.status();CHECK(state.running && state.latency.queueFrames==ordinary);
+  }
+  for(unsigned n=0;n<3;++n)timedCapture(256);
+  const auto increased=monitor.status();CHECK(increased.running && increased.latency.queueFrames>ordinary);
+  while(timingFrame<48000*2)timedCapture(128);
+  const auto recovered=monitor.status();CHECK(recovered.running && recovered.latency.queueFrames==ordinary);
+  std::printf("monitor timing lifecycle: ordinary=%u, sustained=%u, recovered=%u, outliers=2000/20000 frames, running=1\n",
+    ordinary,increased.latency.queueFrames,recovered.latency.queueFrames);
+  CHECK(monitor.end(16).ok);
   std::puts("common monitor client: ok");
 }

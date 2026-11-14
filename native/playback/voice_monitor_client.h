@@ -14,6 +14,8 @@ struct CommonVoiceMonitorRender {
   std::array<float, kAudioHostMaxFrames> mono{};
   std::atomic<float> target{0}, peak{0}, rms{0};
   std::atomic<uint32_t> period{0}, hostPeriod{0}, silent{1}, feedbackRisk{0};
+  std::atomic<uint32_t> outputLeadFrames{0};
+  VoiceMonitorTimingWindow outputLeadWindow; // Output-callback owned.
   uint32_t queueFrames{0}; // Source frames; zero requests the publication floor.
   float current{0}, destination{0}, step{0};
   uint32_t remaining{0};
@@ -22,10 +24,13 @@ struct CommonVoiceMonitorRender {
     if (!self.source || block.frames > self.mono.size() || block.frames > block.maximumFrames ||
         block.outputChannels > kAudioHostMaxChannels) return true;
     self.period.store(block.frames, std::memory_order_relaxed);
+    const auto lead = self.outputLeadWindow.observe(voiceMonitorPresentationLead(block),
+        std::max(block.frames, self.hostPeriod.load(std::memory_order_acquire)), block.outputHostTimeNs);
+    self.outputLeadFrames.store(lead, std::memory_order_relaxed);
     const auto floor = self.source->queueFloor(block.sampleRate,
-        std::max(block.frames, self.hostPeriod.load(std::memory_order_acquire)));
+        std::max(block.frames, self.hostPeriod.load(std::memory_order_acquire)), lead);
     self.source->render(block, self.mono.data(), static_cast<uint32_t>(self.mono.size()),
-                        floor ? std::max(self.queueFrames, floor) : kVoiceMonitorHistoryFrames, self.reader);
+                        floor ? std::max(self.queueFrames, floor) : kVoiceMonitorHistoryFrames, self.reader, floor);
     const auto next = self.target.load(std::memory_order_acquire);
     if (next != self.destination) {
       self.destination = next; self.remaining = kVoiceMonitorRampFrames;

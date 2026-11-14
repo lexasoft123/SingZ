@@ -20,18 +20,51 @@ bool monitorRate(double rate) noexcept {
 uint64_t monitorFrameNs(uint64_t frames, double rate) noexcept {
   return static_cast<uint64_t>(static_cast<long double>(frames) * 1e9L / rate);
 }
+uint32_t monitorTimingFrames(uint64_t ns, double rate) noexcept {
+  // Two independently rounded host timestamps can differ by a nanosecond.
+  // Keep that conversion precision from growing an integral-frame queue.
+  const auto frames = std::ceil(std::max(0.0L, static_cast<long double>(ns) - 2) * rate / 1e9L);
+  return static_cast<uint32_t>(std::min(frames, static_cast<long double>(kVoiceMonitorHistoryFrames)));
+}
 }
 uint32_t voiceMonitorQueueFloor(double src, double dst, uint32_t outputPeriod,
-    uint32_t inputPeriod, uint32_t lookback, uint32_t jitter, uint32_t quantum) noexcept {
+    uint32_t inputPeriod, uint32_t lookback, uint32_t jitter, uint32_t quantum,
+    uint32_t captureAge, uint32_t outputLead) noexcept {
   if (!monitorRate(src) || !monitorRate(dst) || !outputPeriod ||
       outputPeriod > kAudioHostMaxFrames || !inputPeriod ||
       inputPeriod > kVoiceMonitorMaximumCaptureFrames) return 0;
   const double outputFloor = std::ceil(2.0 * outputPeriod * src / dst) + quantum;
-  const uint64_t inputFloor = static_cast<uint64_t>(inputPeriod) + jitter;
-  const double floor = std::max({static_cast<double>(lookback), outputFloor,
-                                static_cast<double>(inputFloor)});
+  const uint64_t inputFloor = std::max(inputPeriod, captureAge);
+  const auto support = std::max(static_cast<uint64_t>(lookback) + jitter, uint64_t{quantum});
+  // A presentation timestamp can be ahead of callback entry while capture's
+  // first sample is already old when its block is published. Both offsets,
+  // the entire output read and FIR support must fit behind publication.
+  const double publicationFloor = std::ceil((double(outputPeriod) + outputLead) * src / dst) +
+      static_cast<double>(inputFloor) + support;
+  const double floor = std::max(outputFloor, publicationFloor);
   if (floor > kVoiceMonitorHistoryFrames / 2) return 0;
   return static_cast<uint32_t>(floor);
+}
+uint32_t voiceMonitorPresentationLead(const AudioHostRenderBlock& b) noexcept {
+  if (!monitorRate(b.sampleRate) || !b.callbackHostTimeNs ||
+      b.outputHostTimeNs <= b.callbackHostTimeNs) return 0;
+  return monitorTimingFrames(b.outputHostTimeNs - b.callbackHostTimeNs, b.sampleRate);
+}
+void VoiceMonitorTimingWindow::reset() noexcept {
+  largest_ = {}; previous_ = warmup_ = estimate_ = 0; startNs_ = 0;
+}
+uint32_t VoiceMonitorTimingWindow::observe(uint32_t frames, uint32_t period, uint64_t ns,
+    uint32_t deviceFrames) noexcept {
+  if (warmup_ < 4) { ++warmup_; return 0; } // Start may deliver queued packets.
+  if (!startNs_ || ns < startNs_ || ns - startNs_ >= 500000000) {
+    previous_ = startNs_ && ns >= startNs_ && ns - startNs_ < 1000000000 ? largest_[2] : 0;
+    largest_ = {}; startNs_ = ns;
+  }
+  const auto cap = std::min(uint64_t{period} * 4 + deviceFrames, uint64_t{kVoiceMonitorHistoryFrames / 4});
+  auto candidate = static_cast<uint32_t>(std::min(uint64_t{frames}, cap));
+  for (auto& value : largest_) if (candidate > value) std::swap(candidate, value);
+  estimate_ = std::max(previous_, largest_[2]);
+  return estimate_;
 }
 void VoiceMonitorOutputClock::reset() noexcept { *this = {}; }
 double VoiceMonitorOutputClock::observe(uint64_t frame, uint64_t ns, uint32_t frames,
@@ -71,7 +104,7 @@ double VoiceMonitorOutputClock::observe(uint64_t frame, uint64_t ns, uint32_t fr
   return rate;
 }
 bool VoiceMonitorSource::publish(const float* input, uint32_t frames, uint64_t ns,
-    AudioInputTimestampQuality quality, AudioInputSourcePosition position) noexcept {
+    AudioInputTimestampQuality quality, AudioInputSourcePosition position, uint64_t callbackNs) noexcept {
   const double rate = rate_.load(std::memory_order_relaxed);
   // A provider may omit its opening period. Retain the largest actual block.
   if (frames <= kVoiceMonitorMaximumCaptureFrames && frames > inputPeriod_.load(std::memory_order_relaxed))
@@ -85,23 +118,27 @@ bool VoiceMonitorSource::publish(const float* input, uint32_t frames, uint64_t n
     droppedFrames_.fetch_add(frames, std::memory_order_relaxed);
     return false;
   }
+  const auto age = callbackNs > ns ? monitorTimingFrames(callbackNs - ns, rate) : 0;
+  captureAgeFrames_.store(captureAgeWindow_.observe(age, inputPeriod(), ns, inputDeviceFrames_),
+      std::memory_order_relaxed);
   publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
   publishedFrames_.fetch_add(frames, std::memory_order_relaxed);
   if (quality == AudioInputTimestampQuality::Unknown) unknown_.fetch_add(1, std::memory_order_relaxed);
   if (quality == AudioInputTimestampQuality::CallbackEstimate) estimated_.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
-uint32_t VoiceMonitorSource::queueFloor(double rate, uint32_t period) const noexcept {
+uint32_t VoiceMonitorSource::queueFloor(double rate, uint32_t period, uint32_t outputLead) const noexcept {
   const double src = sourceRate();
   if (!monitorRate(src) || !monitorRate(rate)) return 0;
   const auto lookback = static_cast<uint32_t>(std::ceil(96.0 / (.94 * std::min(1.0, rate / src))));
-  return voiceMonitorQueueFloor(src, rate, period, inputPeriod(), lookback);
+  return voiceMonitorQueueFloor(src, rate, period, inputPeriod(), lookback, 128,
+      kVoiceMonitorQuantum, captureAgeFrames_.load(std::memory_order_relaxed), outputLead);
 }
 zcore::routing::AudioReadResult VoiceMonitorSource::render(const AudioHostRenderBlock& b,
-    float* mono, uint32_t capacity, uint32_t queueFrames, VoiceMonitorReader& reader) noexcept {
+    float* mono, uint32_t capacity, uint32_t queueFrames, VoiceMonitorReader& reader, uint32_t preparedFloor) noexcept {
   const uint32_t writable = std::min(capacity, b.frames);
   if (mono) std::fill_n(mono, writable, 0.f);
-  const auto floor = queueFloor(b.sampleRate, b.frames);
+  const auto floor = preparedFloor ? preparedFloor : queueFloor(b.sampleRate, b.frames, voiceMonitorPresentationLead(b));
   if (!queueFrames) queueFrames = floor;
   const double src = sourceRate();
   uint64_t queueNs = 0;
@@ -141,7 +178,8 @@ VoiceMonitorSourceStats VoiceMonitorSource::stats() const noexcept {
   return {publishedBlocks_.load(std::memory_order_relaxed), publishedFrames_.load(std::memory_order_relaxed),
     droppedBlocks_.load(std::memory_order_relaxed), droppedFrames_.load(std::memory_order_relaxed),
     missingFrames_.load(std::memory_order_relaxed), estimated_.load(std::memory_order_relaxed), unknown_.load(std::memory_order_relaxed),
-    history.phaseCorrections, history.correctedSamples, history.rejectedIntervals, history.discontinuities};
+    history.phaseCorrections, history.correctedSamples, history.rejectedIntervals, history.discontinuities,
+    captureAgeFrames_.load(std::memory_order_relaxed)};
 }
 bool VoiceMonitorCaptureTap::push(void* context, const float* input, uint32_t frames,
     uint64_t ns, uint64_t callbackNs, AudioInputTimestampQuality quality) noexcept {
@@ -153,7 +191,7 @@ bool VoiceMonitorCaptureTap::pushWithPosition(void* context, const float* input,
   if (!context) return false;
   auto& tap = *static_cast<VoiceMonitorCaptureTap*>(context);
   const bool delivered = tap.delivery.pushWithPosition(input, frames, ns, callbackNs, quality, position);
-  if (tap.monitor) (void)tap.monitor->publish(input, frames, ns, quality, position);
+  if (tap.monitor) (void)tap.monitor->publish(input, frames, ns, quality, position, callbackNs);
   return delivered;
 }
 // SINGZ_MONITOR_SOURCE_RT_END
@@ -161,10 +199,13 @@ bool VoiceMonitorCaptureTap::pushWithPosition(void* context, const float* input,
 VoiceMonitorSource::VoiceMonitorSource()
     : history_(1, kVoiceMonitorHistoryFrames, zcore::routing::ResamplingFilter::LinearPhase,
                false, kVoiceMonitorPhaseConfig) {}
-void VoiceMonitorSource::prepare(double rate, uint32_t period) noexcept {
+void VoiceMonitorSource::prepare(double rate, uint32_t period, uint32_t inputDeviceFrames) noexcept {
   history_.stop();
   rate_.store(rate, std::memory_order_relaxed);
   inputPeriod_.store(period, std::memory_order_relaxed);
+  captureAgeFrames_.store(0, std::memory_order_relaxed);
+  inputDeviceFrames_ = inputDeviceFrames;
+  captureAgeWindow_.reset();
 }
 void VoiceMonitorSource::stop() noexcept { history_.stop(); }
 
@@ -315,7 +356,7 @@ AudioInputResult VoiceMonitorCapture::retain(VoiceCaptureUser user, const AudioI
   if (!s.opened.ok) { s.fail(s.opened.error); s.close(false); return s.opened; }
   // Without opening-period metadata the first capture block establishes a
   // conservative observed period. Takes keep the normal delivery timeline.
-  s.source.prepare(s.opened.sampleRate, s.opened.inputBufferFrames);
+  s.source.prepare(s.opened.sampleRate, s.opened.inputBufferFrames, s.opened.inputLatencyFrames);
   s.quit.store(false, std::memory_order_release);
   auto started = s.backend->start();
   if (!started.ok) { s.fail(started.error); s.close(false); return started; }
