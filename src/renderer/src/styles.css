@@ -1306,6 +1306,12 @@ body.win:not(.glass) .drop-overlay {
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel-deep) 55%, transparent);
   animation: fade 0.25s;
+  /* Above .stack's .scrub-overlay (z 5). The stack's rows are minmax(64px, 1fr)
+     and the Voice row 104px, so with a split song (7+ lanes) in a normal-height
+     window they total more than the stack's flex share and the grid — overlay
+     included — overflows down over this strip. At z auto the overlay then
+     swallowed every click on the strip's Mic toggle, chips and resize handle. */
+  z-index: 6;
 }
 
 /* The moving now-line is a 1px composited layer, not canvas ink — the
