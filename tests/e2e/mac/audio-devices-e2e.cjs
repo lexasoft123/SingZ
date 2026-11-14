@@ -1,15 +1,15 @@
 /*
  * Audio settings E2E (macOS): gear → Settings → Audio; device pickers, live
- * mic device switch while singing, resizable pitch strip, Esc close, output
- * sinkId move + boot-time re-apply. Permanent harness for the e2e-verifier.
+ * mic device switch while singing, resizable pitch strip, Esc close, native
+ * output move + boot-time re-apply. Permanent harness for the e2e-verifier.
  *
  * Runs against an isolated scratch profile (SINGZ_USERDATA_DIR) with a
  * pre-seeded stems cache, so no library is needed and demucs never runs. The
  * splitter pack still is: the song is split through the Split menu, as a
  * singer splits one, which refuses to start without the pack, and whose
  * second stage separates lead from backing vocals with the pack's own model.
- * SINGZ_FAKE_MIC grants capture without touching hardware. A renderer-only,
- * driver-installed stereo fixture then supplies silence on channel 1 and a
+ * SINGZ_FAKE_MIC supplies Chromium capture for the Web Audio half; native mode
+ * opens the real microphone. A renderer-only stereo fixture supplies silence on channel 1 and a
  * tone on channel 2. Device enumeration stays real, so the hardware picker
  * branch is still exercised without making meter assertions machine-dependent.
  *
@@ -45,15 +45,20 @@ require('../../shared/watchdog.cjs').arm('audio-devices-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { showCaptureWindow } = require('./capture-visibility.cjs')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { writeFileSync, mkdirSync, copyFileSync, createReadStream, rmSync } = require('node:fs')
 const { createHash } = require('node:crypto')
 const { join } = require('node:path')
 const { tmpdir } = require('node:os')
 
 const OUT = process.env.E2E_OUT ?? tmpdir()
-const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
+// Electron must use the package root: native pitch resolves assets/pitch from
+// app.getAppPath(), which is out/main when launching its script directly.
+const APP = join(__dirname, '..', '..', '..')
 const PROFILE = join(OUT, 'audio-e2e-userdata')
 const STEMS_6 = ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano']
+let activeApp
 
 /** 2s of 440 Hz mono 16-bit PCM — enough for a loaded, playable song. */
 function makeWav(path) {
@@ -92,12 +97,15 @@ const launch = async () => {
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
-    // SINGZ_MUTE silences the device only — enumeration, sinkId moves and the
+    // SINGZ_MUTE silences the device only — enumeration, native route moves and the
     // fake-mic pitch path stay real, so every assertion here is mute-proof.
-    env: { ...process.env, SINGZ_FAKE_MIC: '1', SINGZ_USERDATA_DIR: PROFILE, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' }
+    env: { ...process.env, ...scratchProfileEnv({ dir: PROFILE }), SINGZ_FAKE_MIC: '1', SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_LANG: 'en' }
   })
-  await quietLaunch(app) // measurement runs must not steal the singer's focus
+  activeApp = app
   const win = await app.firstWindow()
+  // A hidden document deliberately cannot start the Settings microphone.
+  // Exercise a singer-visible meter without activating the test window.
+  await showCaptureWindow(app, quietLaunch)
   await win.addInitScript(() => {
     const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
     const state = { active: 0, maxActive: 0 }
@@ -142,6 +150,7 @@ const launch = async () => {
     }
   })
   await win.reload()
+  await win.waitForFunction(() => !document.hidden, null, { timeout: 10000 })
   return app
 }
 
@@ -224,6 +233,9 @@ const coreProvenance = async (win) => {
   // Seed the splitter cache: six copies of the tone under the song's hash,
   // so the split's first stage returns instantly without running demucs.
   rmSync(PROFILE, { recursive: true, force: true })
+  scratchProfileEnv({ dir: PROFILE, projectsRoot: join(PROFILE, 'library'), settings: {
+    language: 'en', releaseNotesSeen: require(join(APP, 'package.json')).version
+  } })
   const stemDir = join(PROFILE, 'stems', await hashFile(wav), 'htdemucs_6s')
   mkdirSync(stemDir, { recursive: true })
   for (const s of STEMS_6) copyFileSync(wav, join(stemDir, `${s}.wav`))
@@ -358,19 +370,19 @@ const coreProvenance = async (win) => {
     pickedOut = realOuts[0].v
     await win.selectOption('#settings-output', pickedOut)
     try {
-      await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
+      await win.waitForFunction((id) => window.__engine.outputDeviceId === id &&
+        JSON.parse(localStorage.getItem('singz.audio') ?? '{}').nativeOutputUid === id, pickedOut, {
         timeout: 10000
       })
     } catch (error) {
       const diagnosis = await win.evaluate(() => ({
-        sinkId: window.__engine.context.sinkId,
         desiredOutputId: window.__engine.outputDeviceId,
-        storedOutputId: JSON.parse(localStorage.getItem('singz.audio') ?? '{}').outputId,
+        storedOutputUid: JSON.parse(localStorage.getItem('singz.audio') ?? '{}').nativeOutputUid,
         selectedOutputId: document.querySelector('#settings-output')?.value ?? '',
         warnings: [...document.querySelectorAll('.settings-hint.warn')].map((node) => node.textContent),
         previewStatus: document.querySelector('.mic-preview-status')?.textContent ?? ''
       }))
-      throw new Error(`playback sink did not switch: ${JSON.stringify(diagnosis)}; ${error.message}`)
+      throw new Error(`native playback output did not switch: ${JSON.stringify(diagnosis)}; ${error.message}`)
     }
     console.log('output moved to:', realOuts[0].t)
   } else {
@@ -621,10 +633,10 @@ const coreProvenance = async (win) => {
   if (prefs[inputPrefKey] !== expectInput) throw new Error(`${inputPrefKey} pref lost across relaunch`)
   if (prefs.inputChannel !== expectedInputChannel) throw new Error(`input channel lost across relaunch: ${prefs.inputChannel}`)
   if (pickedOut) {
-    await win.waitForFunction((id) => window.__engine.context.sinkId === id, pickedOut, {
+    await win.waitForFunction((id) => window.__engine.outputDeviceId === id, pickedOut, {
       timeout: 15000
     })
-    console.log('boot re-apply: sinkId restored')
+    console.log('boot re-apply: native output UID restored')
   }
   await app.close()
 
@@ -635,7 +647,8 @@ const coreProvenance = async (win) => {
   )
   console.log('PASS')
   process.exit(0)
-})().catch((e) => {
+})().catch(async (e) => {
   console.error('FAIL', e.stack ?? e.message)
+  await activeApp?.close().catch(() => undefined)
   process.exit(1)
 })

@@ -848,7 +848,7 @@ the skeleton:
 const { _electron } = require('playwright-core')
 const app = await _electron.launch({
   executablePath: '<repo>/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
-  args: ['<repo>/out/main/index.js'],          // or a packaged .app binary
+  args: ['<repo>'],                          // package.json loads out/main/index.js
   env: { ...process.env, /* hooks below */ }
 })
 const win = await app.firstWindow()
@@ -858,6 +858,12 @@ await win.setInputFiles('input[type=file]', song)   // same path as drag-drop
 Rules learned the hard way:
 
 - `npm run build` before driving — drivers run `out/`, not `src/`.
+- Launch development builds from the package root. `app.getAppPath()` anchors
+  asset reads there; launching `out/main/index.js` directly points it at
+  `out/main`, so native microphone pitch cannot find `assets/pitch/crepe-tiny.bin`.
+- A hidden document deliberately suspends the Settings microphone preview.
+  Live meter checks use a visible, non-activating window (see
+  `tests/e2e/mac/capture-visibility.cjs`) and wait for `document.hidden === false`.
 - `npm run build` and `npm run dev` never install, so after a pull that moved
   `package-lock.json` (a new `@singz/ui` pin, most often) run `npm ci` first.
   Both refuse to start on a `node_modules` that is not the lockfile's

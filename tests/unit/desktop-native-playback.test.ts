@@ -755,6 +755,64 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
+  it.each([128, 256])('uses the saved/default %i-frame CoreAudio policy across an output round trip', async frames => {
+    const h = seamHarness(generation => playing(generation))
+    const base = await h.api.audioHostDevices('coreaudio')
+    if (!base.ok) throw new Error(base.error)
+    vi.mocked(h.api.audioHostDevices).mockResolvedValue({ ...base, devices: ['zen', 'lg'].map(uid => ({ ...base.devices[0], uid,
+      bufferFrames: { ...base.devices[0].bufferFrames, preferredFrames: 512 } })), defaultOutputUid: 'zen' })
+    const preferences: Record<string, number> = frames === 128 ? {} : { zen: frames, lg: 64 }
+    h.api.audioBufferSettings = vi.fn(async () => ({ ok: true, pending: false, preferences,
+      outputUid: '', requestedFrames: frames, obtainedFrames: 0, inputUid: '', inputRequestedFrames: 128, inputObtainedFrames: 0 }))
+    const request: DesktopNativePlaybackPrepare = { provider: 'coreaudio', preferredOutputUid: 'zen',
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.flac', gain: 1, muted: false, solo: false }],
+      beat: null, metronome: h.metronome, countIn: false, positionSeconds: 0, durationSeconds: 10,
+      sampleRate: 48000, masterGain: 0, playbackRate: 1, transpose: 0, training: null, loop: null }
+    await h.client.prepareAhead(request)
+    expect(h.prepared[0].bufferFrames).toBe(frames)
+    await h.client.reconfigure({ preferredOutputUid: 'lg' }, { refreshRoute: true })
+    expect(h.prepared[1].bufferFrames).toBe(frames === 128 ? 128 : 64)
+    await h.client.reconfigure({ preferredOutputUid: 'zen' }, { refreshRoute: true })
+    expect(h.prepared[2].bufferFrames).toBe(frames)
+    h.calls.length = 0
+    expect(await h.client.prepareAndStart(request)).toBe(true)
+    await h.client.reconfigure({ preferredOutputUid: 'zen' }, { refreshRoute: true })
+    expect(h.calls).toEqual(['open:3', 'start:3'])
+    expect(h.prepared).toHaveLength(3)
+    await h.client.unload()
+  })
+
+  it('does not rebuild the adopted graph for the first healthy output callback after an idle route switch', async () => {
+    let first = true
+    const h = seamHarness(generation => {
+      const initial = first; first = false
+      return playing(generation, { transportState: initial ? 'stopped' : 'playing',
+        callbacks: initial ? '0' : '1', routeGeneration: '4', streamGeneration: '4',
+        transportDiscontinuities: initial ? '0' : '1', lastTransportBoundary: initial ? 'none' : 'clock-reanchored' })
+    })
+    h.api.reanchorDesktopPlayback = vi.fn<SingzApi['reanchorDesktopPlayback']>(async generation => ({ ...result(generation), ok: false, errorCode: 'invalid-state' }))
+    await h.start({ countIn: false })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.calls).toEqual(['prepare:1', 'open:1', 'start:1'])
+    expect(h.api.reanchorDesktopPlayback).not.toHaveBeenCalled()
+    expect(h.prepared).toHaveLength(1)
+    await h.client.unload()
+  })
+
+  it('still recovers a render failure on the first callback', async () => {
+    let first = true
+    const h = seamHarness(generation => {
+      const initial = first; first = false
+      return playing(generation, { callbacks: initial ? '0' : '1', adapterRenderFailures: initial ? 0 : 1,
+        routeGeneration: initial ? '2' : '3', streamGeneration: initial ? '2' : '3',
+        transportDiscontinuities: initial ? '0' : '1', lastTransportBoundary: initial ? 'none' : 'clock-reanchored' })
+    })
+    await h.start({ countIn: false })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.api.reanchorDesktopPlayback).toHaveBeenCalledOnce()
+    await h.client.unload()
+  })
+
   it('keeps a healthy sequence-gap source running without another re-anchor, but recovers a failed render', async () => {
     let gaps = 0
     let failures = 0

@@ -26,6 +26,7 @@ import {
   DESKTOP_PLAYBACK_CONTRACT_VERSION
 } from '../../../shared/types'
 import type { BeatInfo, MetronomeConfig } from './beat'
+import { audioBufferChoices, DEFAULT_AUDIO_BUFFER_FRAMES, validAudioBufferSize } from '../../../shared/audio-buffer'
 import { NATIVE_PLAYBACK_MIN_RATE, NATIVE_PLAYBACK_MAX_RATE, NATIVE_PLAYBACK_MAX_TRANSPOSE } from './native-playback-limits'
 import {
   desktopStreamLanesPreferred,
@@ -868,6 +869,7 @@ export class DesktopNativePlaybackClient {
     transportGeneration: string
     key: string
     failures: number
+    callbacks: string
   } | null = null
   private reanchorPending = false
   /** An accepted re-anchor is answered by the core with its own
@@ -1392,6 +1394,22 @@ export class DesktopNativePlaybackClient {
       previous.outputDeviceUid === output.uid && previous.sampleRate === sampleRate &&
       previous.outputChannels.length === outputChannels.length &&
       previous.outputChannels.every((channel, index) => channel === outputChannels[index])
+    let bufferFrames = Math.max(1, output.bufferFrames.preferredFrames || 512)
+    if (request.provider === 'coreaudio') {
+      if (sameCoreAudioRoute) bufferFrames = previous.bufferFrames
+      else {
+        // Inventory reports the device's current physical period, which can
+        // revert when another route releases its HAL lease. The shared host
+        // opens from the saved per-device policy, default 128, not that value.
+        const settings = typeof window.singz.audioBufferSettings === 'function'
+          ? await invokeNativePlayback('route-rejected', 'Native buffer preferences failed', () => window.singz.audioBufferSettings())
+          : undefined
+        const saved = settings?.preferences[output.uid]
+        const requested = validAudioBufferSize(saved) ? saved : DEFAULT_AUDIO_BUFFER_FRAMES
+        // Mirror the ledger: unsupported requests leave the device period alone.
+        if (audioBufferChoices([output]).includes(requested)) bufferFrames = requested
+      }
+    }
     return {
       outputDeviceUid: output.uid,
       outputChannels,
@@ -1402,7 +1420,7 @@ export class DesktopNativePlaybackClient {
       // because an active Chromium/preview stream can constrain them to 1024.
       bufferFrames: request.provider === 'alsa'
         ? 256
-        : sameCoreAudioRoute ? previous.bufferFrames : Math.max(1, output.bufferFrames.preferredFrames || 512)
+        : bufferFrames
     }
   }
 
@@ -2647,8 +2665,15 @@ export class DesktopNativePlaybackClient {
     const key = `${status.routeGeneration}:${status.streamGeneration}:${status.transportDiscontinuities}`
     const failures = status.adapterRenderFailures
     const previous = this.transportBoundary
-    this.transportBoundary = { generation, transportGeneration: status.transportGeneration, key, failures }
+    this.transportBoundary = { generation, transportGeneration: status.transportGeneration, key, failures, callbacks: status.callbacks }
     if (!previous || previous.generation !== generation) {
+      this.reanchorEchoPending = false
+      return
+    }
+    // Before its first callback a new song can still expose the idle host's
+    // route/stream counters. The first healthy callback establishes its clock;
+    // it is not a route failure requiring re-anchor (and a fallback rebuild).
+    if (previous.callbacks === '0' && failures <= previous.failures) {
       this.reanchorEchoPending = false
       return
     }
