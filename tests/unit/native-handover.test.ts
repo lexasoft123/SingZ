@@ -86,7 +86,7 @@ describe('native handover export contract', () => {
     const fixture = join(__dirname, '../../experiments/gpui-player/tests/fixtures/electron-native-handover.json')
     if (process.env.UPDATE_HANDOVER_FIXTURE === '1') { mkdirSync(dirname(fixture), { recursive: true }); writeFileSync(fixture, produced) }
     expect(existsSync(fixture)).toBe(true)
-    expect(readFileSync(fixture, 'utf8')).toBe(produced)
+    expect(readFileSync(fixture, 'utf8').replaceAll('\r\n', '\n')).toBe(produced)
   })
 })
 

@@ -20,7 +20,7 @@ describe('crash-safe microphone selection store', () => {
     const open = vi.spyOn(fs, 'open')
     await store.save(doc())
     expect(await store.load()).toEqual(doc())
-    expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
     expect(open.mock.calls[0]).toEqual([expect.stringMatching(/microphones\.json\.[0-9]+\.[0-9a-f]{16}\.tmp$/), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600])
   })
   it('cleans only matching orphan temporaries', async () => {

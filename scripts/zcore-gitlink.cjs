@@ -59,7 +59,11 @@ function loopzBuildInputs(root) {
     return result.stdout
   }
   const top = git(['rev-parse', '--show-toplevel']).trim()
-  if (realpathSync(top) !== realpathSync(child)) {
+  const canonical = path => {
+    const resolved = realpathSync(path)
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  }
+  if (canonical(top) !== canonical(child)) {
     throw new Error('LoopZ sources are not an initialized submodule checkout')
   }
   if (git(['rev-parse', '--verify', 'HEAD^{commit}']).trim() !== revision) {

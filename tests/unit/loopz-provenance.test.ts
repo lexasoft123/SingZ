@@ -114,6 +114,11 @@ describe('LoopZ addon source provenance', () => {
     expect(() => loopzBuildInputs(root)).toThrow(/not an initialized submodule/)
   })
 
+  it.runIf(process.platform === 'win32')('accepts the same checkout when Git returns different path casing', () => {
+    const { root, revision } = fixture()
+    expect(loopzBuildInputs(root.toUpperCase()).revision).toBe(revision)
+  })
+
   it('preserves the existing lightweight zCore gitlink semantics', () => {
     const { root, git, revision } = fixture()
     git(root, ['update-index', '--add', '--cacheinfo', `160000,${revision},third_party/zcore`])
