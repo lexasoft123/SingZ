@@ -131,7 +131,8 @@ jobs:
 
   zdsp-sanitizers:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Three clean native builds and their test suites run sequentially.
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:

@@ -222,7 +222,9 @@ ready.then(async () => {
   }
   assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: NaN }, 10n).ok, false)
   assert.equal(addon.setVoiceMonitorGain(Infinity).ok, false)
-  assert.equal(addon.setVoiceMonitorGain(0).ok, false)
+  // The native gain target accepts finite updates even while idle; begin
+  // supplies its own gain and resets that target for the new monitor.
+  assert.equal(addon.setVoiceMonitorGain(0).ok, true)
   // Ending an already-idle valid generation is idempotent.
   assert.equal(addon.endVoiceMonitor(10n).ok, true)
   assert.equal(addon.voiceMonitorStatus().running, false)
