@@ -29,7 +29,7 @@ async function selectNativeOutputBeforeOpen(win, uid) {
     localStorage.setItem('singz.audio', JSON.stringify(prefs))
   }, uid)
   await win.reload()
-  await win.waitForFunction(uid => window.__test?.engine.outputDeviceId === `native:${uid}`, uid, { timeout: 20000 })
+  await win.waitForFunction(uid => window.__test?.engine.outputDeviceId === uid, uid, { timeout: 20000 })
   return output
 }
 

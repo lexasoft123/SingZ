@@ -381,6 +381,18 @@ describe('playback output latest-intent arbitration', () => {
 describe('legacy output migration', () => {
   const browser = [{ id: 'sink', label: 'Interface' }]
   const native = [{ uid: 'uid', label: 'Interface', outputChannels: 2 }]
+  it('maps the Zen default alias and its concrete Chromium output without hiding real ambiguity', () => {
+    const uid = 'AppleUSBAudioEngine:Antelope Audio:Zen Quadro SC:4912524000285:1,2'
+    const inventory = [{ uid, label: 'Zen Quadro SC Playback', outputChannels: 16 }]
+    const browser = [
+      { id: 'default', label: 'Default - Zen Quadro SC Playback (23e5:a2f9)' },
+      { id: 'zen-browser', label: 'Zen Quadro SC Playback (23e5:a2f9)' }
+    ]
+    expect(nativeOutputUidForBrowser('zen-browser', browser, inventory)).toBe(uid)
+    expect(nativeOutputUidForBrowser('default', browser, inventory)).toBe(uid)
+    expect(nativeOutputUidForBrowser('zen-browser', [...browser, { id: 'another-zen', label: browser[1].label }], inventory)).toBeUndefined()
+    expect(nativeOutputUidForBrowser('zen-browser', browser, [...inventory, { ...inventory[0], uid: 'second-native-zen' }])).toBeUndefined()
+  })
   it('preserves the exact comma-containing CoreAudio UID during saved native-ID migration', async () => {
     const uid = 'AppleUSBAudioEngine:Antelope Audio:Zen Quadro SC:4912524000285:1,2'
     const inventory = [{ uid, label: 'Zen Quadro SC Playback', outputChannels: 16 }]

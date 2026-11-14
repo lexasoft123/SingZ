@@ -305,7 +305,12 @@ export function nativeOutputUidForBrowser(
   if (direct.length === 1) return direct[0].uid
   const selected = browser.find(row => row.id === id)
   const label = selected ? outputLabelKey(selected.label) : ''
-  if (!label || browser.filter(row => outputLabelKey(row.label) === label).length !== 1) return undefined
+  if (!label) return undefined
+  // Chromium lists system-default/communications aliases alongside the same
+  // physical endpoint. Only distinct concrete endpoints create ambiguity.
+  const endpoints = browser.filter(row => outputLabelKey(row.label) === label &&
+    row.id !== 'default' && row.id !== 'communications')
+  if (endpoints.length > 1) return undefined
   const matches = native.filter(row => row.outputChannels > 0 && outputLabelKey(row.label) === label)
   return matches.length === 1 ? matches[0].uid : undefined
 }

@@ -11,7 +11,12 @@ describe('native output driver setup', () => {
   it('restores the exact opaque UID through the product preference before song open', async () => {
     let saved = JSON.stringify({ outputId: 'legacy-browser', inputChannel: 4 })
     vi.stubGlobal('localStorage', { getItem: () => saved, setItem: (_key: string, value: string) => { saved = value } })
-    const page = { waitForLoadState: vi.fn(async () => {}), evaluate: vi.fn<(...args: unknown[]) => Promise<unknown>>(), reload: vi.fn(async () => {}), waitForFunction: vi.fn(async () => {}) }
+    vi.stubGlobal('window', { __test: { engine: { outputDeviceId: uid } } })
+    const page = { waitForLoadState: vi.fn(async () => {}), evaluate: vi.fn<(...args: unknown[]) => Promise<unknown>>(), reload: vi.fn(async () => {}), waitForFunction: vi.fn(async (predicate: (uid: string) => boolean, requested: string) => {
+      expect(predicate(requested)).toBe(true)
+      expect(predicate('unknown')).toBe(false)
+      expect(predicate(`native:${requested}`)).toBe(false)
+    }) }
     page.evaluate.mockResolvedValueOnce({ ok: true, devices: [{ uid, outputChannels: 16 }] })
       .mockImplementationOnce(async (fn, value) => (fn as (uid: string) => void)(value as string))
     expect(await selectNativeOutputBeforeOpen(page, uid)).toEqual({ uid, outputChannels: 16 })

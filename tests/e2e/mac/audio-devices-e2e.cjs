@@ -599,8 +599,16 @@ const coreProvenance = async (win) => {
     { timeout: 15000 }
   )
   const restoredOwnership = await win.evaluate(() => window.__singzE2eMic)
-  if (restoredOwnership.active !== 1 || restoredOwnership.maxActive > 1)
+  if (restoredOwnership.active !== (nativeMode ? 0 : 1) || restoredOwnership.maxActive > 1)
     throw new Error(`karaoke capture did not restore exclusively: ${JSON.stringify(restoredOwnership)}`)
+  if (nativeMode) {
+    const restored = await win.evaluate(async () => ({
+      state: await window.singz.captureState(), stats: await window.singz.captureStats()
+    }))
+    if (restored.state.state !== 'running' || Number(restored.stats.deliveredFrames) <= 0)
+      throw new Error(`native karaoke capture did not restore: ${JSON.stringify(restored)}`)
+    console.log('restored native karaoke capture:', JSON.stringify(restored))
+  }
 
   // ---- pitch strip: drag the top edge, drawing scales, height persists ----
   const before = await win.$eval('.pitch-strip', (el) => el.clientHeight)
