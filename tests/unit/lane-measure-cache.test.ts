@@ -288,6 +288,18 @@ describe('persistent lane measurement cache', () => {
     expect(native).toHaveBeenCalledTimes(2)
   })
 
+  it('hands native the namespaced file path (win32 prefix, passthrough elsewhere)', async () => {
+    const native = nativeSuccess()
+    const cache = new LaneMeasureCache({ cacheDir, measure: native })
+    await cache.measurePlaybackLanes(request([{ id: 'a', path: source }]))
+    const sent = native.mock.calls[0][0].lanes[0].path
+    expect(sent).toBe(nativeFilePath(source))
+    if (process.platform === 'win32') expect(sent.startsWith('\\\\?\\')).toBe(true)
+    else expect(sent).toBe(source)
+    expect(nativeFilePath('C:\\a\\b.flac', 'win32')).toBe('\\\\?\\C:\\a\\b.flac')
+    expect(nativeFilePath('/a/b.flac', 'darwin')).toBe('/a/b.flac')
+  })
+
   it('measures only misses and restores request order and current lane IDs', async () => {
     const other = join(dir, 'b.flac')
     const added = join(dir, 'c.flac')
@@ -309,8 +321,8 @@ describe('persistent lane measurement cache', () => {
     ]))
     expect(native).toHaveBeenCalledTimes(2)
     expect(native.mock.calls[1][0].lanes).toEqual([
-      { id: 'new-c', path: added },
-      { id: 'new-b', path: other }
+      { id: 'new-c', path: nativeFilePath(added) },
+      { id: 'new-b', path: nativeFilePath(other) }
     ])
     expect(mixed.lanes.map(lane => lane.id)).toEqual(['new-c', 'new-a', 'new-b'])
     expect(floatBits(mixed.lanes[1].peaks)).toEqual(cachedPeaks)
@@ -418,7 +430,7 @@ describe('persistent lane measurement cache', () => {
     expect(result.lanes[1].peaks).toHaveLength(0)
     expect(result.lanes[1].envelope).toHaveLength(0)
     expect(native).toHaveBeenCalledTimes(2)
-    expect(native.mock.calls[1][0].lanes).toEqual([{ id: 'changing', path: other }])
+    expect(native.mock.calls[1][0].lanes).toEqual([{ id: 'changing', path: nativeFilePath(other) }])
     expect(await cacheFiles(cacheDir)).toHaveLength(1)
   })
 
@@ -452,7 +464,7 @@ describe('persistent lane measurement cache', () => {
     expect(result.lanes[0].envelope).toHaveLength(0)
     expect(result.lanes[1]).toMatchObject({ ok: true, error: 'ok' })
     expect(native).toHaveBeenCalledTimes(2)
-    expect(native.mock.calls[1][0].lanes).toEqual([{ id: 'miss', path: other }])
+    expect(native.mock.calls[1][0].lanes).toEqual([{ id: 'miss', path: nativeFilePath(other) }])
   })
 
   it('a newer cache hit supersedes an older native call without publishing or caching it', async () => {
@@ -679,11 +691,11 @@ describe('persistent lane measurement cache', () => {
       { id: 'miss', path: other, gain: 0.5, muted: true, solo: false }
     ])
     expect(lanes[0]).toEqual({
-      id: 'hit', path: source, gain: 1, muted: false, solo: false,
+      id: 'hit', path: nativeFilePath(source), gain: 1, muted: false, solo: false,
       sourceKey: seed?.contentKey,
       waveform: seed
     })
-    expect(lanes[1]).toEqual({ id: 'miss', path: other, gain: 0.5, muted: true, solo: false })
+    expect(lanes[1]).toEqual({ id: 'miss', path: nativeFilePath(other), gain: 0.5, muted: true, solo: false })
     expect(native).toHaveBeenCalledTimes(1)
   })
 

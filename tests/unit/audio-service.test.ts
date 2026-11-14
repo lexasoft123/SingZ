@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fake = vi.hoisted(() => ({
@@ -137,7 +138,7 @@ it('initializes and polls routing only for local Box and shuts it down after the
   await import('../../src/main/audio-service')
   request(1, 'inputDevices', [], 'binding')
   await vi.advanceTimersByTimeAsync(0)
-  expect(fake.binding.boxRoutingInitialize).toHaveBeenCalledWith('/fake/box-profile/routing.json')
+  expect(fake.binding.boxRoutingInitialize).toHaveBeenCalledWith(join('/fake/box-profile', 'routing.json'))
   await vi.advanceTimersByTimeAsync(100)
   expect(fake.binding.boxRoutingPoll).toHaveBeenCalledTimes(4)
   const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
