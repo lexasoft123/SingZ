@@ -112,7 +112,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                                 handle.update(cx, |_, window, app| -> anyhow::Result<()> {
                                     anyhow::ensure!(!window.is_visible() && !window.is_window_active(), "scenario window became visible");
                                     view.update(app, |p, cx| { p.playhead.seek(start + frame as f64 / 120.); cx.notify(); });
-                                    let _ = window.draw(app);
+                                    window.draw(app).clear(app);
                                     Ok(())
                                 })??;
                                 // Yield now and then so the helper's status traffic is serviced.
@@ -133,7 +133,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                             // `native` also moves the audio engine, as a click on a lyric does; without it
                             // the engine keeps its own position and playback pulls the playhead back.
                             let native = command["native"].as_bool().unwrap_or(false);
-                            handle.update(cx, |_, window, app| { view.update(app, |p, cx| { p.playhead.seek(to); if native { p.seek_native(cx); } cx.notify(); }); let _ = window.draw(app); })?;
+                            handle.update(cx, |_, window, app| { view.update(app, |p, cx| { p.playhead.seek(to); if native { p.seek_native(cx); } cx.notify(); }); window.draw(app).clear(app); })?;
                             Ok(serde_json::json!({"to": to}))
                         }
                         "seed-meter" => {
@@ -175,7 +175,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                                         let pending = window.simulate_next_frame(app);
                                         let dirty = window.is_dirty();
                                         if pending > 0 { window.refresh(); }
-                                        if pending > 0 || dirty { let _ = window.draw(app); }
+                                        if pending > 0 || dirty { window.draw(app).clear(app); }
                                         Ok((pending, dirty))
                                     })??;
                                     if measuring {
