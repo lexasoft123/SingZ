@@ -60,10 +60,15 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
       return { ok: true, found: false, latencySource: 'measured-trim' as const }
     let hostNs: bigint
     try { hostNs = BigInt(args.firstSampleHostNs) } catch { return { ok: true, found: false, latencySource: 'measured-trim' as const } }
-    const inputTrimNs = args.trimInputLatency ? (args.inputLatencyFrames ?? 0) * 1e9 / args.sampleRate : 0
-    const outputRate = args.outputSampleRate ?? args.sampleRate
-    const outputTrimNs = ((args.outputLatencyFrames ?? 0) + (args.graphLatencyFrames ?? 0)) * 1e9 / outputRate
-    const trimNs = BigInt(Math.max(0, Math.round(inputTrimNs + outputTrimNs)))
+    // A non-finite or non-positive value (a zero output rate, an Infinity latency) must never reach BigInt(): it throws
+    // ("The number Infinity cannot be converted to a BigInt") and used to end a live take as partial-error. Each part falls
+    // back to 0 ns / the capture rate; the trim stays a bounded estimate.
+    const finite = (value: number | undefined): number => Number.isFinite(value) ? value as number : 0
+    const inputTrimNs = args.trimInputLatency ? finite(args.inputLatencyFrames) * 1e9 / args.sampleRate : 0
+    const outputRate = Number.isFinite(args.outputSampleRate) && (args.outputSampleRate as number) > 0 ? args.outputSampleRate as number : args.sampleRate
+    const outputTrimNs = (finite(args.outputLatencyFrames) + finite(args.graphLatencyFrames)) * 1e9 / outputRate
+    const trimSum = inputTrimNs + outputTrimNs
+    const trimNs = BigInt(Number.isFinite(trimSum) ? Math.max(0, Math.round(trimSum)) : 0)
     const adjustedHostNs = hostNs > trimNs ? hostNs - trimNs : 0n
     const raw = await desktopAudioProcess.call<{
       found: boolean; projectFrame?: number; songSeconds?: number; rate?: number; sampleRate?: number;

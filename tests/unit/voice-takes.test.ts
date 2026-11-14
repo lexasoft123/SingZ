@@ -81,6 +81,23 @@ describe('voice take storage', () => {
     await expect(none.transportState!()).rejects.toThrow()
   })
 
+  it('a non-finite latency or output rate never throws in the presentation query (BigInt(Infinity) used to end a live take as partial-error)', async () => {
+    const call = vi.fn(async () => ({ found: true, projectFrame: 1, songSeconds: 1, sampleRate: 48000, discontinuitySerial: 0 }))
+    const native = createVoiceTakeNative({ call } as unknown as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    const base = { songId: '', firstSampleHostNs: '1000000000', sampleRate: 48000, trimInputLatency: true }
+    for (const extra of [
+      { outputSampleRate: 0, outputLatencyFrames: 156 },
+      { inputLatencyFrames: Infinity },
+      { outputLatencyFrames: Infinity, graphLatencyFrames: 7200 },
+      { graphLatencyFrames: NaN, outputSampleRate: Number.NaN }
+    ]) {
+      const result = await native.presentationQuery({ ...base, ...extra })
+      expect(result.ok).toBe(true)
+      expect(result.found).toBe(true)
+    }
+    expect(call).toHaveBeenCalledTimes(4)
+  })
+
   it.each(['initial', 'lastGood', 'unavailable'])('does not use %s status as evidence for stopping a take', async quality => {
     const call = vi.fn(async () => ({ transportTelemetryQuality: quality, transportState: 'stopped', seekCount: '2', loopCount: '3' }))
     const native = createVoiceTakeNative({ call } as unknown as typeof import('../../src/main/audio-process').desktopAudioProcess)
