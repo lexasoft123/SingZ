@@ -146,6 +146,12 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
   },
   presentationQuery,
   transportState: async () => (await desktopAudioProcess.call<import('../shared/types').DesktopPlaybackStatus>('binding', 'playbackStatus', [])).transportState,
+  transportSnapshot: async () => {
+    const status = await desktopAudioProcess.call<import('../shared/types').DesktopPlaybackStatus>('binding', 'playbackStatus', [])
+    if (status.transportTelemetryQuality !== 'current' || !status.transportState ||
+        typeof status.seekCount !== 'string' || typeof status.loopCount !== 'string') return null
+    return { state: status.transportState, seekCount: status.seekCount, loopCount: status.loopCount, sampleRate: status.format?.sampleRate }
+  },
   captureStats: () => desktopAudioProcess.call('binding', 'captureStats', []),
   level: async () => {
     const stats = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['captureStats']>>>('binding', 'captureStats', [])

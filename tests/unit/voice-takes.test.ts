@@ -50,6 +50,19 @@ const request = { songId: 'song-1', songTitle: 'Song', songArtist: 'Artist', inp
 const store = (root: string, now = new Date()) => new VoiceTakeStore({ rootDir: root, native: fakeNative(), now: () => now })
 
 describe('voice take storage', () => {
+  it('reads independent native transport state and callback seek/loop counters for boundary confirmation', async () => {
+    const call = vi.fn(async () => ({ transportTelemetryQuality: 'current', transportState: 'playing', seekCount: '2', loopCount: '3', format: { sampleRate: 48000 } }))
+    const native = createVoiceTakeNative({ call } as unknown as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    expect(await native.transportSnapshot!()).toEqual({ state: 'playing', seekCount: '2', loopCount: '3', sampleRate: 48000 })
+    expect(call).toHaveBeenCalledWith('binding', 'playbackStatus', [])
+  })
+
+  it.each(['initial', 'lastGood', 'unavailable'])('does not use %s status as evidence for stopping a take', async quality => {
+    const call = vi.fn(async () => ({ transportTelemetryQuality: quality, transportState: 'stopped', seekCount: '2', loopCount: '3' }))
+    const native = createVoiceTakeNative({ call } as unknown as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    expect(await native.transportSnapshot!()).toBeNull()
+  })
+
   it('writes a complete sidecar atomically after finishing, including settings timeline', async () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
     let now = new Date('2026-01-01T00:00:00.000Z')
@@ -187,7 +200,7 @@ describe('voice take storage', () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
     const s = new VoiceTakeStore({ rootDir: root, native: fakeNative() }); const started = await s.start(request); expect(started.ok).toBe(true)
     const takeId = started.ok ? started.takeId : ''
-    await s.list('song-1')
+    expect(await s.list('song-1')).toEqual([])
     const sidecar = JSON.parse(readFileSync(join(root, 'song-1', `${takeId}.json`), 'utf8'))
     expect(sidecar.status).toBe('recovered'); expect(sidecar.durationSec).toBe(0)
   })
@@ -794,8 +807,9 @@ describe('take timeline anchors and FX descriptor', () => {
     expect(f.read().anchors).toHaveLength(2)
   })
 
-  it('ends without extrapolating when retained presentation coverage is lost', async () => {
+  it('keeps capture active without extrapolating an uncovered final tail', async () => {
     const f = timelineFixture(); await f.start(); f.miss(); await f.poll(3)
+    expect((await f.s.level()).takeActive).toBe(true)
     expect((await f.s.stop()).take?.status).toBe('complete')
     expect(f.read().anchors).toHaveLength(1)
   })
@@ -829,10 +843,13 @@ describe('take timeline anchors and FX descriptor', () => {
     expect(await f.s.stop()).toMatchObject({ note: boundary })
   })
 
-  it('discriminates missing native transport telemetry which used to label song end as seek', async () => {
+  it('does not invent a seek from missing history and missing native transport telemetry', async () => {
     const f = timelineFixture(); f.native.transportState = undefined
     await f.start(); f.endSong(); await f.poll(3)
-    expect(await f.s.stop()).toMatchObject({ take: { status: 'complete' }, note: 'seek' })
+    expect((await f.s.level()).takeActive).toBe(true)
+    const stopped = await f.s.stop()
+    expect(stopped).toMatchObject({ take: { status: 'complete' } })
+    expect(stopped.note).toBeUndefined()
   })
 
   it('awaits in-flight automatic finalization instead of reporting no recording to the renderer', async () => {

@@ -89,6 +89,9 @@ was sung, exactly on the song timeline at any tempo. For a take recorded at
    `presentationQuery` placement uses. Conform uses anchors when present (they
    also absorb capture/output clock drift); old takes fall back to
    `settings[].atSec` and are tagged approximate when `settingsChanged`.
+   Missing journal coverage is not a seek or an end: capture continues while
+   independent native transport state and seek/loop counters show no boundary.
+   Uncovered points are skipped, rather than used as anchors or stop signals.
 5. **Cache.** Body keyed by (take identity, anchors/settings hash, conform
    version); the placed file adds the start frame. Stored beside the take,
    outside the project, written temp-then-rename, removed with the take, rebuilt

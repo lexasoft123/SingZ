@@ -319,6 +319,28 @@ describe('recording', () => {
     } finally { c.dispose(); warning.mockRestore() }
   })
 
+  it.each([1.25, .75, 1.1, 1.5])('native recording survives five seconds of UI/capture clock jitter at %sx', async tempo => {
+    const { c, engine, api } = await setup({}, e => {
+      Object.defineProperty(e, 'nativeActive', { value: true })
+      e._tempo = tempo
+    })
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await c.toggleRecord()
+      for (let i = 1; i <= 100; i++) {
+        clock = i * 50
+        // A UI projection is refreshed on a separate status clock, not on
+        // input packet edges; include quantization and one cold correction.
+        const publishedMs = Math.max(0, clock - [0, 65, 20, 110, 5][i % 5])
+        engine._pos = 30 + Math.floor(publishedMs * 48 / 128) * 128 / 48000 * tempo - (i === 41 ? 1 : 0)
+        c.tick()
+        if (i % 5 === 0) await c.pollLevel()
+        expect(c.getSnapshot().recording).toBe(true)
+        expect(api.recordStop).not.toHaveBeenCalled()
+      }
+    } finally { c.dispose(); warning.mockRestore() }
+  })
+
   it('the legacy negative control still ends a take on the same cold position sequence', async () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { c, engine, api } = await setup()

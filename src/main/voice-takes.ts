@@ -5,6 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import { fsyncDirectorySync, writeAllSync } from './atomic-file'
 import { log } from './log'
 import type { VoiceMonitorStore } from './voice-monitor'
+import type { DesktopPlaybackStatus } from '../shared/types'
 import type {
   VoiceRecordSettingsChange,
   VoiceRecordStartRequest,
@@ -24,6 +25,13 @@ import type {
 } from '../shared/voice-take'
 import { VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_PEAKS_MAX, VOICE_TAKE_SIDECAR_VERSION, VOICE_TAKE_ANCHORS_MAX, defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects, safeVoiceTakeMessage } from '../shared/voice-take'
 
+export type VoiceTakeTransportSnapshot = {
+  state: DesktopPlaybackStatus['transportState']
+  seekCount: string
+  loopCount: string
+  sampleRate?: number
+}
+
 export type VoiceTakeNative = {
   armCapture(args: { deviceName: string; channelIndex: number }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; generation?: bigint; deviceName?: string }>
   disarmCapture(generation?: bigint): Promise<{ ok: boolean; error?: string }>
@@ -32,6 +40,8 @@ export type VoiceTakeNative = {
   cancelTake(args: { generation: bigint }): Promise<{ ok: boolean; error?: string }>
   stopCapture?(generation: bigint): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
   transportState?(): Promise<'stopped' | 'pre-roll' | 'playing' | 'paused' | 'completed'>
+  /** Independent callback counters confirm a boundary when history is missing. */
+  transportSnapshot?(): Promise<VoiceTakeTransportSnapshot | null>
   captureStats(): Promise<{ takeFrameHostNs?: string; takeFrame?: string | number; gapOverflow?: boolean; gapRegressions?: string | number; firstSampleCaptured?: boolean; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; sampleRate?: number; lastSampleHostNs?: string; inputLatencyFrames?: number; inputLatencySource?: 'reported' | 'unknown'; inputLatencyStable?: boolean; inputBufferFrames?: number; inputLevel?: VoiceInputLevel; takeActive?: boolean }>
   presentationQuery(args: { songId: string; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; sampleRate?: number; outputSampleRate?: number; trimInputLatency?: boolean; initialDiscontinuitySerial?: number }): Promise<{ ok: boolean; found?: boolean; paused?: boolean; sampleRate?: number; startPositionSec?: number; songSeconds?: number; projectFrame?: number; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; latencySource?: 'reported' | 'measured-trim'; discontinuitySerial?: number | string; faultSerial?: number | string; transposeSemitones?: number; generation?: number | string; rate?: number; mappingStartCaptureHostNs?: string; mappingStartSongSeconds?: number; seekDuringCallback?: boolean; error?: string }>
   level(): Promise<VoiceInputLevel>
@@ -78,6 +88,11 @@ type Active = {
   lastRate?: number
   sampling?: Promise<void>
   placementFault?: boolean
+  captureFault?: boolean
+  initialPlacementMissing?: boolean
+  transportSnapshot?: VoiceTakeTransportSnapshot
+  coverageMissingAtEnd?: boolean
+  coverageMisses?: number
   finalizationError?: boolean
   timelineEnded?: boolean
   timelineEndNote?: VoiceRecordStopNote
@@ -317,6 +332,7 @@ export class VoiceTakeStore {
       settings: [{ atSec: 0, tempo: request.tempo, transposeSemitones: request.transposeSemitones }], generation: result.generation ?? this.armed?.generation ?? generation
       }
       active.actualDeviceName = result.deviceName ?? this.armed?.deviceName ?? request.input.deviceName
+      active.transportSnapshot = await this.initialTransportSnapshot()
       {
         const firstSampleWaitStarted = Date.now()
         const stamp = await this.waitForFirstSample()
@@ -330,10 +346,17 @@ export class VoiceTakeStore {
           active.lastSampleHostNs = stamp.lastSampleHostNs ?? stamp.firstSampleHostNs
           active.firstSampleQuality = stamp.firstSampleQuality
           active.sampleRate = stamp.sampleRate
-          const raw = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, trimInputLatency: false })
+          const raw = await this.initialQuery({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, trimInputLatency: false })
+          // A miss still carries device/graph latency. Freeze that basis even
+          // when the first input stamp falls outside a committed output block.
+          active.inputLatencyFrames = stamp.inputLatencySource === 'reported' && stamp.inputLatencyStable !== false ? stamp.inputLatencyFrames ?? 0 : 0
+          active.outputLatencyFrames = raw.outputLatencyFrames ?? 0
+          active.graphLatencyFrames = raw.graphLatencyFrames ?? 0
+          active.outputSampleRate = raw.sampleRate ?? active.transportSnapshot?.sampleRate ?? stamp.sampleRate
           if (!raw.ok || raw.found === false || raw.paused || raw.seekDuringCallback)
             log('voice-take', 'initial raw placement fault ' + JSON.stringify({ takeId, stamp, placement: raw }), 'warn')
-          if (!raw.ok || raw.found === false || raw.paused || raw.seekDuringCallback) active.placementFault = true
+          if (raw.ok && raw.found === false && !raw.paused && !raw.seekDuringCallback) active.initialPlacementMissing = true
+          else if (!raw.ok || raw.paused || raw.seekDuringCallback) active.placementFault = true
           else {
             const reported = stamp.inputLatencySource === 'reported' && stamp.inputLatencyStable !== false
             active.inputLatencyFrames = reported ? stamp.inputLatencyFrames ?? 0 : 0
@@ -343,15 +366,16 @@ export class VoiceTakeStore {
             // graph-delay subtraction at a tempo seam can regress the map.
             // Hardware gate: tone across 1 -> .5, error before/at/after <=5 ms.
             active.outputSampleRate = raw.sampleRate
-            const placed = await this.query({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, outputSampleRate: raw.sampleRate, inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames, trimInputLatency: true })
+            const placed = await this.initialQuery({ songId: request.songId, firstSampleHostNs: stamp.firstSampleHostNs, firstSampleQuality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, outputSampleRate: raw.sampleRate, inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames, trimInputLatency: true })
             if (!placed.ok || placed.found === false || placed.paused || placed.seekDuringCallback)
               log('voice-take', 'initial trimmed placement fault ' + JSON.stringify({ takeId, stamp,
                 inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
                 graphLatencyFrames: active.graphLatencyFrames, placement: placed }), 'warn')
-            if (!placed.ok || placed.found === false || placed.paused || placed.seekDuringCallback) active.placementFault = true
+            if (placed.ok && placed.found === false && !placed.paused && !placed.seekDuringCallback) active.initialPlacementMissing = true
+            else if (!placed.ok || placed.paused || placed.seekDuringCallback) active.placementFault = true
             else {
               const startPositionSec = placed.startPositionSec ?? placed.songSeconds
-              if (!Number.isFinite(startPositionSec)) active.placementFault = true
+              if (!Number.isFinite(startPositionSec) || startPositionSec! < 0) active.placementFault = true
               else active.startPositionSec = startPositionSec!
               // Readiness can observe a notification just before the native
               // control thread revalidates it. Freeze the first sample's final
@@ -380,17 +404,9 @@ export class VoiceTakeStore {
           if (active.placementFault) active.latencySource = 'measured-trim'
         }
       }
-      if (!active.placementFault && active.firstSampleHostNs && active.sampleRate) {
+      if (!active.placementFault && active.anchors.length && active.firstSampleHostNs && active.sampleRate) {
         active.monitoring ||= this.monitoringDuringStart
-        active.provisional = {
-          version: VOICE_TAKE_SIDECAR_VERSION, takeId: active.takeId, songId: request.songId,
-          songTitle: request.songTitle, songArtist: request.songArtist, createdAt: active.createdAt,
-          startPositionSec: active.startPositionSec, durationSec: 0, sampleRate: active.sampleRate, channels: 1,
-          inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
-          graphLatencyFrames: active.graphLatencyFrames, latencySource: active.latencySource, placementEstimated: active.placementEstimated, input: { ...request.input, deviceName: active.actualDeviceName ?? request.input.deviceName },
-          settings: active.settings, anchors: active.anchors, effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate, matchPercent: null, monitoring: active.monitoring, status: 'recovered', name: null,
-          audio: { fileName: `${active.takeId}.wav`, format: 'wav-pcm16', byteSize: 0, checksum: null }
-        }
+        active.provisional = this.provisionalSidecar(active)
         await this.writeSidecar(active.dir, active.takeId, active.provisional)
       }
       active.monitoring ||= this.monitoringDuringStart
@@ -430,21 +446,88 @@ export class VoiceTakeStore {
     return null
   }
 
+  /** A seqlock read or not-yet-published output callback can miss briefly.
+   * Retry the same sample, never move the singer's first sample forward. */
+  private async initialQuery(args: Parameters<VoiceTakeNative['presentationQuery']>[0]): ReturnType<VoiceTakeNative['presentationQuery']> {
+    for (let attempt = 0; ; attempt++) {
+      const result = await this.query(args)
+      if (attempt === 2 || !result.ok || result.found !== false || result.paused || result.seekDuringCallback) return result
+      // Each IPC round trip yields to the native publisher; no recording-start
+      // timer or later input timestamp is needed for these bounded probes.
+    }
+  }
+
+  private async initialTransportSnapshot(): Promise<VoiceTakeTransportSnapshot | undefined> {
+    if (!this.options.native.transportSnapshot) return undefined
+    // As with initialQuery, bounded IPC reads yield to a just-started callback
+    // without delaying recording or accepting initial/lastGood telemetry.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const snapshot = await this.options.native.transportSnapshot()
+      if (snapshot) return snapshot
+    }
+    return undefined
+  }
+
+  private provisionalSidecar(active: Active): VoiceTakeSidecar {
+    const request = active.request
+    return {
+      version: VOICE_TAKE_SIDECAR_VERSION, takeId: active.takeId, songId: request.songId,
+      songTitle: request.songTitle, songArtist: request.songArtist, createdAt: active.createdAt,
+      startPositionSec: active.startPositionSec, durationSec: 0, sampleRate: active.sampleRate!, channels: 1,
+      inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
+      graphLatencyFrames: active.graphLatencyFrames, latencySource: active.latencySource, placementEstimated: active.placementEstimated,
+      input: { ...request.input, deviceName: active.actualDeviceName ?? request.input.deviceName },
+      settings: active.settings, anchors: active.anchors, effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate,
+      matchPercent: null, monitoring: active.monitoring, status: 'recovered', name: null,
+      audio: { fileName: `${active.takeId}.wav`, format: 'wav-pcm16', byteSize: 0, checksum: null }
+    }
+  }
+
+  private async transportBoundary(active: Active, placement: Awaited<ReturnType<VoiceTakeNative['presentationQuery']>>): Promise<{ note: VoiceRecordStopNote | null; counters: boolean; steady?: boolean }> {
+    const current = await this.options.native.transportSnapshot?.()
+    // A snapshot-capable bridge returning null has only stale/initial status.
+    // Do not re-read its unqualified state and treat that as fresh proof.
+    const guarded = !!this.options.native.transportSnapshot
+    const state = current?.state ?? (!guarded ? await this.options.native.transportState?.().catch(() => undefined) : undefined)
+    if (state === 'completed') return { note: 'song-end', counters: guarded }
+    if (state === 'paused' || state === 'stopped') return { note: 'pause', counters: guarded }
+    if (current && active.transportSnapshot &&
+        (current.seekCount !== active.transportSnapshot.seekCount || current.loopCount !== active.transportSnapshot.loopCount)) {
+      return { note: 'seek', counters: true }
+    }
+    const historyBoundary = placement.paused || placement.seekDuringCallback ||
+      (active.faultSerial !== undefined && placement.faultSerial !== undefined && placement.faultSerial !== active.faultSerial) ||
+      (active.discontinuitySerial !== undefined && placement.discontinuitySerial !== undefined &&
+        placement.discontinuitySerial !== active.discontinuitySerial &&
+        (active.faultSerial === undefined || placement.faultSerial === undefined))
+    // Adopt only after covered, continuous history agrees. A first fresh read
+    // arriving after a seek must not turn that seek into the new baseline.
+    if (current && !active.transportSnapshot && placement.ok && placement.found === true && !historyBoundary) {
+      active.transportSnapshot = current
+    }
+    // A capable bridge with no baseline cannot disprove positive historical
+    // evidence. Coverage misses are still skipped separately by sampleAnchors.
+    return { note: null, counters: guarded && !!active.transportSnapshot, steady: !!current && !!active.transportSnapshot }
+  }
+
   /** Poll faster than the journal's ~2.7 s retention. Never await a wall-clock settings timer. */
   private async checkDiscontinuity(active: Active, force = false): Promise<void> {
     if (this.active !== active || !active.firstSampleHostNs) return
     if (active.sampling) { await active.sampling; return }
     active.sampling = this.sampleAnchors(active, force)
     try { await active.sampling } finally { active.sampling = undefined }
-    if (active.placementFault && this.active === active) await this.stop('error')
-    else if (active.timelineEnded && this.active === active) await this.stop(undefined, active.timelineEndNote)
+    // An uncertain map is a diagnostic on the eventual saved take, not a
+    // reason to throw away ongoing microphone PCM while the song still plays.
+    if (active.captureFault && this.active === active) await this.stop('error')
+    else if (active.timelineEnded && this.active === active) await this.stop(active.placementFault ? 'error' : undefined, active.timelineEndNote)
   }
 
   private endTimeline(active: Active, note: VoiceRecordStopNote = 'seek'): void {
     // After placement, transport boundaries end the valid recording timeline;
     // they do not invalidate its measured start or the anchors already captured.
-    if (active.anchors.length) { active.timelineEnded = true; active.timelineEndNote ??= note }
-    else active.placementFault = true
+    active.timelineEnded = true
+    active.timelineEndNote ??= note
+    if (!active.anchors.length) active.placementFault = true
   }
 
   private async boundaryNote(paused?: boolean): Promise<VoiceRecordStopNote> {
@@ -461,12 +544,12 @@ export class VoiceTakeStore {
         stats.sampleRate !== undefined && stats.sampleRate !== active.sampleRate) {
       log('voice-take', 'capture fault ' + JSON.stringify({ takeId: active.takeId, host, takeFrame: stats.takeFrame,
         gapOverflow: stats.gapOverflow, gapRegressions: stats.gapRegressions, sampleRate: stats.sampleRate, initialSampleRate: active.sampleRate }), 'warn')
-      active.placementFault = true; return
+      active.placementFault = active.captureFault = true; return
     }
     const rate = active.sampleRate
     const frame = stats.takeFrame === undefined ?
       Math.round(Number(BigInt(host) - BigInt(active.firstSampleHostNs!)) * rate / 1e9) : Number(stats.takeFrame)
-    if (!Number.isSafeInteger(frame) || frame < 0) { active.placementFault = true; return }
+    if (!Number.isSafeInteger(frame) || frame < 0) { active.placementFault = active.captureFault = true; return }
     // An older addon has no exact file cursor. Keep the compatibility map explicitly approximate.
     if (stats.takeFrame === undefined) active.timelineApproximate = true
     const queryAt = (at: string) => this.query({ songId: active.request.songId,
@@ -475,12 +558,49 @@ export class VoiceTakeStore {
       graphLatencyFrames: active.graphLatencyFrames, sampleRate: rate,
       outputSampleRate: active.outputSampleRate, trimInputLatency: true })
     const placement = await queryAt(host)
+    // The journal returns "not covered", not "transport ended". Callback
+    // timestamp gaps, a late publication or a seqlock collision are all misses
+    // while the transport continues. Independently confirm stop/seek/loop.
+    const boundary = await this.transportBoundary(active, placement)
+    if (boundary.note) { this.endTimeline(active, boundary.note); return }
+    if (placement.ok && placement.found === false) {
+      active.coverageMisses = (active.coverageMisses ?? 0) + 1
+      if (active.coverageMisses <= 3) log('voice-take', 'timeline coverage missing ' + JSON.stringify({
+        takeId: active.takeId, host, takeFrame: frame, force, action: 'keep-recording',
+        confirmedBoundary: false, initialPlacementMissing: active.initialPlacementMissing === true
+      }), 'warn')
+      if (force) { active.coverageMissingAtEnd = true; active.timelineApproximate = true }
+      return
+    }
+    if (active.initialPlacementMissing && placement.ok && !placement.paused && !placement.seekDuringCallback && boundary.steady) {
+      const seconds = placement.startPositionSec ?? placement.songSeconds
+      const tempo = placement.rate ?? active.request.tempo
+      if (!Number.isFinite(tempo) || tempo <= 0 || !placement.mappingStartCaptureHostNs ||
+          BigInt(placement.mappingStartCaptureHostNs) > BigInt(active.firstSampleHostNs!)) return
+      const start = seconds === undefined ? NaN : seconds - frame / rate * tempo
+      // With unchanged native seek/loop counters the first valid affine point
+      // and exact file cursor recover the missing start without dropping PCM.
+      if (!Number.isFinite(start) || start < 0) return
+      active.startPositionSec = start
+      this.appendAnchor(active, { takeFrame: 0, projectFrame: Math.round(start * rate) })
+      active.initialPlacementMissing = false
+      active.timelineApproximate = true
+      active.discontinuitySerial = placement.discontinuitySerial
+      active.faultSerial = placement.faultSerial
+    }
     const faulty = (p: Awaited<ReturnType<typeof queryAt>>) =>
       !p.ok || p.found === false || p.paused || p.seekDuringCallback ||
       (active.faultSerial !== undefined && p.faultSerial !== active.faultSerial) ||
       (p.discontinuitySerial !== active.discontinuitySerial &&
         (active.faultSerial === undefined || p.faultSerial === undefined))
     if (faulty(placement)) {
+      // Older bridges have no counter snapshot: only a positive historical
+      // boundary is evidence. Missing coverage alone must never stop a take.
+      if (boundary.counters) {
+        active.timelineApproximate = true
+        if (force) active.coverageMissingAtEnd = true
+        return
+      }
       log('voice-take', 'timeline end ' + JSON.stringify({ takeId: active.takeId, phase: force ? 'final-or-settings' : 'poll',
         host, takeFrame: frame, quality: stats.firstSampleQuality, inputLatencyFrames: active.inputLatencyFrames,
         outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames,
@@ -502,6 +622,10 @@ export class VoiceTakeStore {
       upperHost = edge
       epoch = await queryAt((edge - 1n).toString())
       if (faulty(epoch)) {
+        if ((epoch.ok && epoch.found === false) || boundary.counters) {
+          if (force) { active.coverageMissingAtEnd = true; active.timelineApproximate = true }
+          return
+        }
         log('voice-take', 'timeline end ' + JSON.stringify({ takeId: active.takeId, phase: 'seam-history',
           host, takeFrame: frame, edge: edge.toString(), initialDiscontinuitySerial: active.discontinuitySerial,
           initialFaultSerial: active.faultSerial, placement: epoch }), 'warn')
@@ -527,7 +651,8 @@ export class VoiceTakeStore {
     active.lastSampleHostNs = host
     active.lastRate = placement.rate ?? active.lastRate
     active.discontinuitySerial = placement.discontinuitySerial
-    if (active.provisional && (force || seams.length || active.anchors.length !== previousCount)) {
+    if (active.anchors.length && (force || seams.length || active.anchors.length !== previousCount || !active.provisional)) {
+      active.provisional ??= this.provisionalSidecar(active)
       await this.writeSidecar(active.dir, active.takeId, { ...active.provisional,
         anchors: [...active.anchors], settings: [...active.settings], timelineApproximate: active.timelineApproximate })
     }
@@ -606,9 +731,10 @@ export class VoiceTakeStore {
       }
       const durationSec = finished.frames !== undefined ? finished.frames / sampleRate : wavDuration(file.size, sampleRate)
       const frames = Math.round(durationSec * sampleRate)
+      if (!active.anchors.length) active.placementFault = true
       active.anchors = active.anchors.filter(anchor => anchor.takeFrame <= frames)
       const last = active.anchors.at(-1)
-      if (last && frames > last.takeFrame && active.lastRate && !active.placementFault && !active.timelineEnded)
+      if (last && frames > last.takeFrame && active.lastRate && !active.placementFault && !active.timelineEnded && !active.coverageMissingAtEnd)
         this.appendAnchor(active, { takeFrame: frames, projectFrame: last.projectFrame + Math.round((frames - last.takeFrame) * active.lastRate) })
       const placementMiss = active.placementFault === true
       const sidecar: VoiceTakeSidecar = {
@@ -668,7 +794,9 @@ export class VoiceTakeStore {
       try {
         const sidecar = JSON.parse(await readFile(join(dir, name), 'utf8')) as VoiceTakeSidecar
         if (sidecar.version !== VOICE_TAKE_SIDECAR_VERSION || !validTimelineFields(sidecar)) continue
-        if (this.active?.request.songId === songId && this.active.takeId === sidecar.takeId) { result.push(summary(sidecar)); continue }
+        // The active take is already represented by the recording model; its
+        // crash-recovery placeholder is not another saved zero-second take.
+        if (this.active?.request.songId === songId && this.active.takeId === sidecar.takeId) continue
         if (sidecar.status === 'recovered') {
           try {
             const wavPath = join(dir, sidecar.audio.fileName)

@@ -1,6 +1,9 @@
 'use strict'
 const assert = require('node:assert/strict')
 
+const nativeOutputProvider = (platform = process.platform) =>
+  platform === 'darwin' ? 'coreaudio' : platform === 'win32' ? 'wasapi' : 'alsa'
+
 /** Seed the product's persisted native route BEFORE opening a song. Setting
  * engine.setOutput after open discards its prepared-ahead graph; waiting for
  * that discarded graph then hangs the driver. UIDs are opaque, including ','. */
@@ -12,7 +15,7 @@ async function selectNativeOutputBeforeOpen(win, uid) {
   for (let attempt = 0; ; attempt++) {
     try {
       await win.waitForLoadState('domcontentloaded')
-      inventory = await win.evaluate(() => window.singz.audioHostDevices('coreaudio'))
+      inventory = await win.evaluate(provider => window.singz.audioHostDevices(provider), nativeOutputProvider())
       break
     } catch (error) {
       if (attempt >= 5 || !/Execution context was destroyed|navigation/i.test(String(error))) throw error
@@ -33,4 +36,4 @@ async function selectNativeOutputBeforeOpen(win, uid) {
   return output
 }
 
-module.exports = { selectNativeOutputBeforeOpen }
+module.exports = { selectNativeOutputBeforeOpen, nativeOutputProvider }

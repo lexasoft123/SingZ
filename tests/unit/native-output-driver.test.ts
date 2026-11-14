@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const { selectNativeOutputBeforeOpen } = require('../e2e/mac/native-output.cjs') as {
+const { selectNativeOutputBeforeOpen, nativeOutputProvider } = require('../e2e/mac/native-output.cjs') as {
   selectNativeOutputBeforeOpen(page: object, uid: string): Promise<{ uid: string }>
+  nativeOutputProvider(platform?: string): string
 }
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('native output driver setup', () => {
+  it.each([['darwin', 'coreaudio'], ['win32', 'wasapi'], ['linux', 'alsa']])('uses %s native provider %s', (platform, provider) => {
+    expect(nativeOutputProvider(platform)).toBe(provider)
+  })
   const uid = 'AppleUSBAudioEngine:Antelope Audio:Zen Quadro SC:4912524000285:1,2'
   it('restores the exact opaque UID through the product preference before song open', async () => {
     let saved = JSON.stringify({ outputId: 'legacy-browser', inputChannel: 4 })
@@ -22,6 +26,7 @@ describe('native output driver setup', () => {
     expect(await selectNativeOutputBeforeOpen(page, uid)).toEqual({ uid, outputChannels: 16 })
     expect(JSON.parse(saved)).toEqual({ nativeOutputUid: uid, inputChannel: 4 })
     expect(page.reload).toHaveBeenCalledOnce()
+    expect(page.evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), nativeOutputProvider())
     expect(page.waitForFunction).toHaveBeenCalledWith(expect.any(Function), uid, { timeout: 20000 })
   })
 
