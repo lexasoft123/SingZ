@@ -39,6 +39,9 @@ def foreground_pid():
         return {"available": False, "reason": str(error)}
 
 
+MAX_RSS_GROWTH_BYTES = 128 * 2**20
+
+
 def rss_bytes(pid):
     value = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], check=True,
                            capture_output=True, text=True, timeout=2).stdout.strip()
@@ -70,6 +73,13 @@ def evaluate(telemetry, resources, minimum_fps, maximum_cpu=None):
         failures.append("advancing glyph glow was not painted during measurement")
     if len(resources) < 3:
         failures.append("fewer than three measured process resource samples")
+    if len(resources) >= 2:
+        # Steady offscreen rendering must not accumulate memory per frame. A retained frame arena
+        # grew about 500 MiB in six seconds; a correct run grows about 10 MiB.
+        growth = resources[-1]["process_rss_bytes"] - resources[0]["process_rss_bytes"]
+        if growth > MAX_RSS_GROWTH_BYTES:
+            failures.append(f"process RSS grew {growth / 2**20:.0f} MiB during measurement, "
+                            f"limit {MAX_RSS_GROWTH_BYTES / 2**20:.0f} MiB")
     for row in resources:
         if not math.isfinite(row["process_cpu_percent"]) or row["process_cpu_percent"] < 0:
             failures.append("invalid process CPU sample")

@@ -45,7 +45,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, output: PathBuf, cx: &
                 });
                 // A hidden window has no display callbacks. Settle the initial
                 // viewport independently of the measured clock/cadence.
-                for _ in 0..90 { window.simulate_next_frame(cx); window.refresh(); let _=window.draw(cx); }
+                for _ in 0..90 { window.simulate_next_frame(cx); window.refresh(); window.draw(cx).clear(cx); }
             })?;
             let scenario_start=Instant::now();
             let warmup_end=scenario_start+Duration::from_secs_f64(warmup);
@@ -77,7 +77,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, output: PathBuf, cx: &
                         this.playhead.seek(64.+scenario_start.elapsed().as_secs_f64());
                         this.playing=false; this.last=Instant::now(); cx.notify();
                     });
-                    window.simulate_next_frame(cx); window.refresh(); let _=window.draw(cx);
+                    window.simulate_next_frame(cx); window.refresh(); window.draw(cx).clear(cx);
                     // C-35 negative control: a per-frame stall that the perf smoke gate must catch.
                     if let Some(ms)=gated_env!("SINGZ_PERF_INJECT_FRAME_SLEEP_MS").and_then(|value|value.to_str().and_then(|text|text.parse::<u64>().ok())) {
                         std::thread::sleep(Duration::from_millis(ms));

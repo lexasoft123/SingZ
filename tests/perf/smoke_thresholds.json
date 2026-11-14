@@ -51,8 +51,8 @@
       "basis": "Q-02 has no offscreen cell. Mac receipt: p95 1.98 ms. 25 ms is about 12x that, for a runner with a software or shared GPU; the injected 40 ms stall measured p95 51.9 ms."
     },
     "offscreenStructuralFailures": {
-      "label": "offscreen run checks failed (hidden, glow painted, frames, samples, readback)", "unit": "failures", "op": "<=", "limit": 0, "q02": null,
-      "basis": "interface-offscreen-perf.py's own verdict, excluding its throughput line (gated above). A run whose glow never painted, or that measured too few frames, must not pass on throughput alone."
+      "label": "offscreen run checks failed (hidden, glow painted, frames, samples, readback, memory growth)", "unit": "failures", "op": "<=", "limit": 0, "q02": null,
+      "basis": "interface-offscreen-perf.py's own verdict, excluding its throughput line (gated above). A run whose glow never painted, that measured too few frames, or whose RSS grew more than 128 MiB during measurement must not pass on throughput alone."
     }
   },
   "info": {
