@@ -457,10 +457,19 @@ was driven; the gotchas that follow from it are below.
   Electron can emit `ready`. Register `app.whenReady().then(...)` with explicit
   startup-error handling; do not top-level-await a startup path that itself
   awaits `whenReady()`, which deadlocks before any window or service starts.
-- **userData identity**: `Electron out/main/index.js` → userData "Electron";
-  `npm run dev`/`npx electron .` → "singz"; packaged → "SingZ". Caches differ
-  per identity — shared things (model weights, GPU pack) deliberately live in
-  `~/Library/Application Support/SingZ/` via `modelsDir()`/`packDir()`.
+- **userData identity**: desktop bootstrap explicitly selects `appData/SingZ`
+  before importing main services, for driver, development and packaged launches.
+  Chromium `sessionData` uses the same directory. This is
+  `~/Library/Application Support/SingZ` on macOS, `~/.config/SingZ` on Linux
+  (or `$XDG_CONFIG_HOME/SingZ`), and `%APPDATA%\SingZ` on Windows.
+  `SINGZ_USERDATA_DIR` overrides both paths and bypasses migration; drivers must
+  set it to isolate preferences, recordings and caches. Models and the GPU pack
+  stay under `appData/SingZ` via `modelsDir()`/`packDir()` unless separately overridden.
+  A distinct legacy `appData/singz` is atomically renamed only when `SingZ`
+  does not exist. Case-insensitive aliases are never renamed or deleted. If
+  both directories exist, use `SingZ`, warn with the legacy path, and leave
+  every entry in both directories untouched; never merge them. A failed rename
+  warns and continues using the existing legacy directory.
   The dedicated SingZ Box package selects its product before importing main
   services and uses `appData/SingZ Box` for preferences, Chromium sessions,
   models and packs, plus `Documents/SingZ Box` for projects. It does not adopt

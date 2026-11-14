@@ -40,9 +40,9 @@ async function mix() { return page.evaluate(() => Object.fromEntries(__test.trac
 async function lane(id) { const index = await page.evaluate(id => __test.tracks.findIndex(t => t.id === id), id); assert.ok(index >= 0, id); return page.locator('.lane-controls').nth(index) }
 async function close() { if (!app) return; await app.close(); app = null; page = null }
 async function launch(offline = false) {
-  const env = { ...process.env, XDG_CONFIG_HOME: path.join(scratch, 'config'), SINGZ_MUTE: hasSilentLoopback ? '' : '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en', LANGUAGE: 'en', LANG: 'C.UTF-8', SINGZ_GDRIVE_CONFIG: JSON.stringify(drive.config) }
+  const env = { ...process.env, SINGZ_USERDATA_DIR: profile, XDG_CONFIG_HOME: path.join(scratch, 'config'), SINGZ_MUTE: hasSilentLoopback ? '' : '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en', LANGUAGE: 'en', LANG: 'C.UTF-8', SINGZ_GDRIVE_CONFIG: JSON.stringify(drive.config) }
   for (const key of ['SINGZ_PACK_DIR', 'SINGZ_MODELS_DIR', 'PYTHONPATH', 'PYTHONHOME']) delete env[key]
-  app = await _electron.launch({ executablePath: executable, chromiumSandbox: true, args: ['--mute-audio', '--ozone-platform=' + ozone, '--user-data-dir=' + profile], env, timeout: 60000 })
+  app = await _electron.launch({ executablePath: executable, chromiumSandbox: true, args: ['--mute-audio', '--ozone-platform=' + ozone], env, timeout: 60000 })
   await app.evaluate(({ app, session }, { base, offline }) => {
     global.__network = []; global.__originalFetch = global.fetch
     global.fetch = async (url, init) => {

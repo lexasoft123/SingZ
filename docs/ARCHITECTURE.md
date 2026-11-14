@@ -528,6 +528,15 @@ count-in), and the desktop adopts the rest as-is.
 
 ## On-disk layout
 
+Desktop `<userData>` and Chromium `sessionData` are explicitly `<appData>/SingZ`
+for all launch modes, unless `SINGZ_USERDATA_DIR` selects an isolated profile.
+Before services load, a distinct legacy `<appData>/singz` is renamed when the
+canonical directory is absent. If both exist, the canonical profile wins and a
+warning identifies the untouched legacy directory; entries are never merged.
+Case-insensitive aliases are untouched. A failed rename keeps using the legacy
+profile and logs a warning. Models and packs retain the paths below, independent
+of the userData override.
+
 ```
 <userData>/stems/<sha1-16>/         per-song cache (stems, lyrics.json)
 <userData>/settings.json            library root, Drive tokens, gdriveDirty ledger

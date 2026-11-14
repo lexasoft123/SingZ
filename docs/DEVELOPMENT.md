@@ -866,8 +866,12 @@ Rules learned the hard way:
   on the source where it describes those same files);
   `SINGZ_ALLOW_STALE_DEPS=1` builds anyway, for a package put there by hand at
   another version on purpose (a locally built kit, tried before its tag).
-- Driver runs get userData **"Electron"**, dev runs **"singz"**, packaged
-  **"SingZ"**: their stem caches are separate. Shared models are not.
+- Desktop driver, development and packaged launches all use `appData/SingZ`
+  for userData and Chromium sessionData. Set `SINGZ_USERDATA_DIR` for each
+  driver's isolated profile; shared models and packs have separate overrides.
+  Bootstrap migrates a distinct lowercase `appData/singz` only if `SingZ`
+  is absent; if both exist it warns without merging, and if rename fails it
+  keeps using the legacy directory. Case-insensitive aliases are left untouched.
 - After clicking something that triggers an async re-render, wait for the
   *new* state (e.g. `.variant:has-text(...)`, or a button's label returning to
   idle) — stale rows accept clicks while disabled and the click silently dies.
@@ -893,7 +897,7 @@ Rules learned the hard way:
 | `SINGZ_NO_LAUNCH_SYNC=1` | the older, narrower opt-out: skips only the launch reconcile |
 | `SINGZ_SYNC_DEBOUNCE_MS` | shrink the 4 s coalescing window so a driver need not wait for it |
 | `SINGZ_GDRIVE_CONFIG` | JSON OAuth config — point the app at a fake Drive (`tests/shared/fake-drive-http.ts`) |
-| `SINGZ_USERDATA_DIR` | isolate userData (drivers sharing "Electron" crash each other) |
+| `SINGZ_USERDATA_DIR` | isolate userData and sessionData (drivers sharing the default SingZ profile crash each other); bypass profile migration |
 | `SINGZ_MODELS_DIR` | relocate the shared model cache |
 | `SINGZ_PACK_DIR` | relocate the GPU pack install dir |
 | `SINGZ_GPU_PACK_URL` | pack download URL (point at a local http server) |
