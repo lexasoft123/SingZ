@@ -41,8 +41,8 @@ describe('PR #152 round 2, fix 3: Right from a row enters the primary action', (
   }
   const renderQueue = (): string => renderToStaticMarkup(createElement(Queue, {
     items: [{ dir: '/a', name: 'B - A', songPath: '', hasStems: false }, { dir: '/b', name: 'B - B', songPath: '', hasStems: false }] as never,
-    rows: {}, selectedDir: '/a', active: null, position: 0, playing: false, status: 'paused',
-    onRemember: () => {}, onChoose: () => {}, onMove: () => {}, onRemove: () => {}, onBrowse: () => {}, onClose: () => {}, onToggle: () => {}
+    rows: {}, selectedDir: '/a', active: null,
+    onRemember: () => {}, onChoose: () => {}, onMove: () => {}, onRemove: () => {}, onBrowse: () => {}
   }))
   it('uses the rendered hand-over selector and never lands on Remove, even when Move is disabled', () => {
     const selector = /data-remote-right="([^"]+)"/.exec(renderQueue())?.[1]
@@ -54,7 +54,7 @@ describe('PR #152 round 2, fix 3: Right from a row enters the primary action', (
     ;(group as never as { contains(e: unknown): boolean }).contains = element => element === row
     ;(row as never as { closest(s: string): unknown }).closest = candidate => candidate === '[data-remote-right]' ? group : null
     ;(group as never as { getAttribute(a: string): string }).getAttribute = () => selector!
-    const back = new El(['[data-queue-return]'])
+    const back = new El(['[data-focus="current-song"]'])
     const scope = { contains: () => true }
     // Negative control: the old all-action selector sees Remove first here and selects it.
     expect(sideExit(scope as never, row as never, [back, row, remove, select] as never, 'ArrowRight')).toBe(select)

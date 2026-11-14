@@ -19,7 +19,7 @@ const rule = (source: string, selector: string): string => {
 }
 const noop = (): void => {}
 const nav = (section: BoxNavigationSection, extra: Partial<Parameters<typeof BoxNavigation>[0]> = {}): string => renderToStaticMarkup(createElement(BoxNavigation, {
-  section, queueCount: 3, currentName: 'Artist - Donaukinder', playing: true, position: 116, duration: 277,
+  section, queueCount: 3, currentName: 'Artist - Donaukinder', playing: true, status: 'playing', position: 116, duration: 277,
   onCatalog: noop, onQueue: noop, onCurrent: noop, onSettings: noop, onAccount: noop, ...extra
 }))
 const snapshot = { active: { item: { name: 'Artist - Donaukinder', dir: '/d' }, lyrics: { status: 'ready', lines: [] }, metadata: {} }, playing: true, position: 116, duration: 277, tempo: 1, tracks: [], masterVolume: 1, routingBlocked: false, applyingOutput: false, restartRequired: false, playbackError: null, outputError: null, saveError: null } as unknown as BoxTransportSnapshot
@@ -54,12 +54,13 @@ describe('one top bar on every screen', () => {
     expect(html).not.toContain('player-header-actions')
   })
   it('shows the filled pill with a play triangle and "Back to the song" away from the player, pause bars while playing', () => {
-    const away = nav('catalog', { playing: false })
+    const away = nav('catalog', { playing: false, status: 'paused' })
     expect(away).toContain('data-state="away"')
     expect(away).toContain('Back to the song · 1:56')
     expect(away).toContain('Current song: Donaukinder')
-    expect(nav('catalog', { playing: true })).not.toBe(away)
-    expect(nav('catalog', { playing: false })).toContain('Artist')
+    expect(nav('catalog', { status: 'playing' })).not.toBe(away)
+    expect(nav('catalog', { playing: false, status: 'paused' })).toContain('Artist')
+    expect(nav('catalog', { playing: true, status: 'error' })).toBe(nav('catalog', { playing: true, status: 'playing' }))
     expect(nav('catalog', { currentName: null })).not.toContain('box-song-pill')
   })
   it('shows the "you are here" pill on the player with the artist reachable and the song info replacing the old header', () => {
@@ -69,6 +70,16 @@ describe('one top bar on every screen', () => {
     expect(html).toContain('Now playing · 1:56 / 4:37')
     expect(html).toContain('aria-label="Current song: Donaukinder — Artist"')
     expect(html).not.toContain('player-song')
+  })
+  it('says Ended with the duration, and a play badge, once the song ended on the player', () => {
+    const ended = barOf(renderToStaticMarkup(createElement(Player, {
+      snapshot: { ...snapshot, playing: false, position: 277 } as BoxTransportSnapshot, controlsVisible: true, queueCount: 0, next: null, onLibrary: noop, onMix: noop, onQueue: noop, onAccount: noop, onNext: noop, onSettings: noop, onToggle: noop, onSeek: noop, onSeekBy: noop, onWake: noop
+    })))
+    expect(ended).toContain('Ended · 4:37')
+    expect(ended).not.toContain('Now playing')
+    expect(nav('player', { playing: false, status: 'ended', position: 277 })).toContain('Ended · 4:37')
+    expect(nav('catalog', { playing: false, status: 'ended', position: 277 })).toContain('Back to the song · 4:37')
+    expect(nav('catalog', { playing: false, status: 'ended' })).not.toContain('Ended')
   })
   it('hides the controls with the chrome but keeps the logo and the pill visible', () => {
     const hidden = barOf(player(false))
@@ -87,6 +98,7 @@ describe('one top bar on every screen', () => {
     for (const bundle of [en, ru, zh]) {
       expect(bundle['box.navigation.backToSong']).toContain('{time}')
       expect(bundle['box.navigation.nowPlaying']).toContain('{duration}')
+      expect(bundle['box.navigation.ended']).toContain('{duration}')
     }
   })
 })

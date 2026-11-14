@@ -72,6 +72,7 @@ export function Player({
         queueCount={queueCount}
         currentName={active.item.name}
         playing={snapshot.playing}
+        status={status}
         position={snapshot.position}
         duration={snapshot.duration}
         chromeHidden={!controlsVisible}

@@ -5,6 +5,7 @@ import { tSettings } from './settings-i18n'
 import { songLine } from './next-song'
 import { parseSongName } from './song-identity'
 import { timeText } from './metadata'
+import type { PlaybackStatus } from './playback-status'
 
 export type BoxNavigationSection = 'catalog' | 'queue' | 'settings' | 'account' | 'player'
 
@@ -15,6 +16,7 @@ export function BoxNavigation({
   queueCount,
   currentName,
   playing,
+  status,
   position,
   duration,
   chromeHidden = false,
@@ -28,6 +30,7 @@ export function BoxNavigation({
   queueCount: number
   currentName: string | null
   playing: boolean
+  status: PlaybackStatus
   position: number
   duration: number
   /** Player only: chrome is hidden, so the controls are inert and invisible; the logo and pill stay. */
@@ -74,7 +77,7 @@ export function BoxNavigation({
       <span className="box-song-badge" aria-hidden="true"><Icon name={playing ? 'pause' : 'play'} size={14} /></span>
       <span className="box-song-text">
         <strong>{song.title}</strong>
-        <small>{onPlayer ? t('box.navigation.nowPlaying', { time, duration: timeText(duration) }) : t('box.navigation.backToSong', { time })}</small>
+        <small>{onPlayer ? (status === 'ended' ? t('box.navigation.ended', { duration: timeText(duration) }) : t('box.navigation.nowPlaying', { time, duration: timeText(duration) })) : t('box.navigation.backToSong', { time })}</small>
       </span>
     </Button>}
   </header>
