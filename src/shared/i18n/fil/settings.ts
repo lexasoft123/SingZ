@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "Magkakaibang laki ng buffer",
+  "settings.buffer.label": "Laki ng buffer",
+  "settings.buffer.option": "{frames} frame · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} frame (naka-save, hindi available)",
+  "settings.buffer.hint": "Mas maliit na buffer, mas mababang latency at mas mataas na gamit ng CPU. Ang oras na ipinapakita ay para sa isang buffer, hindi sa kabuuang pagkaantala ng tunog.",
+  "settings.buffer.pending": "Na-save. Ilalapat kapag huminto ang pag-play, monitoring, pag-record, at preview ng mikropono.",
+  "settings.buffer.outputStatus": "Output: hiniling na {requested}, aktuwal na {actual} frame",
+  "settings.buffer.inputStatus": "Input: hiniling na {requested}, aktuwal na {actual} frame",
+  "settings.buffer.unsupported": "Maaaring baguhin ang laki ng buffer gamit ang CoreAudio sa macOS.",
+  "settings.buffer.failed": "Hindi mailapat ang laki ng buffer: {error}",
+
   'settings.route.title': 'Ruta ng audio',
   'settings.route.retryNextStart': 'Susubukang muli ang naka-save na device sa susunod na pagbukas ng SingZ.',
   'settings.route.inventoryUnavailable': 'Hindi makuha ang listahan ng mga audio device.',

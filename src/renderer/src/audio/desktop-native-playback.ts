@@ -1,3 +1,4 @@
+import { windowsPathTooLong } from '../../../shared/windows-path'
 import { commandableRetainedPlayback } from '../../../shared/box-retained-playback'
 import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
@@ -218,6 +219,7 @@ export function selectDesktopPlaybackBackend(
   }
   const supported = new Set(features.runtime!.mediaCodec.extensions)
   for (const lane of features.lanes) {
+    if (platform === 'win32' && lane.path && windowsPathTooLong(lane.path)) return decline('graph-rejected', 'path-too-long: lane path exceeds the Windows extended-length limit', { laneId: lane.id })
     const format = lane.path ? extensionOf(lane.path) : null
     if (!format || !supported.has(format)) {
       // File paths are not URLs: do not strip a query and admit a source that

@@ -60,6 +60,7 @@ import {
 import { machCanonicalSha256 } from './mach-canonical'
 
 export interface NativeCaptureBinding {
+  audioBufferSettings?(preferences?: import('../shared/audio-buffer').AudioBufferPreferences): import('../shared/audio-buffer').AudioBufferStatus
   initializeSharedAudio(config?: { outputDeviceUid: string; provider?: DesktopPlaybackProvider }): { ok: boolean; error?: string }
   refreshSharedAudioInventory(): { ok: boolean; error?: string }
   scheduleTrainingCue(config: { channels: Float32Array[]; sampleRate: number; startDelayMs: number; gain: number }, generation: bigint): { ok: boolean; error?: string; startHostTimeNs: string; durationMs: number }

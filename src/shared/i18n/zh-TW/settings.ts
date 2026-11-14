@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "緩衝區大小不同",
+  "settings.buffer.label": "緩衝區大小",
+  "settings.buffer.option": "{frames} 幀 · {ms} 毫秒",
+  "settings.buffer.savedUnavailable": "{frames} 幀（已儲存，無法使用）",
+  "settings.buffer.hint": "較小的緩衝區可降低延遲，但會增加 CPU 負載。此處顯示單一緩衝區的時間，而非總聲音延遲。",
+  "settings.buffer.pending": "已儲存。將在播放、監聽、錄音及麥克風預覽停止後套用。",
+  "settings.buffer.outputStatus": "輸出：要求 {requested} 幀，實際 {actual} 幀",
+  "settings.buffer.inputStatus": "輸入：要求 {requested} 幀，實際 {actual} 幀",
+  "settings.buffer.unsupported": "僅在 macOS 的 CoreAudio 中可設定緩衝區大小。",
+  "settings.buffer.failed": "無法套用緩衝區大小：{error}",
+
   'settings.route.title': '音訊路由',
   'settings.route.retryNextStart': '下次啟動 SingZ 時將重試儲存的裝置。',
   'settings.route.inventoryUnavailable': '無法取得音訊裝置清單。',

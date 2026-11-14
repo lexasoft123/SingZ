@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "अलग-अलग बफ़र आकार",
+  "settings.buffer.label": "बफ़र का आकार",
+  "settings.buffer.option": "{frames} फ़्रेम · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} फ़्रेम (सहेजा गया, उपलब्ध नहीं)",
+  "settings.buffer.hint": "छोटे बफ़र से विलंब कम होता है और CPU का उपयोग बढ़ता है। दिखाया गया समय एक बफ़र का है, ध्वनि के कुल विलंब का नहीं।",
+  "settings.buffer.pending": "सहेजा गया। प्लेबैक, मॉनिटरिंग, रिकॉर्डिंग और माइक्रोफ़ोन प्रीव्यू बंद होने के बाद लागू होगा।",
+  "settings.buffer.outputStatus": "आउटपुट: अनुरोधित {requested}, वास्तविक {actual} फ़्रेम",
+  "settings.buffer.inputStatus": "इनपुट: अनुरोधित {requested}, वास्तविक {actual} फ़्रेम",
+  "settings.buffer.unsupported": "बफ़र का आकार macOS पर CoreAudio के साथ बदला जा सकता है।",
+  "settings.buffer.failed": "बफ़र का आकार लागू नहीं हो सका: {error}",
+
   'settings.route.title': 'ऑडियो मार्ग',
   'settings.route.retryNextStart': 'सहेजे गए डिवाइस को SingZ के अगले प्रारंभ पर फिर आज़माया जाएगा।',
   'settings.route.inventoryUnavailable': 'ऑडियो डिवाइस सूची उपलब्ध नहीं है।',

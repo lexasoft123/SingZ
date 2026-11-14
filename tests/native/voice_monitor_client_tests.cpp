@@ -109,8 +109,9 @@ int main(){
   CHECK(CommonVoiceMonitor::admit(&stopping,virtualPair,virtualOutput,admissionOpening));
   CHECK(stopping.target.load()==.001f); // Never raise a quieter user gain.
 
-  CHECK(input->config.requestedBufferFrames==32 && input->config.maximumAcceptableBufferFrames==256);
-  auto began=monitor.status(); CHECK(began.running && began.latency.queueFrames==384 && began.latency.delayed);
+  CHECK(input->config.requestedBufferFrames==128 && input->config.maximumAcceptableBufferFrames==0);
+  CHECK(service.status().latency.bufferFrames==128 && monitor.status().latency.requestedFrames==128);
+  auto began=monitor.status(); CHECK(began.running && began.latency.queueFrames==512 && began.latency.delayed);
   std::array<float,64> pcm;pcm.fill(.25f);
   std::array<float,64> left{},right{},extra{};float* planes[]{left.data(),right.data(),extra.data()};
   AudioHostRenderBlock block;block.output=planes;block.outputChannels=3;block.frames=64;block.maximumFrames=64;
@@ -275,7 +276,7 @@ int main(){
   output->inventory.devices[1].transport=AudioHostTransport::Usb;service.refreshInventory();
   CHECK(!monitor.status().latency.delayed);
   // A graph prepared before the monitor has a smaller cached capacity. Its
-  // first open must rebind the monitor on the same physical route/512 period.
+  // first open must rebind the monitor while retaining the saved 128 period.
   pcm.fill(.25f);block.outputChannels=2;render(64);
   AudioHostConfig reopened;reopened.outputDeviceUid="out";reopened.outputChannels={0,1};
   reopened.requestedSampleRate=48000;reopened.maximumFrames=1024;reopened.requestedBufferFrames=512;
@@ -285,7 +286,7 @@ int main(){
   CHECK(service.outputRouteGeneration()>oldGeneration && output->current.state==AudioHostState::Running);
   CHECK(monitor.status().running && input->opens==1 && input->starts==1);
   measured=monitor.status().latency;
-  CHECK(measured.outputPeriodFrames==512 && measured.queueFloorFrames==1280 && measured.queueFrames==1280 && measured.delayed);
+  CHECK(measured.outputPeriodFrames==128 && measured.queueFloorFrames==512 && measured.queueFrames==512 && measured.delayed);
   render(1); // The first post-gap block fades in, rather than resuming full-scale.
   CHECK(left[0]>0 && left[0]<.001f && left[63]>left[0] && left[63]<.04f);
   render(64);CHECK(std::abs(left[63]-.0625f)<1e-5); // Voice before first Play.
@@ -295,8 +296,8 @@ int main(){
   auto switchedSong=service.playbackBackend(std::make_unique<Output>(),"coreaudio");
   reopened.maximumFrames=512;reopened.requestedBufferFrames=256;
   CHECK(switchedSong->open(reopened,song,&music).ok);
-  CHECK(monitor.status().running && monitor.status().latency.outputPeriodFrames==256);
-  CHECK(monitor.status().latency.queueFrames==768);
+  CHECK(monitor.status().running && monitor.status().latency.outputPeriodFrames==128);
+  CHECK(monitor.status().latency.queueFrames==512);
   render(64);CHECK(std::abs(left[63]-.0625f)<1e-5);
   switchedSong->stop();CHECK(service.setPlaybackOutputCurrent(false));
   CHECK(monitor.status().running && input->opens==1 && input->starts==1);

@@ -143,7 +143,7 @@
         "mp3_decoder_tests", "streaming_lane_feeder_tests", "lane_measure_tests", "native_audio_ownership_tests", "audio_input_latency_tests", "native_playback_session_tests", "native_playback_contract_tests",
         "voice_monitor_tests", "singz_check_voice_monitor_realtime",
         "service_master_tests", "shared_audio_service_tests", "singz_check_service_master_realtime",
-        "playback_presentation_history_tests", "record_placement_tests", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
+        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
     },
     {
       "name": "zdsp-asan-ubsan",
@@ -153,7 +153,7 @@
         "mp3_decoder_tests", "streaming_lane_feeder_tests", "lane_measure_tests", "native_audio_ownership_tests", "audio_input_latency_tests", "native_playback_session_tests", "native_playback_contract_tests",
         "voice_monitor_tests", "singz_check_voice_monitor_realtime",
         "service_master_tests", "shared_audio_service_tests", "singz_check_service_master_realtime",
-        "playback_presentation_history_tests", "record_placement_tests", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
+        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
     },
     {
       "name": "zdsp-tsan",
@@ -163,7 +163,7 @@
         "mp3_decoder_tests", "streaming_lane_feeder_tests", "lane_measure_tests", "native_audio_ownership_tests", "audio_input_latency_tests", "native_playback_session_tests", "native_playback_contract_tests",
         "voice_monitor_tests", "singz_check_voice_monitor_realtime",
         "service_master_tests", "shared_audio_service_tests", "singz_check_service_master_realtime",
-        "playback_presentation_history_tests", "record_placement_tests", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
+        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
     },
     {
       "name": "monitor-spike",
@@ -216,19 +216,19 @@
     {
       "name": "zdsp-release-strict",
       "configurePreset": "zdsp-release-strict",
-      "filter": { "include": { "name": "^(service_master_.*|shared_audio_service_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests|realtime_source_policy)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
+      "filter": { "include": { "name": "^(file_path_.*|service_master_.*|shared_audio_service_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests|realtime_source_policy)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
       "output": { "outputOnFailure": true }
     },
     {
       "name": "zdsp-asan-ubsan",
       "configurePreset": "zdsp-asan-ubsan",
-      "filter": { "include": { "name": "^(service_master_.*|shared_audio_service_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
+      "filter": { "include": { "name": "^(file_path_.*|service_master_.*|shared_audio_service_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
       "output": { "outputOnFailure": true }
     },
     {
       "name": "zdsp-tsan",
       "configurePreset": "zdsp-tsan",
-      "filter": { "include": { "name": "^(service_master_.*|shared_audio_service_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
+      "filter": { "include": { "name": "^(file_path_.*|service_master_.*|shared_audio_service_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
       "output": { "outputOnFailure": true }
     },
     {

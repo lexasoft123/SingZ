@@ -19,6 +19,7 @@ export const AUDIO_OWNER_METHODS: ReadonlySet<string> = new Set([
   'rendererGone', 'rendererDetached', 'state', 'stats', 'setPlaybackOutputCurrent'
 ])
 export const AUDIO_BINDING_METHODS: ReadonlySet<string> = new Set([
+  'audioBufferSettings',
   'initializeSharedAudio', 'refreshSharedAudioInventory', 'inputDevices', 'beginCapture', 'cancelCapture',
   'captureState', 'captureStats', 'scheduleTrainingCue', 'trainingCueStatus', 'cancelTrainingCues',
   'setTrainingCueGain', 'captureRecording', 'cancelAudioExport', 'recordTake', 'finishTake', 'cancelTake',

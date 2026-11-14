@@ -16,6 +16,8 @@ import {
   type AudioReply
 } from './audio-process-rpc'
 import type { CaptureAnalysisWindow, CaptureDiscontinuity, CaptureTimeValue } from '../shared/types'
+import { readSettings } from './settings'
+import { audioBufferPreferences } from '../shared/audio-buffer'
 
 export type AsyncCaptureOwner = {
   [K in keyof CaptureOwner]: CaptureOwner[K] extends (...args: infer A) => infer R
@@ -79,6 +81,7 @@ class DesktopAudioProcess {
       serviceName: 'SingZ Audio', stdio: 'pipe', cwd: process.cwd(),
       allowLoadingUnsignedLibraries: true,
       env: { ...process.env, SINGZ_AUDIO_PROCESS: '1', SINGZ_AUDIO_EPOCH: epoch,
+        SINGZ_AUDIO_BUFFER_PREFERENCES: JSON.stringify(audioBufferPreferences(readSettings().audioBufferFrames)),
         SINGZ_AUDIO_PACKAGED: app.isPackaged ? '1' : '0',
         ...(app.isPackaged ? {} : verifiedCaptureFingerprintEnv()),
         ...(process.env.SINGZ_SURFACE === 'box' ? { SINGZ_AUDIO_BOX_DATA_DIR: app.getPath('userData') } : {}),

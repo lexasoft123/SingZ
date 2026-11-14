@@ -69,6 +69,12 @@ struct Voice {
 
  public:
   static constexpr size_t kMaximumBytes = 64 * 1024 * 1024;
+  bool active() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& voice : voices_)
+      if (voice.state.load(std::memory_order_acquire) != Voice::Finished) return true;
+    return false;
+  }
   bool canSchedule(size_t frames, size_t channels) {
     std::lock_guard<std::mutex> lock(mutex_);
     return canScheduleLocked(frames,channels);

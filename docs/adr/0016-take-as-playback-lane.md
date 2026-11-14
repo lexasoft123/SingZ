@@ -103,7 +103,11 @@ was sung, exactly on the song timeline at any tempo. For a take recorded at
    removes acoustic bleed and a doubled voice. Placement and the presentation
    history are untouched.
 8. **One lane, one active take.** With the M3 takes list, one take per song is
-   active; choosing another swaps the source. Later comping renders several
+   active; choosing another swaps the source. Takes never replace one another:
+   every recording is kept and stacks in the strip, one row per take, newest on
+   top (DAW convention); the selected take is the active, audible one (a new
+   recording is selected), chosen by clicking its block. Delete acts on the
+   selected take and the newest remaining take becomes active (spec VS-TAKE-7). Later comping renders several
    takes into one placed file; the lane count stays 1.
 9. **Lane budget.** The take uses 1 of 16 lanes, 3 of 128 nodes. On a 16-stem
    song the engine omits the take lane and the clip says why; the song is never

@@ -3,6 +3,7 @@
 #include "playback_addon_bridge.h"
 #include "../playback/presentation_history.h"
 namespace singz {
+bool trainingAudioActive();
 class NativeAudioOwnership;
 void defineTrainingAudioExports(napi_env env, napi_value exports, NativeAudioOwnership* ownership, DesktopPlaybackBackendFactory backendFactory);
 void cleanupTrainingAudio() noexcept;

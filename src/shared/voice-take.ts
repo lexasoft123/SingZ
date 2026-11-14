@@ -12,6 +12,7 @@ export const VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS = 8 * 60 * 1000
 
 export type VoiceTakeStatus = 'complete' | 'recovered' | 'partial-device-lost' | 'partial-error'
 export type VoiceTakeLatencySource = 'reported' | 'measured-trim'
+export type VoiceTakePlacementEstimate = 'latency-unreported' | 'latency-not-settled'
 
 /** Both coordinates use the take file's sampleRate; projectFrame is song time at tempo 1.
  * This keeps the map independent of the output device/song decoder rate. */
@@ -88,6 +89,8 @@ export interface VoiceTakeSidecar {
   outputLatencyFrames: number
   graphLatencyFrames: number
   latencySource: VoiceTakeLatencySource
+  /** Additive v1 marker: latency facts were unavailable or did not settle before capture. */
+  placementEstimated?: VoiceTakePlacementEstimate
   input: { deviceName: string; channelIndex: number }
   settings: VoiceTakeSettingsPoint[]
   /** Absent on legacy takes: integrate settings[].atSec (wall clock), approximately. */
@@ -190,13 +193,15 @@ export type VoiceArmResult =
   | { ok: true }
   | { ok: false; reason: 'permission' | 'no-input' | 'busy' | 'error'; message: string }
 
+export type VoiceRecordStopNote = 'seek' | 'pause' | 'song-end'
+
 export interface VoiceRecordStopResult {
   ok: boolean
   take?: VoiceTakeSummary
   reason?: 'device-lost' | 'error'
   message?: string
   /** Main ended a native take at a transport boundary; preserve its explanation. */
-  note?: 'seek'
+  note?: VoiceRecordStopNote
 }
 
 export interface VoiceRecordSettingsChange {

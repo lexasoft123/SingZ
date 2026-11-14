@@ -94,9 +94,12 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
     // latency makes this window much longer. Wait BEFORE opening the writer:
     // retrying placement later cannot move a first sample out of old silence.
     let ready = false
+    let covered = false
+    let placementEstimated: import('../shared/voice-take').VoiceTakePlacementEstimate | undefined
     const readinessStarted = Date.now()
     let lastProbe: Record<string, unknown> = {}
     for (let attempt = 0; attempt < 80; attempt++) {
+      covered = false
       const stats = await desktopAudioProcess.call<Awaited<ReturnType<VoiceTakeNative['captureStats']>>>('binding', 'captureStats', [])
       if (stats.lastSampleHostNs && stats.lastSampleHostNs !== '0' && stats.sampleRate) {
         const probe = { songId: '', firstSampleHostNs: stats.lastSampleHostNs, sampleRate: stats.sampleRate }
@@ -110,15 +113,27 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
             inputLatencyFrames: stats.inputLatencySource === 'reported' && stats.inputLatencyStable !== false ? stats.inputLatencyFrames : 0,
             outputLatencyFrames: raw.outputLatencyFrames, graphLatencyFrames: raw.graphLatencyFrames, trimInputLatency: true })
           lastProbe.placed = placed
-          if (placed.ok && placed.found && !placed.paused && !placed.seekDuringCallback) { ready = true; break }
+          if (placed.ok && placed.found && !placed.paused && !placed.seekDuringCallback) {
+            covered = true
+            // The first callback can precede settled device latency telemetry.
+            // Do not freeze a known-stale input snapshot or a zero output delay.
+            if (stats.inputLatencyStable !== false && raw.outputLatencyFrames !== 0) {
+              ready = true
+              if (stats.inputLatencySource !== 'reported' || raw.outputLatencyFrames === undefined) placementEstimated = 'latency-unreported'
+              break
+            }
+          }
         }
       }
       await new Promise(resolve => setTimeout(resolve, 25))
     }
-    log('voice-take', 'readiness ' + JSON.stringify({ takeId: args.takeId, ready, waitedMs: Date.now() - readinessStarted, ...lastProbe }), ready ? 'info' : 'warn')
+    // Some routes cannot report stable latency. Keep the two-second bound and
+    // capture only with current timeline coverage, explicitly marked estimated.
+    if (!ready && covered) { ready = true; placementEstimated = 'latency-not-settled' }
+    log('voice-take', 'readiness ' + JSON.stringify({ takeId: args.takeId, ready, placementEstimated, waitedMs: Date.now() - readinessStarted, ...lastProbe }), placementEstimated ? 'warn' : ready ? 'info' : 'warn')
     if (!ready) return { ok: false, generation: started.generation ?? generation, reason: 'error', error: 'The song is not ready to record. Try again after playback starts.' }
     const result = await desktopAudioProcess.call<{ ok: boolean; error?: string }>('binding', 'recordTake', [args.dir, args.takeId, started.generation ?? generation])
-    return { ...result, generation: started.generation ?? generation, deviceName: started.deviceName }
+    return { ...result, generation: started.generation ?? generation, deviceName: started.deviceName, ...(placementEstimated ? { placementEstimated } : {}) }
   },
   finishTake: args => desktopAudioProcess.call('binding', 'finishTake', [args.generation]),
   cancelTake: args => desktopAudioProcess.call('binding', 'cancelTake', [args.generation]),
@@ -127,6 +142,7 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
     finally { if (captureGeneration === generation) { captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1 } }
   },
   presentationQuery,
+  transportState: async () => (await desktopAudioProcess.call<import('../shared/types').DesktopPlaybackStatus>('binding', 'playbackStatus', [])).transportState,
   playTake: args => desktopAudioProcess.call('binding', 'playTake', [{ path: args.path, mode: args.mode, startPositionSec: args.startPositionSec, ...(args.gain === undefined ? {} : { gain: args.gain }), ...(args.tempo === undefined ? {} : { tempo: args.tempo }) }, args.generation]),
   stopTake: generation => desktopAudioProcess.call('binding', 'stopTake', generation === undefined ? [] : [generation]),
   captureStats: () => desktopAudioProcess.call('binding', 'captureStats', []),

@@ -944,6 +944,7 @@ export type DesktopPlaybackErrorCode =
   | 'native-audio-busy'
   | 'platform-not-ready'
   | 'unauthorized-path'
+  | 'path-too-long'
 
 export interface DesktopPlaybackResult {
   ok: boolean
@@ -1485,6 +1486,7 @@ export interface SingzApi {
   onCaptureWindow(cb: (window: CaptureAnalysisWindow) => void): () => void
   /** Full-duplex native host inventory. UIDs remain distinct from Chromium ids. */
   audioHostDevices(provider?: DesktopPlaybackProvider): Promise<DesktopAudioHostInventoryResult>
+  audioBufferSettings(change?: { frames: number; deviceUids: string[] }): Promise<import('./audio-buffer').AudioBufferStatus>
   desktopPlaybackProviders(): Promise<DesktopPlaybackProviderInfo[]>
   desktopPlaybackCapability(): Promise<DesktopPlaybackRuntimeCapability>
   prepareDesktopPlayback(

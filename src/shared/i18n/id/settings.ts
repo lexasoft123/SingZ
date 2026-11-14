@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "Ukuran buffer berbeda",
+  "settings.buffer.label": "Ukuran buffer",
+  "settings.buffer.option": "{frames} frame · {ms} md",
+  "settings.buffer.savedUnavailable": "{frames} frame (tersimpan, tidak tersedia)",
+  "settings.buffer.hint": "Buffer lebih kecil mengurangi latensi dan memakai lebih banyak CPU. Waktu yang ditampilkan adalah untuk satu buffer, bukan total jeda suara.",
+  "settings.buffer.pending": "Tersimpan. Diterapkan setelah pemutaran, pemantauan, perekaman, dan pratinjau mikrofon berhenti.",
+  "settings.buffer.outputStatus": "Output: diminta {requested}, diperoleh {actual} frame",
+  "settings.buffer.inputStatus": "Input: diminta {requested}, diperoleh {actual} frame",
+  "settings.buffer.unsupported": "Ukuran buffer dapat diatur dengan CoreAudio di macOS.",
+  "settings.buffer.failed": "Tidak dapat menerapkan ukuran buffer: {error}",
+
   'settings.route.title': 'Rute audio',
   'settings.route.retryNextStart': 'Perangkat tersimpan akan dicoba lagi saat SingZ dimulai berikutnya.',
   'settings.route.inventoryUnavailable': 'Daftar perangkat audio tidak tersedia.',

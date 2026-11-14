@@ -8,6 +8,7 @@
 #include "../playback/shared_audio_service.h"
 
 #include <lane_measure.h>
+#include <file_path.h>
 #include <zcore/media/decoded_audio.h>
 #include <native_playback_session.h>
 
@@ -154,6 +155,7 @@ struct MeasureJob {
   napi_async_work work{nullptr};
   std::vector<LaneMeasureRequest> requests;
   std::vector<LaneMeasure> results;
+  std::vector<std::string> pathFailures;
   uint64_t epoch{0};
 };
 
@@ -949,17 +951,10 @@ bool parseInitialTransport(napi_env env, napi_value value,
   return true;
 }
 
-int openReadOnly(const std::string &utf8Path) noexcept {
-#if defined(_WIN32)
-  try {
-    return _wopen(std::filesystem::u8path(utf8Path).c_str(),
-                  _O_RDONLY | _O_BINARY);
-  } catch (...) {
-    return -1;
-  }
-#else
-  return ::open(utf8Path.c_str(), O_RDONLY | O_CLOEXEC);
-#endif
+int openReadOnly(const std::string &path,std::string *failure=nullptr) noexcept {
+  try {return openNativeReadOnly(path);}
+  catch(const FilePathError &e) {if(failure)*failure=e.code()==FilePathFailure::TooLong?"path-too-long":"invalid-path";return -1;}
+  catch(...) {return -1;}
 }
 
 bool validMeasureWaveformKey(const std::string &key) noexcept {
@@ -1015,7 +1010,7 @@ bool parseWaveformSeed(napi_env env, napi_value value,
 }
 
 bool parseLanes(napi_env env, napi_value value,
-                std::vector<NativePlaybackLaneSource> *result) {
+                std::vector<NativePlaybackLaneSource> *result, std::string *pathFailure=nullptr) {
   bool isArray = false;
   uint32_t length = 0;
   if (result == nullptr || napi_is_array(env, value, &isArray) != napi_ok ||
@@ -1033,7 +1028,7 @@ bool parseLanes(napi_env env, napi_value value,
         !objectWithOnlyKeys(env, laneValue,
                             {"id", "path", "gain", "muted", "solo", "sourceKey", "waveform"}) ||
         !stringProperty(env, laneValue, "id", 96, &lane.id) ||
-        !stringProperty(env, laneValue, "path", 32768, &path) ||
+        !stringProperty(env, laneValue, "path", 131072, &path) ||
         !numberProperty(env, laneValue, "gain", 0.0,
                         kNativePlaybackMaximumLinearGain, 1.0, true, &gain) ||
         !boolProperty(env, laneValue, "muted", false, true, &lane.muted) ||
@@ -1043,7 +1038,7 @@ bool parseLanes(napi_env env, napi_value value,
           return prior.id == lane.id;
         }))
       return false;
-    const int descriptor = openReadOnly(path);
+    const int descriptor = openReadOnly(path,pathFailure);
     if (descriptor < 0)
       return false;
     lane.descriptor = OwnedFileDescriptor(descriptor);
@@ -1562,15 +1557,15 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
   NativePlaybackPrepareConfig config;
   std::string provider;
   std::vector<NativePlaybackLaneSource> lanes;
+  std::string pathFailure;
   if (argc != 3 || !exactU64(env, argv[2], &generation) ||
       !parseConfig(env, argv[0], &config, &provider) ||
-      !parseLanes(env, argv[1], &lanes))
-    return settledPromise(
-        env, resultValue(env,
-                         simpleFailure(
-                             NativePlaybackError::InvalidConfiguration,
-                             generation,
-                             "Playback configuration or lane paths are invalid")));
+      !parseLanes(env, argv[1], &lanes,&pathFailure)) {
+    auto result=resultValue(env,simpleFailure(NativePlaybackError::InvalidConfiguration,generation,
+      pathFailure=="path-too-long"?"A lane path exceeds the Windows extended-length limit":"Playback configuration or lane paths are invalid"));
+    if(pathFailure=="path-too-long") setValue(env,result,"errorCode",makeString(env,"path-too-long"));
+    return settledPromise(env,result);
+  }
 
   std::lock_guard<std::mutex> lock(playback.mutex);
   // One at a time. The facade serializes its own calls, but the refusal is
@@ -2486,7 +2481,7 @@ napi_value laneMeasureResultValue(napi_env env, const MeasureJob &job,
     setValue(env, lane, "id", makeString(env, measure.id));
     setValue(env, lane, "ok", makeBool(env, measure.ok));
     setValue(env, lane, "error",
-             makeString(env, decodedAudioStatusName(measure.status)));
+             makeString(env, index<job.pathFailures.size() && !job.pathFailures[index].empty()?job.pathFailures[index]:decodedAudioStatusName(measure.status)));
     setValue(env, lane, "sampleRate", makeNumber(env, measure.sampleRate));
     setValue(env, lane, "channels", makeNumber(env, measure.channels));
     // A number, not a decimal string: this is a length the renderer does
@@ -2581,7 +2576,7 @@ napi_value measurePlaybackLanes(napi_env env, napi_callback_info info) {
     if (napi_get_element(env, lanesValue, index, &laneValue) != napi_ok ||
         !objectWithOnlyKeys(env, laneValue, {"id", "path"}) ||
         !stringProperty(env, laneValue, "id", 96, &request.id) ||
-        !stringProperty(env, laneValue, "path", 32768, &path))
+        !stringProperty(env, laneValue, "path", 131072, &path))
       return refuse("Native lane measure lanes failed schema validation");
     if (std::any_of(job->requests.begin(), job->requests.end(),
                     [&](const LaneMeasureRequest &prior) {
@@ -2591,7 +2586,9 @@ napi_value measurePlaybackLanes(napi_env env, napi_callback_info info) {
     // A file that will not open is that ONE lane's refusal (the source
     // reports it), not the call's: the renderer decodes it and measures the
     // rest, exactly as it would for a lane the source cannot read.
-    request.descriptor = OwnedFileDescriptor(openReadOnly(path));
+    std::string pathFailure;
+    request.descriptor = OwnedFileDescriptor(openReadOnly(path,&pathFailure));
+    job->pathFailures.push_back(pathFailure);
     request.policy = policy;
     job->requests.push_back(std::move(request));
   }

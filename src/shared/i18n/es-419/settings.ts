@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "Tamaños de búfer diferentes",
+  "settings.buffer.label": "Tamaño del búfer",
+  "settings.buffer.option": "{frames} cuadros · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} cuadros (guardado, no disponible)",
+  "settings.buffer.hint": "Los búferes más pequeños reducen la latencia y usan más CPU. El tiempo mostrado corresponde a un búfer, no al retraso total del sonido.",
+  "settings.buffer.pending": "Guardado. Se aplicará al detener la reproducción, el monitoreo, la grabación y la vista previa del micrófono.",
+  "settings.buffer.outputStatus": "Salida: solicitado {requested}, obtenido {actual} cuadros",
+  "settings.buffer.inputStatus": "Entrada: solicitado {requested}, obtenido {actual} cuadros",
+  "settings.buffer.unsupported": "El tamaño del búfer se puede ajustar con CoreAudio en macOS.",
+  "settings.buffer.failed": "No se pudo aplicar el tamaño del búfer: {error}",
+
   'settings.route.title': 'Ruta de audio',
   'settings.route.retryNextStart': 'Se volverá a buscar el dispositivo guardado al iniciar SingZ.',
   'settings.route.inventoryUnavailable': 'No se puede obtener la lista de dispositivos de audio.',

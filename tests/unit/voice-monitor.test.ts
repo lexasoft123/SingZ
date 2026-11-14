@@ -10,6 +10,7 @@ import { VOICE_IPC } from '../../src/shared/voice-take'
 import { VoiceMonitorStore, microphonePermission, type VoiceMonitorNative } from '../../src/main/voice-monitor'
 import { VoiceTakeStore, type VoiceTakeNative } from '../../src/main/voice-takes'
 import { disposeWithin } from '../../src/main/box-audio/microphones'
+import { log } from '../../src/main/log'
 
 const input = { deviceName: 'mic', channelIndex: 0 }
 function fixture() {
@@ -383,14 +384,26 @@ describe('voice monitoring', () => {
   })
   it.each(['win32', 'linux'] as const)('keeps monitoring unavailable on unqualified %s', async platform => {
     const { native } = fixture()
-    const store = new VoiceMonitorStore(native, () => true, platform)
+    const permission = vi.fn(() => false)
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValue({ running: false, reason: 'permission' })
+    const store = new VoiceMonitorStore(native, permission, platform)
     expect(await store.availability({ input })).toMatchObject({ on: false, available: { reason: 'platform' } })
     expect(await store.availability({ input, contextOnly: true, playbackContext: { webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: '' } })).toMatchObject({ available: { reason: 'platform' } })
     expect(await store.set({ input, on: true })).toMatchObject({ on: false, available: { reason: 'platform' } })
+    expect(await store.set({ input, on: false })).toMatchObject({ on: false, available: { reason: 'platform' } })
+    expect(await store.state()).toMatchObject({ on: false, available: { reason: 'platform' } })
+    expect(await store.gain(-6)).toMatchObject({ on: false, available: { reason: 'platform' } })
+    expect(permission).not.toHaveBeenCalled()
     expect(native.inputDevices).not.toHaveBeenCalled()
     expect(native.voiceMonitorAvailability).not.toHaveBeenCalled()
     expect(native.beginVoiceMonitor).not.toHaveBeenCalled()
+    expect(native.voiceMonitorStatus).not.toHaveBeenCalled()
+    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
     await store.dispose()
+    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
+    // Bypass the platform guard with the same native reply: the old state()
+    // path queried native and let permission override the unsupported platform.
+    expect(await new VoiceMonitorStore(native, permission, 'darwin').state()).toMatchObject({ available: { reason: 'permission' } })
   })
   it('carries queue/delayed latency and preserves terminal route reasons without restarting', async () => {
     const { native, store } = fixture()
@@ -499,6 +512,39 @@ describe('monitor renderer ownership', () => {
     expect((await store.state()).available).toEqual({ reason: 'device-lost' })
     expect(report).toHaveBeenCalledWith(expect.stringContaining('reason=device-lost'))
     await store.songChanged('next');expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1)
+  })
+  it('does not log an idle no-input probe as a monitor stop, unlike the old availability control', async () => {
+    const { native } = fixture(), report = vi.fn()
+    const store = new VoiceMonitorStore(native, () => true, 'darwin', report)
+    await store.availability({ input: { deviceName: '', channelIndex: 0 } })
+    await store.songChanged('first'); await store.availability({ input: { deviceName: '', channelIndex: 0 } })
+    expect(report).not.toHaveBeenCalled()
+    // Reinstall the old fail() log rule, then run the same idle no-input probe.
+    const old = new VoiceMonitorStore(native, () => true, 'darwin', report)
+    const internals = old as unknown as {
+      current: { on: boolean; available: true | { reason: string } }
+      fail(reason: string): unknown
+    }
+    const fail = internals.fail.bind(old)
+    internals.fail = reason => {
+      if (internals.current.on || internals.current.available === true) report(`monitor stopped · reason=${reason}`)
+      return fail(reason)
+    }
+    await old.availability({ input: { deviceName: '', channelIndex: 0 } })
+    expect(report).toHaveBeenCalledExactlyOnceWith('monitor stopped · reason=no-input')
+  })
+  it('logs user off once at info, and a real device loss once at warn', async () => {
+    const { native } = fixture()
+    const store = new VoiceMonitorStore(native, () => true, 'darwin')
+    const before = vi.mocked(log).mock.calls.length
+    await store.set({ input, on: true }); await store.set({ input, on: false }); await store.set({ input, on: false })
+    await store.set({ input, on: true })
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValue({ running: false, lost: true, reason: 'device-lost' })
+    await store.state(); await store.state()
+    const entries = vi.mocked(log).mock.calls.slice(before).filter(call => call[0] === 'voice-monitor')
+      .map(call => ({ line: call[1], level: call[2] }))
+    expect(entries.filter(entry => entry.line === 'monitor off · reason=user')).toMatchObject([{ level: 'info' }])
+    expect(entries.filter(entry => entry.line === 'monitor stopped · reason=device-lost')).toMatchObject([{ level: 'warn' }])
   })
   it('refreshes the running route and latency from native status after app output selection', async () => {
     const { store, native } = fixture()

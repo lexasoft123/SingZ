@@ -79,6 +79,12 @@ target_compile_definitions(singz_native_build_options INTERFACE
 
 set(SINGZ_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 set(ZCORE_ROOT "${SINGZ_REPO_ROOT}/third_party/zcore")
+add_library(singz_file_path STATIC native/playback/file_path.cpp)
+add_library(SingZ::file_path ALIAS singz_file_path)
+target_compile_features(singz_file_path PUBLIC cxx_std_20)
+target_include_directories(singz_file_path PUBLIC "${SINGZ_REPO_ROOT}/native/playback")
+set_target_properties(singz_file_path PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 if(NOT EXISTS "${ZCORE_ROOT}/CMakeLists.txt")
   message(FATAL_ERROR
     "zCore submodule sources are missing. Initialize them with: git submodule update --init -- third_party/zcore")
@@ -486,6 +492,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
   # this target PUBLIC through native_playback_session, and Apple's linker warns on the repeated
   # archive when they are also listed directly.
   target_link_libraries(singz_capture PRIVATE
+    SingZ::file_path
     SingZ::native_build_options
     SingZ::zdsp_analysis
     SingZ::zcore_audio_export
@@ -614,6 +621,8 @@ add_executable(singz-analyze
 target_compile_features(singz-analyze PRIVATE cxx_std_20)
 add_dependencies(singz-analyze singz_check_zcore_boundaries)
 target_link_libraries(singz-analyze PRIVATE
+  SingZ::file_path
+  $<$<PLATFORM_ID:Windows>:shell32>
   SingZ::native_build_options
   SingZ::zcore_legacy
   SingZ::zdsp_analysis)
@@ -841,6 +850,19 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(lane_measure_tests PRIVATE
     SingZ::native_playback_session SingZ::zcore_media SingZ::native_flac Threads::Threads)
   add_test(NAME lane_measure_tests COMMAND lane_measure_tests)
+  foreach(_path_variant IN ITEMS tests negative_legacy)
+    add_executable(file_path_${_path_variant} tests/native/file_path_tests.cpp native/playback/file_path.cpp)
+    target_compile_features(file_path_${_path_variant} PRIVATE cxx_std_20)
+    target_link_libraries(file_path_${_path_variant} PRIVATE SingZ::native_playback_session SingZ::zcore_media SingZ::native_flac Threads::Threads)
+    if(_path_variant STREQUAL "negative_legacy")
+      target_compile_definitions(file_path_${_path_variant} PRIVATE SINGZ_PATH_NEGATIVE_LEGACY_LIMIT=1)
+      add_test(NAME file_path_negative_legacy COMMAND "${Python3_EXECUTABLE}" -c
+        "import subprocess,sys; p=subprocess.run([r'$<TARGET_FILE:file_path_negative_legacy>'],capture_output=True,text=True);print(p.stdout+p.stderr);sys.exit(0 if p.returncode==1 and p.stderr.strip()=='Long stem must open as a descriptor' else 1)")
+    else()
+      add_test(NAME file_path_tests COMMAND file_path_tests)
+    endif()
+  endforeach()
+
 
   add_executable(flac_streaming_source_tests
     ${SINGZ_REPO_ROOT}/tests/native/flac_streaming_source_tests.cpp)
@@ -1231,6 +1253,27 @@ if(SINGZ_CORE_TESTS)
     "-DSINGZ_ZDSP_RT_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/monitor-client-forbidden.cmake"
     -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
   set_tests_properties(voice_monitor_client_negative_rt PROPERTIES WILL_FAIL TRUE)
+
+  add_executable(voice_monitor_waveform_tests tests/native/voice_monitor_waveform_tests.cpp)
+  target_compile_features(voice_monitor_waveform_tests PRIVATE cxx_std_20)
+  target_link_libraries(voice_monitor_waveform_tests PRIVATE singz_voice_monitor_client)
+  add_test(NAME voice_monitor_waveform_tests COMMAND voice_monitor_waveform_tests)
+  string(REPLACE "if (std::abs(expected - elapsed) > 2)" "if (std::abs(expected - elapsed) > -1)"
+    _monitor_rounding_mutant "${_monitor_source_cpp}")
+  if(_monitor_rounding_mutant STREQUAL _monitor_source_cpp)
+    message(FATAL_ERROR "Monitor timestamp rounding mutation did not hit")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-rounding-mutant.cpp" "${_monitor_rounding_mutant}")
+  add_executable(voice_monitor_waveform_negative_rounding tests/native/voice_monitor_waveform_tests.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-rounding-mutant.cpp")
+  target_compile_features(voice_monitor_waveform_negative_rounding PRIVATE cxx_std_20)
+  target_include_directories(voice_monitor_waveform_negative_rounding PRIVATE
+    "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback")
+  target_link_libraries(voice_monitor_waveform_negative_rounding PRIVATE zCore::routing SingZ::zcore_device Threads::Threads)
+  add_dependencies(voice_monitor_waveform_tests voice_monitor_waveform_negative_rounding)
+  add_test(NAME voice_monitor_waveform_negative_rounding
+    COMMAND "${Python3_EXECUTABLE}" "${SINGZ_REPO_ROOT}/tools/monitor-spike/expect_failure.py"
+      "$<TARGET_FILE:voice_monitor_waveform_negative_rounding>" "rounding" "mismatched==0")
 
   add_executable(voice_monitor_client_clock_tests tests/native/voice_monitor_client_clock_tests.cpp)
   target_compile_features(voice_monitor_client_clock_tests PRIVATE cxx_std_20)
@@ -1704,6 +1747,7 @@ endif()
 
 add_library(singz_take_conform STATIC native/playback/take_conform.cpp)
 target_compile_features(singz_take_conform PUBLIC cxx_std_20)
+target_link_libraries(singz_take_conform PUBLIC SingZ::file_path)
 set_target_properties(singz_take_conform PROPERTIES POSITION_INDEPENDENT_CODE YES)
 target_include_directories(singz_take_conform PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
 if(SINGZ_CORE_TESTS)
@@ -1715,7 +1759,7 @@ if(SINGZ_CORE_TESTS)
     set(_conform_target take_conform_${_conform_variant})
     add_executable(${_conform_target} tests/native/take_conform_tests.cpp native/playback/take_conform.cpp)
     target_compile_features(${_conform_target} PRIVATE cxx_std_20)
-    target_link_libraries(${_conform_target} PRIVATE take_conform_v2_reference SingZ::zcore_resample Threads::Threads)
+    target_link_libraries(${_conform_target} PRIVATE SingZ::file_path take_conform_v2_reference SingZ::zcore_resample Threads::Threads)
     target_include_directories(${_conform_target} PRIVATE "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
     target_compile_options(${_conform_target} PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>" "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
     if(NOT _conform_variant STREQUAL "tests")
@@ -1911,5 +1955,5 @@ endif()
 
 # Canonical monitor preset target builds every common-client test it selects.
 if(TARGET voice_monitor_tests AND TARGET voice_monitor_client_tests AND TARGET voice_monitor_client_clock_tests)
-  add_dependencies(voice_monitor_tests voice_monitor_client_tests voice_monitor_client_clock_tests)
+  add_dependencies(voice_monitor_tests voice_monitor_client_tests voice_monitor_client_clock_tests voice_monitor_waveform_tests)
 endif()

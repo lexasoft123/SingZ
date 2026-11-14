@@ -14,6 +14,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { nativeFilePath } from '../../src/main/file-path'
 import {
   LANE_MEASURE_CACHE_VERSION,
   describeLaneMeasureBatch,
@@ -134,6 +135,15 @@ describe('persistent lane measurement cache', () => {
     return { lanes, ...policy }
   }
 
+  it('reads and caches a source under a 300-character directory', async () => {
+    const deep=nativeFilePath(join(dir,'p'.repeat(100),'q'.repeat(100),'r'.repeat(100)))
+    await mkdir(deep,{recursive:true});const file=join(deep,'vocals.flac');await writeFile(file,'aaaa')
+    expect(file.length).toBeGreaterThan(300)
+    const native=nativeSuccess(),cache=new LaneMeasureCache({cacheDir,measure:native})
+    expect((await cache.measurePlaybackLanes(request([{id:'deep',path:file}]))).lanes[0].ok).toBe(true)
+    expect((await cache.measurePlaybackLanes(request([{id:'deep',path:file}]))).lanes[0].ok).toBe(true)
+    expect(native).toHaveBeenCalledTimes(1)
+  })
   it('skips native on a repeated call and preserves every value and Float32 bit', async () => {
     const native = nativeSuccess()
     const batches: LaneMeasureCacheBatch[] = []
@@ -532,7 +542,7 @@ describe('persistent lane measurement cache', () => {
     expect(native).not.toHaveBeenCalled()
   })
 
-  it.each(['', 'bad\0path', 'é'.repeat(16385)])('refuses native-invalid paths before measuring', async path => {
+  it.each(['', 'bad\0path', 'é'.repeat(65535)])('refuses native-invalid paths before measuring', async path => {
     const native = nativeSuccess()
     const cache = new LaneMeasureCache({ cacheDir, measure: native })
     expect((await cache.measurePlaybackLanes(request([{ id: 'a', path }]))).ok).toBe(false)

@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <map>
 #include <zcore/device/audio_host.h>
 #include <zcore/device/audio_input.h>
 
@@ -118,6 +119,11 @@ struct ServiceMasterStage {
 // Input capture is deliberately separate and inactive until explicitly begun.
 class SharedAudioService final {
  public:
+  using BufferPreferences = std::map<std::string, uint32_t>;
+  // Control-only. False means a live client still owns the opening policy.
+  bool configureBufferPreferences(const BufferPreferences&, bool captureActive);
+  uint32_t requestedBufferFrames(const std::string& uid) const;
+  AudioInputConfig inputBufferConfig(AudioInputConfig config) const;
   SharedAudioService();
   explicit SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider = {});
   ~SharedAudioService();

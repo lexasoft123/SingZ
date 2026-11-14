@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "서로 다른 버퍼 크기",
+  "settings.buffer.label": "버퍼 크기",
+  "settings.buffer.option": "{frames} 프레임 · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} 프레임 (저장됨, 사용 불가)",
+  "settings.buffer.hint": "버퍼가 작을수록 지연은 줄고 CPU 사용량은 늘어납니다. 표시된 시간은 버퍼 하나의 길이이며 전체 소리 지연이 아닙니다.",
+  "settings.buffer.pending": "저장했습니다. 재생, 모니터링, 녹음 및 마이크 미리보기가 멈추면 적용됩니다.",
+  "settings.buffer.outputStatus": "출력: 요청 {requested}, 실제 {actual} 프레임",
+  "settings.buffer.inputStatus": "입력: 요청 {requested}, 실제 {actual} 프레임",
+  "settings.buffer.unsupported": "버퍼 크기는 macOS의 CoreAudio에서 설정할 수 있습니다.",
+  "settings.buffer.failed": "버퍼 크기를 적용할 수 없습니다: {error}",
+
   'settings.route.title': '오디오 경로',
   'settings.route.retryNextStart': '저장된 장치는 다음 SingZ 시작 시 다시 시도합니다.',
   'settings.route.inventoryUnavailable': '오디오 장치 목록을 가져올 수 없습니다.',

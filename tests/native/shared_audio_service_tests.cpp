@@ -1,10 +1,22 @@
 #include "native/playback/shared_audio_service.h"
+#include "third_party/zcore/zcore/platform/macos/audio_device_macos_buffer.h"
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 
 #define CHECK(value) do { if (!(value)) { std::fprintf(stderr, "failed line %d: %s\n", __LINE__, #value); std::abort(); } } while (false)
 using namespace singz;
+
+struct BufferAccess {
+  std::string uid{"selected"}; uint32_t frames{512};
+  const std::string& deviceUid() const { return uid; }
+  uint64_t deviceIdentity() const { return 7; }
+  bool identityMatches() const { return true; }
+  bool isSettable() const { return true; }
+  bool readFrames(uint32_t& value) const { value = frames; return true; }
+  bool readRange(uint32_t& minimum, uint32_t& maximum) const { minimum = 16; maximum = 4096; return true; }
+  bool writeFrames(uint32_t value) { frames = value; return true; }
+};
 
 class TestBackend final : public AudioHostBackend {
  public:
@@ -15,6 +27,10 @@ class TestBackend final : public AudioHostBackend {
   AudioHostStatus current;
   AudioHostConfig lastConfig;
   bool preferredPresent = true;
+  bool useLedger = false;
+  BufferAccess access;
+  detail::MacAudioBufferLedger ledger;
+  detail::MacAudioBufferOwnership lease;
   uint32_t selectedChannels = 2;
   std::string defaultUid = "selected";
   AudioHostInventory enumerate() const override {
@@ -23,6 +39,7 @@ class TestBackend final : public AudioHostBackend {
     device.uid = "selected"; device.defaultInput = true;
     device.defaultOutput = true; device.inputChannels = 1;
     device.outputChannels = selectedChannels; device.nominalSampleRate = 48000;
+    device.bufferFrames = {16, 4096, 512, 1};
     AudioHostDeviceInfo alternate = device;
     alternate.uid = "alternate"; alternate.inputChannels = 0; alternate.defaultInput = false;
     alternate.nominalSampleRate = 44100;
@@ -35,6 +52,12 @@ class TestBackend final : public AudioHostBackend {
   AudioHostResult open(const AudioHostConfig& config, AudioHostRender render, void* object) override {
     CHECK(config.inputDeviceUid.empty()); CHECK(config.inputChannels.empty());
     ++opens; callback = render; context = object; lastConfig = config;
+    if (useLedger) {
+      access.uid = config.outputDeviceUid;
+      const auto result = detail::requestMacAudioBuffer(access, config.requestedBufferFrames,
+          config.maximumFrames, lease, 0, ledger);
+      CHECK(result.ok());
+    }
     for (uint32_t channel : config.outputChannels)
       if (config.outputDeviceUid == "selected" && channel >= selectedChannels)
         return {false, AudioHostError::InvalidConfiguration, AudioHostState::Error,
@@ -43,7 +66,9 @@ class TestBackend final : public AudioHostBackend {
     current.terminalReason = AudioHostTerminalReason::None;
     current.terminalOrdinal = 0;
     current.xruns = 0;
-    current.format = {config.requestedSampleRate ? config.requestedSampleRate : 48000, config.maximumFrames, 512, 0, static_cast<uint32_t>(config.outputChannels.size())};
+    current.format = {config.requestedSampleRate ? config.requestedSampleRate : 48000, config.maximumFrames,
+        useLedger ? access.frames : 512, 0, static_cast<uint32_t>(config.outputChannels.size())};
+    if (useLedger) current.latency.bufferFrames = access.frames;
     return {true, AudioHostError::None, current.state, current.format, {}, {}};
   }
   AudioHostResult start() override {
@@ -72,6 +97,45 @@ bool cue(void*, const AudioHostRenderBlock& block) noexcept {
   return true;
 }
 int main() {
+  {
+    auto owned = std::make_unique<TestBackend>(); auto* backend = owned.get();
+    backend->useLedger = true;
+    SharedAudioService service(std::move(owned), "coreaudio");
+    CHECK(service.initialize().ok);
+    CHECK(backend->lastConfig.requestedBufferFrames == 128);
+    CHECK(backend->access.frames == 128); // Real zCore ledger writes the host's request.
+    CHECK(backend->lastConfig.allowSharedDeviceBufferChange);
+    AudioInputConfig input; input.deviceUid = "selected";
+    CHECK(service.inputBufferConfig(input).requestedBufferFrames == 128);
+    CHECK(service.inputBufferConfig(input).allowSharedDeviceBufferChange);
+    detail::MacAudioBufferOwnership inputLease;
+    const auto inputRequest = service.inputBufferConfig(input);
+    CHECK(detail::requestMacAudioBuffer(backend->access, inputRequest.requestedBufferFrames,
+        16384, inputLease, inputRequest.maximumAcceptableBufferFrames, backend->ledger, false).ok());
+    CHECK(backend->access.frames == 128 && service.status().latency.bufferFrames == 128);
+    // Captures (including take/preview) keep their policy until all stop.
+    CHECK(!service.configureBufferPreferences({{"selected", 64}}, true));
+    CHECK(service.requestedBufferFrames("selected") == 128);
+    CHECK(service.configureBufferPreferences({{"selected", 64}}, false));
+    CHECK(service.ensureOutput().ok);
+    CHECK(backend->lastConfig.requestedBufferFrames == 64);
+    CHECK(backend->access.frames == 64);
+    CHECK(service.inputBufferConfig(input).requestedBufferFrames == 64);
+    auto songClient = service.playbackBackend(std::make_unique<TestBackend>(), "coreaudio");
+    AudioHostConfig songConfig; songConfig.requestedBufferFrames = 512;
+    CHECK(songClient->open(songConfig, song, nullptr).ok);
+    CHECK(backend->lastConfig.requestedBufferFrames == 64); // Never inherit the caller's 512.
+    CHECK(!service.configureBufferPreferences({{"selected", 32}}, false));
+    songClient->stop();
+    CHECK(service.configureBufferPreferences({{"selected", 32}, {"alternate", 256}}, false));
+    CHECK(service.ensureOutput().ok);
+    CHECK(backend->lastConfig.requestedBufferFrames == 32);
+    backend->useLedger = false; // The next route has a different physical device.
+    CHECK(service.configureOutput("alternate").ok);
+    CHECK(backend->lastConfig.requestedBufferFrames == 256);
+    CHECK(service.configureOutput("selected").ok);
+    CHECK(backend->lastConfig.requestedBufferFrames == 32); // Reconnected route reapplies UID preference.
+  }
   // A terminal physical stream does not prevent proving song callback
   // quiescence, and does not force retirement of a training owner's stream.
   for (auto failedState : {AudioHostState::Error, AudioHostState::DeviceLost}) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { MultitrackEngine } from '../audio/engine'
 import { createVoiceController } from './voice-bootstrap'
@@ -7,7 +7,6 @@ import { cleanSongName, type TimeView } from '../model'
 import type { LoadedSongIdentity } from '../training-ui-state'
 import VoiceRecordButton from './voice-record-button'
 import VoiceStrip from './VoiceStrip'
-import { useVoiceModel } from './voice-host'
 import './voice-strip.css'
 
 /*
@@ -51,8 +50,6 @@ export default function VoiceHost({
     return () => controller.onInputChosen(null)
   }, [controller, onChooseInput])
   useEffect(() => controller.setPreferredInput(input?.uid, input?.channel), [controller, input?.uid, input?.channel])
-  const model = useVoiceModel(controller)
-  const root = useRef<HTMLSpanElement>(null)
   // The Record button sits right after Play, in a node this host adds there.
   // Transport can re-mount that part of its tree, so the slot is re-attached
   // whenever it falls out of place (coalesced to one check per frame).
@@ -108,17 +105,8 @@ export default function VoiceHost({
     return () => window.removeEventListener('keydown', onKey)
   }, [controller])
 
-  // A take playing alone: the stems are not playing, so they read as off.
-  const alone = model.listen === 'take'
-  useEffect(() => {
-    const col = root.current?.closest('.main-col')
-    col?.classList.toggle('voice-listening-alone', alone)
-    return () => col?.classList.remove('voice-listening-alone')
-  }, [alone])
-
   return (
     <>
-      <span ref={root} hidden />
       <VoiceStrip controller={controller} engine={engine} view={view} />
       {slot && createPortal(<VoiceRecordButton controller={controller} />, slot)}
     </>

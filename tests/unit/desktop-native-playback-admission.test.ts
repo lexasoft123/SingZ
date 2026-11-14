@@ -40,6 +40,11 @@ const features = (): DesktopNativePlaybackFeatures => ({
   enabled: true, playbackRate: 1, transpose: 0, training: null,
   lanes: [{ id: 'guide', path: '/authorized/guide.flac' }], runtime: runtime()
 })
+it('admits 300-character Windows and namespaced stem paths', () => {
+  const path='C:\\'+('p'.repeat(100)+'\\').repeat(3)+'vocals.flac'
+  for(const value of [path,'\\\\?\\'+path]) expect(selectDesktopPlaybackBackend('win32',{...features(),lanes:[{id:'guide',path:value}]}).backend).toBe('native')
+  expect(selectDesktopPlaybackBackend('win32',{...features(),lanes:[{id:'guide',path:'C:\\'+('p'.repeat(200)+'\\').repeat(164)+'vocals.flac'}]}).backend).toBe('legacy')
+})
 const request = (): DesktopNativePlaybackEngineRequest => ({
   ...features(), lanes: [{ id: 'guide', path: '/authorized/guide.flac', volume: 1, muted: false, solo: false }],
   nativePlaybackEnabled: true, nativeAudioProvider: 'wasapi', graphDocument: null,

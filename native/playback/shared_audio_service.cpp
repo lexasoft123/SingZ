@@ -64,6 +64,20 @@ struct SharedAudioService::Impl {
   AudioHostInventory cached;
   AudioHostConfig route;
   std::string preferredOutputUid;
+  BufferPreferences bufferPreferences;
+  uint32_t requestedBuffer(const std::string& uid) const {
+    const auto found = bufferPreferences.find(uid);
+    return found == bufferPreferences.end() ? 128 : found->second;
+  }
+  uint32_t supportedBuffer(const std::string& uid) const {
+    const auto frames = requestedBuffer(uid);
+    const auto device = std::find_if(cached.devices.begin(), cached.devices.end(),
+        [&](const auto& d) { return d.uid == uid; });
+    if (device == cached.devices.end()) return 0;
+    const auto& b = device->bufferFrames;
+    return b.minimumFrames && frames >= b.minimumFrames && frames <= b.maximumFrames &&
+        (!b.fundamentalFrames || frames % b.fundamentalFrames == 0) ? frames : 0;
+  }
   bool parked = false;
   bool songOutputCurrent = false;
   bool monitorBufferHeld = false;
@@ -318,6 +332,9 @@ struct SharedAudioService::Impl {
     if (!enumerated) refreshLocked();
     startWatcherLocked();
     if (config.outputDeviceUid.empty()) config.outputDeviceUid = cached.defaultOutputUid;
+    // Every desktop CoreAudio opener uses one policy, including the silent
+    // base host, song, cues and take playback. The zCore backend owns its lease.
+    if (provider == "coreaudio") config.requestedBufferFrames = supportedBuffer(config.outputDeviceUid);
     if (config.outputChannels.empty()) {
       const auto found = std::find_if(cached.devices.begin(), cached.devices.end(),
           [&](const auto& device) { return device.uid == config.outputDeviceUid; });
@@ -371,7 +388,7 @@ struct SharedAudioService::Impl {
     auto result = backend->open(actualConfig, render, this);
     if (!result.ok && result.error == AudioHostError::InvalidConfiguration &&
         config.requestedBufferFrames != 0 && !config.exclusive &&
-        config.inputDeviceUid.empty() && config.inputChannels.empty() && sharedCoreAudio) {
+        config.inputDeviceUid.empty() && config.inputChannels.empty() && sharedCoreAudio && provider != "coreaudio") {
       // A monitor may hold a smaller buffer than the song's cached preference.
       // zCore refuses an incompatible request BEFORE writing or adding a lease.
       // Treat the song period as best effort: retry once at the current device
@@ -589,6 +606,29 @@ SharedAudioService::SharedAudioService()
 SharedAudioService::SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider)
     : impl_(std::make_unique<Impl>(std::move(backend), false)) { impl_->provider = std::move(provider); }
 SharedAudioService::~SharedAudioService() { shutdown(); }
+bool SharedAudioService::configureBufferPreferences(const BufferPreferences& preferences, bool captureActive) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->bufferPreferences == preferences) return true;
+  if (captureActive || impl_->playback.render || impl_->monitor.render ||
+      impl_->microphone.render || !impl_->monitorOutput.expired()) return false;
+  impl_->bufferPreferences = preferences;
+  // Reopening is performed by ensureOutput after releasing this control lock.
+  return true;
+}
+uint32_t SharedAudioService::requestedBufferFrames(const std::string& uid) const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->requestedBuffer(uid);
+}
+AudioInputConfig SharedAudioService::inputBufferConfig(AudioInputConfig config) const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->provider == "coreaudio") {
+    if (!impl_->enumerated) impl_->refreshLocked();
+    config.requestedBufferFrames = impl_->supportedBuffer(config.deviceUid);
+    config.allowSharedDeviceBufferChange = true;
+    config.maximumAcceptableBufferFrames = 0;
+  }
+  return config;
+}
 AudioHostResult SharedAudioService::initialize(const AudioHostConfig& config) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (config.outputDeviceUid.empty() && config.outputChannels.empty() &&

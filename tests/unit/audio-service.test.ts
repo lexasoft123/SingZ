@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const fake = vi.hoisted(() => ({
   sink: undefined as undefined | ((value: unknown) => void),
   begin: vi.fn(), stop: vi.fn(), prepare: vi.fn(), unload: vi.fn(),
-  binding: { inputDevices: vi.fn(() => ({ ok: true, devices: [] })),
+  binding: { inputDevices: vi.fn(() => ({ ok: true, devices: [] })), audioBufferSettings: vi.fn(),
     boxRoutingInitialize: vi.fn(() => ({ ok: true })), boxRoutingPoll: vi.fn(), boxRoutingShutdown: vi.fn() }
 }))
 vi.mock('../../src/main/capture', () => ({
@@ -40,6 +40,28 @@ afterEach(() => {
 })
 
 describe('audio helper control dispatcher', () => {
+  it('still dispatches stop when applying buffer settings throws', async () => {
+    request(1, 'inputDevices', [], 'binding')
+    await vi.advanceTimersByTimeAsync(0)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fake.binding.audioBufferSettings.mockImplementationOnce(() => { throw new Error('buffer apply failed') })
+    fake.unload.mockReturnValueOnce({ ok: true, cleanupComplete: true })
+    request(2, 'unloadPlayback', [7, '9'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fake.unload).toHaveBeenCalledWith(7, '9')
+    expect(port.postMessage.mock.calls.map(([message]) => message).find(message => message.id === 2)).toMatchObject({ ok: true })
+    report.mockRestore()
+  })
+  it('publishes saved buffer policy before the first device call and pumps deferred changes without Settings', async () => {
+    vi.stubEnv('SINGZ_AUDIO_BUFFER_PREFERENCES', JSON.stringify({ input: 64, output: 128, invalid: 48 }))
+    request(1, 'inputDevices', [], 'binding')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fake.binding.audioBufferSettings).toHaveBeenCalledWith({ input: 64, output: 128 })
+    expect(fake.binding.audioBufferSettings.mock.invocationCallOrder[0]).toBeLessThan(fake.binding.inputDevices.mock.invocationCallOrder[0])
+    fake.binding.audioBufferSettings.mockClear()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(fake.binding.audioBufferSettings).toHaveBeenCalledWith()
+  })
   it('announces its own PID and refuses methods outside the explicit surface', async () => {
     expect(port.postMessage).toHaveBeenCalledWith({ type: 'ready', epoch: 'service-test', pid: process.pid })
     request(1, 'constructor')

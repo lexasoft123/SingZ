@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "バッファサイズが異なります",
+  "settings.buffer.label": "バッファサイズ",
+  "settings.buffer.option": "{frames} フレーム · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} フレーム（保存済み、利用不可）",
+  "settings.buffer.hint": "バッファを小さくすると遅延が減りますが、CPU 負荷が増えます。表示時間はバッファ1個分で、音声全体の遅延ではありません。",
+  "settings.buffer.pending": "保存しました。再生、モニタリング、録音、マイクプレビューの停止後に適用されます。",
+  "settings.buffer.outputStatus": "出力：要求 {requested}、実際 {actual} フレーム",
+  "settings.buffer.inputStatus": "入力：要求 {requested}、実際 {actual} フレーム",
+  "settings.buffer.unsupported": "バッファサイズは macOS の CoreAudio で設定できます。",
+  "settings.buffer.failed": "バッファサイズを適用できませんでした：{error}",
+
   'settings.route.title': 'オーディオ経路',
   'settings.route.retryNextStart': '保存したデバイスは次回 SingZ 起動時に再試行します。',
   'settings.route.inventoryUnavailable': 'オーディオデバイスの一覧を取得できません。',

@@ -7,7 +7,7 @@
  * as ports, which is also what the tests swap for fakes. `useVoiceController`
  * (components/VoiceStrip.tsx) binds it to React.
  *
- * Records a take over the song, listens back, keeps or discards it, and (M2)
+ * Records takes over the song (every take is kept; the selected one is the audible lane), deletes one, and (M2)
  * monitors live: monitoring is a second duplex host in main; this controller toggles it,
  * routes the fader to its gain, and releases it with everything else.
  */
@@ -22,11 +22,11 @@ import type {
   VoiceMonitorState,
   VoiceArmResult,
   VoiceInputLevel,
-  VoicePlayTakeRequest,
   VoiceRecordSettingsChange,
   VoiceRecordStartRequest,
   VoiceRecordStartResult,
   VoiceRecordStopResult,
+  VoiceRecordStopNote,
   VoiceTakeMoveRequest,
   VoiceTakeMoveResult,
   VoiceTakePeaksRequest,
@@ -47,7 +47,6 @@ export const VOICE_STATES = [
   'armed',
   'recording',
   'take-review',
-  'playing-take',
   'monitoring-on',
   'monitoring-unavailable-latency',
   'monitoring-unavailable-route',
@@ -55,7 +54,6 @@ export const VOICE_STATES = [
 ] as const
 export type VoiceState = (typeof VOICE_STATES)[number]
 
-export type VoiceListenMode = 'take' | 'with-song'
 export type VoiceErrorKind = 'device-lost' | 'busy' | 'error' | 'no-bridge' | 'monitor'
 
 /** What the strip needs of the preload bridge (`window.singz.voiceTakes`, WP4). */
@@ -67,8 +65,6 @@ export interface VoiceTakeApi {
   recordStop(): Promise<VoiceRecordStopResult>
   recordSettings(change: VoiceRecordSettingsChange): Promise<unknown>
   list(songId: string): Promise<VoiceTakeSummary[]>
-  play(req: VoicePlayTakeRequest): Promise<{ ok: boolean } | void>
-  stopPlay(): Promise<unknown>
   remove(songId: string, takeId: string): Promise<unknown>
   /** Waveform peaks of a finished take, computed in main from its WAV. */
   peaks(req: VoiceTakePeaksRequest): Promise<VoiceTakePeaksResult>
@@ -106,9 +102,6 @@ export interface VoiceEnginePort {
   seek(t: number): void
   setTempo(rate: number): Promise<void>
   setTranspose(st: number): Promise<void>
-  /** Stem mute control, used to solo the take against the song. */
-  getTrackStates?(): { id: string; muted: boolean }[]
-  setMuted?(id: string, muted: boolean): void
 }
 
 /** One selectable input CHANNEL of a device (a mono device has a single option). */
@@ -150,7 +143,7 @@ export interface VoiceTake {
   /** Ratio, 1 = 100%. Updated while recording when the singer changes it. */
   tempo: number
   transpose: number
-  /** The take's settings over its own time (point 0 = start), for Listen with song. */
+  /** The take's settings over its own time (point 0 = start): its span in song time. */
   timeline: { atSec: number; tempo: number; transpose: number }[]
   changed: boolean
   kept: boolean
@@ -161,7 +154,15 @@ export interface VoiceTake {
   /** Loudest absolute sample (0..1) per slice of the take: live level readings while recording, then main's WAV peaks. */
   peaks?: number[]
   conformedWaveform?: import('../../../shared/voice-take').VoiceTakeConformedWaveform
+  /** Stored FX slots of this take (the model's `effects` are the audible take's). */
+  effects?: VoiceTakeEffect[]
 }
+
+/** Newest first (the strip stacks takes like a DAW: the latest recording on top). */
+export const newestFirst = (takes: readonly VoiceTake[]): VoiceTake[] => [...takes].sort((a, b) => b.n - a.n)
+const newestTake = (takes: readonly VoiceTake[]): VoiceTake | undefined => newestFirst(takes)[0]
+/** Every take of the song, newest first: the audible (selected) `take` among the others. */
+export const allTakes = (m: Pick<VoiceModel, 'take' | 'takes'>): VoiceTake[] => newestFirst(m.take ? [m.take, ...m.takes] : m.takes)
 
 export interface VoiceModel {
   /** WP4 binds preparing/omission/error copy and disabled M/S reasons here. */
@@ -174,7 +175,6 @@ export interface VoiceModel {
   armed: boolean
   starting: boolean
   recording: boolean
-  listen: VoiceListenMode | null
   perm: 'unknown' | 'granted' | 'denied'
   inputMissing: boolean
   /** Monitoring is inert in M1: always 'ok' and off. */
@@ -199,8 +199,11 @@ export interface VoiceModel {
   monitorNote: 'other-input' | null
   error: VoiceErrorKind | null
   /** Why the last take ended without the singer pressing stop. */
-  stoppedBy: 'seek' | 'auto' | null
+  stoppedBy: VoiceRecordStopNote | 'auto' | null
+  /** The audible take: the one conformed and streamed as the voice:take lane. */
   take: VoiceTake | null
+  /** Every other take of the song. They never replace one another; selecting one swaps it with `take`. */
+  takes: VoiceTake[]
   inputs: VoiceInputOption[]
   input: string | null
   clipped: boolean
@@ -239,7 +242,6 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   armed: false,
   starting: false,
   recording: false,
-  listen: null,
   perm: 'unknown',
   inputMissing: false,
   // Monitoring is never persisted as on: every controller starts off.
@@ -253,6 +255,7 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   error: null,
   stoppedBy: null,
   take: null,
+  takes: [],
   inputs: [],
   input: null,
   clipped: false,
@@ -270,7 +273,6 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
 export function primaryState(m: VoiceModel): VoiceState {
   if (m.error) return 'error-recoverable'
   if (m.recording) return 'recording'
-  if (m.listen) return 'playing-take'
   if (m.take && !m.take.kept) return 'take-review'
   if (m.perm === 'denied') return 'permission-needed'
   if (m.inputMissing) return 'input-missing'
@@ -316,25 +318,6 @@ const AVAILABILITY_RETRY_MS = [500, 1500, 3000]
 const MONITOR_STATE_EVERY = 10 // level polls (~50 ms each) per monitor-state check
 const BRIDGE_MISSING = 'voice bridge unavailable'
 
-/**
- * Stems this feature muted for a soloed Listen with song, per engine. It lives
- * outside any controller so that a controller torn down mid-listen (the host
- * unmounts, the song changes) cannot strand the stems muted: the next
- * controller for the same engine restores them on startup.
- */
-const MUTED_BY_SOLO = new WeakMap<object, string[]>()
-
-/** What a Listen with song changed on the engine, so it can put back only that. */
-interface ListenSettings {
-  saved: { tempo: number; transpose: number }
-  /** The values this listen applied (the take's start state, then its timeline). */
-  applied: { tempo?: number; transpose?: number }
-  /** True while the engine's setTempo/setTranspose calls for it are still pending. */
-  inFlight: boolean
-  restoreWhenSettled: boolean
-  done: boolean
-}
-
 /** What the singer last chose: the device, and the channel remembered for each device. */
 interface SavedInput {
   device: string | null
@@ -358,7 +341,6 @@ export class VoiceController {
   private laneRequest: string | null = null
   private laneLease: (VoiceTakeInvalidateRequest & { leaseId: string }) | null = null
   private laneAdoption: Promise<unknown> = Promise.resolve()
-  private listenStopping = false
   private finalizePending: Promise<VoiceRecordStopResult> | null = null
   private finalizingTake = false
   private model: VoiceModel = INITIAL_VOICE_MODEL
@@ -373,8 +355,6 @@ export class VoiceController {
   private lastPos = 0
   private lastTickMs = 0
   private loggedRecordingPositionObservation = false
-  private listenStartedMs = 0
-  private listenSawPlaying = false
   private takeCount = 0
   private songEpoch = 0
   private disposed = false
@@ -402,16 +382,10 @@ export class VoiceController {
   private armToken = 0
   private armMonitorOnly = false
   private armOpen = false
-  private listenSettings: ListenSettings | null = null
-  private listenTimelineIdx = 1
-  private soloedStems: string[] | null = null
-  private listenToken = 0
-  private pendingListen: VoiceListenMode | null = null
   private readonly now: () => number
 
   constructor(private readonly deps: VoiceControllerDeps) {
     this.now = deps.now ?? (() => Date.now())
-    this.restoreStems(MUTED_BY_SOLO.get(deps.engine) ?? null)
     this.saved = this.readStored()
     this.dropLegacyMonitorOutput()
     this.rememberedMonitorGainDb = this.readMonitorGain()
@@ -475,7 +449,7 @@ export class VoiceController {
   private set(patch: Partial<VoiceModel>): void {
     this.model = { ...this.model, ...patch }
     this.syncTimers()
-    if (['level', 'takeMuted', 'solo', 'starting', 'recording', 'listen', 'lane'].some(k => k in patch))
+    if (['level', 'takeMuted', 'solo', 'starting', 'recording', 'lane'].some(k => k in patch))
       void this.syncLaneControl().catch(() => {})
     this.publishHold()
     for (const fn of [...this.listeners]) fn()
@@ -488,7 +462,7 @@ export class VoiceController {
     const m = this.model
     return this.deps.engine.setVoiceTakeControl?.({ gain: takeGain(m.level, false), muted: m.takeMuted,
       solo: m.solo, suppressed: m.starting || m.recording || this.finalizingTake ||
-        m.lane.status === 'conforming' || this.listenStopping || !!m.listen || !!this.pendingListen },
+        m.lane.status === 'conforming' },
       m.starting || m.recording || this.finalizingTake) ?? Promise.resolve()
   }
 
@@ -588,7 +562,8 @@ export class VoiceController {
   retryTakeLane(): void { this.scheduleLaneConform() }
   setTakeEffects(effects: VoiceTakeEffect[]): void {
     if (this.model.recording || this.model.starting || this.finalizingTake || !isVoiceTakeEffects(effects)) return
-    this.set({ effects: effects.map(e => ({ ...e, params: { ...e.params } })) })
+    const copy = effects.map(e => ({ ...e, params: { ...e.params } }))
+    this.set({ effects: copy, ...(this.model.take ? { take: { ...this.model.take, effects: copy } } : {}) })
     this.scheduleLaneConform(150)
   }
 
@@ -689,24 +664,31 @@ export class VoiceController {
       stoppedBy: null,
       monitorNote: null,
       take: null,
+      takes: [],
       takeSelected: false,
       elapsedSec: 0,
-      listen: null,
       recording: false
     })
     if (songId === null) return
     void this.refreshMonitorAvailability()
     try {
-      const takes = await this.deps.api.list(songId)
-      if (epoch !== this.songEpoch || this.disposed || this.model.take) return
-      const newest = [...takes]
+      const stored = (await this.deps.api.list(songId))
         .filter((tk) => tk.status !== 'partial-error' || tk.durationSec > 0)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
-      if (newest) {
-        this.set({ take: this.fromSummary(newest, true), effects: newest.effects ?? defaultVoiceTakeEffects() })
-        this.loadPeaks(newest.takeId)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      if (epoch !== this.songEpoch || this.disposed || stored.length === 0) return
+      // Every stored take is shown, numbered oldest first; the newest is the audible one.
+      const base = this.takeCount
+      const loaded = stored.map((tk, i) => this.fromSummary(tk, true, base + i + 1))
+      this.takeCount = base + loaded.length
+      const known = new Set([this.model.take?.takeId, ...this.model.takes.map((o) => o.takeId)])
+      const fresh = loaded.filter((tk) => !known.has(tk.takeId))
+      if (this.model.take) this.set({ takes: [...this.model.takes, ...fresh] }) // a recording began while listing
+      else {
+        const active = fresh[fresh.length - 1]!
+        this.set({ take: active, takes: fresh.slice(0, -1), effects: active.effects ?? defaultVoiceTakeEffects() })
         this.scheduleLaneConform()
       }
+      for (const tk of fresh) this.loadPeaks(tk.takeId)
     } catch {
       // Listing is a convenience; the strip works without it.
     }
@@ -723,10 +705,6 @@ export class VoiceController {
     // A running monitor keeps its hold on the input across a song change; teardown releases everything.
     if (releaseMon || !(this.model.monitor.on || this.monitorPending)) this.releaseArm()
     const monitorReleased = releaseMon ? this.releaseMonitor() : Promise.resolve() // sync part now; awaited last
-    // A listen ends synchronously here, before any await: stems restored, song
-    // paused, listen state cleared (stopListening does all three).
-    if (this.pendingListen) await this.cancelPendingListen()
-    if (this.model.listen) await this.stopListening()
     if (this.model.recording && this.recordingId) {
       this.recordingId = null
       await this.deps.api.recordStop().catch(() => undefined)
@@ -1035,7 +1013,6 @@ export class VoiceController {
     const block = recordBlock(this.model)
     if (block !== null || this.finalizingTake) return
     // One press records: a take still being played back stops, and a take under review is kept (its file stays).
-    if (this.model.listen) await this.stopListening()
     if (this.model.take && !this.model.take.kept) this.keep()
     if (recordBlock(this.model) !== null || this.model.recording) return
     const { engine, api } = this.deps
@@ -1128,7 +1105,8 @@ export class VoiceController {
     const startPos = engine.position
     this.recordingId = res.takeId
     this.takeInput = inputRequest(input)
-    this.armOpen = false // main reuses the open input for the take (the take still holds it: starting/recording)
+    // A take adds its own hold; it never consumes a pre-existing meter lease.
+    this.armOpen = this.armOpen && (this.model.armed || this.model.monitor.on)
     this.startedAtMs = this.now()
     this.lastTickMs = this.startedAtMs
     this.lastPos = engine.position
@@ -1139,9 +1117,10 @@ export class VoiceController {
     this.set({
       starting: false,
       recording: true,
-      armed: false,
       stoppedBy: null,
       elapsedSec: 0,
+      takes: this.model.take ? [...this.model.takes, { ...this.model.take, conformedWaveform: undefined }] : this.model.takes,
+      effects: defaultVoiceTakeEffects(),
       take: {
         takeId: res.takeId,
         n: this.takeCount,
@@ -1185,16 +1164,16 @@ export class VoiceController {
   }
 
   private failStart(reason: 'permission' | 'no-input' | 'busy' | 'error'): void {
-    if (this.model.armed) this.set({ armed: false })
+    if (this.model.armed && (reason === 'permission' || reason === 'no-input')) this.set({ armed: false })
     if (reason === 'permission') this.set({ starting: false, perm: 'denied' })
     else if (reason === 'no-input') this.set({ starting: false, inputMissing: true })
     else this.set({ starting: false, error: reason === 'busy' ? 'busy' : 'error' })
     this.resumeLaneAfterFailedStart()
-    // The take never started: the input stays open only for a live monitor, else it is closed whatever we believed.
-    if (!this.monitorHolds()) void this.forceDisarm()
+    // A failed take releases only its own hold; explicit Arm and Monitor persist.
+    if (!this.model.armed && !this.monitorHolds()) void this.forceDisarm()
   }
 
-  async stopRecording(reason: 'user' | 'seek' | 'auto' = 'user'): Promise<void> {
+  async stopRecording(reason: 'user' | VoiceRecordStopNote | 'auto' = 'user'): Promise<void> {
     const id = this.recordingId
     if (!this.model.recording || !id) return
     if (reason !== 'user') console.warn('[voice-take] renderer stop ' + JSON.stringify({ takeId: id, reason,
@@ -1222,9 +1201,10 @@ export class VoiceController {
     // The take is over, so the input is no longer held open for it.
     this.takeInput = null
     if (this.model.monitorNote) this.set({ monitorNote: null })
-    if (this.model.monitor.on) {
-      // The take held the input; monitoring now holds it, so turning monitoring off releases it.
+    if (this.model.armed || this.model.monitor.on) {
+      // Explicit Arm and Monitor outlive the take; Record's implicit hold does not.
       this.armOpen = true
+      if (!this.model.armed) await this.setMainArmOwnership(true)
     } else {
       void Promise.resolve(this.deps.api.disarm()).catch(() => undefined)
     }
@@ -1232,6 +1212,7 @@ export class VoiceController {
     if (this.disposed) return
     if (res.ok && res.take) {
       this.set({
+        error: null,
         take: { ...this.withTimeline(this.fromSummary(res.take, false, cur?.n ?? this.takeCount), cur), changed: res.take.settingsChanged || !!cur?.changed },
         stoppedBy: reason === 'user' ? null : res.note ?? reason,
         ...this.say('announceReview')
@@ -1249,6 +1230,11 @@ export class VoiceController {
           ? { ...cur, durationSec: elapsed, partial: true }
           : null
     })
+    if (!this.model.take) {
+      // Nothing was kept of this recording: the previous newest take is audible again.
+      const next = newestTake(this.model.takes)
+      if (next) this.set({ take: next, takes: this.model.takes.filter((o) => o !== next), effects: next.effects ?? defaultVoiceTakeEffects() })
+    }
     if (this.model.take) this.scheduleLaneConform()
     else void this.removeLane().catch(() => {})
   }
@@ -1265,17 +1251,34 @@ export class VoiceController {
     if (songId === null) return
     void Promise.resolve(this.deps.api.peaks?.({ songId, takeId }))
       .then((r) => {
+        if (this.disposed || !r || !r.ok || this.model.recording || this.model.songId !== songId) return
         const tk = this.model.take
-        if (this.disposed || !r || !r.ok || !tk || tk.takeId !== takeId || this.model.recording) return
-        this.set({ take: { ...tk, peaks: r.peaks } })
+        if (tk?.takeId === takeId) this.set({ take: { ...tk, peaks: r.peaks } })
+        else if (this.model.takes.some((o) => o.takeId === takeId))
+          this.set({ takes: this.model.takes.map((o) => (o.takeId === takeId ? { ...o, peaks: r.peaks } : o)) })
       })
       .catch(() => undefined) // the clip keeps its live waveform, or a flat line
   }
 
-  /** Select or deselect the take clip. A take that is still recording cannot be selected. */
-  selectTake(on: boolean): void {
+  /**
+   * Select or deselect a take clip. Selecting another take makes it the audible one: it swaps with the
+   * current one and is conformed as the voice:take lane. A take that is still recording cannot be selected.
+   */
+  selectTake(on: boolean, takeId?: string): void {
     const m = this.model
-    const want = on && m.take !== null && !m.recording
+    const busy = m.recording || m.starting || this.finalizingTake || this.deleting
+    const other = on && takeId !== undefined && m.take?.takeId !== takeId ? m.takes.find((o) => o.takeId === takeId) : undefined
+    if (other && !busy) {
+      this.set({
+        take: other,
+        takes: [...m.takes.filter((o) => o !== other), ...(m.take ? [{ ...m.take, conformedWaveform: undefined }] : [])],
+        effects: other.effects ?? defaultVoiceTakeEffects(),
+        takeSelected: true
+      })
+      this.scheduleLaneConform()
+      return
+    }
+    const want = on && m.take !== null && !busy
     if (m.takeSelected === want) return
     this.set({ takeSelected: want })
   }
@@ -1295,7 +1298,7 @@ export class VoiceController {
   private async doMoveTake(startSec: number): Promise<void> {
     const tk = this.model.take
     const songId = this.model.songId
-    if (!tk || songId === null || this.finalizingTake || this.model.recording || this.model.listen || this.pendingListen || !Number.isFinite(startSec)) return
+    if (!tk || songId === null || this.finalizingTake || this.model.recording || !Number.isFinite(startSec)) return
     const duration = this.deps.engine.duration ?? 0
     const hi = duration > 0 ? Math.max(0, duration - songSpan(tk)) : Number.POSITIVE_INFINITY
     const clamped = Math.min(hi, Math.max(0, startSec))
@@ -1340,25 +1343,30 @@ export class VoiceController {
     this.set({ take: { ...tk, kept: true }, ...this.say('announceKept') })
   }
 
+  /** Delete the active (selected) take. Every other take stays; the newest of them becomes the audible one. */
+  private deleting = false
+
   async discard(): Promise<void> {
     const tk = this.model.take
     if (!tk || this.model.recording || this.model.starting || this.finalizingTake) return
-    if (this.pendingListen) {
-      // A listen still starting: cancel it and undo what it did so far.
-      const mode = this.pendingListen
-      this.listenToken++
-      this.pendingListen = null
-      this.restoreStems(this.soloedStems)
-      this.soloedStems = null
-      if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
-      await this.deps.api.stopPlay().catch(() => undefined)
-    }
-    if (this.model.listen) await this.stopListening()
+    this.deleting = true
     try { await this.removeLane() } catch {
+      this.deleting = false
       this.set({ lane: { status: 'error', reason: 'prepare-failed' } })
       return
     }
-    this.set({ lane: { status: 'idle' }, take: null, takeSelected: false, error: null, ...this.say('announceDiscarded') })
+    this.deleting = false
+    const rest = this.model.takes.filter((o) => o.takeId !== tk.takeId)
+    // A take selected during the removal stays selected; only promote when the deleted take is still the audible one.
+    if (this.model.take && this.model.take.takeId !== tk.takeId) {
+      this.set({ takes: rest, error: null })
+      await this.deps.api.remove(this.model.songId ?? '', tk.takeId).catch(() => undefined)
+      return
+    }
+    const next = newestTake(rest)
+    this.set({ lane: { status: 'idle' }, take: next ?? null, takes: rest.filter((o) => o !== next),
+      effects: next?.effects ?? defaultVoiceTakeEffects(), takeSelected: false, error: null, ...this.say('announceDiscarded') })
+    if (next) this.scheduleLaneConform()
     await this.deps.api.remove(this.model.songId ?? '', tk.takeId).catch(() => undefined)
   }
 
@@ -1368,161 +1376,7 @@ export class VoiceController {
     void this.refreshInputs()
   }
 
-  async listen(mode: VoiceListenMode): Promise<void> {
-    const tk = this.model.take
-    const { engine, api } = this.deps
-    if (!tk || this.model.recording || this.model.listen || this.pendingListen) return
-    // From here until the listen settles, abortActivity can cancel it: every
-    // continuation below checks the token and does nothing once it is stale.
-    const token = ++this.listenToken
-    this.pendingListen = mode
-    if (engine.setVoiceTakeControl) await this.syncLaneControl()
-    const ls: ListenSettings | null =
-      mode === 'with-song'
-        ? { saved: { tempo: engine.tempo, transpose: engine.transpose }, applied: {}, inFlight: true, restoreWhenSettled: false, done: false }
-        : null
-    this.listenSettings = ls
-    this.listenTimelineIdx = 1
-    const stale = (): boolean => token !== this.listenToken
-    let startedSong = false
-    try {
-      if (mode === 'take') {
-        if (engine.playing) engine.pause()
-      } else {
-        try {
-          ls!.applied.tempo = tk.tempo
-          await engine.setTempo(tk.tempo)
-          ls!.applied.transpose = tk.transpose
-          await engine.setTranspose(tk.transpose)
-        } finally {
-          // The restore of an aborted listen waited for these calls to land:
-          // before they settle the engine still reads the old values.
-          ls!.inFlight = false
-          if (ls!.restoreWhenSettled) this.restoreFrom(ls!)
-        }
-        if (stale()) return
-        // Play first, then seek: a seek on a paused, never-played song asks the
-        // native engine to prepare a route before Play (see report, D1), and
-        // that can throw. Cost: the song is audible from its current position
-        // for an instant before the seek lands.
-        if (!engine.playing) {
-          await engine.play()
-          startedSong = true
-        }
-        if (stale()) {
-          if (startedSong && engine.playing) engine.pause()
-          return
-        }
-        engine.seek(tk.startSec)
-      }
-    } catch {
-      if (stale()) return
-      // Never hide a failure: show it, and leave the song as we found it.
-      if (startedSong && engine.playing) engine.pause()
-      this.pendingListen = null
-      this.requestRestore()
-      this.set({ error: 'error' })
-      void this.syncLaneControl().catch(() => {})
-      return
-    }
-    // Recorded BEFORE the await so a teardown during it can restore the stems.
-    this.soloedStems = mode === 'with-song' && this.model.solo ? this.muteStems() : null
-    let ok = true
-    try {
-      const res = await api.play({ takeId: tk.takeId, mode, gain: takeGain(this.model.level, this.model.takeMuted) })
-      ok = !res || res.ok !== false
-    } catch {
-      ok = false
-    }
-    // Torn down meanwhile: abortActivity already stopped native play and
-    // restored everything; setting listen or a timer now would resurrect it.
-    if (stale()) {
-      // Torn down while main was starting playback: make sure it is not left playing.
-      if (ok) void Promise.resolve(api.stopPlay()).catch(() => undefined)
-      return
-    }
-    this.pendingListen = null
-    if (!ok) {
-      this.restoreStems(this.soloedStems)
-      this.soloedStems = null
-      if (mode === 'with-song') engine.pause()
-      this.requestRestore()
-      this.set({ error: 'error' })
-      void this.syncLaneControl().catch(() => {})
-      return
-    }
-    this.listenStartedMs = this.now()
-    this.listenSawPlaying = engine.playing
-    this.set({ listen: mode })
-  }
-
-  async stopListening(): Promise<void> {
-    if (!this.model.listen) return
-    const mode = this.model.listen
-    this.listenStopping = true
-    this.set({ listen: null })
-    this.restoreStems(this.soloedStems)
-    this.soloedStems = null
-    if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
-    this.requestRestore()
-    await this.deps.api.stopPlay().catch(() => undefined)
-    this.listenStopping = false
-    await this.syncLaneControl().catch(() => {})
-  }
-
-  /** Put back the singer's tempo and transpose once this listen's own changes have landed. */
-  private requestRestore(): void {
-    const ls = this.listenSettings
-    if (!ls) return
-    if (ls.inFlight) ls.restoreWhenSettled = true
-    else this.restoreFrom(ls)
-  }
-
-  /** Restore a field only if the engine still holds what the listen set: a value the singer changed since is theirs. */
-  private restoreFrom(ls: ListenSettings): void {
-    if (ls.done) return
-    ls.done = true
-    if (this.listenSettings === ls) this.listenSettings = null
-    const { engine } = this.deps
-    const { applied, saved } = ls
-    if (applied.tempo !== undefined && Math.abs(engine.tempo - applied.tempo) < 1e-4 && Math.abs(applied.tempo - saved.tempo) > 1e-4) {
-      void engine.setTempo(saved.tempo).catch(() => undefined)
-    }
-    if (applied.transpose !== undefined && engine.transpose === applied.transpose && applied.transpose !== saved.transpose) {
-      void engine.setTranspose(saved.transpose).catch(() => undefined)
-    }
-  }
-
-  /** Cancel a listen that is still starting and undo what it did so far. */
-  private async cancelPendingListen(): Promise<void> {
-    const mode = this.pendingListen
-    if (!mode) return
-    this.listenToken++
-    this.pendingListen = null
-    void this.syncLaneControl().catch(() => {})
-    this.restoreStems(this.soloedStems)
-    this.soloedStems = null
-    if (mode === 'with-song' && this.deps.engine.playing) this.deps.engine.pause()
-    this.requestRestore()
-    await this.deps.api.stopPlay().catch(() => undefined)
-  }
-
-  /** Mute every stem that is not already muted; returns what to restore. */
-  private muteStems(): string[] | null {
-    const { engine } = this.deps
-    if (!engine.getTrackStates || !engine.setMuted) return null
-    const ids = engine.getTrackStates().filter((tr) => !tr.muted).map((tr) => tr.id)
-    for (const id of ids) engine.setMuted(id, true)
-    MUTED_BY_SOLO.set(engine, ids)
-    return ids
-  }
-  private restoreStems(ids: string[] | null): void {
-    if (!ids) return
-    for (const id of ids) this.deps.engine.setMuted?.(id, false)
-    MUTED_BY_SOLO.delete(this.deps.engine)
-  }
-
-  // ── time-driven checks (setInterval while recording or listening) ──
+  // ── time-driven checks (setInterval while recording) ──
   tick(): void {
     const m = this.model
     const nowMs = this.now()
@@ -1552,7 +1406,8 @@ export class VoiceController {
       // seek. Main owns sample-time seek/loop/pause/end detection for native
       // takes and pollLevel finalizes its receipt. Keep the legacy fallback.
       if (!native && (jumped || !playing)) {
-        void this.stopRecording('seek')
+        const ended = (engine.duration ?? 0) > 0 && pos >= engine.duration! - .05
+        void this.stopRecording(!playing ? ended ? 'song-end' : 'pause' : 'seek')
         return
       }
       const cur = m.take
@@ -1575,31 +1430,6 @@ export class VoiceController {
       }
       this.set({ elapsedSec: (nowMs - this.startedAtMs) / 1000, take: take ? { ...take, peaks: this.livePeaks.slice() } : take })
       return
-    }
-    if (m.listen && m.take) {
-      const heard = (nowMs - this.listenStartedMs) / 1000
-      if (engine.playing) this.listenSawPlaying = true
-      const songStopped = m.listen === 'with-song' && this.listenSawPlaying && !engine.playing
-      // With the song, the take is anchored to the song timeline (native
-      // re-anchors it on a seek), so it ends where the SONG passes its end, not
-      // after a wall-clock length. The span is in song time: the take's seconds
-      // times the tempo it was recorded at, which Listen with song restores.
-      if (m.listen === 'with-song') this.replayTimeline(m.take, heard)
-      const songPastEnd =
-        m.listen === 'with-song' && engine.position >= m.take.startSec + songSpan(m.take)
-      const aloneDone = m.listen === 'take' && heard >= m.take.durationSec
-      if (aloneDone || songPastEnd || songStopped) void this.stopListening()
-    }
-  }
-
-  /** Apply the take's later tempo/transpose points as its own time reaches them. */
-  private replayTimeline(take: VoiceTake, takeSec: number): void {
-    const { engine } = this.deps
-    while (this.listenTimelineIdx < take.timeline.length && takeSec >= take.timeline[this.listenTimelineIdx]!.atSec) {
-      const pt = take.timeline[this.listenTimelineIdx++]!
-      if (this.listenSettings) Object.assign(this.listenSettings.applied, { tempo: pt.tempo, transpose: pt.transpose })
-      void engine.setTempo(pt.tempo).catch(() => undefined)
-      void engine.setTranspose(pt.transpose).catch(() => undefined)
     }
   }
 
@@ -1907,7 +1737,8 @@ export class VoiceController {
       changed: s.settingsChanged,
       kept,
       partial: s.status === 'partial-device-lost' || s.status === 'partial-error',
-      recovered: s.status === 'recovered'
+      recovered: s.status === 'recovered',
+      ...(s.effects ? { effects: s.effects } : {})
     }
   }
 
@@ -1927,7 +1758,7 @@ export class VoiceController {
 
   private syncTimers(): void {
     const m = this.model
-    const wantTick = m.recording || m.listen !== null
+    const wantTick = m.recording
     if (wantTick && !this.timer) this.timer = setInterval(() => this.tick(), 100)
     else if (!wantTick && this.timer) {
       clearInterval(this.timer)
@@ -1958,8 +1789,8 @@ export const TAKE_GAIN_MAX = 0.891
 /**
  * The Level fader as take gain: 100 is the native maximum (-1 dB), falling
  * 60 dB over the scale to silence at 0. There is no boost above unity to offer:
- * the legacy listen host would clamp it. The same scale drives the transient
- * lane live through setLaneControl; the legacy Listen host reads it at start.
+ * the lane would clamp it. The same scale drives the transient lane live
+ * through setLaneControl.
  */
 export function takeGainDb(level: number): number {
   if (level <= 0) return -Infinity
@@ -2036,8 +1867,6 @@ export function createBridgeVoiceApi(
     recordStop: call('recordStop'),
     recordSettings: call('recordSettings'),
     list: call('list'),
-    play: call('play'),
-    stopPlay: call('stopPlay'),
     remove: call('remove'),
     peaks: call('peaks'),
     move: call('move'),

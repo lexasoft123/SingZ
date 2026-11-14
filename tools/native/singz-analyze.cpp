@@ -56,6 +56,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 #include <zcore/base/build_stamp.h>
@@ -68,10 +69,11 @@
 #include <zcore/legacy/courts.h>
 #include <zcore/legacy/melody.h>
 #include <zcore/media/wav.h>
+#include <file_path.h>
 
 static std::vector<float> readF32(const std::string& path) {
   std::vector<float> out;
-  std::FILE* f = std::fopen(path.c_str(), "rb");
+  std::FILE* f = singz::openNativeFile(path.c_str(), "rb");
   if (f == nullptr) return out;
   std::fseek(f, 0, SEEK_END);
   const long bytes = std::ftell(f);
@@ -437,11 +439,14 @@ class NdjsonWriter {
 
 template <size_t N, typename... Args>
 static std::string jsonLine(const char (&format)[N], Args... args) {
+  if constexpr(sizeof...(Args)==0) { return std::string(format,N-1); }
+  else {
   const int needed = std::snprintf(nullptr, 0, format, args...);
   if (needed <= 0 || needed > 65536) return {};
   std::vector<char> text(static_cast<size_t>(needed) + 1);
   std::snprintf(text.data(), text.size(), format, args...);
   return std::string(text.data(), static_cast<size_t>(needed));
+  }
 }
 
 static int printInputDevices(std::vector<singz::AudioInputDevice> devices,
@@ -1082,8 +1087,11 @@ static int liveInputCommand(int argc, char** argv) {
   };
   NdjsonWriter writer;
   std::unique_ptr<zdsp::analysis::PitchAnalysisModule> pitchModule;
-  try { if(!crepePath.empty()) pitchModule=std::make_unique<zdsp::analysis::PitchAnalysisModule>(
-      zdsp::analysis::PitchAnalysisConfig{zdsp::analysis::PitchDetectorKind::CrepeTiny, crepePath, 1}); }
+  try { if(!crepePath.empty()) {
+    zdsp::analysis::PitchAnalysisConfig pitchConfig;
+    pitchConfig.detector=zdsp::analysis::PitchDetectorKind::CrepeTiny;pitchConfig.modelPath=crepePath;
+    pitchModule=std::make_unique<zdsp::analysis::PitchAnalysisModule>(std::move(pitchConfig));
+  } }
   catch(const std::exception& e){std::fprintf(stderr,"CREPE: %s\n",e.what());return 1;}
   startupPhase("pitch model initialized");
   std::shared_ptr<singz::CaptureRecording> recording;
@@ -1238,7 +1246,7 @@ static int liveInputCommand(int argc, char** argv) {
                           : std::chrono::steady_clock::time_point::max();
   while (!liveInputStop && !writer.stopRequested()) {
     if(!controlFile.empty()) {
-      std::ifstream commands(std::filesystem::path(std::u8string(controlFile.begin(),controlFile.end())));
+      std::ifstream commands(singz::nativeFilePath(controlFile));
       std::string command;std::getline(commands,command);commands.close();
       if(!command.empty()&&command!=lastControl){
         lastControl=command; const auto separator=command.find(' ');
@@ -1373,6 +1381,16 @@ static int buildInfoCommand() {
 }
 
 int main(int argc, char** argv) {
+ try {
+#if defined(_WIN32)
+  int wideCount=0;auto **wide=CommandLineToArgvW(GetCommandLineW(),&wideCount);
+  std::vector<std::string> utf8Arguments;std::vector<char*> arguments;
+  if (!wide) return 2;
+  for(int i=0;i<wideCount;++i){const auto u=std::filesystem::path(wide[i]).u8string();utf8Arguments.emplace_back(u.begin(),u.end());}
+  LocalFree(wide);
+  for(auto &arg:utf8Arguments)arguments.push_back(arg.data());
+  arguments.push_back(nullptr);argc=wideCount;argv=arguments.data();
+#endif
   if (argc < 2) {
     printLiveInputUsage(stderr);
     std::fprintf(stderr,
@@ -1501,7 +1519,7 @@ int main(int argc, char** argv) {
 
     // one read per file, shared by every consumer
     const auto load = [&](const std::string& path, singz::AnalysisStem& into) {
-      singz::MonoWav w = singz::readWavMono(path);
+      singz::MonoWav w = singz::readWavMono(singz::nativeFilePathUtf8(path));
       if (!w.ok) {
         std::fprintf(stderr, "could not read %s: %s\n", path.c_str(), w.error.c_str());
         std::exit(1);
@@ -1555,7 +1573,7 @@ int main(int argc, char** argv) {
       singz::MlGrid ml;
       bool haveMl = false;
       if (!mlPath.empty()) {
-        std::FILE* f = std::fopen(mlPath.c_str(), "rb");
+        std::FILE* f = singz::openNativeFile(mlPath.c_str(), "rb");
         if (f) {
           std::string text;
           char chunk[65536];
@@ -1624,7 +1642,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "mlmix: %s\n", err.c_str());
       return 1;
     }
-    FILE* f = std::fopen(argv[2], "wb");
+    FILE* f = singz::openNativeFile(argv[2], "wb");
     if (!f) {
       std::fprintf(stderr, "mlmix: cannot write %s\n", argv[2]);
       return 1;
@@ -1642,7 +1660,7 @@ int main(int argc, char** argv) {
   if (cmd == "melody") {
     std::vector<float> mono;
     if (!wav.empty()) {
-      singz::MonoWav w = singz::readWavMono(wav);
+      singz::MonoWav w = singz::readWavMono(singz::nativeFilePathUtf8(wav));
       if (!w.ok) {
         std::fprintf(stderr, "could not read %s: %s\n", wav.c_str(), w.error.c_str());
         return 1;
@@ -1691,7 +1709,7 @@ int main(int argc, char** argv) {
         return 2;
       }
       const std::string path = argv[++i];
-      singz::MonoWav w = singz::readWavMono(path);
+      singz::MonoWav w = singz::readWavMono(singz::nativeFilePathUtf8(path));
       if (!w.ok) {
         std::fprintf(stderr, "could not read %s: %s\n", path.c_str(), w.error.c_str());
         return 1;
@@ -1732,7 +1750,7 @@ int main(int argc, char** argv) {
      * the one property a %.17g hop through Foundation would NOT give us.
      */
     const auto readMlFile = [](const std::string& path, singz::MlGrid& g) -> std::string {
-      std::FILE* f = std::fopen(path.c_str(), "rb");
+      std::FILE* f = singz::openNativeFile(path.c_str(), "rb");
       if (!f) return "cannot open " + path;
       std::string text;
       char chunk[65536];
@@ -1821,7 +1839,7 @@ int main(int argc, char** argv) {
         return 2;
       }
       const std::string path = argv[++i];
-      singz::MonoWav w = singz::readWavMono(path);
+      singz::MonoWav w = singz::readWavMono(singz::nativeFilePathUtf8(path));
       if (!w.ok) {
         std::fprintf(stderr, "could not read %s: %s\n", path.c_str(), w.error.c_str());
         return 1;
@@ -2127,7 +2145,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "courts needs --wav\n");
       return 2;
     }
-    singz::MonoWav w = singz::readWavMono(path);
+    singz::MonoWav w = singz::readWavMono(singz::nativeFilePathUtf8(path));
     if (!w.ok) {
       std::fprintf(stderr, "could not read %s: %s\n", path.c_str(), w.error.c_str());
       return 1;
@@ -2188,7 +2206,7 @@ int main(int argc, char** argv) {
       singz::CourtSources src;
       src.harm = &harm;
       if (!bassPath.empty()) {
-        singz::MonoWav bw = singz::readWavMono(bassPath);
+        singz::MonoWav bw = singz::readWavMono(singz::nativeFilePathUtf8(bassPath));
         if (!bw.ok) {
           std::fprintf(stderr, "could not read %s: %s\n", bassPath.c_str(), bw.error.c_str());
           return 1;
@@ -2198,7 +2216,7 @@ int main(int argc, char** argv) {
         src.bass = &bassStem;
       }
       if (!vocalsPath.empty()) {
-        singz::MonoWav vw = singz::readWavMono(vocalsPath);
+        singz::MonoWav vw = singz::readWavMono(singz::nativeFilePathUtf8(vocalsPath));
         if (!vw.ok) {
           std::fprintf(stderr, "could not read %s: %s\n", vocalsPath.c_str(), vw.error.c_str());
           return 1;
@@ -2321,7 +2339,7 @@ int main(int argc, char** argv) {
     int nFrames = 0;
     const std::vector<float> frames = singz::frameSignal(signal, nFrames);
     if (!framesOut.empty()) {
-      FILE* fo = std::fopen(framesOut.c_str(), "wb");
+      FILE* fo = singz::openNativeFile(framesOut.c_str(), "wb");
       if (!fo) {
         std::fprintf(stderr, "mlgrid: could not write %s\n", framesOut.c_str());
         return 1;
@@ -2377,7 +2395,7 @@ int main(int argc, char** argv) {
       for (int which = 0; which < 2; which++) {
         const std::vector<float>& v = which == 0 ? beatLogits : downLogits;
         const std::string p = logitsOut + (which == 0 ? "-beat.f32" : "-down.f32");
-        FILE* fo = std::fopen(p.c_str(), "wb");
+        FILE* fo = singz::openNativeFile(p.c_str(), "wb");
         if (!fo) {
           std::fprintf(stderr, "mlgrid: could not write %s\n", p.c_str());
           return 1;
@@ -2458,7 +2476,7 @@ int main(int argc, char** argv) {
     }
     singz::AnalysisStem harmStem;
     if (!synthetic) {
-      singz::MonoWav hw = singz::readWavMono(harmPath);
+      singz::MonoWav hw = singz::readWavMono(singz::nativeFilePathUtf8(harmPath));
       if (!hw.ok) {
         std::fprintf(stderr, "could not read %s: %s\n", harmPath.c_str(), hw.error.c_str());
         return 1;
@@ -2536,7 +2554,7 @@ int main(int argc, char** argv) {
     singz::CourtSources src;
     src.harm = &harm;
     if (!bassPath.empty() && !synthetic) {
-      singz::MonoWav bw = singz::readWavMono(bassPath);
+      singz::MonoWav bw = singz::readWavMono(singz::nativeFilePathUtf8(bassPath));
       if (!bw.ok) {
         std::fprintf(stderr, "could not read %s: %s\n", bassPath.c_str(), bw.error.c_str());
         return 1;
@@ -2546,7 +2564,7 @@ int main(int argc, char** argv) {
       src.bass = &bassStem;
     }
     if (!vocalsPath.empty() && !synthetic) {
-      singz::MonoWav vw = singz::readWavMono(vocalsPath);
+      singz::MonoWav vw = singz::readWavMono(singz::nativeFilePathUtf8(vocalsPath));
       if (!vw.ok) {
         std::fprintf(stderr, "could not read %s: %s\n", vocalsPath.c_str(), vw.error.c_str());
         return 1;
@@ -2618,4 +2636,7 @@ int main(int argc, char** argv) {
 
   std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
   return 2;
+ } catch(const singz::FilePathError &e) {
+    std::fprintf(stderr,"%s: %s\n",e.code()==singz::FilePathFailure::TooLong?"path-too-long":"invalid-path",e.what());return 2;
+  }
 }

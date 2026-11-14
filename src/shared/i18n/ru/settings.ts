@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "Разные размеры буфера",
+  "settings.buffer.label": "Размер буфера",
+  "settings.buffer.option": "{frames} сэмплов · {ms} мс",
+  "settings.buffer.savedUnavailable": "{frames} сэмплов (сохранено, недоступно)",
+  "settings.buffer.hint": "Меньший буфер снижает задержку и увеличивает нагрузку на процессор. Показано время одного буфера, а не полная задержка звука.",
+  "settings.buffer.pending": "Сохранено. Применится после остановки воспроизведения, мониторинга, записи и прослушивания микрофона.",
+  "settings.buffer.outputStatus": "Выход: запрошено {requested}, получено {actual} сэмплов",
+  "settings.buffer.inputStatus": "Вход: запрошено {requested}, получено {actual} сэмплов",
+  "settings.buffer.unsupported": "Размер буфера можно менять при использовании CoreAudio в macOS.",
+  "settings.buffer.failed": "Не удалось применить размер буфера: {error}",
+
   'settings.route.title': 'Аудиомаршрут',
   'settings.route.retryNextStart': 'Сохранённое устройство будет проверено при следующем запуске SingZ.',
   'settings.route.inventoryUnavailable': 'Не удалось получить список аудиоустройств.',

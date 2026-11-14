@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "缓冲区大小不同",
+  "settings.buffer.label": "缓冲区大小",
+  "settings.buffer.option": "{frames} 帧 · {ms} 毫秒",
+  "settings.buffer.savedUnavailable": "{frames} 帧（已保存，不可用）",
+  "settings.buffer.hint": "较小的缓冲区可降低延迟，但会增加 CPU 负载。此处显示单个缓冲区的时长，而非总声音延迟。",
+  "settings.buffer.pending": "已保存。将在播放、监听、录音及麦克风预览停止后应用。",
+  "settings.buffer.outputStatus": "输出：请求 {requested} 帧，实际 {actual} 帧",
+  "settings.buffer.inputStatus": "输入：请求 {requested} 帧，实际 {actual} 帧",
+  "settings.buffer.unsupported": "仅在 macOS 的 CoreAudio 中可设置缓冲区大小。",
+  "settings.buffer.failed": "无法应用缓冲区大小：{error}",
+
   'settings.route.title': '音频路由',
   'settings.route.retryNextStart': '下次启动 SingZ 时将重试已保存的设备。',
   'settings.route.inventoryUnavailable': '无法获取音频设备列表。',

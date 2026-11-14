@@ -67,8 +67,11 @@ describe('Windows conform paths (portable normalisation)', () => {
   })
   it('preserves POSIX and rejects unsupported devices and real length limits with a typed code', () => {
     expect(conformFilePath('/tmp/a.wav', 'darwin')).toBe('/tmp/a.wav')
+    const unicode = 'C:\\' + ('歌'.repeat(200) + '\\').repeat(100) + 'take.wav'
+    expect(Buffer.byteLength(unicode)).toBeGreaterThan(32768)
+    expect(conformFilePath(unicode, 'win32', 'C:\\').length).toBeLessThan(32767)
     expect(() => conformFilePath('\\\\.\\PhysicalDrive0', 'win32', 'C:\\')).toThrow('device')
-    for (const input of ['C:\\' + 'p'.repeat(256), 'C:\\' + ('p'.repeat(200) + '\\').repeat(164), 'C:\\' + ('é'.repeat(200) + '\\').repeat(100)]) {
+    for (const input of ['C:\\' + 'p'.repeat(256), 'C:\\' + ('p'.repeat(200) + '\\').repeat(164)]) {
       expect(() => conformFilePath(input, 'win32', 'C:\\')).toThrowError(expect.objectContaining({ code: 'path-too-long' }))
     }
   })

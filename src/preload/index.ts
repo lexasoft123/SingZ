@@ -246,6 +246,7 @@ const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
   },
 
   audioHostDevices: (provider) => ipcRenderer.invoke('audio-host:devices', provider),
+  audioBufferSettings: (change) => ipcRenderer.invoke('audio-host:buffer-settings', change),
 
   desktopPlaybackProviders: () => ipcRenderer.invoke('audio-host:playback-providers'),
   desktopPlaybackCapability: () => ipcRenderer.invoke('audio-host:playback-capability'),

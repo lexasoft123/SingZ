@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "Saiz penimbal berbeza",
+  "settings.buffer.label": "Saiz penimbal",
+  "settings.buffer.option": "{frames} bingkai · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} bingkai (disimpan, tidak tersedia)",
+  "settings.buffer.hint": "Penimbal lebih kecil mengurangkan kependaman dan menggunakan lebih banyak CPU. Masa yang ditunjukkan ialah untuk satu penimbal, bukan jumlah kelewatan bunyi.",
+  "settings.buffer.pending": "Disimpan. Akan digunakan selepas main balik, pemantauan, rakaman dan pratonton mikrofon berhenti.",
+  "settings.buffer.outputStatus": "Output: diminta {requested}, sebenar {actual} bingkai",
+  "settings.buffer.inputStatus": "Input: diminta {requested}, sebenar {actual} bingkai",
+  "settings.buffer.unsupported": "Saiz penimbal boleh dilaraskan dengan CoreAudio pada macOS.",
+  "settings.buffer.failed": "Tidak dapat menggunakan saiz penimbal: {error}",
+
   'settings.route.title': 'Laluan audio',
   'settings.route.retryNextStart': 'Peranti tersimpan akan dicuba semula apabila SingZ dimulakan lagi.',
   'settings.route.inventoryUnavailable': 'Senarai peranti audio tidak tersedia.',

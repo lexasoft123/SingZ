@@ -43,6 +43,7 @@ struct VoiceMonitorReader {
 struct VoiceMonitorSourceStats {
   uint64_t publishedBlocks{}, publishedFrames{}, droppedBlocks{}, droppedFrames{}, missingFrames{};
   uint64_t estimatedTimestampBlocks{}, unknownTimestampBlocks{};
+  uint64_t phaseCorrections{}, correctedSamples{}, rejectedIntervals{}, discontinuities{};
 };
 
 class VoiceMonitorSource {

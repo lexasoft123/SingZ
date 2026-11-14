@@ -1,6 +1,6 @@
 import { access, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   deleteProject,
@@ -56,6 +56,17 @@ async function gone(path: string): Promise<boolean> {
 }
 
 describe('projects outside the library root stay put', () => {
+  it.skipIf(process.platform!=='win32')('keeps namespaced custom paths as the same project/save/sync identity', async () => {
+    const root=await makeLibrary(),dir=await makeProject(root,'Namespaced identity'),file=join(dir,'stems','custom-kept.flac')
+    await writeFile(file,'custom-audio')
+    const result=await saveProject(join(dir,'song.mp3'),'Namespaced identity',{transpose:0,tracks:{},custom:[{id:'stable-id',label:'Custom',file:win32.toNamespacedPath(file)}]})
+    expect(result.ok).toBe(true)
+    if(!result.ok)return
+    expect(result.custom?.[0].file).toBe(file)
+    expect((await readdir(join(dir,'stems'))).filter(name=>name.startsWith('custom-'))).toEqual(['custom-kept.flac'])
+    const meta=JSON.parse(await readFile(join(dir,'project.json'),'utf8'));expect(meta.settings.custom[0].file).toBe('stems/custom-kept.flac')
+    expect(dirtyDirs().some(path=>path.startsWith('\\\\?\\'))).toBe(false)
+  })
   it('preserves a custom lane filename across saves when its ID differs', async () => {
     const root = await makeLibrary()
     const dir = await makeProject(root, 'Custom identity')

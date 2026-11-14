@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, type Me
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import { canonicalFilePath, nativeFilePath, FilePathError } from './file-path'
 import { pathToFileURL } from 'node:url'
 import type {
   CaptureStartConfig,
@@ -77,7 +78,9 @@ import { BoxCecService, boxCecEnabled } from './box/cec'
 import { boxMicrophones, boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
 import { checkCaptureAddonProvenance, failedPlayback, playbackCodecSupportsPath } from './capture'
 import { enforceAddonStartupGate } from './addon-startup-gate'
-import { createRemoteCaptureOwner } from './audio-process'
+import { createRemoteCaptureOwner, remoteCaptureBinding } from './audio-process'
+import { AudioBufferSettingsController } from './audio-buffer-settings'
+import { audioBufferPreferences, type AudioBufferStatus } from '../shared/audio-buffer'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
 import { registerVoiceTakes } from './voice-takes-ipc'
 import { registerVoiceMonitor } from './voice-monitor-ipc'
@@ -789,6 +792,26 @@ function registerIpc(): void {
         ? provider
         : undefined
     ))
+  const audioBuffers = new AudioBufferSettingsController({
+    platform: process.env.SINGZ_SURFACE === 'box' ? 'box' : process.platform,
+    read: () => readSettings().audioBufferFrames,
+    save: audioBufferFrames => writeSettings({ audioBufferFrames }),
+    inventory: () => captureOwner.hostDevices('coreaudio'),
+    native: async preferences => {
+      const method = remoteCaptureBinding().audioBufferSettings
+      if (!method) throw new Error('Audio buffer settings are unavailable in this build')
+      return preferences === undefined ? await method() : await method(preferences)
+    }
+  })
+  ipcMain.handle('audio-host:buffer-settings', async (_event, change: unknown): Promise<AudioBufferStatus> => {
+    try { return await audioBuffers.request(change) } catch (e) {
+      return {
+        ok: false, pending: false, error: e instanceof Error ? e.message : String(e),
+        preferences: audioBufferPreferences(readSettings().audioBufferFrames),
+        outputUid: '', requestedFrames: 0, obtainedFrames: 0, inputUid: '', inputRequestedFrames: 0, inputObtainedFrames: 0
+      }
+    }
+  })
   ipcMain.handle('audio-host:microphone-mix-configure', async (event, config: unknown) => {
     bindNativeAudioCleanup(event.sender)
     const result = await captureOwner.configureMicrophoneMix(event.sender.id, config)
@@ -832,7 +855,10 @@ function registerIpc(): void {
           latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
         }
       }
-      const authorized = lanes.map((lane) => ({ ...lane, path: resolve(lane.path) }))
+      try { for (const lane of lanes) nativeFilePath(lane.path) } catch (error) {
+        return failedPlayback(error instanceof Error ? error.message : String(error), error instanceof FilePathError && error.code === 'path-too-long' ? 'path-too-long' : 'invalid-configuration')
+      }
+      const authorized = lanes.map((lane) => ({ ...lane, path: canonicalFilePath(lane.path) }))
       const callerIsCurrent = bindNativeAudioCleanup(event.sender)
       const codecCapability = await captureOwner.playbackCapability()
       if (!callerIsCurrent())
@@ -952,14 +978,14 @@ function registerIpc(): void {
           !lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
           lane.id.length < 1 || Buffer.byteLength(lane.id, 'utf8') > 96 || lane.id.includes('\0') ||
           typeof lane.path !== 'string' || lane.path.length < 1 ||
-          Buffer.byteLength(lane.path, 'utf8') > 32768 || lane.path.includes('\0'))
+          Buffer.byteLength(lane.path, 'utf8') > 131068 || lane.path.includes('\0'))
       ) {
         return refused('a measure request failed schema validation')
       }
       if (new Set(request.lanes.map(lane => lane.id)).size !== request.lanes.length) {
         return refused('a measure request has duplicate lane ids')
       }
-      const lanes = request.lanes.map((lane) => ({ id: lane.id, path: resolve(lane.path) }))
+      const lanes = request.lanes.map((lane) => ({ id: lane.id, path: canonicalFilePath(lane.path) }))
       const codecCapability = await captureOwner.playbackCapability()
       const unauthorized = lanes.find((lane) =>
         !isAllowed(lane.path) || !codecCapability.available ||

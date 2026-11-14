@@ -1309,3 +1309,62 @@ and take timestamps are unchanged; transport frame counts never substitute for
 an authoritative hardware position. Source statistics are cumulative, and
 control must join capture before `prepare`/`stop`; output readers may continue
 reading counted silence while capture is stopped.
+
+### Desktop stem paths and finite-burst seam evidence
+
+Stem paths remain ordinary drive/UNC paths in project identity, save metadata,
+custom-track comparisons, media authorization and the sync dirty ledger. Main
+normalises both ordinary and namespaced representations to the same key. Only
+Node/native IO gets the Windows extended namespace. Measurement and prepare use
+the same wide descriptor opener; streaming and decoded lanes subsequently own
+that descriptor, so neither decoder nor feeder reopens a narrow filename.
+The analyzer likewise converts Windows command-line arguments to UTF-8 and
+normalises WAV/FLAC/f32/control paths at its file boundary. No long-path registry
+opt-in is needed. A 300-character-directory fixture exercises measurement and
+decode; a forced legacy MAX_PATH opener is rejected by its negative control.
+`path-too-long` denotes the 32767 UTF-16-unit extended limit, while an invalid
+component is `invalid-path`; a 32-KiB UTF-8 byte count is not a path limit.
+
+The ADR 0016 48-kHz fixture has 20-ms, 1-kHz tapered bursts at take 1, 3.9,
+4.1 and 7 seconds around a 1x-to-0.5x seam at 4 seconds. With the pinned cheaper
+Signalsmith preset, measured energy-centroid errors are -0.0106, -0.0106,
++2.3454 and +0.3541 ms. Impulses at the same centres have zero peak displacement
+and at most 0.0049 ms energy-centroid error. Thus a common latency-offset change
+would move already-aligned impulses; the finite tone-envelope response differs
+from the source clock. The portable fixture and UI driver use a 3-ms centroid
+bound for these bursts, still rejecting a 5-ms displaced expectation. This is a
+fixture-specific envelope bound, not an arbitrary-audio timing guarantee. The
+1-ms impulse-alignment requirement remains. PCM output and take-conform-3 cache
+semantics are unchanged.
+
+
+### Desktop hardware buffer preference
+
+Settings > Audio has one CoreAudio buffer selector, initially 128 frames. Its
+16–4096 power-of-two choices intersect the connected output and input ranges
+(and their fundamental frame alignment). Labels show one buffer at the current
+device rates; they do not estimate total monitoring latency. Preferences live in
+settings.json by native device UID and survive disconnect/reconnect. Unavailable
+saved sizes remain visible; unknown ranges keep device negotiation unchanged.
+Windows/WASAPI and Linux/ALSA do not expose this CoreAudio-only control.
+
+The audio utility process publishes one opening policy to SharedAudioService.
+The silent base host, song host, preview/analysis input, shared monitor input,
+and take capture/playback all use that policy through zCore's buffer ledger.
+An active capture retains its opening policy when a monitor or take joins.
+No callback allocates or reads preferences. Input devices negotiate when used;
+the idle output reopens immediately when a new preference can be published.
+
+A change during playback (including a prepared/paused song), monitoring,
+recording, microphone capture/preview, or queued cue/take playback is saved but
+deferred. Settings shows an applies-after-stop notice until every owning client
+releases its route. A 250-ms control-plane pump also runs after Settings closes,
+releases idle prepared capture, then reopens the idle output with the saved
+request. Thus a preview cannot pin a larger period for the next monitor/take.
+The setting reports requested and obtained input/output frames separately;
+rounding is visible and application failures are shown.
+
+Portable tests exercise the request through a fake host and the real zCore
+ledger, shared monitor joins and deferred publication. Real-device qualification
+still needs obtained size at 32/64/128 frames and measured monitor latency;
+portable tests do not qualify driver behavior.

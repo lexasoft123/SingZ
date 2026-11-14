@@ -1,3 +1,4 @@
+import { canonicalFilePath } from './file-path'
 import { app } from 'electron'
 import { driveProjectsRoot, isDriveProject } from './drive-storage'
 import { sanitizeSongVolume } from '../shared/song-volume'
@@ -63,8 +64,8 @@ function legacyProjectsRoot(): string {
  */
 export function projectsRoot(): string {
   const custom = readSettings().projectsRoot
-  if (custom && existsSync(custom)) return custom
-  return defaultProjectsRoot()
+  if (custom && existsSync(custom)) return canonicalFilePath(custom)
+  return canonicalFilePath(defaultProjectsRoot())
 }
 
 /**
@@ -73,8 +74,9 @@ export function projectsRoot(): string {
  * reorganise: they save and rename where they are until the user imports them.
  */
 export function inLibrary(dir: string): boolean {
-  const root = projectsRoot()
-  return dir === root || dir.startsWith(root + sep)
+  const root = canonicalFilePath(projectsRoot())
+  dir = canonicalFilePath(dir)
+  return dir === root || dir.startsWith(root.endsWith(sep) ? root : root + sep)
 }
 
 /** Cloud-synced folders present on this machine, with product-local proposals. */
@@ -200,6 +202,7 @@ async function exists(path: string): Promise<boolean> {
 const projectWriters = new Map<string, Promise<unknown>>()
 
 function withProjectLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  dir = canonicalFilePath(dir)
   const queue = projectWriters.get(dir) ?? Promise.resolve()
   // the tail runs whether the one before it resolved or threw — a failed save
   // must not wedge every later write to that folder
@@ -385,7 +388,7 @@ async function resolveCustom(
 ): Promise<CustomTrack[] | undefined> {
   if (!Array.isArray(list) || list.length === 0) return undefined
   const out: CustomTrack[] = []
-  const root = resolve(dir)
+  const root = canonicalFilePath(dir)
   for (const t of list) {
     if (!t || typeof t.file !== 'string' || typeof t.id !== 'string') continue
     const file = customTrackPath(t.file)
@@ -421,14 +424,14 @@ async function storeCustomTracks(
   for (let i = 0; i < entries.length; i++) {
     const t = entries[i]
     if (!t || typeof t.file !== 'string') continue
-    const src = resolve(t.file)
+    const src = canonicalFilePath(t.file)
     if (!(await exists(src))) {
       log('app', `custom track "${t.label ?? t.id}": ${src} is gone — not saved`, 'warn')
       continue
     }
     // An existing project lane may have a filename unrelated to its mixer ID.
     // Keep it stable: a save can overlap a native prepare still using this path.
-    const existingName = dirname(src) === resolve(stemsDir) && basename(src).startsWith(CUSTOM_PREFIX)
+    const existingName = dirname(src) === canonicalFilePath(stemsDir) && basename(src).startsWith(CUSTOM_PREFIX)
       ? basename(src) : undefined
     let name = existingName ?? `${customBase(t.id, i)}${extname(src).toLowerCase()}`
     for (let n = 2; used.has(name); n++) {
@@ -892,6 +895,7 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
 
 /** If the song sits inside a project folder, describe what that project has. */
 export async function detectProject(songPath: string): Promise<ProjectInfo | null> {
+  songPath = canonicalFilePath(songPath)
   const dir = dirname(songPath)
   const metaPath = join(dir, 'project.json')
   if (!(await exists(metaPath))) return null
@@ -986,6 +990,7 @@ export async function saveProject(
   // runs first — and everything this save decides (does the song still exist,
   // is it already in a project) is decided INSIDE the lock, where a rename
   // cannot have moved the answer since.
+  songPath = canonicalFilePath(songPath)
   const own = dirname(songPath)
   try {
     return await withProjectLock(own, async () => {
@@ -1140,6 +1145,7 @@ export async function renameProject(
   | { ok: false; error: string }
 > {
   try {
+    songPath = canonicalFilePath(songPath)
     const oldDir = dirname(songPath)
     // waits for a save of this project to finish rather than moving the folder
     // out from under it — see withProjectLock
@@ -1200,7 +1206,7 @@ export async function deleteProject(
   dir: string
 ): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
   try {
-    const target = resolve(dir)
+    const target = canonicalFilePath(dir)
     if ((!inLibrary(target) && !isDriveProject(target)) || target === projectsRoot()) {
       return { ok: false, error: t('main.error.folderNotInLibrary') }
     }

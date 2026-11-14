@@ -15,6 +15,7 @@ import {
   type AudioDevices
 } from '../audio/devices'
 import { detectedDesktopPlatform } from '../audio/native-playback-preference'
+import { AudioBufferSettings } from './AudioBufferSettings'
 import { micOwnership } from '../audio/mic-ownership'
 import { MicrophonePreview, micPreviewErrorCopy, micPreviewErrorKind } from '../audio/mic-preview'
 import {
@@ -944,6 +945,8 @@ export default function SettingsModal({
           </select>
           {routeStatus && <p className="settings-hint" role="status">{routeStatus}</p>}
           {hostInventory && !hostInventory.ok && <p className="settings-hint warn" role="status">{t('settings.route.inventoryUnavailable')}</p>}
+          {detectedDesktopPlatform() === 'darwin' && <AudioBufferSettings inventory={hostInventory}
+            outputUid={audio.nativeOutputUid} inputUid={audio.nativeInputUid} />}
           <OutputRouteRecovery
             unconfirmed={outputRouteUnconfirmed}
             busy={routeApplicationBusy}

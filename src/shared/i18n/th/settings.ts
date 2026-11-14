@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "ขนาดบัฟเฟอร์แตกต่างกัน",
+  "settings.buffer.label": "ขนาดบัฟเฟอร์",
+  "settings.buffer.option": "{frames} เฟรม · {ms} มิลลิวินาที",
+  "settings.buffer.savedUnavailable": "{frames} เฟรม (บันทึกแล้ว ไม่พร้อมใช้งาน)",
+  "settings.buffer.hint": "บัฟเฟอร์ที่เล็กลงช่วยลดความหน่วง แต่ใช้ CPU มากขึ้น เวลาที่แสดงเป็นระยะเวลาของบัฟเฟอร์เดียว ไม่ใช่ความหน่วงเสียงทั้งหมด",
+  "settings.buffer.pending": "บันทึกแล้ว จะใช้หลังจากหยุดเล่น ฟังเสียงมอนิเตอร์ บันทึกเสียง และพรีวิวไมโครโฟน",
+  "settings.buffer.outputStatus": "เอาต์พุต: ขอ {requested} เฟรม ได้จริง {actual} เฟรม",
+  "settings.buffer.inputStatus": "อินพุต: ขอ {requested} เฟรม ได้จริง {actual} เฟรม",
+  "settings.buffer.unsupported": "ปรับขนาดบัฟเฟอร์ได้เมื่อใช้ CoreAudio บน macOS",
+  "settings.buffer.failed": "ใช้ขนาดบัฟเฟอร์ไม่ได้: {error}",
+
   'settings.route.title': 'เส้นทางเสียง',
   'settings.route.retryNextStart': 'จะลองใช้อุปกรณ์ที่บันทึกไว้อีกครั้งเมื่อเปิด SingZ ครั้งถัดไป',
   'settings.route.inventoryUnavailable': 'ไม่สามารถแสดงรายการอุปกรณ์เสียงได้',

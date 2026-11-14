@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "Kích thước bộ đệm khác nhau",
+  "settings.buffer.label": "Kích thước bộ đệm",
+  "settings.buffer.option": "{frames} khung · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} khung (đã lưu, không khả dụng)",
+  "settings.buffer.hint": "Bộ đệm nhỏ hơn giúp giảm độ trễ nhưng dùng nhiều CPU hơn. Thời gian hiển thị là của một bộ đệm, không phải tổng độ trễ âm thanh.",
+  "settings.buffer.pending": "Đã lưu. Sẽ áp dụng sau khi dừng phát, nghe kiểm âm, thu âm và nghe thử micrô.",
+  "settings.buffer.outputStatus": "Đầu ra: yêu cầu {requested}, thực tế {actual} khung",
+  "settings.buffer.inputStatus": "Đầu vào: yêu cầu {requested}, thực tế {actual} khung",
+  "settings.buffer.unsupported": "Có thể chỉnh kích thước bộ đệm bằng CoreAudio trên macOS.",
+  "settings.buffer.failed": "Không thể áp dụng kích thước bộ đệm: {error}",
+
   'settings.route.title': 'Đường âm thanh',
   'settings.route.retryNextStart': 'Thiết bị đã lưu sẽ được thử lại khi mở SingZ lần sau.',
   'settings.route.inventoryUnavailable': 'Không thể lấy danh sách thiết bị âm thanh.',

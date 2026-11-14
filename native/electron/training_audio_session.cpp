@@ -212,6 +212,7 @@ napi_value guarded(napi_env env,napi_callback_info info) noexcept {
 }
 
 }
+bool trainingAudioActive() { return mixer.active(); }
 void defineTrainingAudioExports(napi_env env,napi_value exports,NativeAudioOwnership* owner,DesktopPlaybackBackendFactory backendFactory) {
   ownership = owner;
   factory = backendFactory;

@@ -289,6 +289,8 @@ napi_value status(napi_env env,napi_callback_info) {
   MONITOR_DIAG(publishedBlocks);MONITOR_DIAG(publishedFrames);MONITOR_DIAG(droppedBlocks);
   MONITOR_DIAG(droppedFrames);MONITOR_DIAG(missingFrames);MONITOR_DIAG(estimatedTimestampBlocks);
   MONITOR_DIAG(unknownTimestampBlocks);
+  MONITOR_DIAG(phaseCorrections);MONITOR_DIAG(correctedSamples);MONITOR_DIAG(rejectedIntervals);
+  MONITOR_DIAG(discontinuities);
 #undef MONITOR_DIAG
   napi_set_named_property(env,o,"monitorHistoryDiagnostics",historyStats);
   number(env,o,"songProcessBufferFrames",route.song.latency.bufferFrames);

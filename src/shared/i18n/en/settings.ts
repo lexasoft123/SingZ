@@ -1,5 +1,16 @@
 /* English strings for the `settings` namespace — see ../index.ts. */
 export const settings = {
+  "settings.buffer.mixed": "Mixed buffer sizes",
+  "settings.buffer.label": "Buffer size",
+  "settings.buffer.option": "{frames} frames · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} frames (saved, unavailable)",
+  "settings.buffer.hint": "Smaller buffers reduce latency and use more CPU. The time shown is one buffer, not the total sound delay.",
+  "settings.buffer.pending": "Saved. Applies after playback, monitoring, recording and microphone preview stop.",
+  "settings.buffer.outputStatus": "Output: requested {requested}, obtained {actual} frames",
+  "settings.buffer.inputStatus": "Input: requested {requested}, obtained {actual} frames",
+  "settings.buffer.unsupported": "Buffer size control is available with CoreAudio on macOS.",
+  "settings.buffer.failed": "Could not apply buffer size: {error}",
+
   'settings.route.title': 'Audio route',
   'settings.route.retryNextStart': 'The saved device will be tried again next time SingZ starts.',
   'settings.route.inventoryUnavailable': 'Audio device inventory is unavailable.',

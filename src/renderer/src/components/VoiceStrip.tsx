@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MultitrackEngine } from '../audio/engine'
 import type { TimeView } from '../model'
-import { meterFraction, monitorDbToFader, primaryState, recordBlock, songSpan, type VoiceController, type VoiceInputOption, type VoiceModel } from '../audio/voice-take'
+import { allTakes, meterFraction, monitorDbToFader, primaryState, recordBlock, songSpan, type VoiceController, type VoiceInputOption, type VoiceModel, type VoiceTake } from '../audio/voice-take'
 import { t, type Key } from '../i18n'
-import { blockText, clock, dbText, laneCanRetry, isKnownMonitorWarning, laneText, monitorWarningText, pitchFollowShift, REASON_KEY, sgn, takeIsSilent, voiceIsShifted } from './voice-format'
+import { blockText, clock, dbText, laneCanRetry, isKnownMonitorWarning, laneText, monitorWarningText, pitchFollowShift, REASON_KEY, sgn, takeIsSilent, takeTags, voiceIsShifted } from './voice-format'
 import Tooltip from './Tooltip'
 import VoiceTrackSettings from './VoiceTrackSettings'
 import { useVoiceModel } from './voice-host'
@@ -56,22 +56,6 @@ const ICON = {
     </>
   ),
   reset: <path {...STROKE} d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5M3 2.8v2.4h2.4" />,
-  check: <path {...STROKE} d="M3 8.5l3.2 3.2L13 4.5" />,
-  play: <path d="M4.5 3v10l8-5z" fill="currentColor" />,
-  playSong: (
-    <>
-      <path d="M2.5 3.5v9l6-4.5z" fill="currentColor" />
-      <rect x="10.2" y="6.5" width="1.6" height="5" rx=".6" fill="currentColor" />
-      <rect x="13" y="4" width="1.6" height="8" rx=".6" fill="currentColor" />
-    </>
-  ),
-  stop: <rect x="4" y="4" width="8" height="8" rx="1.2" fill="currentColor" />,
-  add: (
-    <>
-      <rect x="2.5" y="2.5" width="11" height="11" rx="2.4" {...STROKE} />
-      <path {...STROKE} d="M8 5.2v5.6M5.2 8h5.6" />
-    </>
-  ),
   trash: <path {...STROKE} d="M3 4.5h10M6.2 4.5V3h3.6v1.5M4.6 4.5l.6 8.5h5.6l.6-8.5" />
 }
 
@@ -184,24 +168,17 @@ function statusLine(
   }
   if (m.monitor.on && m.monitor.warnings.includes('route-feedback-risk')) return { cls: 'warn', text: monitorWarningText('route-feedback-risk') }
   if (m.monitorNote === 'other-input') return { cls: 'warn', text: t('player.voice.monitorOtherInput') }
-  if (m.recording) return { cls: '', text: t('player.voice.msgRecording') }
-  if (m.listen === 'take') return { cls: '', text: t('player.voice.msgListenAlone') }
-  if (m.listen === 'with-song' && m.take) {
-    return {
-      cls: '',
-      text: t('player.voice.msgListenSong', { tempo: Math.round(m.take.tempo * 100), transpose: sgn(m.take.transpose) })
-    }
+  // Why a recording ended by itself at a transport boundary: short, and only until the next take.
+  if (state === 'take-review') {
+    if (m.stoppedBy === 'seek') return { cls: 'warn', text: t('player.voice.msgSeekStopped') }
+    if (m.stoppedBy === 'pause') return { cls: '', text: t('player.voice.msgPauseStopped') }
+    if (m.stoppedBy === 'song-end') return { cls: '', text: t('player.voice.msgSongEndStopped') }
   }
-  // A take stopped by a seek or a pause reads as that first, then as a review.
-  if (m.stoppedBy === 'seek' && state === 'take-review') return { cls: 'warn', text: t('player.voice.msgSeekStopped') }
-  if (state === 'take-review') return { cls: '', text: t('player.voice.msgReview') }
   if (m.monitor.on && m.monitor.warnings.length > 0) {
     const w = m.monitor.warnings[0]!
     return { cls: 'warn', text: isKnownMonitorWarning(w) ? t('player.voice.monitorWarning', { text: monitorWarningText(w) }) : monitorWarningText(w) }
   }
-  if (m.monitor.on && m.monitorHint) return { cls: '', text: t('player.voice.monitorHint') }
-  if (m.monitor.on) return { cls: '', text: t('player.voice.msgMonitoring') }
-  // Monitoring-unavailable is not drawn in the lane: the speaker's tooltip/aria description and the settings route line carry the reason.
+  // Everything else (recording, review, monitoring hint, why a take stopped) is a tooltip, not lane text.
   return null
 }
 
@@ -219,12 +196,10 @@ export default function VoiceStrip({
   const m = useVoiceModel(controller)
   const state = primaryState(m)
   const rec = m.recording
-  const listening = m.listen !== null
   const take = m.take
   const needSetup = m.perm === 'denied' || m.inputMissing
   const block = recordBlock(m)
   const status = statusLine(m, controller)
-  const keepRef = useRef<HTMLButtonElement>(null)
   const gearRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     controller.setStripMounted(true)
@@ -244,13 +219,7 @@ export default function VoiceStrip({
   }
   const duration = engine.duration || 0
 
-  // After a take finishes, put focus on Keep so the next step is one key away.
   const announceKey = m.announce.key
-  useEffect(() => {
-    if (announceKey !== 'announceReview') return
-    const a = document.activeElement
-    if (!a || a === document.body || a.closest('.voice-row') || a.classList.contains('vs-rec-t')) keepRef.current?.focus()
-  }, [announceKey, m.announce.seq])
 
   // Outside click and Esc deselect the clip (the stems' seek-on-click still happens); Esc first cancels a drag.
   const selected = m.takeSelected
@@ -277,24 +246,12 @@ export default function VoiceStrip({
     }
   }, [selected, controller])
 
-  const waveform = !rec && m.lane.status === 'ready' ? take?.conformedWaveform : undefined
-  const spanSec = take ? (rec ? m.elapsedSec * take.tempo : (waveform?.durationSec ?? take.durationSec * take.tempo)) : 0
   // The same time axis as the stems: the shared view (or the whole song), in song seconds.
   const viewS = view?.s ?? 0
   const viewE = view?.e ?? duration
   const viewSpan = viewE - viewS
-  const shownStart = drag ? drag.startSec : take ? (waveform?.offsetSec ?? take.startSec) : 0
-  const left = viewSpan > 0 && take ? ((shownStart - viewS) / viewSpan) * 100 : 0
-  const width = viewSpan > 0 ? Math.max(0.3, (spanSec / viewSpan) * 100) : 0
-  const clipVisible = take !== null && viewSpan > 0 && left < 100 && left + width > 0
-  // Only what differs from the song is named, with units: tempo in %, pitch in semitones.
-  const tagParts: string[] = []
-  if (take && Math.abs(take.tempo - 1) > 1e-4) tagParts.push(t('player.voice.tagTempo', { tempo: Math.round(take.tempo * 100) }))
-  if (take && take.transpose !== 0) tagParts.push(t('player.voice.tagPitch', { transpose: sgn(take.transpose) }))
-  if (take && voiceIsShifted(m)) tagParts.push(t('player.voice.voiceShifted'))
-  if (take?.changed) tagParts.push(t('player.voice.tagChanged'))
-  const tagText = tagParts.join(' · ')
-  const silent = take !== null && !rec && takeIsSilent(take.peaks)
+  const rows = allTakes(m)
+  const shifted = voiceIsShifted(m)
 
   const armed = m.armed || rec
   const faderMonitor = m.monitor.on
@@ -306,6 +263,7 @@ export default function VoiceStrip({
   const pitchHelp = pitch?.enabled === false ? t('player.voice.pitchFollowOffHelp') : t('player.voice.pitchFollowHelp')
   const pitchText = pitch?.enabled === false ? t('player.voice.pitchFollowOff') : t('player.voice.pitchFollowChip', { shift: sgn(shift) })
   const laneMessage = take && !rec ? laneText(m.lane) : ''
+  const laneBad = m.lane.status === 'error' || m.lane.status === 'omitted'
   const lat = m.monitor.latency
   const badgeTip = !lat ? '' : lat.delayed
     ? t('player.voice.monitorBadgeDelayedTip')
@@ -314,14 +272,100 @@ export default function VoiceStrip({
   const monitorUnavailable = !m.monitor.on && m.monitor.avail !== 'ok'
   const monitorLabel = m.monitor.on ? t('player.voice.monitorOn') : t('player.voice.monitorOff')
   const inputTip = m.inputs.find((i) => i.id === m.input) ? inputOptionText(m.inputs.find((i) => i.id === m.input)!) : t('player.voice.input')
-  const takeInfo = !take
-    ? ''
-    : rec
+  const monitorTip = monitorUnavailable ? monitorWhy : [monitorLabel, ...(m.monitor.on && m.monitorHint ? [t('player.voice.monitorHint')] : [])].join(' · ')
+
+  const takeInfo = (tk: VoiceTake, active: boolean): string =>
+    active && rec
       ? t('player.voice.recordingInfo', { time: clock(m.elapsedSec) })
-      : t(take.recovered ? 'player.voice.takeInfoRecovered' : take.partial ? 'player.voice.takeInfoPartial' : 'player.voice.takeInfo', {
-          n: take.n,
-          time: clock(take.durationSec)
-        })
+      : t(tk.recovered ? 'player.voice.takeInfoRecovered' : tk.partial ? 'player.voice.takeInfoPartial' : 'player.voice.takeInfo', { n: tk.n, time: clock(tk.durationSec) })
+
+  const renderClip = (tk: VoiceTake): React.JSX.Element | null => {
+    const active = tk.takeId === take?.takeId
+    const live = active && rec
+    const sel = active && selected
+    const waveform = active && !rec && m.lane.status === 'ready' ? tk.conformedWaveform : undefined
+    const spanSec = live ? m.elapsedSec * tk.tempo : (waveform?.durationSec ?? tk.durationSec * tk.tempo)
+    const shownStart = active && drag ? drag.startSec : (waveform?.offsetSec ?? tk.startSec)
+    const left = viewSpan > 0 ? ((shownStart - viewS) / viewSpan) * 100 : 0
+    const width = viewSpan > 0 ? Math.max(0.3, (spanSec / viewSpan) * 100) : 0
+    if (!(viewSpan > 0 && left < 100 && left + width > 0)) return null
+    const dragging = active && drag
+    const tagText = takeTags(tk, active && shifted)
+    const silent = !live && takeIsSilent(tk.peaks)
+    const peaks = waveform?.peaks ?? tk.peaks
+    const tip = live
+      ? t('player.voice.clipRecording')
+      : [takeInfo(tk, active), tagText, t('player.voice.clipHint')].filter(Boolean).join(' · ')
+    return (
+      <Tooltip key={tk.takeId} label={tip} className="contents">
+        <div
+          role="option"
+          aria-selected={sel}
+          tabIndex={0}
+          className={`vs-clip${live ? ' recording' : ''}${peaks?.length ? ' has-wave' : ''}${tk.partial ? ' partial' : ''}${active ? ' audible' : ''}${sel ? ' selected' : ''}${dragging ? ' dragging' : ''}${rec ? '' : ' selectable'}`}
+          style={{ left: `${left}%`, width: `${width}%` }}
+          aria-label={t('player.voice.clipLabel', { n: tk.n, time: clock(shownStart) })}
+          onPointerDown={(e) => {
+            if (rec || e.button !== 0) return
+            e.stopPropagation() // only the clip itself captures the click: empty lane still seeks
+            controller.selectTake(true, tk.takeId) // selecting a take makes it the audible one
+            if (!trackRef.current || viewSpan <= 0) return
+            e.currentTarget.setPointerCapture?.(e.pointerId)
+            const total = engine.duration || 0
+            dragRef.current = {
+              x0: e.clientX,
+              start0: tk.startSec,
+              pxPerSec: trackRef.current.clientWidth / viewSpan,
+              moved: false,
+              last: tk.startSec,
+              max: total > 0 ? Math.max(0, total - songSpan(tk)) : Number.POSITIVE_INFINITY
+            }
+          }}
+          onPointerMove={(e) => {
+            const d = dragRef.current
+            if (!d || d.pxPerSec <= 0 || !active) return
+            if (!d.moved && Math.abs(e.clientX - d.x0) < 3) return
+            d.moved = true
+            d.last = Math.min(d.max, Math.max(0, d.start0 + (e.clientX - d.x0) / d.pxPerSec)) // the latest position lives in the ref
+            setDrag({ startSec: d.last })
+          }}
+          onPointerUp={(e) => {
+            const d = dragRef.current
+            dragRef.current = null
+            e.currentTarget.releasePointerCapture?.(e.pointerId)
+            if (d?.moved && active) void controller.moveTake(d.last)
+            setDrag(null)
+          }}
+          onPointerCancel={cancelDrag}
+          onKeyDown={(e) => {
+            if (rec) return
+            if (e.code === 'Enter' || e.code === 'Space') {
+              e.preventDefault()
+              e.stopPropagation()
+              controller.selectTake(active ? !selected : true, tk.takeId)
+            } else if (sel && (e.code === 'Delete' || e.code === 'Backspace')) {
+              e.preventDefault()
+              e.stopPropagation()
+              void controller.deleteSelected()
+            } else if (sel && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+              e.preventDefault()
+              e.stopPropagation() // the app's arrow keys seek the song
+              void controller.moveTake(tk.startSec + (e.code === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1 : 0.1))
+            }
+          }}
+        >
+          <ClipWave peaks={peaks} />
+          {active && m.lane.status === 'conforming' && !rec && <span className="vs-preparing">{t('player.voice.preparingTake')}</span>}
+          {(dragging || silent) && (
+            <span className="vs-clip-tags">
+              {dragging && <span className="vs-clip-tag changed">{t('player.voice.positionAt', { time: clock(shownStart) })}</span>}
+              {silent && !dragging && <span className="vs-clip-tag silent">{t('player.voice.takeSilent')}</span>}
+            </span>
+          )}
+        </div>
+      </Tooltip>
+    )
+  }
 
   return (
     <section className="voice-row" data-phase={state} data-armed={m.armed} aria-label={t('player.voice.stripLabel')} role="group">
@@ -358,7 +402,7 @@ export default function VoiceStrip({
           <select
             id="voice-input"
             value={needSetup ? '' : (m.input ?? '')}
-            disabled={needSetup || rec || m.starting || listening || m.inputs.length === 0}
+            disabled={needSetup || rec || m.starting || m.inputs.length === 0}
             onChange={(e) => controller.selectInput(e.target.value)}
           >
             {needSetup || m.inputs.length === 0 ? (
@@ -396,7 +440,7 @@ export default function VoiceStrip({
               <SvgIcon>{ICON.rec}</SvgIcon>
             </button>
           </Tooltip>
-          <Tooltip label={monitorUnavailable ? monitorWhy : monitorLabel}>
+          <Tooltip label={monitorTip}>
             <button
               type="button"
               className={`vs-ib vs-mon${m.monitor.on ? ' active' : ''}`}
@@ -468,7 +512,7 @@ export default function VoiceStrip({
       </div>
       </div>
 
-      <div className={`vs-tl${listening ? ' listening' : ''}`}>
+      <div className="vs-tl">
         <div className="vs-head">
           <span className={`vs-note ${status?.cls ?? ''}`}>
             {status && (
@@ -484,7 +528,6 @@ export default function VoiceStrip({
               </Tooltip>
             )}
           </span>
-          {take && <span className="vs-take-info">{takeInfo}</span>}
           {take && !rec && pitch && <Tooltip label={pitchHelp}>
             <button type="button" className={`vs-effect-chip${!pitch.enabled || shift === 0 ? ' dim' : ''}`} aria-pressed={pitch.enabled}
               aria-label={pitchText}
@@ -492,129 +535,24 @@ export default function VoiceStrip({
               {pitchText}
             </button>
           </Tooltip>}
-          {take && !rec && <Tooltip label={laneMessage || t('player.voice.playsWithSong')}><span ref={laneStateRef} tabIndex={-1} className={`vs-lane-state${laneMessage && m.lane.status !== 'conforming' ? ' bad' : ''}`} role="status">{laneMessage || t('player.voice.playsWithSong')}</span></Tooltip>}
+          {take && !rec && laneBad && <Tooltip label={laneMessage}><span ref={laneStateRef} tabIndex={-1} className="vs-lane-state bad" role="status">{laneMessage}</span></Tooltip>}
           {take && !rec && laneCanRetry(m.lane) && <Tooltip label={laneMessage}><button type="button" className="vs-btn" onClick={() => { controller.retryTakeLane(); laneStateRef.current?.focus() }}>{t('player.voice.retry')}</button></Tooltip>}
-          {take && !rec && (
+          {take && !rec && selected && (
             <span className="vs-take-actions" role="group" aria-label={t('player.voice.takeActions')}>
-              {!listening && (
-                <IconButton
-                  ref={keepRef}
-                  icon="check"
-                  label={take.kept ? t('player.voice.kept') : t('player.voice.keep')}
-                  className={take.kept ? '' : 'primary'}
-                  aria-disabled={take.kept}
-                  onClick={() => controller.keep()}
-                />
-              )}
-              <span className="vs-listen-old" role="group" aria-label={t('player.voice.listenOld')}><span>{t('player.voice.listenOld')}</span>
-              {m.listen !== 'with-song' && (
-                <IconButton
-                  icon={m.listen === 'take' ? 'stop' : 'play'}
-                  label={m.listen === 'take' ? t('player.voice.stopListening') : t('player.voice.listen')}
-                  className={m.listen === 'take' ? 'on' : ''}
-                  aria-pressed={m.listen === 'take'}
-                  onClick={() => void (m.listen ? controller.stopListening() : controller.listen('take'))}
-                />
-              )}
-              {m.listen !== 'take' && (
-                <IconButton
-                  icon={m.listen === 'with-song' ? 'stop' : 'playSong'}
-                  label={m.listen === 'with-song' ? t('player.voice.stopListeningSong') : t('player.voice.listenSong')}
-                  className={m.listen === 'with-song' ? 'on' : ''}
-                  aria-pressed={m.listen === 'with-song'}
-                  onClick={() => void (m.listen ? controller.stopListening() : controller.listen('with-song'))}
-                />
-              )}
-              </span>
-              {!listening && (
-                <>
-                  {take.userOffsetSec !== 0 && <IconButton icon="reset" label={t('player.voice.resetPosition')} onClick={() => void controller.resetTakePosition()} />}
-                  <IconButton icon="add" label={t('player.voice.addTrackLater')} disabled />
-                  <IconButton icon="trash" label={`${t('player.voice.discard')} (Delete)`} className="danger" onClick={() => void controller.discard()} />
-                </>
-              )}
+              {take.userOffsetSec !== 0 && <IconButton icon="reset" label={t('player.voice.resetPosition')} onClick={() => void controller.resetTakePosition()} />}
+              <IconButton icon="trash" label={t('player.voice.deleteTake')} className="danger" onClick={() => void controller.deleteSelected()} />
             </span>
           )}
         </div>
         <div className="vs-track" ref={trackRef} role="listbox" aria-label={t('player.voice.takesLane')}>
-          {take && clipVisible && drag && (
-            <div className="vs-clip vs-clip-ghost" aria-hidden="true" style={{ left: `${((take.startSec - viewS) / viewSpan) * 100}%`, width: `${width}%` }} />
-          )}
-          {take && clipVisible && (
-            <Tooltip label={rec ? t('player.voice.clipRecording') : t('player.voice.clipHint')} className="contents">
-            <div
-              role="option"
-              aria-selected={selected}
-              tabIndex={0}
-              className={`vs-clip${rec ? ' recording' : ''}${(waveform?.peaks ?? take.peaks)?.length ? ' has-wave' : ''}${take.partial ? ' partial' : ''}${listening ? ' playing' : ''}${selected ? ' selected' : ''}${drag ? ' dragging' : ''}${rec ? '' : ' selectable'}`}
-              style={{ left: `${left}%`, width: `${width}%` }}
-              aria-label={t('player.voice.clipLabel', { n: take.n, time: clock(shownStart) })}
-              onPointerDown={(e) => {
-                if (rec || e.button !== 0) return
-                e.stopPropagation() // only the clip itself captures the click: empty lane still seeks
-                controller.selectTake(true)
-                if (listening || !trackRef.current || viewSpan <= 0) return
-                e.currentTarget.setPointerCapture?.(e.pointerId)
-                const duration = engine.duration || 0
-                dragRef.current = {
-                  x0: e.clientX,
-                  start0: take.startSec,
-                  pxPerSec: trackRef.current.clientWidth / viewSpan,
-                  moved: false,
-                  last: take.startSec,
-                  max: duration > 0 ? Math.max(0, duration - songSpan(take)) : Number.POSITIVE_INFINITY
-                }
-              }}
-              onPointerMove={(e) => {
-                const d = dragRef.current
-                if (!d || d.pxPerSec <= 0) return
-                if (!d.moved && Math.abs(e.clientX - d.x0) < 3) return
-                d.moved = true
-                d.last = Math.min(d.max, Math.max(0, d.start0 + (e.clientX - d.x0) / d.pxPerSec)) // the latest position lives in the ref
-                setDrag({ startSec: d.last })
-              }}
-              onPointerUp={(e) => {
-                const d = dragRef.current
-                dragRef.current = null
-                e.currentTarget.releasePointerCapture?.(e.pointerId)
-                if (d?.moved) void controller.moveTake(d.last)
-                setDrag(null)
-              }}
-              onPointerCancel={cancelDrag}
-              onKeyDown={(e) => {
-                if (rec) return
-                if (e.code === 'Enter' || e.code === 'Space') {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  controller.selectTake(!selected)
-                } else if (selected && (e.code === 'Delete' || e.code === 'Backspace')) {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  void controller.deleteSelected()
-                } else if (selected && !listening && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
-                  e.preventDefault()
-                  e.stopPropagation() // the app's arrow keys seek the song
-                  void controller.moveTake(take.startSec + (e.code === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1 : 0.1))
-                }
-              }}
-            >
-              <ClipWave peaks={waveform?.peaks ?? take.peaks} />
-              {m.lane.status === 'conforming' && !rec && <span className="vs-preparing">{t('player.voice.preparingTake')}</span>}
-              {(drag || tagText || silent) && (
-                <span className="vs-clip-tags">
-                  {(drag || tagText) && (
-                    <Tooltip label={take.changed ? t('player.voice.tagTitleChanged') : t('player.voice.tagTitle')}>
-                      <span className={`vs-clip-tag${take.changed || (tagText && !drag) ? ' changed' : ''}`}>
-                        {drag ? t('player.voice.positionAt', { time: clock(shownStart) }) : tagText}
-                      </span>
-                    </Tooltip>
-                  )}
-                  {silent && !drag && <span className="vs-clip-tag silent">{t('player.voice.takeSilent')}</span>}
-                </span>
+          {rows.map((tk) => (
+            <div key={tk.takeId} className="vs-take-row">
+              {tk.takeId === take?.takeId && drag && viewSpan > 0 && (
+                <div className="vs-clip vs-clip-ghost" aria-hidden="true" style={{ left: `${((tk.startSec - viewS) / viewSpan) * 100}%`, width: `${Math.max(0.3, (songSpan(tk) / viewSpan) * 100)}%` }} />
               )}
+              {renderClip(tk)}
             </div>
-            </Tooltip>
-          )}
+          ))}
         </div>
       </div>
       <div className="vs-sr-only" aria-live="polite" role="status">

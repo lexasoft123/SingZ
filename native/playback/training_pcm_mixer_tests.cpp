@@ -5,6 +5,7 @@
 using namespace singz;
 int main() {
   TrainingPcmMixer mixer;
+  assert(!mixer.active());
   float left[256]{}, right[256]{};
   float* outputs[]{left,right};
   AudioHostRenderBlock block;
@@ -16,8 +17,10 @@ int main() {
   assert(!mixer.canSchedule(48*1024*1024,2));
   for(unsigned i=0;i<40;++i) {
     assert(mixer.schedule({{1,0.5f}},i+1,48000,block.callbackHostTimeNs,1));
+    assert(mixer.active());
     std::fill_n(left,256,0); std::fill_n(right,256,0);
     assert(mixer.render(block)); assert(std::abs(left[0]-0.89125094f)<0.000001); assert(std::abs(right[1]-0.44562547f)<0.000001);
+    assert(!mixer.active());
   }
   // Mono is replicated, stereo remains separate; rendering is additive.
   assert(mixer.schedule({{0.5f},{0.25f}},100,48000,block.callbackHostTimeNs,1));

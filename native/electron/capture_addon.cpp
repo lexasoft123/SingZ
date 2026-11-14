@@ -590,6 +590,79 @@ napi_value devices(napi_env env, napi_callback_info) {
   return result;
 }
 
+// Desired preferences can change while a take is active. Publication to the
+// shared service waits until every capture/output client has stopped.
+singz::SharedAudioService::BufferPreferences desiredBuffers;
+bool bufferApplyNeeded = false;
+std::string bufferApplyError;
+napi_value audioBufferSettingsImpl(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value arg{};
+  napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr);
+  auto& service = singz::sharedAudioService();
+  const bool supported = service.providerId() == "coreaudio";
+  if (argc && supported) {
+    napi_value keys; uint32_t length = 0; napi_valuetype type;
+    if (napi_typeof(env, arg, &type) != napi_ok || type != napi_object ||
+        napi_get_property_names(env, arg, &keys) != napi_ok ||
+        napi_get_array_length(env, keys, &length) != napi_ok || length > 256) {
+      napi_throw_type_error(env, nullptr, "Invalid audio buffer preferences"); return undefined(env);
+    }
+    singz::SharedAudioService::BufferPreferences next;
+    for (uint32_t i = 0; i < length; ++i) {
+      napi_value key, value; size_t bytes = 0; uint32_t frames = 0;
+      napi_get_element(env, keys, i, &key);
+      if (napi_get_value_string_utf8(env, key, nullptr, 0, &bytes) != napi_ok || !bytes || bytes > 4096) {
+        napi_throw_type_error(env, nullptr, "Invalid audio device UID"); return undefined(env);
+      }
+      std::string uid(bytes + 1, '\0');
+      napi_get_value_string_utf8(env, key, uid.data(), uid.size(), &bytes); uid.resize(bytes);
+      if (uid.find('\0') != std::string::npos || napi_get_property(env, arg, key, &value) != napi_ok ||
+          !getExactU32Value(env, value, 16, 4096, &frames) || (frames & (frames - 1))) {
+        napi_throw_type_error(env, nullptr, "Invalid audio buffer size"); return undefined(env);
+      }
+      next.emplace(std::move(uid), frames);
+    }
+    if (next != desiredBuffers) { desiredBuffers = std::move(next); bufferApplyNeeded = true; bufferApplyError.clear(); }
+  }
+  auto& capture = singz::sharedVoiceMonitorCapture();
+  const bool capturing = capture.users(singz::VoiceCaptureUser::Arm) || capture.users(singz::VoiceCaptureUser::Monitor) ||
+      capture.users(singz::VoiceCaptureUser::Take);
+  if (supported && bufferApplyNeeded && service.configureBufferPreferences(desiredBuffers, capturing || singz::trainingAudioActive())) {
+    capture.releasePrepared(); // An idle cached input must reacquire the new ledger request.
+    bufferApplyNeeded = false;
+    if (!service.activeOutputUid().empty()) {
+      const auto applied = service.ensureOutput();
+      bufferApplyError = applied.ok ? std::string{} : applied.message;
+    }
+  }
+  const auto host = service.status();
+  const auto input = capture.openingResult();
+  const auto outputUid = service.activeOutputUid();
+  auto requested = [](const std::string& uid) { const auto found = desiredBuffers.find(uid); return found == desiredBuffers.end() ? 128u : found->second; };
+  napi_value result, preferences; napi_create_object(env, &result); napi_create_object(env, &preferences);
+  for (const auto& [uid, frames] : desiredBuffers) set(env, preferences, uid.c_str(), uintValue(env, frames));
+  set(env, result, "ok", boolValue(env, supported && bufferApplyError.empty()));
+  set(env, result, "pending", boolValue(env, bufferApplyNeeded));
+  if (!supported) set(env, result, "reason", stringValue(env, "unsupported-platform"));
+  else if (bufferApplyNeeded) set(env, result, "reason", stringValue(env, "audio-active"));
+  if (!bufferApplyError.empty()) set(env, result, "error", stringValue(env, bufferApplyError));
+  set(env, result, "preferences", preferences);
+  set(env, result, "outputUid", stringValue(env, outputUid));
+  set(env, result, "requestedFrames", uintValue(env, requested(outputUid)));
+  set(env, result, "obtainedFrames", uintValue(env, host.latency.bufferFrames));
+  set(env, result, "inputUid", stringValue(env, capturing ? input.deviceUid : ""));
+  set(env, result, "inputRequestedFrames", uintValue(env, requested(input.deviceUid)));
+  set(env, result, "inputObtainedFrames", uintValue(env, capturing ? input.inputBufferFrames : 0));
+  return result;
+}
+
+napi_value audioBufferSettings(napi_env env, napi_callback_info info) noexcept {
+  try { return audioBufferSettingsImpl(env, info); }
+  catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); }
+  catch (...) { napi_throw_error(env, nullptr, "Audio buffer settings failed"); }
+  return undefined(env);
+}
+
 napi_value beginImpl(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3];
@@ -609,6 +682,7 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
 
   singz::AudioInputConfig config;
   config.deviceUid = getString(env, argv[0], "deviceUid");
+  config = singz::sharedAudioService().inputBufferConfig(std::move(config));
   if (!getExactU32(env, argv[0], "inputChannel", 0,
                    singz::kAudioHostMaxChannels - 1, false, 0,
                    &config.channel) ||
@@ -1449,6 +1523,7 @@ napi_value init(napi_env env, napi_value exports) {
   napi_add_env_cleanup_hook(env, cleanup, nullptr);
   napi_property_descriptor properties[] = {
       {"inputDevices", nullptr, devices, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"audioBufferSettings", nullptr, audioBufferSettings, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"beginCapture", nullptr, begin, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cancelCapture", nullptr, cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureState", nullptr, state, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -711,8 +711,9 @@ describe('take timeline anchors and FX descriptor', () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-anchors-')); roots.push(root)
     const sampleRate = 22050 // Deliberately different from the song/output's 48 kHz.
     const origin = 10_000_000_000n
-    let elapsed = 0, fault = false, missing = false, paused = false, frameBias = 0
+    let elapsed = 0, fault = false, missing = false, paused = false, ended = false, frameBias = 0
     const native = fakeNative({ frames: sampleRate * 6, sampleRate })
+    native.transportState = async () => ended ? 'completed' : paused ? 'paused' : 'playing'
     native.captureStats = async () => ({ firstSampleCaptured: true, firstSampleHostNs: origin.toString(),
       lastSampleHostNs: (origin + BigInt(Math.round(elapsed * 1e9))).toString(),
       takeFrameHostNs: (origin + BigInt(Math.round(elapsed * 1e9))).toString(), takeFrame: Math.round(elapsed * sampleRate) + frameBias,
@@ -725,7 +726,7 @@ describe('take timeline anchors and FX descriptor', () => {
         start += (change.at - edge) * rate; edge = change.at; rate = change.tempo
         transpose = change.transpose ?? 0; epoch++
       }
-      return { ok: true, found: !missing && elapsed - at < 2.7, paused, sampleRate: 48000,
+      return { ok: true, found: !missing && elapsed - at < 2.7, paused, sampleRate: 48000, outputLatencyFrames: 128,
         startPositionSec: start + (at - edge) * rate, rate, transposeSemitones: transpose,
         discontinuitySerial: fault ? 9 : epoch, faultSerial: fault ? 1 : 0,
         mappingStartCaptureHostNs: (origin + BigInt(Math.round(edge * 1e9))).toString(), mappingStartSongSeconds: start }
@@ -740,7 +741,8 @@ describe('take timeline anchors and FX descriptor', () => {
       at: (at: number) => { elapsed = at },
       read: () => JSON.parse(readFileSync(join(root, 'song-1', `${id}.json`), 'utf8')) as import('../../src/shared/voice-take').VoiceTakeSidecar,
       write: (take: import('../../src/shared/voice-take').VoiceTakeSidecar) => writeFileSync(join(root, 'song-1', `${id}.json`), JSON.stringify(take)),
-      fault: () => { fault = true }, miss: () => { missing = true }, pause: () => { paused = true }, bias: (frames: number) => { frameBias = frames }
+      fault: () => { fault = true }, miss: () => { missing = true }, pause: () => { paused = true },
+      endSong: () => { ended = true; missing = true }, bias: (frames: number) => { frameBias = frames }
     }
   }
 
@@ -829,15 +831,53 @@ describe('take timeline anchors and FX descriptor', () => {
     const f = timelineFixture(); await f.start(); await f.poll(2)
     const anchors = f.read().anchors
     if (end === 'seek') f.fault()
-    else if (end === 'song-end') f.miss()
+    else if (end === 'song-end') f.endSong()
     else f.pause()
     f.at(3)
     if (poll) await f.poll(3)
-    const stopped = await f.s.stop(undefined, 'seek')
-    expect(stopped).toMatchObject({ take: { status: 'complete' }, note: 'seek' })
+    const stopped = await f.s.stop()
+    expect(stopped).toMatchObject({ take: { status: 'complete' }, note: end.startsWith('Stop') ? 'pause' : end })
     expect(await f.s.stop()).toEqual(stopped)
     expect(f.read()).toMatchObject({ startPositionSec: 12, latencySource: 'reported', anchors })
     expect((await f.s.level()).takeActive).toBe(false)
+  })
+
+  it.each(['seek', 'pause', 'song-end'] as const)('retains a distinct %s explanation across automatic and repeated Stop', async boundary => {
+    const f = timelineFixture(); await f.start(); await f.poll(2)
+    if (boundary === 'seek') f.fault()
+    else if (boundary === 'pause') f.pause()
+    else f.endSong()
+    await f.poll(3)
+    expect(await f.s.stop()).toMatchObject({ ok: true, take: { status: 'complete' }, note: boundary })
+    expect(await f.s.stop()).toMatchObject({ note: boundary })
+  })
+
+  it('discriminates missing native transport telemetry which used to label song end as seek', async () => {
+    const f = timelineFixture(); f.native.transportState = undefined
+    await f.start(); f.endSong(); await f.poll(3)
+    expect(await f.s.stop()).toMatchObject({ take: { status: 'complete' }, note: 'seek' })
+  })
+
+  it('awaits in-flight automatic finalization instead of reporting no recording to the renderer', async () => {
+    const f = timelineFixture(); await f.start()
+    let release!: () => void
+    const finish = f.native.finishTake
+    f.native.finishTake = vi.fn(async args => { await new Promise<void>(resolve => { release = resolve }); return finish(args) })
+    const stopping = f.s.stop(undefined, 'song-end')
+    expect((await f.s.level()).takeActive).toBe(false)
+    const state = f.s as unknown as { pendingStop: Promise<unknown> | null }
+    const pending = state.pendingStop
+    expect(await f.s.start(request)).toMatchObject({ ok: false, reason: 'busy' })
+    state.pendingStop = null // Negative control: old Stop had no in-flight receipt.
+    expect(await f.s.stop()).toMatchObject({ ok: false, message: 'No recording is active.' })
+    state.pendingStop = pending
+    let received = false
+    const receipt = f.s.stop().then(result => { received = true; return result })
+    await Promise.resolve(); expect(received).toBe(false)
+    release()
+    expect(await receipt).toEqual(await stopping)
+    expect(await receipt).toMatchObject({ ok: true, take: { status: 'complete' }, note: 'song-end' })
+    expect(f.native.finishTake).toHaveBeenCalledTimes(1)
   })
 
   it('discriminates the reviewed negative control that mislabeled a seek as a placement fault', async () => {
@@ -1345,7 +1385,117 @@ describe('renderer meter arm ownership', () => {
 })
 
 
+describe('cold-session placement latency readiness', () => {
+  const fixture = (legacy = false) => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-cold-placement-')); roots.push(root)
+    const origin = 10_000_000_000n
+    let settled = false, writer = false, first = 0n, latest = origin + 1_000_000_000n, probes = 0
+    const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
+      if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'mic', label: 'Mic', channels: 1, isDefault: true }] } as T
+      if (method === 'beginCapture') return { ok: true } as T
+      if (method === 'captureState') return { state: 'running', ownershipGeneration: '1' } as T
+      if (method === 'captureStats') {
+        probes++; latest += 10_000_000n
+        return { sampleRate: 48000, lastSampleHostNs: latest.toString(), firstSampleCaptured: writer,
+          firstSampleHostNs: first.toString(), firstSampleQuality: 'hardware', inputBufferFrames: 1024,
+          inputLatencySource: settled ? 'reported' : 'unknown', inputLatencyStable: settled,
+          inputLatencyFrames: settled ? 2048 : 0 } as T
+      }
+      if (method === 'presentationQuery') {
+        const at = BigInt(args[0] as string)
+        return { found: at >= origin && at < latest + 10_000_000n, paused: false, sampleRate: 48000,
+          songSeconds: 12 + Number(at - origin) / 1e9, outputLatencyFrames: settled ? 128 : 0, graphLatencyFrames: 0 } as T
+      }
+      if (method === 'recordTake') {
+        writer = true; first = latest
+        writeFileSync(join(args[0] as string, `${args[1]}.wav`), wav(48000, 48000))
+        return { ok: true } as T
+      }
+      if (method === 'finishTake') return { ok: true, frames: 48000, sampleRate: 48000 } as T
+      return { ok: true } as T
+    } }
+    const adapter = createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    const native = legacy ? { ...adapter, recordTake: async (args: Parameters<VoiceTakeNative['recordTake']>[0]) => {
+      await adapter.armCapture({ deviceName: 'mic', channelIndex: 0 })
+      return rpc.call<Awaited<ReturnType<VoiceTakeNative['recordTake']>>>('binding', 'recordTake', [args.dir, args.takeId])
+    } } : adapter
+    const store = new VoiceTakeStore({ rootDir: root, native })
+    return { store, settle: () => { settled = true }, started: () => writer, probes: () => probes,
+      truth: () => 12 + Number(first - origin) / 1e9 - (2048 + 128) / 48000,
+      path: (id: string) => join(root, request.songId, `${id}.json`),
+      read: (id: string) => JSON.parse(readFileSync(join(root, request.songId, `${id}.json`), 'utf8')) }
+  }
+
+  it('waits for cold input stability and late output latency instead of freezing a wrong first snapshot', async () => {
+    vi.useFakeTimers()
+    const old = fixture(true), fixed = fixture()
+    try {
+      const legacy = await old.store.start(request); if (!legacy.ok) throw new Error('start failed')
+      await old.store.stop()
+      // Negative control: immediate cold capture is more than 42 ms late under the known physical latencies.
+      expect(old.read(legacy.takeId).startPositionSec - old.truth()).toBeGreaterThan(.042)
+      const pending = fixed.store.start(request)
+      await vi.waitFor(() => expect(fixed.probes()).toBeGreaterThan(0))
+      expect(fixed.started()).toBe(false)
+      fixed.settle(); await vi.advanceTimersByTimeAsync(25)
+      const start = await pending; if (!start.ok) throw new Error('start failed')
+      await fixed.store.stop()
+      const sidecar = fixed.read(start.takeId)
+      expect(sidecar.startPositionSec).toBeCloseTo(fixed.truth(), 8)
+      expect(sidecar).toMatchObject({ inputLatencyFrames: 2048, outputLatencyFrames: 128, latencySource: 'reported' })
+      expect(sidecar.placementEstimated).toBeUndefined()
+      writeFileSync(fixed.path(start.takeId), JSON.stringify({ ...sidecar, placementEstimated: 'unknown-reason' }))
+      expect(await fixed.store.list(request.songId)).toEqual([])
+    } finally { vi.useRealTimers() }
+  })
+
+  it('bounds latency settling at two seconds and marks an otherwise covered take estimated', async () => {
+    vi.useFakeTimers()
+    const f = fixture()
+    try {
+      const pending = f.store.start(request)
+      await vi.waitFor(() => expect(f.probes()).toBeGreaterThan(0))
+      await vi.advanceTimersByTimeAsync(2050)
+      const start = await pending; if (!start.ok) throw new Error('start failed')
+      await f.store.stop()
+      expect(f.read(start.takeId)).toMatchObject({ version: 1, placementEstimated: 'latency-not-settled', latencySource: 'measured-trim' })
+    } finally { vi.useRealTimers() }
+  })
+})
+
 describe('take user versus pre-existing meter Arm purpose', () => {
+  it('can promote an existing monitor meter lease during a take without opening capture again', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-arm-promote-')); roots.push(root)
+    const native = fakeNative(); native.armCapture = vi.fn(native.armCapture); native.disarmCapture = vi.fn(native.disarmCapture)
+    const s = new VoiceTakeStore({ rootDir: root, native }), owner = {}, stranger = {}
+    await s.arm({ input: request.input, monitorOnly: true }, owner)
+    await s.start(request)
+    vi.mocked(native.armCapture).mockClear()
+    expect(await s.arm({ input: request.input, monitorOnly: false }, stranger)).toMatchObject({ ok: false, reason: 'busy' })
+    expect(await s.arm({ input: request.input, monitorOnly: false }, owner)).toMatchObject({ ok: true })
+    expect(native.armCapture).not.toHaveBeenCalled()
+    await s.stop(); await s.releaseMonitorInput()
+    expect(native.disarmCapture).not.toHaveBeenCalled()
+    await s.monitorInputCleanup(owner)()
+    expect(native.disarmCapture).toHaveBeenCalledTimes(1)
+  })
+  it('keeps explicit Arm after takes and ignores a previous renderer cleanup after replacement', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'singz-explicit-arm-')); roots.push(root)
+    const native = fakeNative(); native.disarmCapture = vi.fn(native.disarmCapture); native.stopCapture = vi.fn(async () => ({ ok: true }))
+    const s = new VoiceTakeStore({ rootDir: root, native }), owner = {}, replacement = {}
+    await s.arm({ input: request.input }, owner)
+    const releaseOld = s.monitorInputCleanup(owner)
+    await s.start(request); await s.stop(); await s.releaseMonitorInput()
+    expect(native.disarmCapture).not.toHaveBeenCalled(); expect(native.stopCapture).not.toHaveBeenCalled()
+    await s.start(request); await s.stop()
+    expect(native.stopCapture).not.toHaveBeenCalled()
+    await s.arm({ input: request.input }, replacement); await releaseOld()
+    expect(native.disarmCapture).not.toHaveBeenCalled()
+    await s.monitorInputCleanup(replacement)()
+    expect(native.disarmCapture).toHaveBeenCalledTimes(1)
+    // A new take with no explicit arm releases its implicit capture hold.
+    await s.start(request); await s.stop(); expect(native.stopCapture).toHaveBeenCalledTimes(1)
+  })
   it('keeps a monitor-only meter Arm monitor-only across a take; Take owns capture separately', async () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-monitor-take-purpose-')); roots.push(root)
     const native = fakeNative(); native.disarmCapture = vi.fn(native.disarmCapture)

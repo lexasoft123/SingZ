@@ -59,8 +59,8 @@ export function conformFilePath(path: string, platform: NodeJS.Platform = proces
   const full = win32.resolve(cwd, ordinary)
   check(/^[a-zA-Z]:\\/.test(full) || /^\\\\[^\\]+\\[^\\]+/.test(full), 'Conform path must resolve to a drive or UNC share')
   const result = win32.toNamespacedPath(full)
-  check(result.length < 32767 && Buffer.byteLength(result, 'utf8') <= 32768 && full.split('\\').every(part => part.length <= 255),
-    'Conform path exceeds Windows component, total-length or native UTF-8 limits', 'path-too-long')
+  check(result.length < 32767 && full.split('\\').every(part => part.length <= 255),
+    'Conform path exceeds Windows component or total-length limits', 'path-too-long')
   return result
 }
 interface CacheRecord { version: string; key: string; takeId: string }

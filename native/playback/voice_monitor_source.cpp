@@ -55,7 +55,14 @@ double VoiceMonitorOutputClock::observe(uint64_t frame, uint64_t ns, uint32_t fr
   }
   double rate = nominal;
   if (ns - originNs_ >= window) {
-    rate = static_cast<double>(static_cast<long double>(frame - originFrame_) * 1e9L / (ns - originNs_));
+    const auto expected = static_cast<long double>(frame - originFrame_) * 1e9L / nominal;
+    const auto elapsed = ns - originNs_;
+    // Host timestamps are integer nanoseconds. Do not turn their rounding
+    // into clock drift: that alternates direct copy and the bandlimited FIR
+    // on a nominal 1:1 route, changing the waveform from callback to callback.
+    // Match the history clock's two-nanosecond precision admission.
+    if (std::abs(expected - elapsed) > 2)
+      rate = static_cast<double>(static_cast<long double>(frame - originFrame_) * 1e9L / elapsed);
     if (rate < nominal * .995 || rate > nominal * 1.005) {
       originNs_ = recentNs_ = ns; originFrame_ = recentFrame_ = frame; rate = nominal;
     }
@@ -130,9 +137,11 @@ zcore::routing::AudioReadResult VoiceMonitorSource::render(const AudioHostRender
   return {missing, online};
 }
 VoiceMonitorSourceStats VoiceMonitorSource::stats() const noexcept {
+  const auto history = history_.status();
   return {publishedBlocks_.load(std::memory_order_relaxed), publishedFrames_.load(std::memory_order_relaxed),
     droppedBlocks_.load(std::memory_order_relaxed), droppedFrames_.load(std::memory_order_relaxed),
-    missingFrames_.load(std::memory_order_relaxed), estimated_.load(std::memory_order_relaxed), unknown_.load(std::memory_order_relaxed)};
+    missingFrames_.load(std::memory_order_relaxed), estimated_.load(std::memory_order_relaxed), unknown_.load(std::memory_order_relaxed),
+    history.phaseCorrections, history.correctedSamples, history.rejectedIntervals, history.discontinuities};
 }
 bool VoiceMonitorCaptureTap::push(void* context, const float* input, uint32_t frames,
     uint64_t ns, uint64_t callbackNs, AudioInputTimestampQuality quality) noexcept {

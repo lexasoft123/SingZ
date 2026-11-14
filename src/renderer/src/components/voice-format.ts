@@ -1,5 +1,5 @@
 import { t, type Key } from '../i18n'
-import type { RecordBlock, VoiceModel } from '../audio/voice-take'
+import type { RecordBlock, VoiceModel, VoiceTake } from '../audio/voice-take'
 import type { VoiceMonitorReason, VoiceTakeLaneState } from '../../../shared/voice-take'
 
 export const sgn = (n: number): string => (n > 0 ? `+${n}` : n < 0 ? `\u2212${-n}` : '0')
@@ -77,3 +77,13 @@ export const VOICE_SHIFTED_ST = 3
 export const voiceIsShifted = (m: Pick<VoiceModel, 'take' | 'effects' | 'currentTranspose'>): boolean => Math.abs(pitchFollowShift(m)) > VOICE_SHIFTED_ST
 /** Only error states offer Retry. */
 export const laneCanRetry = (lane: VoiceTakeLaneState): boolean => lane.status === 'error'
+
+/** Only what differs from the song is named, with units: tempo in %, pitch in semitones. It rides in the clip's tooltip, not on the lane. */
+export function takeTags(tk: Pick<VoiceTake, 'tempo' | 'transpose' | 'changed'>, shifted: boolean): string {
+  const parts: string[] = []
+  if (Math.abs(tk.tempo - 1) > 1e-4) parts.push(t('player.voice.tagTempo', { tempo: Math.round(tk.tempo * 100) }))
+  if (tk.transpose !== 0) parts.push(t('player.voice.tagPitch', { transpose: sgn(tk.transpose) }))
+  if (shifted) parts.push(t('player.voice.voiceShifted'))
+  if (tk.changed) parts.push(t('player.voice.tagChanged'))
+  return parts.join(' · ')
+}

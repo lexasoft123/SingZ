@@ -1,5 +1,6 @@
 #include "take_conform_fixture.h"
 #include "take_conform_stream_tests.h"
+#include "take_conform_seam_tests.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -83,6 +84,7 @@ void latencyRegression() {
   std::cout<<"measured DSP alignment "<<latencyError<<" frames ("<<latencyError/rate*1000<<" ms)\n";
 }
 void tests() {
+  seam_tests::bursts();
   auto p=tone(2); auto r=request(p.samples.size());
   auto x=conformTakePcm(p,r);
   check(x.pcm.samples==p.samples,"Identity must be sample equal");

@@ -10,6 +10,7 @@ import type {
   VoiceRecordStartRequest,
   VoiceRecordStartResult,
   VoiceRecordStopResult,
+  VoiceRecordStopNote,
   VoiceTakeSettingsPoint,
   VoiceTakeSidecar,
   VoiceTakeSummary,
@@ -19,17 +20,19 @@ import type {
   VoiceTakeMoveResult,
   VoiceTakePeaksRequest,
   VoiceTakePeaksResult,
-  VoiceTakeAnchor
+  VoiceTakeAnchor,
+  VoiceTakePlacementEstimate
 } from '../shared/voice-take'
 import { VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_PEAKS_MAX, VOICE_TAKE_SIDECAR_VERSION, VOICE_TAKE_ANCHORS_MAX, defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects, safeVoiceTakeMessage } from '../shared/voice-take'
 
 export type VoiceTakeNative = {
   armCapture(args: { deviceName: string; channelIndex: number }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; generation?: bigint; deviceName?: string }>
   disarmCapture(generation?: bigint): Promise<{ ok: boolean; error?: string }>
-  recordTake(args: { dir: string; takeId: string; generation?: bigint; deviceName?: string; channelIndex?: number }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; generation?: bigint; deviceName?: string }>
+  recordTake(args: { dir: string; takeId: string; generation?: bigint; deviceName?: string; channelIndex?: number }): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; error?: string; generation?: bigint; deviceName?: string; placementEstimated?: VoiceTakePlacementEstimate }>
   finishTake(args: { generation: bigint }): Promise<{ ok: boolean; path?: string; frames?: number; sampleRate?: number; droppedBlocks?: number; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; deviceLost?: boolean; reason?: string; error?: string; message?: string }>
   cancelTake(args: { generation: bigint }): Promise<{ ok: boolean; error?: string }>
   stopCapture?(generation: bigint): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
+  transportState?(): Promise<'stopped' | 'pre-roll' | 'playing' | 'paused' | 'completed'>
   captureStats(): Promise<{ takeFrameHostNs?: string; takeFrame?: string | number; gapOverflow?: boolean; gapRegressions?: string | number; firstSampleCaptured?: boolean; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; sampleRate?: number; lastSampleHostNs?: string; inputLatencyFrames?: number; inputLatencySource?: 'reported' | 'unknown'; inputLatencyStable?: boolean; inputBufferFrames?: number; inputLevel?: VoiceInputLevel; takeActive?: boolean }>
   presentationQuery(args: { songId: string; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; sampleRate?: number; outputSampleRate?: number; trimInputLatency?: boolean; initialDiscontinuitySerial?: number }): Promise<{ ok: boolean; found?: boolean; paused?: boolean; sampleRate?: number; startPositionSec?: number; songSeconds?: number; projectFrame?: number; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; latencySource?: 'reported' | 'measured-trim'; discontinuitySerial?: number | string; faultSerial?: number | string; transposeSemitones?: number; generation?: number | string; rate?: number; mappingStartCaptureHostNs?: string; mappingStartSongSeconds?: number; seekDuringCallback?: boolean; error?: string }>
   playTake(args: { takeId: string; path: string; startPositionSec: number; mode: VoicePlayTakeRequest['mode']; generation: bigint; gain?: number; tempo?: number }): Promise<{ ok: boolean; error?: string; startHostTimeNs?: string }>
@@ -63,6 +66,7 @@ type Active = {
   graphLatencyFrames: number
   outputSampleRate?: number
   latencySource: 'reported' | 'measured-trim'
+  placementEstimated?: VoiceTakePlacementEstimate
   settings: VoiceTakeSettingsPoint[]
   monitoring: boolean
   generation: bigint
@@ -79,6 +83,7 @@ type Active = {
   placementFault?: boolean
   finalizationError?: boolean
   timelineEnded?: boolean
+  timelineEndNote?: VoiceRecordStopNote
   monitor?: ReturnType<typeof setInterval>
   lastSampleHostNs?: string
   finalized?: VoiceTakeSummary
@@ -119,6 +124,7 @@ const validTimelineFields = (sidecar: VoiceTakeSidecar): boolean =>
   (sidecar.anchors === undefined || isVoiceTakeAnchors(sidecar.anchors)) &&
   (sidecar.effects === undefined || isVoiceTakeEffects(sidecar.effects)) &&
   typeof sidecar.monitoring === 'boolean' &&
+  (sidecar.placementEstimated === undefined || ['latency-unreported', 'latency-not-settled'].includes(sidecar.placementEstimated)) &&
   (sidecar.timelineApproximate === undefined || typeof sidecar.timelineApproximate === 'boolean')
 
 const wavDuration = (bytes: number, sampleRate: number): number => Math.max(0, bytes - 44) / 2 / sampleRate
@@ -188,7 +194,8 @@ export class VoiceTakeStore {
   private disarming: Promise<{ ok: boolean; error?: string }> | null = null
   private playGeneration: bigint | null = null
   private finalizedTake: VoiceTakeSummary | null = null
-  private finalizedNote?: 'seek'
+  private finalizedNote?: VoiceRecordStopNote
+  private pendingStop: Promise<VoiceRecordStopResult> | null = null
   private monitoringOn = false
   private monitoringDuringStart = false
   private readonly root: string
@@ -211,13 +218,13 @@ export class VoiceTakeStore {
   }
 
   async arm(request: { monitorOnly?: boolean; input: { deviceName: string; channelIndex: number } }, owner?: object): Promise<{ ok: boolean; reason?: 'no-input' | 'busy' | 'error'; message?: string }> {
-    if (this.active || this.starting || this.arming) return { ok: false, reason: 'busy', message: 'A voice take is already recording or arming.' }
     if (!Number.isInteger(request.input.channelIndex) || request.input.channelIndex < 0) return { ok: false, reason: 'no-input', message: 'The selected microphone is unavailable.' }
     if (request.monitorOnly !== undefined && this.armed?.owner === owner && this.armed?.channelIndex === request.input.channelIndex &&
         this.armed.requestedDeviceName === request.input.deviceName) {
       this.armed.monitorOnly = request.monitorOnly // Transfer the meter lease without reopening native capture.
       return { ok: true }
     }
+    if (this.active || this.starting || this.arming || this.pendingStop) return { ok: false, reason: 'busy', message: 'A voice take is already recording or arming.' }
     this.arming = true
     try {
       if (this.disarming) await this.disarming
@@ -275,7 +282,7 @@ export class VoiceTakeStore {
   }
 
   async start(request: VoiceRecordStartRequest): Promise<VoiceRecordStartResult> {
-    if (this.active || this.starting || this.arming) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
+    if (this.active || this.starting || this.arming || this.pendingStop) return { ok: false, reason: 'busy', message: 'A voice take is already recording.' }
     this.finalizedTake = null
     this.finalizedNote = undefined
     if (!validId(request.songId) || !request.input || !validSettings(request)) return { ok: false, reason: 'error', message: 'Invalid recording request.' }
@@ -310,7 +317,7 @@ export class VoiceTakeStore {
       const active: Active = {
       request, takeId, dir: paths.dir, wavPath: paths.wav, createdAt: this.now().toISOString(),
       startPositionSec: 0, inputLatencyFrames: 0, outputLatencyFrames: 0, graphLatencyFrames: 0,
-      latencySource: 'reported', anchors: [], monitoring: this.monitoringDuringStart,
+      latencySource: 'reported', placementEstimated: result.placementEstimated, anchors: [], monitoring: this.monitoringDuringStart,
       settings: [{ atSec: 0, tempo: request.tempo, transposeSemitones: request.transposeSemitones }], generation: result.generation ?? this.armed?.generation ?? generation
       }
       active.actualDeviceName = result.deviceName ?? this.armed?.deviceName ?? request.input.deviceName
@@ -350,7 +357,9 @@ export class VoiceTakeStore {
               const startPositionSec = placed.startPositionSec ?? placed.songSeconds
               if (!Number.isFinite(startPositionSec)) active.placementFault = true
               else active.startPositionSec = startPositionSec!
-              active.latencySource = reported ? 'reported' : 'measured-trim'
+              if (stamp.inputLatencyStable === false || raw.outputLatencyFrames === 0) active.placementEstimated = 'latency-not-settled'
+              else if (!reported || raw.outputLatencyFrames === undefined) active.placementEstimated ??= 'latency-unreported'
+              active.latencySource = reported && !active.placementEstimated ? 'reported' : 'measured-trim'
               active.discontinuitySerial = placed.discontinuitySerial
               active.faultSerial = placed.faultSerial
               active.lastRate = placed.rate ?? request.tempo
@@ -358,7 +367,11 @@ export class VoiceTakeStore {
               active.timelineApproximate = stamp.firstSampleQuality !== 'hardware'
               this.appendAnchor(active, { takeFrame: 0, projectFrame: Math.round(active.startPositionSec * stamp.sampleRate) })
               log('voice-take', 'placed ' + JSON.stringify({ takeId, firstSampleHostNs: stamp.firstSampleHostNs,
-                firstSampleWaitMs, quality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, outputSampleRate: raw.sampleRate,
+                firstSampleWaitMs, inputLatencySource: stamp.inputLatencySource, inputLatencyStable: stamp.inputLatencyStable,
+                inputBufferFrames: stamp.inputBufferFrames, reportedInputLatencyFrames: stamp.inputLatencyFrames,
+                rawSongSeconds: raw.songSeconds ?? raw.startPositionSec,
+                mappingStartCaptureHostNs: placed.mappingStartCaptureHostNs, mappingStartSongSeconds: placed.mappingStartSongSeconds,
+                latencySource: active.latencySource, placementEstimated: active.placementEstimated, quality: stamp.firstSampleQuality, sampleRate: stamp.sampleRate, outputSampleRate: raw.sampleRate,
                 inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
                 graphLatencyFrames: active.graphLatencyFrames, startPositionSec: active.startPositionSec,
                 discontinuitySerial: placed.discontinuitySerial, faultSerial: placed.faultSerial, generation: placed.generation }))
@@ -374,7 +387,7 @@ export class VoiceTakeStore {
           songTitle: request.songTitle, songArtist: request.songArtist, createdAt: active.createdAt,
           startPositionSec: active.startPositionSec, durationSec: 0, sampleRate: active.sampleRate, channels: 1,
           inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
-          graphLatencyFrames: active.graphLatencyFrames, latencySource: active.latencySource, input: { ...request.input, deviceName: active.actualDeviceName ?? request.input.deviceName },
+          graphLatencyFrames: active.graphLatencyFrames, latencySource: active.latencySource, placementEstimated: active.placementEstimated, input: { ...request.input, deviceName: active.actualDeviceName ?? request.input.deviceName },
           settings: active.settings, anchors: active.anchors, effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate, matchPercent: null, monitoring: active.monitoring, status: 'recovered', name: null,
           audio: { fileName: `${active.takeId}.wav`, format: 'wav-pcm16', byteSize: 0, checksum: null }
         }
@@ -424,14 +437,19 @@ export class VoiceTakeStore {
     active.sampling = this.sampleAnchors(active, force)
     try { await active.sampling } finally { active.sampling = undefined }
     if (active.placementFault && this.active === active) await this.stop('error')
-    else if (active.timelineEnded && this.active === active) await this.stop(undefined, 'seek')
+    else if (active.timelineEnded && this.active === active) await this.stop(undefined, active.timelineEndNote)
   }
 
-  private endTimeline(active: Active): void {
+  private endTimeline(active: Active, note: VoiceRecordStopNote = 'seek'): void {
     // After placement, transport boundaries end the valid recording timeline;
     // they do not invalidate its measured start or the anchors already captured.
-    if (active.anchors.length) active.timelineEnded = true
+    if (active.anchors.length) { active.timelineEnded = true; active.timelineEndNote ??= note }
     else active.placementFault = true
+  }
+
+  private async boundaryNote(paused?: boolean): Promise<VoiceRecordStopNote> {
+    const state = await this.options.native.transportState?.().catch(() => undefined)
+    return state === 'completed' ? 'song-end' : state === 'paused' || paused ? 'pause' : 'seek'
   }
 
   private async sampleAnchors(active: Active, force: boolean): Promise<void> {
@@ -467,7 +485,7 @@ export class VoiceTakeStore {
         host, takeFrame: frame, quality: stats.firstSampleQuality, inputLatencyFrames: active.inputLatencyFrames,
         outputLatencyFrames: active.outputLatencyFrames, graphLatencyFrames: active.graphLatencyFrames,
         initialDiscontinuitySerial: active.discontinuitySerial, initialFaultSerial: active.faultSerial, placement }), 'warn')
-      this.endTimeline(active); return
+      this.endTimeline(active, await this.boundaryNote(placement.paused)); return
     }
     // Walk back through every landed mapping epoch, even several fast changes
     // between polls. The boundary coordinates come from the presentation journal.
@@ -487,7 +505,7 @@ export class VoiceTakeStore {
         log('voice-take', 'timeline end ' + JSON.stringify({ takeId: active.takeId, phase: 'seam-history',
           host, takeFrame: frame, edge: edge.toString(), initialDiscontinuitySerial: active.discontinuitySerial,
           initialFaultSerial: active.faultSerial, placement: epoch }), 'warn')
-        this.endTimeline(active); return
+        this.endTimeline(active, await this.boundaryNote(epoch.paused)); return
       }
     }
     for (const anchor of seams.reverse()) {
@@ -543,8 +561,9 @@ export class VoiceTakeStore {
     return { ok: true }
   }
 
-  async stop(reason?: 'device-lost' | 'error', note?: 'seek'): Promise<VoiceRecordStopResult> {
+  async stop(reason?: 'device-lost' | 'error', note?: VoiceRecordStopNote): Promise<VoiceRecordStopResult> {
     const active = this.active
+    if (!active && this.pendingStop) return this.pendingStop
     if (!active) return this.finalizedTake ? { ok: true, take: this.finalizedTake, ...(this.finalizedNote ? { note: this.finalizedNote } : {}) } : { ok: false, reason: 'error', message: 'No recording is active.' }
     // Renderer/audio loss may race a poll already ending the same take. Latch
     // the error before awaiting that poll so its finalizer retains the failure.
@@ -556,6 +575,12 @@ export class VoiceTakeStore {
     if (active.sampling) await active.sampling.catch(() => this.endTimeline(active))
     if (this.active !== active) return this.stop(reason, note)
     this.active = null
+    const pending = this.finalize(active, reason, note)
+    this.pendingStop = pending
+    try { return await pending } finally { if (this.pendingStop === pending) this.pendingStop = null }
+  }
+
+  private async finalize(active: Active, reason?: 'device-lost' | 'error', note?: VoiceRecordStopNote): Promise<VoiceRecordStopResult> {
     this.finalizing.add(active.takeId)
     if (active.monitor) clearInterval(active.monitor)
     try {
@@ -591,7 +616,7 @@ export class VoiceTakeStore {
         songTitle: active.request.songTitle, songArtist: active.request.songArtist, createdAt: active.createdAt,
         startPositionSec: active.startPositionSec, durationSec, sampleRate, channels: 1,
         inputLatencyFrames: active.inputLatencyFrames, outputLatencyFrames: active.outputLatencyFrames,
-        graphLatencyFrames: active.graphLatencyFrames, latencySource: placementMiss ? 'measured-trim' : active.latencySource, input: { ...active.request.input, deviceName: active.actualDeviceName ?? active.request.input.deviceName },
+        graphLatencyFrames: active.graphLatencyFrames, latencySource: placementMiss ? 'measured-trim' : active.latencySource, placementEstimated: active.placementEstimated, input: { ...active.request.input, deviceName: active.actualDeviceName ?? active.request.input.deviceName },
         settings: active.settings, ...(active.anchors.length ? { anchors: active.anchors } : {}), effects: defaultVoiceTakeEffects(), timelineApproximate: active.timelineApproximate, matchPercent: null, monitoring: active.monitoring,
         status: finished.deviceLost || reason === 'device-lost' ? 'partial-device-lost' : !finished.ok || reason === 'error' || active.finalizationError || placementMiss ? 'partial-error' : 'complete',
         name: null, audio: { fileName: basename(wavPath), format: 'wav-pcm16', byteSize: file.size, checksum: null }
@@ -602,7 +627,7 @@ export class VoiceTakeStore {
         nativeOk: finished.ok, deviceLost: finished.deviceLost, placementFault: active.placementFault === true,
         timelineEnded: active.timelineEnded === true, anchors: active.anchors.length }))
       this.finalizedTake = summary(sidecar)
-      this.finalizedNote = note ?? (active.timelineEnded ? 'seek' : undefined)
+      this.finalizedNote = note ?? active.timelineEndNote
       return { ok: true, take: this.finalizedTake, ...(this.finalizedNote ? { note: this.finalizedNote } : {}) }
     } catch (error) {
       log('voice-take', 'finalize failed ' + JSON.stringify({ takeId: active.takeId,

@@ -3,6 +3,17 @@ import type { settings as en } from '../en/settings'
 import type { Translation } from '../types'
 
 export const settings: Translation<typeof en> = {
+  "settings.buffer.mixed": "Farklı arabellek boyutları",
+  "settings.buffer.label": "Arabellek boyutu",
+  "settings.buffer.option": "{frames} kare · {ms} ms",
+  "settings.buffer.savedUnavailable": "{frames} kare (kaydedildi, kullanılamıyor)",
+  "settings.buffer.hint": "Küçük arabellekler gecikmeyi azaltır ve daha fazla CPU kullanır. Gösterilen süre tek bir arabellek içindir, toplam ses gecikmesi değildir.",
+  "settings.buffer.pending": "Kaydedildi. Çalma, izleme, kayıt ve mikrofon önizlemesi durduktan sonra uygulanır.",
+  "settings.buffer.outputStatus": "Çıkış: istenen {requested}, alınan {actual} kare",
+  "settings.buffer.inputStatus": "Giriş: istenen {requested}, alınan {actual} kare",
+  "settings.buffer.unsupported": "Arabellek boyutu macOS üzerinde CoreAudio ile ayarlanabilir.",
+  "settings.buffer.failed": "Arabellek boyutu uygulanamadı: {error}",
+
   'settings.route.title': 'Ses yolu',
   'settings.route.retryNextStart': 'Kaydedilen aygıt SingZ yeniden başladığında tekrar denenecek.',
   'settings.route.inventoryUnavailable': 'Ses aygıtları listesi alınamıyor.',

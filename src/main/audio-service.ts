@@ -3,6 +3,7 @@ import { CaptureOwner, loadCaptureBinding, type NativeCaptureBinding } from './c
 import { join } from 'node:path'
 import { boxRoutingPollTick } from './box-audio/poll'
 import { open } from 'node:fs/promises'
+import { audioBufferPreferences } from '../shared/audio-buffer'
 import {
   AUDIO_BINDING_METHODS,
   AUDIO_OWNER_METHODS,
@@ -22,6 +23,9 @@ let boxShutdown: (() => void) | undefined
 const native = (): NativeCaptureBinding => {
   if (binding) return binding
   const candidate = loadCaptureBinding()
+  if (process.env.SINGZ_SURFACE !== 'box') {
+    candidate.audioBufferSettings?.(audioBufferPreferences(JSON.parse(process.env.SINGZ_AUDIO_BUFFER_PREFERENCES || '{}')))
+  }
   // Local Box has the same private LoopZ tap as the persistent host. Desktop
   // never initializes routing here. Unsupported preview images remain explicit.
   if (process.env.SINGZ_SURFACE === 'box' && process.env.SINGZ_AUDIO_BOX_DATA_DIR) {
@@ -41,6 +45,25 @@ const native = (): NativeCaptureBinding => {
   return binding = candidate
 }
 const owner = new CaptureOwner(undefined, native)
+let bufferTelemetry = ''
+function pumpBufferSettings(): void {
+  try {
+    const status = binding?.audioBufferSettings?.()
+    if (!status) return
+    const telemetry = `output requested ${status.requestedFrames}, obtained ${status.obtainedFrames} frames; ` +
+      `input requested ${status.inputRequestedFrames}, obtained ${status.inputObtainedFrames} frames; ` +
+      `pending ${status.pending}${status.error ? `; error ${status.error}` : ''}`
+    if (telemetry !== bufferTelemetry) { bufferTelemetry = telemetry; console.info(`Audio buffer · ${telemetry}`) }
+  } catch (error) {
+    // A settings error must never prevent a stop/cancel command reaching native.
+    const telemetry = `Audio buffer apply failed: ${String(error)}`
+    if (telemetry !== bufferTelemetry) { bufferTelemetry = telemetry; console.error(telemetry) }
+  }
+}
+// Applying a saved choice waits for all native users to release their routes.
+// Keep this running after Settings closes and before the next opening RPC.
+const bufferTimer = setInterval(pumpBufferSettings, 250)
+bufferTimer.unref()
 let inFlight = 0
 let inFlightBytes = 0
 let closed = false
@@ -118,6 +141,7 @@ port.on('message', async ({ data }) => {
   if (data.type === 'shutdown') {
     closed = true
     clearInterval(timer)
+    clearInterval(bufferTimer)
     for (const job of exportJobs.keys()) cancelExport(job)
     clearInterval(boxPoll)
     try { owner.stop() } finally { boxShutdown?.() }
@@ -149,6 +173,7 @@ port.on('message', async ({ data }) => {
     localeQueue = localized.catch(() => {})
     await localized
     const args = [...request.args]
+    pumpBufferSettings()
     if ((request.target === 'owner' && request.method === 'begin') ||
         (request.target === 'binding' && request.method === 'beginCapture')) {
       const key = args.pop()

@@ -93,22 +93,7 @@ VoiceMonitorResult CommonVoiceMonitor::begin(const std::string& uid, uint32_t ch
   const auto output = service_.ensureOutput();
   if (!output.ok) return monitorFailure("error", output.message);
   AudioInputConfig config; config.deviceUid = uid; config.channel = channel;
-  if (service_.providerId() == "coreaudio") {
-    const auto inventory = service_.inventory();
-    for (const auto& device : inventory.devices) if (device.uid == uid) {
-      config.requestedBufferFrames = chooseMonitorBufferFrames(device.bufferFrames, device.bufferFrames, 32, 256).value_or(0);
-      break;
-    }
-    config.allowSharedDeviceBufferChange = true;
-    config.maximumAcceptableBufferFrames = config.requestedBufferFrames ? 256 : 0;
-    // A physical same-device buffer is also the song host's period. Adopt it
-    // while a song session holds that device; history accepts a delayed route
-    // instead of retuning a playing song. A cross-device input may negotiate.
-    if (uid == service_.activeOutputUid() && service_.playbackOutputCurrent()) {
-      config.requestedBufferFrames = 0;
-      config.maximumAcceptableBufferFrames = 0;
-    }
-  }
+  config = service_.inputBufferConfig(std::move(config));
   const auto devices = service_.inputDevices();
   const auto capture = capture_.retain(VoiceCaptureUser::Monitor, config, {}, &devices);
   if (!capture.ok) return monitorFailure("error", capture.error);
@@ -146,7 +131,8 @@ bool CommonVoiceMonitor::setGain(float db) noexcept {
 VoiceMonitorLatency CommonVoiceMonitor::latency() {
   const auto host = service_.status();
   VoiceMonitorLatency result;
-  result.sampleRate = host.format.sampleRate; result.requestedFrames = 32;
+  result.sampleRate = host.format.sampleRate;
+  result.requestedFrames = service_.requestedBufferFrames(service_.activeOutputUid());
   result.bufferFrames = host.latency.bufferFrames;
   const auto input = capture_.openingResult();
   result.inputDeviceFrames = !input.inputLatencyStable || input.inputLatencyStable->load(std::memory_order_acquire)
