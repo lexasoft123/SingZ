@@ -5,7 +5,6 @@ import { VOICE_IPC, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRe
 
 export function createVoiceMonitorNative(): VoiceMonitorNative {
   return {
-    hostDevices: () => desktopAudioProcess.call('owner', 'hostDevices', []),
     inputDevices: () => desktopAudioProcess.call('binding', 'inputDevices', []),
     voiceMonitorAvailability: async args => { try { return await desktopAudioProcess.call('binding', 'voiceMonitorAvailability', [args]) } catch (error) { if (isAudioProcessFailure(error)) throw error; return { available: false, reason: 'error' } } },
     beginVoiceMonitor: (args, generation) => desktopAudioProcess.call('binding', 'beginVoiceMonitor', [args, generation]),
@@ -14,22 +13,21 @@ export function createVoiceMonitorNative(): VoiceMonitorNative {
     endVoiceMonitor: generation => desktopAudioProcess.call('binding', 'endVoiceMonitor', [generation])
   }
 }
-const validOutput = (value: unknown): boolean => value == null || (typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0'))
 const validInput = (value: unknown): value is VoiceMonitorAvailabilityRequest => {
   const v = value as VoiceMonitorAvailabilityRequest
   if (v && typeof v === 'object' && v.contextOnly === true) {
     const c = v.playbackContext
-    return Boolean(validOutput(v.outputDeviceId) && c && typeof c.webAudioPlaying === 'boolean' &&
+    return Boolean(c && typeof c.webAudioPlaying === 'boolean' &&
       typeof c.browserOutputUid === 'string' && c.browserOutputUid.length <= 4096 && !c.browserOutputUid.includes('\0') &&
       typeof c.selectedOutputUid === 'string' && c.selectedOutputUid.length <= 4096 && !c.selectedOutputUid.includes('\0'))
   }
-  return Boolean(v && validOutput(v.outputDeviceId) && v.contextOnly === undefined && typeof v === 'object' && v.input && typeof v.input.deviceName === 'string' && Number.isInteger(v.input.channelIndex) && v.input.channelIndex >= 0)
+  return Boolean(v && v.contextOnly === undefined && typeof v === 'object' && v.input && typeof v.input.deviceName === 'string' && Number.isInteger(v.input.channelIndex) && v.input.channelIndex >= 0)
 }
 const invalidChannel = (value: unknown): boolean => {
   const v = value as VoiceMonitorAvailabilityRequest
-  return Boolean(v && validOutput(v.outputDeviceId) && v.contextOnly === undefined && typeof v === 'object' && v.input && typeof v.input.deviceName === 'string' && typeof v.input.channelIndex === 'number' && Number.isFinite(v.input.channelIndex) && (!Number.isInteger(v.input.channelIndex) || v.input.channelIndex < 0))
+  return Boolean(v && v.contextOnly === undefined && typeof v === 'object' && v.input && typeof v.input.deviceName === 'string' && typeof v.input.channelIndex === 'number' && Number.isFinite(v.input.channelIndex) && (!Number.isInteger(v.input.channelIndex) || v.input.channelIndex < 0))
 }
-const errorState = (): VoiceMonitorState => ({ available: { reason: 'error' }, on: false, gainDb: 0, latency: null, warnings: [], outputDevice: null, outputCandidates: [] })
+const errorState = (): VoiceMonitorState => ({ available: { reason: 'error' }, on: false, gainDb: 0, latency: null, warnings: [] })
 /** Installed on monitor activation itself, independently of capture:begin or takes. */
 export class VoiceMonitorRendererOwnership {
   private watched = new WeakMap<WebContents, { epoch: number }>()

@@ -1,5 +1,11 @@
 # ADR 0014: Voice strip — recording and monitoring in the song player
 
+Take playback and monitoring design are superseded by
+[ADR 0016](0016-take-as-playback-lane.md) and
+[ADR 0017](0017-monitoring-through-the-common-mixer.md): takes use the normal
+transport lane and live voice uses the common mixer/output. The old replay
+path and second monitor host described below are historical and deleted.
+
 Status: accepted; milestone 2 (live monitoring on macOS) implemented on
 `codex/voice-monitor`, not merged; milestone 1 and 3 as in the spec table.
 The second monitor host, the monitor-output selection (`outputDeviceId`,

@@ -16,7 +16,6 @@ const input = { deviceName: 'mic', channelIndex: 0 }
 function fixture() {
   const device = { uid: 'mic', label: 'AirPods', isDefault: true, sampleRate: 48000, channels: 1, channelLabels: ['1'] }
   const native: VoiceMonitorNative = {
-    hostDevices: vi.fn(async () => ({ ok: true as const, platform: 'darwin' as const, provider: 'coreaudio' as const, defaultInputUid: 'mic', defaultOutputUid: 'mic', devices: [{ uid: 'mic', label: 'AirPods', direction: 'duplex' as const, transport: 'usb' as const, defaultInput: true, defaultOutput: true, inputChannels: 1, outputChannels: 2, inputChannelLabels: [], outputChannelLabels: [], nominalSampleRate: 48000, accessMode: 'shared' as const, monitoringSuitability: 'low-latency' as const, sampleRateRanges: [], bufferFrames: { minimumFrames: 32, maximumFrames: 256, preferredFrames: 32, fundamentalFrames: 1 } }] })),
     inputDevices: vi.fn(async () => ({ ok: true, devices: [device] })),
     voiceMonitorAvailability: vi.fn(async () => ({ available: true })),
     beginVoiceMonitor: vi.fn(async () => { vi.mocked(native.voiceMonitorStatus).mockResolvedValue({ running: true }); return { ok: true } }),
@@ -31,7 +30,7 @@ describe('voice monitoring', () => {
   it('uses native typed route decisions, not the AirPods label', async () => {
     const { store, native } = fixture()
     expect((await store.availability({ input })).available).toBe(true)
-    for (const reason of ['route-separate-devices', 'route-latency', 'route-bluetooth', 'route-wireless', 'route-feedback'] as const) {
+    for (const reason of ['route-latency', 'route-bluetooth', 'route-wireless', 'route-feedback'] as const) {
       vi.mocked(native.voiceMonitorAvailability).mockResolvedValueOnce({ available: false, reason })
       expect((await store.availability({ input })).available).toEqual({ reason })
     }
@@ -39,9 +38,7 @@ describe('voice monitoring', () => {
   })
   it('uses native availability for virtual/unknown routes instead of duplex metadata', async () => {
     const { store, native } = fixture()
-    vi.mocked(native.hostDevices).mockRejectedValue(new Error('legacy metadata must not decide availability'))
     expect((await store.availability({ input })).available).toBe(true)
-    expect(native.hostDevices).not.toHaveBeenCalled()
     expect(native.voiceMonitorAvailability).toHaveBeenCalledWith({ inputUid: 'mic', inputChannel: 0 })
   })
   it('keeps the monitor through song changes and unloads', async () => {
@@ -77,7 +74,6 @@ describe('voice monitoring', () => {
     const playbackContext = { webAudioPlaying: false, browserOutputUid: 'mic', selectedOutputUid: '' }
     expect(await store.availability({ input: { deviceName: '', channelIndex: 0 }, contextOnly: true, playbackContext })).toMatchObject({ on: false })
     expect(native.inputDevices).not.toHaveBeenCalled()
-    expect(native.hostDevices).not.toHaveBeenCalled()
     expect(permission).not.toHaveBeenCalled()
     expect(native.voiceMonitorAvailability).toHaveBeenCalledWith({ inputUid: '', inputChannel: 0, contextOnly: true, ...playbackContext })
     expect((await store.set({ input, on: true })).on).toBe(true)
@@ -111,20 +107,19 @@ describe('voice monitoring', () => {
     expect((await store.set({ input, on: false })).on).toBe(false)
     expect(native.endVoiceMonitor).toHaveBeenCalled()
   })
-  it('a foreground probe with another outputDeviceId never rewrites the route of a running monitor', async () => {
+  it('a foreground probe never rewrites the common route of a running monitor', async () => {
     const { store, native } = fixture()
-    vi.mocked(native.beginVoiceMonitor).mockResolvedValueOnce({ ok: true, outputDevice: { id: 'mic', name: 'Interface A' }, outputCandidates: [{ id: 'mic', name: 'Interface A', usable: true }] } as never)
+    vi.mocked(native.beginVoiceMonitor).mockResolvedValueOnce({ ok: true, commonOutputName: 'Interface A' } as never)
     const started = await store.set({ input, on: true })
-    expect(started.outputDevice).toEqual({ id: 'mic', name: 'Interface A' })
-    vi.mocked(native.voiceMonitorAvailability).mockResolvedValueOnce({ available: true, outputDevice: { id: 'other', name: 'Other Out' }, outputCandidates: [{ id: 'other', name: 'Other Out', usable: true }] } as never)
-    const probed = await store.availability({ input, outputDeviceId: 'other' })
+    expect(started.commonOutputName).toBe('Interface A')
+    vi.mocked(native.voiceMonitorAvailability).mockResolvedValueOnce({ available: true, commonOutputName: 'Other Out' } as never)
+    const probed = await store.availability({ input })
     expect(probed.on).toBe(true)
-    expect(probed.outputDevice).toEqual({ id: 'mic', name: 'Interface A' })
-    expect(probed.outputCandidates).toEqual([{ id: 'mic', name: 'Interface A', usable: true }])
-    // negative control: once off, a probe does merge its candidates
+    expect(probed.commonOutputName).toBe('Interface A')
+    // Once off, a probe reports the current common output.
     await store.set({ input, on: false })
-    vi.mocked(native.voiceMonitorAvailability).mockResolvedValueOnce({ available: true, outputDevice: { id: 'other', name: 'Other Out' }, outputCandidates: [{ id: 'other', name: 'Other Out', usable: true }] } as never)
-    expect((await store.availability({ input, outputDeviceId: 'other' })).outputDevice).toEqual({ id: 'other', name: 'Other Out' })
+    vi.mocked(native.voiceMonitorAvailability).mockResolvedValueOnce({ available: true, commonOutputName: 'Other Out' } as never)
+    expect((await store.availability({ input })).commonOutputName).toBe('Other Out')
     await store.dispose()
   })
   it('rejects malformed playback context and context-only monitor starts at IPC', async () => {
@@ -170,56 +165,16 @@ describe('voice monitoring', () => {
     expect(native.voiceMonitorAvailability).toHaveBeenCalledWith({ inputUid: 'mic', inputChannel: 1 })
     expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0].inputChannel).toBe(1)
   })
-  it('ignores deprecated output UIDs, echoes the common route and isolates snapshots', async () => {
-    const { store, native } = fixture()
-    const outputDevice = { id: 'mic', name: 'Interface' }
-    const outputCandidates = [{ ...outputDevice, usable: true }, { id: 'other', name: 'Interface', usable: false, reason: 'route-separate-devices' as const }]
-    vi.mocked(native.voiceMonitorAvailability).mockResolvedValue({ available: true, outputDevice, outputCandidates })
-    const state = await store.availability({ input, outputDeviceId: 'mic' })
-    expect(native.voiceMonitorAvailability).toHaveBeenLastCalledWith({ inputUid: 'mic', inputChannel: 0 })
-    expect(state).toMatchObject({ outputDevice, outputCandidates })
-    state.outputCandidates![0].name = 'caller mutation'
-    state.outputDevice!.name = 'caller mutation'
-    expect((await store.state()).outputDevice).toEqual(outputDevice)
-    expect((await store.state()).outputCandidates).toEqual(outputCandidates)
-    await store.set({ input, on: true, outputDeviceId: 'mic' })
-    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0]).not.toHaveProperty('outputDeviceId')
-    expect((await store.state()).on).toBe(true)
-    await store.dispose()
-  })
-  it('deprecated output changes never restart capture or select another monitor output', async () => {
-    const { store, native } = fixture()
-    await store.set({ input, on: true })
-    await store.set({ input, on: true, outputDeviceId: 'other' })
-    await store.set({ input, on: true, outputDeviceId: null })
-    expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1)
-    expect(native.endVoiceMonitor).not.toHaveBeenCalled()
-    for (const [args] of vi.mocked(native.voiceMonitorAvailability).mock.calls) expect(args).not.toHaveProperty('outputDeviceId')
-    await store.dispose()
-  })
-  it('stops the old monitor and refuses a separate-device selection with native metadata', async () => {
-    const { store, native } = fixture()
-    await store.set({ input, on: true })
-    const outputDevice = { id: 'other', name: 'same label' }
-    vi.mocked(native.voiceMonitorAvailability).mockResolvedValueOnce({ available: false, reason: 'route-separate-devices', outputDevice,
-      outputCandidates: [{ ...outputDevice, usable: false, reason: 'route-separate-devices' }] })
-    expect(await store.set({ input, on: true, outputDeviceId: 'other' })).toMatchObject({ on: false, available: { reason: 'route-separate-devices' }, outputDevice })
-    expect(native.endVoiceMonitor).toHaveBeenCalledTimes(1)
-    expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1)
-  })
-  it('rejects malformed output identifiers before native IPC', async () => {
-    registerVoiceMonitor()
-    for (const outputDeviceId of ['', 7, {}, 'bad\0uid', 'x'.repeat(4097)]) {
-      expect(await ipc.get(VOICE_IPC.monitorAvailability)!(null, { input, outputDeviceId })).toMatchObject({ available: { reason: 'error' } })
-      expect(await ipc.get(VOICE_IPC.monitorSet)!(null, { input, on: true, outputDeviceId })).toMatchObject({ available: { reason: 'error' } })
-    }
-  })
+
+
+
+
   it('opens once, clamps gain, closes with its generation and reopens with a fresh generation', async () => {
     const { store, native } = fixture()
     expect((await store.set({ input, on: true, gainDb: 100 })).on).toBe(true)
     await store.set({ input, on: true })
     expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0]).toMatchObject({ gainDb: 36, targetFrames: 32, maxFrames: 256 })
+    expect(vi.mocked(native.beginVoiceMonitor).mock.calls[0][0]).toMatchObject({ gainDb: 36 })
     expect((await store.gain(20)).gainDb).toBe(20) // above the old +12 ceiling is valid
     expect((await store.gain(99)).gainDb).toBe(36)
     expect((await store.gain(-100)).gainDb).toBe(-60)
@@ -550,12 +505,12 @@ describe('monitor renderer ownership', () => {
     const { store, native } = fixture()
     const initial = { sampleRate: 48000, requestedFrames: 32, bufferFrames: 32, inputDeviceFrames: 148,
       outputDeviceFrames: 28, roundTripFrames: 560, roundTripMs: 11.667, source: 'estimated' as const }
-    vi.mocked(native.beginVoiceMonitor).mockResolvedValueOnce({ ok: true, latency: initial, outputDevice: { id: 'zen', name: 'Zen' } })
+    vi.mocked(native.beginVoiceMonitor).mockResolvedValueOnce({ ok: true, latency: initial, commonOutputName: 'Zen' })
     await store.set({ input, on: true })
     const migrated = { ...initial, bufferFrames: 512, outputDeviceFrames: 96, roundTripMs: 51.7, queueFrames: 1280, delayed: true }
-    vi.mocked(native.voiceMonitorStatus).mockResolvedValueOnce({ running: true, latency: migrated, outputDevice: { id: 'cortex', name: 'Cortex' } })
+    vi.mocked(native.voiceMonitorStatus).mockResolvedValueOnce({ running: true, latency: migrated, commonOutputName: 'Cortex' })
     const selected = await store.availability({ input, contextOnly: true, playbackContext: { webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: 'cortex' } })
-    expect(selected).toMatchObject({ on: true, outputDevice: { id: 'cortex' }, latency: migrated })
+    expect(selected).toMatchObject({ on: true, commonOutputName: 'Cortex', latency: migrated })
     expect(native.beginVoiceMonitor).toHaveBeenCalledTimes(1);expect(native.endVoiceMonitor).not.toHaveBeenCalled()
     await store.dispose()
   })

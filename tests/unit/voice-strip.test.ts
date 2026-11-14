@@ -359,8 +359,7 @@ describe('recording', () => {
       expect(c.getSnapshot().stoppedBy).toBe(boundary)
       expect(c.getSnapshot().error).toBeNull()
       const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
-      const text = boundary === 'pause' ? 'Recording stopped because the song was paused.' : boundary === 'song-end' ? 'Recording stopped at the end of the song.' : 'Recording stopped because the song position changed.'
-      expect(html).toContain(text)
+      expect(html).not.toMatch(/Recording stopped (because|at)/)
       expect(html.replaceAll('&#x27;', "'")).not.toContain(t('player.voice.errGeneric'))
     } finally { c.dispose(); warning.mockRestore() }
   })
@@ -410,6 +409,18 @@ describe('recording', () => {
     await missing.refreshInputs()
     await missing.toggleRecord()
     expect(missing.getSnapshot().error).toBe('no-bridge')
+  })
+
+  it('a salvaged take that was not a device loss is shown as a take, never as "Recording didn\'t work"', async () => {
+    const { c, engine } = await setup({ recordStop: vi.fn(async () => ({ ok: false, reason: 'error' as const, take: summary({ durationSec: 9 }) })) })
+    try {
+      await c.toggleRecord()
+      await c.stopRecording('song-end')
+      expect(c.getSnapshot().error).toBeNull()
+      expect(c.state).toBe('take-review')
+      const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never })).replaceAll('&#x27;', "'")
+      expect(html).not.toContain(t('player.voice.errGeneric'))
+    } finally { c.dispose() }
   })
 
   it('a device lost mid-take keeps the salvaged take and enters error-recoverable', async () => {
@@ -765,7 +776,7 @@ describe('live monitoring (M2)', () => {
     fresh.c.dispose()
   })
   it('maps every unavailable reason to the two unavailable states and keeps the reason', async () => {
-    const reasons = ['route-separate-devices', 'route-latency', 'route-bluetooth', 'route-wireless', 'route-feedback', 'no-input', 'permission', 'output-not-native', 'platform', 'device-lost', 'error'] as const
+    const reasons = ['route-latency', 'route-bluetooth', 'route-wireless', 'route-feedback', 'no-input', 'permission', 'output-not-native', 'platform', 'device-lost', 'error'] as const
     for (const reason of reasons) {
       const { c, api } = await setup({ monitorAvailability: unavailable({ reason }) })
       await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe(reason))
@@ -776,7 +787,7 @@ describe('live monitoring (M2)', () => {
     }
   })
   it('recording and the meter work in every unavailable state; recording works with monitoring on', async () => {
-    const u = await setup({ monitorAvailability: unavailable({ reason: 'route-separate-devices' }) })
+    const u = await setup({ monitorAvailability: unavailable({ reason: 'route-bluetooth' }) })
     await vi.waitFor(() => expect(u.c.getSnapshot().monitor.avail).toBe('route'))
     await u.c.arm()
     expect(u.c.getSnapshot().armed).toBe(true)
@@ -902,21 +913,22 @@ describe('live monitoring (M2)', () => {
     await on.c.toggleMonitor()
     let html = renderToStaticMarkup(createElement(VoiceStrip, { controller: on.c, engine: on.engine as never }))
     expect(html).toContain('aria-label="Monitoring on. Click to turn off"')
-    expect(html).toContain('≈ 6 ms')
+    expect(html).toContain('>6 ms<')
+    expect(html).not.toContain('≈ 6 ms')
     expect(html).toContain('Estimated round-trip delay · 64 frames')
     expect(html).toContain('aria-label="Monitor level"')
     on.c.dispose()
-    const off = await setup({ monitorAvailability: unavailable({ reason: 'route-separate-devices' }) })
+    const off = await setup({ monitorAvailability: unavailable({ reason: 'route-bluetooth' }) })
     await vi.waitFor(() => expect(off.c.getSnapshot().monitor.avail).toBe('route'))
     html = renderToStaticMarkup(createElement(VoiceStrip, { controller: off.c, engine: off.engine as never }))
     expect(html).toMatch(/aria-disabled="true"[^>]*aria-describedby="voice-monitor-why"|aria-describedby="voice-monitor-why"[^>]*aria-disabled="true"/)
     expect(html).toContain('id="voice-monitor-why"')
-    expect(html).toContain('Monitoring needs the input and output on one device')
+    expect(html).toContain('Bluetooth')
     // the reason is only the speaker's description: nothing is drawn as lane text (no vs-note content)
     expect(html).toMatch(/<span class="vs-note[^"]*"[^>]*><\/span>/) // exactly empty: no text, no whitespace
-    expect(html.match(/on one device/g)?.length).toBeGreaterThan(0)
+    expect(html.match(/Bluetooth/g)?.length).toBeGreaterThan(0)
     expect(html).not.toMatch(/class="vs-note warn"/)
-    expect(settingsHtmlOf(off.c)).toContain('Monitoring needs the input and output on one device') // route line
+    expect(settingsHtmlOf(off.c)).toContain('Bluetooth') // route line
     off.c.dispose()
   })
 })
@@ -1090,9 +1102,10 @@ describe('input channels (spec J2, VS-REC-011)', () => {
     const html = render(c, engine)
     expect(html).toContain('<optgroup label="Zen Quadro SC">')
     expect((html.match(/<option value="zen#/g) ?? []).length).toBe(16)
-    expect(html).toContain('Zen Quadro SC · In 1')
-    expect(html).toContain('Zen Quadro SC · In 16')
-    expect(html).toContain('Zen Quadro SC · Vocal mic') // the device's own name for channel 6
+    expect(html).toContain('In 1 · Zen Quadro SC') // input name first: truncation cuts the device name
+    expect(html).toContain('In 16 · Zen Quadro SC')
+    expect(html).toContain('Vocal mic · Zen Quadro SC')
+    expect(html).not.toContain('Zen Quadro SC · In 1') // the device's own name for channel 6
     expect(html).toContain('MacBook Pro Microphone (mono)')
     expect(html).not.toContain('<optgroup label="MacBook Pro Microphone">') // a mono device is a single option
     c.dispose()
@@ -1510,7 +1523,7 @@ describe('monitoring during a take, route changes, and the arm window (hardware 
   it('re-asks availability when the song output changes: speakers disable the button with the reason, the interface re-enables it', async () => {
     let route = 'interface'
     let emit = () => undefined as void
-    const sep = { reason: 'route-separate-devices' as const }
+    const sep = { reason: 'route-bluetooth' as const }
     const { c, api, engine } = await setup({}, (e) => {
       Object.defineProperty(e, 'outputDeviceId', { get: () => route })
       ;(e as unknown as { subscribe: (fn: () => void) => () => void }).subscribe = (fn) => { emit = fn; return () => undefined }
@@ -1521,7 +1534,7 @@ describe('monitoring during a take, route changes, and the arm window (hardware 
     api.monitorAvailability.mockResolvedValue(monState({ available: sep, on: false, latency: null }))
     route = 'speakers'
     emit()
-    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('route-separate-devices'))
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('route-bluetooth'))
     const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
     expect(html).toMatch(/aria-disabled="true"[^>]*aria-describedby="voice-monitor-why"|aria-describedby="voice-monitor-why"[^>]*aria-disabled="true"/)
     api.monitorAvailability.mockResolvedValue(monState({ on: false }))
@@ -1533,10 +1546,10 @@ describe('monitoring during a take, route changes, and the arm window (hardware 
   it('re-asks availability right before each toggle-on and refuses with the reason if main says unavailable', async () => {
     const { c, api } = await setup()
     expect(c.getSnapshot().monitor.avail).toBe('ok')
-    api.monitorAvailability.mockResolvedValue(monState({ available: { reason: 'route-separate-devices' }, on: false, latency: null }))
+    api.monitorAvailability.mockResolvedValue(monState({ available: { reason: 'route-bluetooth' }, on: false, latency: null }))
     await c.toggleMonitor()
     expect(api.monitorSet).not.toHaveBeenCalled()
-    expect(c.getSnapshot().monitor.reason).toBe('route-separate-devices')
+    expect(c.getSnapshot().monitor.reason).toBe('route-bluetooth')
     expect(c.getSnapshot().armed).toBe(false) // nothing armed for a refused monitor
     c.dispose()
   })
@@ -1730,7 +1743,7 @@ describe('take span in song time', () => {
 })
 
 describe('seek-stopped note (D4)', () => {
-  it.each(['pause', 'song-end'] as const)('shows the distinct legacy %s note without an error', async boundary => {
+  it.each(['pause', 'song-end'] as const)('shows no stop-reason note and no error for a %s stop', async boundary => {
     const { c, engine } = await setup()
     try {
       await c.toggleRecord(); clock = 100; engine._playing = false
@@ -1739,7 +1752,7 @@ describe('seek-stopped note (D4)', () => {
       await vi.waitFor(() => expect(c.state).toBe('take-review'))
       expect(c.getSnapshot().stoppedBy).toBe(boundary)
       const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
-      expect(html).toContain(t(boundary === 'pause' ? 'player.voice.msgPauseStopped' : 'player.voice.msgSongEndStopped'))
+      expect(html).not.toMatch(/Recording stopped (because|at)/)
       expect(html.replaceAll('&#x27;', "'")).not.toContain(t('player.voice.errGeneric'))
     } finally { c.dispose() }
   })
@@ -1753,7 +1766,7 @@ describe('seek-stopped note (D4)', () => {
       await c.stopRecording('auto')
       expect(c.getSnapshot().error).toBeNull()
       let html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
-      expect(html).toContain(t('player.voice.msgSongEndStopped'))
+      expect(html).not.toMatch(/Recording stopped (because|at)/)
       expect(html.replaceAll('&#x27;', "'")).not.toContain(t('player.voice.errGeneric'))
       internals.set({ error: 'error' }) // Negative control: old success retained this stale failure.
       html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
@@ -1761,7 +1774,7 @@ describe('seek-stopped note (D4)', () => {
     } finally { c.dispose() }
   })
 
-  it('shows the seek copy in take-review, not only outside it', async () => {
+  it('shows no seek note in take-review', async () => {
     const { c, engine } = await setup()
     await c.toggleRecord()
     clock = 100
@@ -1769,7 +1782,7 @@ describe('seek-stopped note (D4)', () => {
     c.tick()
     await vi.waitFor(() => expect(c.state).toBe('take-review'))
     const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: c, engine: engine as never }))
-    expect(html).toContain('Recording stopped because the song position changed.')
+    expect(html).not.toMatch(/Recording stopped (because|at)/)
     c.dispose()
   })
 })
@@ -1895,9 +1908,9 @@ describe('one common output: the track settings popup has no monitor output of i
     return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k), m }
   }
   const KEY = 'singz.voice.monitorOutput'
-  // The deprecated contract fields may still arrive from main; nothing in the UI or controller may use them.
-  const withDeprecated = (over: Partial<VoiceMonitorState> = {}) =>
-    ({ monitorAvailability: vi.fn(async () => monState({ on: false, outputCandidates: [{ id: 'zen-uid', name: 'Zen Quadro', usable: true }, { id: 'bt-uid', name: 'Headphones BT', usable: false, reason: 'route-bluetooth' as const }], outputDevice: { id: 'zen-uid', name: 'Zen Quadro' }, ...over })) }) as Partial<VoiceTakeApi>
+  // Display metadata comes from the one common Settings output.
+  const withCommonOutput = (over: Partial<VoiceMonitorState> = {}) =>
+    ({ monitorAvailability: vi.fn(async () => monState({ on: false, commonOutputName: 'Zen Quadro', ...over })) }) as Partial<VoiceTakeApi>
   const settingsHtml = (c: VoiceController): string => renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: c, onClose: () => undefined }))
   const sentOutputs = (api: ReturnType<typeof fakeApi>): unknown[] =>
     [...api.monitorSet.mock.calls, ...api.monitorAvailability.mock.calls].map((c) => c[0] as object)
@@ -1908,9 +1921,9 @@ describe('one common output: the track settings popup has no monitor output of i
     expect(html).toMatch(/aria-haspopup="dialog"[^>]*aria-expanded="false"[^>]*aria-label="Track settings"/)
     c.dispose()
   })
-  it('the popup renders no select and no monitor-output label, even when main still reports output candidates', async () => {
-    const { c } = await setup(withDeprecated())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputDevice).not.toBeNull())
+  it('the popup renders no select and no monitor-output label, with the common output display name', async () => {
+    const { c } = await setup(withCommonOutput())
+    await vi.waitFor(() => expect(c.getSnapshot().monitorCommonOutputName).not.toBeNull())
     const html = settingsHtml(c)
     expect(html).not.toContain('<select')
     expect(html).not.toContain('<option')
@@ -1922,7 +1935,7 @@ describe('one common output: the track settings popup has no monitor output of i
     c.dispose()
   })
   it('the controller never sends outputDeviceId, to availability or to monitorSet', async () => {
-    const { c, api } = await setup(withDeprecated())
+    const { c, api } = await setup(withCommonOutput())
     await vi.waitFor(() => expect(api.monitorAvailability).toHaveBeenCalled())
     await c.toggleMonitor()
     await c.toggleMonitor()
@@ -1934,7 +1947,7 @@ describe('one common output: the track settings popup has no monitor output of i
   })
   it('a stored singz.voice.monitorOutput is ignored, removed once, and never written back', async () => {
     const store = memory({ [KEY]: 'zen-uid' })
-    const { c, api } = await setup(withDeprecated(), undefined, undefined, store)
+    const { c, api } = await setup(withCommonOutput(), undefined, undefined, store)
     expect(store.m.has(KEY)).toBe(false)
     await c.toggleMonitor()
     c.setMonitorFader(40)
@@ -1948,18 +1961,18 @@ describe('one common output: the track settings popup has no monitor output of i
     legacy.c.dispose()
   })
   it('the route line names the one common output, then adds buffer and delay only while monitoring', async () => {
-    const { c } = await setup(withDeprecated())
-    await vi.waitFor(() => expect(c.getSnapshot().monitorOutputDevice).not.toBeNull())
+    const { c } = await setup(withCommonOutput())
+    await vi.waitFor(() => expect(c.getSnapshot().monitorCommonOutputName).not.toBeNull())
     expect(settingsHtml(c)).toContain('Output: Zen Quadro (Settings › Audio route)')
     await c.toggleMonitor()
     expect(settingsHtml(c)).toMatch(/Route: Zen Quadro · buffer \d+ frames · estimated delay ≈ \d+ ms/)
     c.dispose()
   })
-  it('a typed refusal (route-separate-devices) shows its message, which never mentions a monitor output', async () => {
-    const { c } = await setup({ monitorAvailability: vi.fn(async () => monState({ available: { reason: 'route-separate-devices' }, on: false, latency: null })) })
-    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('route-separate-devices'))
+  it('a typed refusal (route-bluetooth) shows its message, which never mentions a monitor output', async () => {
+    const { c } = await setup({ monitorAvailability: vi.fn(async () => monState({ available: { reason: 'route-bluetooth' }, on: false, latency: null })) })
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('route-bluetooth'))
     const html = settingsHtml(c)
-    expect(html).toContain('Monitoring needs the input and output on one device')
+    expect(html).toContain('Bluetooth')
     expect(html).not.toMatch(/monitor output/i)
     c.dispose()
   })
@@ -2886,22 +2899,23 @@ describe('take lane state binding and themed effect controls', () => {
 describe('delayed monitor route (VS-MON)', () => {
   const route = async (delayed: boolean, input?: string) => {
     const latency = { ...monState().latency!, bufferFrames: 512, roundTripMs: 52, delayed }
-    const x = await setup({ monitorSet: vi.fn(async (req: { on: boolean }) => monState({ on: req.on, latency, outputDevice: { id: 'q', name: 'Quad Cortex' }, ...(input ? { inputDevice: { name: input } } : {}) })) })
+    const x = await setup({ monitorSet: vi.fn(async (req: { on: boolean }) => monState({ on: req.on, latency, commonOutputName: 'Quad Cortex', ...(input ? { inputDevice: { name: input } } : {}) })) })
     await x.c.toggleMonitor()
     const strip = renderToStaticMarkup(createElement(VoiceStrip, { controller: x.c, engine: x.engine as never }))
     const settings = renderToStaticMarkup(createElement(VoiceTrackSettings, { controller: x.c, onClose: () => undefined }))
     x.c.dispose()
     return { strip, settings }
   }
-  it('delayed: amber badge text, explanatory description and "delayed" in the route line', async () => {
+  it('delayed: amber ms-only badge, explanatory description and "delayed" in the route line', async () => {
     const { strip, settings } = await route(true)
-    expect(strip).toMatch(/class="vs-badge delayed"[^>]*>≈ 52 ms · delayed</)
+    expect(strip).toMatch(/class="vs-badge delayed"[^>]*>52 ms</)
+    expect(strip).not.toMatch(/>[^<]*delayed[^<]*</)
     expect(strip).toContain('different devices or use a larger buffer: expect a noticeable delay')
     expect(settings).toContain('estimated delay ≈ 52 ms · delayed')
   })
   it('not delayed: no marker anywhere (negative control)', async () => {
     const { strip, settings } = await route(false)
-    expect(strip).toMatch(/class="vs-badge"[^>]*>≈ 52 ms</)
+    expect(strip).toMatch(/class="vs-badge"[^>]*>52 ms</)
     expect(strip).not.toContain('delayed')
     expect(settings).not.toContain('delayed')
   })
@@ -3225,5 +3239,31 @@ describe('takes stack like a DAW: none replaces another, the selected one is the
   })
   it('no Listen keys remain in any locale', () => {
     for (const k of Object.keys(voiceEn)) expect(k, k).not.toMatch(/listen/i)
+  })
+})
+
+describe('stacked take rows share a fixed lane height (CSS)', () => {
+  const css = readFileSync(new URL('../../src/renderer/src/components/voice-strip.css', import.meta.url), 'utf8')
+  const body = (sel: string): string => new RegExp(`(?:^|\\n)${sel.replace('.', '\\.')} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+  it('rows split the lane evenly with a legible floor, never growing the strip', () => {
+    const row = body('.vs-take-row')
+    expect(row).toMatch(/flex:\s*1 1 0/)
+    expect(row).toMatch(/min-height:\s*\d+px/)
+    expect(row).toMatch(/max-height:\s*\d+px/)
+    expect(row).not.toMatch(/flex:\s*1 0 56px/) // old: fixed 56px basis that grew the strip and left gaps
+    const track = body('.vs-track')
+    expect(track).toMatch(/min-height:\s*0/)
+    expect(track).toMatch(/overflow-y:\s*auto/)
+    expect(track).not.toMatch(/max-height/)
+    expect(body('.vs-tl')).toMatch(/min-height:\s*0/)
+  })
+  it('the clip fills its row with only a hairline inset (no dead space between takes)', () => {
+    const clip = /\n\.vs-clip \{([^}]*)\}/.exec(css)![1]!
+    expect(Number(/top:\s*(\d+)px/.exec(clip)![1])).toBeLessThanOrEqual(3)
+    expect(Number(/bottom:\s*(\d+)px/.exec(clip)![1])).toBeLessThanOrEqual(3)
+  })
+  it('the selected take stays obvious: others are dimmed, the audible one is not', () => {
+    expect(css).toMatch(/\.vs-clip:not\(\.audible\):not\(\.recording\) \{ opacity: 0\.\d+/)
+    expect(css).toMatch(/\.vs-clip\.selected \{[^}]*border-color: var\(--accent\)/)
   })
 })

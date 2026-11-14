@@ -1,8 +1,8 @@
 # ADR 0017: Live monitoring through the common mixer and output
 
-Status: proposed (revision 2)<br>
+Status: implemented baseline (WP6 removal complete; hardware qualification remains WP8)<br>
 Date: 2026-11-13<br>
-Supersedes (when accepted): ADR 0014 "Design: a second small duplex host", its
+Supersedes: ADR 0014 "Design: a second small duplex host", its
 monitor-output selection paragraph (`outputDeviceId`, `outputDevice`,
 `outputCandidates`), the same-device-only rule and the two-host parts of "Buffer
 policy" and "Idle monitoring"; spec VS-MON-002, -005, -016, -024 (output picker).
@@ -114,9 +114,9 @@ history mechanism. No CPU or jitter figure is recorded for either path.
    measured output rate. Same device, another device and another rate are the
    same code. **The song host stays output-only and is never reopened for
    monitoring, except the optional WP5 duplex open at non-playing moments
-   (decision 6).** The 32..256 buffer negotiation and its session hold stay as the
-   service's own rule (they decide the queue floor); the two-host bookkeeping
-   around them goes.
+   (decision 6).** Settings owns the per-device buffer preference (default 128 frames); the
+   current capture and output periods decide the queue floor. Monitoring never
+   retunes an existing song output; the two-host buffer bookkeeping goes.
 3. **Reuse and port.** Reuse: zCore routing (history, resampler, sample clock)
    and the read side of `MicrophoneMixSession`, extracted into a shared core.
    Port from LoopZ: the measured output-rate estimator
@@ -176,7 +176,7 @@ history mechanism. No CPU or jitter figure is recorded for either path.
     The common Settings output context must actually configure the service,
     including when there is no native song or training cue.
     Period negotiation is order-dependent: monitoring first may acquire a
-    32..256 input-device buffer and the same physical output then uses it;
+    input-device buffer from Settings and the same physical output then uses it;
     opening the song first keeps its existing period (for example 512). Never
     shrink a song period for monitoring. Both the history read queue and the
     reported estimate use the current host period, even across reopens and
@@ -346,3 +346,23 @@ of the two-host buffer and lifetime special cases.
 - Owner, after WP0b: the cross-device refusal ceiling in ms, and confirmation
   that Bluetooth and wireless stay refused.
 - WP0b decides whether WP5 exists.
+
+## WP6 removal and regression mapping
+
+The legacy duplex host, escape switch, output picker fields, same-device-only
+refusal, weak monitor-output token and song-output 32..256 retune are deleted.
+Common monitor types and helpers live in `voice_monitor_client.h`. The service
+retains the common host capacity only while the additive monitor is attached.
+Output display metadata is `commonOutputName`; Settings owns the only output.
+
+| Deleted fake-duplex group | Replacement evidence |
+| --- | --- |
+| `renderTests`, `channelTests` | `voice_monitor_source_tests` selected capture/history and silence, `voice_monitor_client_tests` additive gain/ramp/meter/non-finite/allocation cases, `service_master_tests` final ceiling |
+| `routeTests` | `voice_monitor_client_tests` common-route admission, separate devices, virtual feedback, aggregate and transport policy |
+| `hostTests` | Common client/source ownership, permission, stale generation, stop/drain and capture-loss cases; no second host or callback-settle contract remains |
+| `outputPickerTests` | Picker behavior removed; `voice-monitor.test.ts` common-output display/migration and `voice-strip.test.ts` no-selector route UI |
+| `idleMonitorTests`, `songTests`, `currentOutputAndGapTests` | Common client idle/song join/unload/migration tests; shared service master and callback diagnostics; capture writer gap tests remain |
+| `sharedMonitorLeaseTests`, `externalLeaseTests`, `repeatedSharedBufferTests` | Two-host lease/retune behavior removed; common client asserts no period writes, retained host capacity, cue handback; native session capacity regression uses a common monitor and preserves the existing 512-frame song period |
+| Legacy render/host/lease mutation targets | Common source/client/clock/waveform/master mutation and realtime policy gates remain, including queue floor, admission, master order, cue handback, period and telemetry failures |
+
+Portable evidence does not claim new hardware continuity or round-trip results.

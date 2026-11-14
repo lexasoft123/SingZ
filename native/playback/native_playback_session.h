@@ -1008,11 +1008,6 @@ public:
   // a raw render-timeline query: callers subtract input/output/graph latency
   // once (recordPlacement), and retain discontinuitySerial to stop on seek.
   PlaybackPresentationQuery presentationQuery(uint64_t hostTimeNs) const;
-  // Bounded seqlock/atomic observation for the shared output render callback.
-  // No mutex, host call, allocation, ownership change or shared_ptr copy. Call
-  // after song rendering; stopped/unloaded/unpublished songs return missing.
-  // Latency fields are zero: this is the raw block coordinate for output mix.
-  PlaybackPresentationQuery presentationQueryRealtime(uint64_t hostTimeNs) const noexcept;
   // Lock-free and wait-free from any thread: see NativePlaybackPositionNow.
   // Safe to call at UI rate while a prepare decodes, while stop waits for
   // quiescence, and from a DecodeCancellation callback.

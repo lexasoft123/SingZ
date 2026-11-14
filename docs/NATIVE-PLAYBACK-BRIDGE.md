@@ -1368,3 +1368,21 @@ Portable tests exercise the request through a fake host and the real zCore
 ledger, shared monitor joins and deferred publication. Real-device qualification
 still needs obtained size at 32/64/128 frames and measured monitor latency;
 portable tests do not qualify driver behavior.
+
+### Voice lane and common monitor after removal (ADR 0016 WP5 / 0017 WP6)
+
+Takes play only as the transient `voice:take` lane under normal transport.
+The standalone take replay exports, IPC and preload methods are removed, along
+with the training mixer's file reader, presentation-provider hook and callback-only
+session query. The control-thread presentation query used for recording remains. Training
+cues retain their existing shared-output callback and cancellation semantics.
+
+The monitor is `CommonVoiceMonitor`, fed by shared capture history and added
+before the common master gain and limiter. There is no second output host,
+monitor output selector/candidate list or monitor-driven song buffer retune.
+Main/preload monitor requests carry input, gain and on/off only (plus the
+existing common-output context publication); state carries `commonOutputName`
+for route display. Native diagnostics retain input/output UIDs, channel map,
+stream generations, periods, history counters and callback timing counters.
+The common monitor's source, client, clock and waveform tests and mutation
+controls remain mandatory in all three native presets.

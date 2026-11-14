@@ -1,11 +1,67 @@
 #pragma once
-#include "voice_monitor.h"
 #include "voice_monitor_source.h"
 #include "shared_audio_service.h"
 #include <array>
+#include <bit>
 
 namespace singz {
+struct VoiceMonitorAvailability {
+  bool available{false};
+  std::string reason, detail, deviceUid;
+  uint32_t minBufferFrames{0}, maxBufferFrames{0};
+};
+struct VoiceMonitorLatency {
+  double sampleRate{0};
+  uint32_t requestedFrames{32}, bufferFrames{0}, inputDeviceFrames{0}, outputDeviceFrames{0};
+  uint64_t roundTripFrames{0};
+  double roundTripMs{0};
+  uint32_t queueFrames{0}; // Source-rate history queue, zero only before capture establishes its period.
+  bool delayed{false};
+  uint32_t inputBufferFrames{0};
+  double inputSampleRate{0};
+  uint32_t outputPeriodFrames{0}, observedOutputFrames{0}, queueFloorFrames{0};
+};
+struct VoiceMonitorResult {
+  bool ok{false};
+  std::string reason, error;
+  VoiceMonitorLatency latency;
+  std::vector<std::string> warnings;
+  std::optional<float> gainDb{}; // Actual common-client gain after route safety policy.
+};
+struct VoiceMonitorStatus {
+  bool running{false}, lost{false};
+  VoiceMonitorLatency latency;
+  std::vector<std::string> warnings;
+  float peak{0}, rms{0};
+  std::string reason; // Optional status diagnostic, e.g. route-changed.
+  uint32_t observedCallbackFrames{0};
+  std::optional<float> gainDb{};
+};
+// Shared input capture/recording and playback/training cues are compatible.
+// Box input ownership, mic mix, and unknown future ownership modes are not.
+inline bool voiceMonitorUseAllowed([[maybe_unused]] bool boxOwnsCapture, [[maybe_unused]] bool micMixActive, [[maybe_unused]] bool ownerSupported) noexcept {
+  return !boxOwnsCapture && !micMixActive && ownerSupported;
+}
+// Externally serialized by the bridge control mutex. Only the last N-API
+// environment may tear down addon-wide hosts; unloading a peer retains them.
+class VoiceMonitorEnvironmentLifetime {
+ public:
+  void attach() noexcept { ++references_; }
+  bool detach() noexcept { return references_ != 0 && --references_ == 0; }
+ private:
+  uint32_t references_{0};
+};
+
 // SINGZ_MONITOR_CLIENT_RT_BEGIN
+inline constexpr uint32_t kVoiceMonitorRampFrames = 128;
+inline constexpr uint32_t kVoiceMonitorMuteWaitMs = 100;
+// Mirrors src/shared/voice-monitor-gain.ts.
+inline constexpr float kVoiceMonitorGainMinDb = -60.0f;
+inline constexpr float kVoiceMonitorGainMaxDb = 36.0f;
+inline float flushVoiceMonitorDenormal(float sample) noexcept {
+  return (std::bit_cast<uint32_t>(sample) & 0x7f800000u) == 0 ? 0.0f : sample;
+}
+
 // Callback-owned reader/ramp; control only publishes target and reads meters.
 struct CommonVoiceMonitorRender {
   const void* owner{}; // Control-only admission context.

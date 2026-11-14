@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'ele
 import { boxAudioPersistentLifetime } from '../shared/box-audio'
 import type { BoxAPI } from '../shared/box-contract'
 import { VOICE_IPC, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorGainRequest, type VoiceMonitorState } from '../shared/voice-take'
-import type { VoiceTakeMoveRequest, VoiceTakeMoveResult, VoiceTakePeaksRequest, VoiceTakePeaksResult, VoiceArmRequest, VoiceArmResult, VoiceRecordSettingsChange, VoiceRecordStartRequest, VoicePlayTakeRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
+import type { VoiceTakeMoveRequest, VoiceTakeMoveResult, VoiceTakePeaksRequest, VoiceTakePeaksResult, VoiceArmRequest, VoiceArmResult, VoiceRecordSettingsChange, VoiceRecordStartRequest, VoiceTakeSummary, VoiceRecordStartResult, VoiceRecordStopResult, VoiceInputLevel } from '../shared/voice-take'
 import type {
   GlassVerdict,
   LogEntry,
@@ -55,8 +55,6 @@ export type VoiceTakeApi = {
   recordStop(reason?: 'device-lost' | 'error'): Promise<VoiceRecordStopResult>
   recordSettings(change: VoiceRecordSettingsChange): Promise<{ ok: boolean; error?: string }>
   list(songId: string): Promise<VoiceTakeSummary[]>
-  play(request: VoicePlayTakeRequest): Promise<{ ok: boolean; error?: string }>
-  stopPlay(): Promise<{ ok: boolean; error?: string }>
   remove(songId: string, takeId: string): Promise<{ ok: boolean; error?: string }>
   peaks(request: VoiceTakePeaksRequest): Promise<VoiceTakePeaksResult>
   move(request: VoiceTakeMoveRequest): Promise<VoiceTakeMoveResult>
@@ -77,8 +75,6 @@ const voiceTakes: VoiceTakeApi = {
   recordStop: reason => ipcRenderer.invoke('voice:record-stop', reason),
   recordSettings: change => ipcRenderer.invoke('voice:record-settings', change),
   list: songId => ipcRenderer.invoke('voice:list', songId),
-  play: request => ipcRenderer.invoke('voice:play', request),
-  stopPlay: () => ipcRenderer.invoke('voice:stop-play'),
   remove: (songId, takeId) => ipcRenderer.invoke('voice:remove', songId, takeId),
   peaks: request => ipcRenderer.invoke(VOICE_IPC.peaks, request),
   move: request => ipcRenderer.invoke(VOICE_IPC.move, request),

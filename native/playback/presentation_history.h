@@ -37,12 +37,6 @@ struct PlaybackPresentationQuery {
   uint64_t outputLatencyFrames{0}, graphLatencyFrames{0};
 };
 
-// Shared by the output-mix take renderer and the song playback bridge. The
-// provider must be invoked after the song callback with callbackHostTimeNs;
-// an absent/inactive song returns found=false. No latency subtraction is
-// applied here: take playback follows the block currently being rendered.
-using TakePresentationProvider = PlaybackPresentationQuery (*)(uint64_t hostTimeNs) noexcept;
-
 // One callback writer; readers never touch ordinary writer state. append is
 // fixed-work, allocation-free and lock-free. query retries at most eight times
 // and NEVER extrapolates outside committed callback coverage. At 48 kHz/32

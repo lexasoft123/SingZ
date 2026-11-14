@@ -14,7 +14,6 @@ import type {
   VoiceTakeSettingsPoint,
   VoiceTakeSidecar,
   VoiceTakeSummary,
-  VoicePlayTakeRequest,
   VoiceInputLevel,
   VoiceTakeMoveRequest,
   VoiceTakeMoveResult,
@@ -35,8 +34,6 @@ export type VoiceTakeNative = {
   transportState?(): Promise<'stopped' | 'pre-roll' | 'playing' | 'paused' | 'completed'>
   captureStats(): Promise<{ takeFrameHostNs?: string; takeFrame?: string | number; gapOverflow?: boolean; gapRegressions?: string | number; firstSampleCaptured?: boolean; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; sampleRate?: number; lastSampleHostNs?: string; inputLatencyFrames?: number; inputLatencySource?: 'reported' | 'unknown'; inputLatencyStable?: boolean; inputBufferFrames?: number; inputLevel?: VoiceInputLevel; takeActive?: boolean }>
   presentationQuery(args: { songId: string; firstSampleHostNs?: string; firstSampleQuality?: 'hardware' | 'estimated' | 'unknown'; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; sampleRate?: number; outputSampleRate?: number; trimInputLatency?: boolean; initialDiscontinuitySerial?: number }): Promise<{ ok: boolean; found?: boolean; paused?: boolean; sampleRate?: number; startPositionSec?: number; songSeconds?: number; projectFrame?: number; inputLatencyFrames?: number; outputLatencyFrames?: number; graphLatencyFrames?: number; latencySource?: 'reported' | 'measured-trim'; discontinuitySerial?: number | string; faultSerial?: number | string; transposeSemitones?: number; generation?: number | string; rate?: number; mappingStartCaptureHostNs?: string; mappingStartSongSeconds?: number; seekDuringCallback?: boolean; error?: string }>
-  playTake(args: { takeId: string; path: string; startPositionSec: number; mode: VoicePlayTakeRequest['mode']; generation: bigint; gain?: number; tempo?: number }): Promise<{ ok: boolean; error?: string; startHostTimeNs?: string }>
-  stopTake(generation?: bigint): Promise<{ ok: boolean; error?: string }>
   level(): Promise<VoiceInputLevel>
 }
 
@@ -192,7 +189,6 @@ export class VoiceTakeStore {
   private arming = false
   private armed: ArmedCapture | null = null
   private disarming: Promise<{ ok: boolean; error?: string }> | null = null
-  private playGeneration: bigint | null = null
   private finalizedTake: VoiceTakeSummary | null = null
   private finalizedNote?: VoiceRecordStopNote
   private pendingStop: Promise<VoiceRecordStopResult> | null = null
@@ -789,38 +785,9 @@ export class VoiceTakeStore {
     await this.writeSidecar(dirname(paths.sidecar), takeId, { ...sidecar, effects })
   }
 
-  async play(request: VoicePlayTakeRequest): Promise<{ ok: boolean; error?: string }> {
-    if (!validId(request.takeId)) return { ok: false, error: 'Invalid take id.' }
-    if (request.gain !== undefined && !Number.isFinite(request.gain)) return { ok: false, error: 'Invalid take gain.' }
-    const matches = await this.findTake(request.takeId)
-    if (!matches) return { ok: false, error: 'Take not found.' }
-    if (!validTimelineFields(matches.sidecar)) return { ok: false, error: 'Invalid take timeline.' }
-    if (matches.sidecar.version !== VOICE_TAKE_SIDECAR_VERSION) return { ok: false, error: 'This take was made by a newer version.' }
-    const generation = BigInt(`0x${request.takeId.replace(/-/g, '').slice(0, 15)}`)
-    const gain = Math.min(8, Math.max(0, request.gain ?? 1))
-    const result = await this.options.native.playTake({ takeId: request.takeId, path: matches.wav, startPositionSec: matches.sidecar.startPositionSec + (matches.sidecar.userOffsetSec ?? 0), mode: request.mode, generation, gain, tempo: matches.sidecar.settings[0]?.tempo ?? 1 })
-    if (result.ok) this.playGeneration = generation
-    return result
-  }
-  stopPlay(): Promise<{ ok: boolean; error?: string }> {
-    const generation = this.playGeneration
-    this.playGeneration = null
-    return this.options.native.stopTake(generation ?? undefined)
-  }
   async level(): Promise<VoiceInputLevel> {
     const level = await this.options.native.level()
     return { ...level, takeActive: this.active !== null }
-  }
-
-  private async findTake(takeId: string): Promise<{ wav: string; sidecar: VoiceTakeSidecar } | null> {
-    let songs: string[]
-    try { songs = await readdir(this.root) } catch { return null }
-    for (const songId of songs) {
-      if (!validId(songId)) continue
-      const paths = this.takePaths(songId, takeId)
-      try { return { wav: paths.wav, sidecar: JSON.parse(await readFile(paths.sidecar, 'utf8')) as VoiceTakeSidecar } } catch { /* next song */ }
-    }
-    return null
   }
 
   private async writeSidecar(dir: string, takeId: string, sidecar: VoiceTakeSidecar): Promise<void> {
@@ -844,8 +811,6 @@ export const createUnavailableVoiceNative = (): VoiceTakeNative => ({
   async finishTake() { return { ok: false, error: 'Voice recording is unavailable.' } },
   async cancelTake() { return { ok: false, error: 'Voice recording is unavailable.' } },
   async presentationQuery() { return { ok: false, error: 'Voice recording is unavailable.' } },
-  async playTake() { return { ok: false, error: 'Voice playback is unavailable.' } },
-  async stopTake() { return { ok: false, error: 'Voice playback is unavailable.' } },
   async captureStats() { return { inputLevel: { peakDb: -120, rmsDb: -120 }, firstSampleCaptured: false } },
   async level() { return { peakDb: -120, rmsDb: -120 } }
 })

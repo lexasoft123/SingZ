@@ -23,7 +23,7 @@ export const AUDIO_BINDING_METHODS: ReadonlySet<string> = new Set([
   'initializeSharedAudio', 'refreshSharedAudioInventory', 'inputDevices', 'beginCapture', 'cancelCapture',
   'captureState', 'captureStats', 'scheduleTrainingCue', 'trainingCueStatus', 'cancelTrainingCues',
   'setTrainingCueGain', 'captureRecording', 'cancelAudioExport', 'recordTake', 'finishTake', 'cancelTake',
-  'conformTake', 'cancelTakeConform', 'playTake', 'stopTake', 'presentationQuery', 'voiceMonitorAvailability', 'beginVoiceMonitor',
+  'conformTake', 'cancelTakeConform', 'presentationQuery', 'voiceMonitorAvailability', 'beginVoiceMonitor',
   'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor'
 ])
 

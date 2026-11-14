@@ -219,8 +219,6 @@ function fakeBinding(): NativeCaptureBinding & {
     recordTake: async () => ({ ok: true }),
     finishTake: async () => ({ ok: true }),
     cancelTake: async () => ({ ok: true }),
-    playTake: async () => ({ ok: true }),
-    stopTake: async () => ({ ok: true }),
     presentationQuery: () => ({ found: false }),
     voiceMonitorAvailability: async () => ({ available: false, reason: 'platform' }),
     beginVoiceMonitor: async () => ({ ok: false, reason: 'platform' }),

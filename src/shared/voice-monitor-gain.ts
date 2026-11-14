@@ -1,5 +1,5 @@
 /** Live-monitor gain range, the single source for main, renderer and the UI.
- *  The native side mirrors it in native/playback/voice_monitor.h
+ *  The native side mirrors it in native/playback/voice_monitor_client.h
  *  (kVoiceMonitorGainMinDb/MaxDb); tests/unit/voice-monitor-gain.test.ts pins them equal. */
 export const VOICE_MONITOR_GAIN_MIN_DB = -60
 export const VOICE_MONITOR_GAIN_MAX_DB = 36

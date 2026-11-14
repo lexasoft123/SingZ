@@ -3,6 +3,9 @@
 This optional standalone CLI prototypes the split-owner path without Electron or
 changes to the shared service, take transport, monitor, or zCore. It is a
 measurement tool, not production monitoring or a hardware qualification receipt.
+Production monitoring now uses the common service/history client (ADR 0017 WP6);
+this CLI’s explicit device selection is independent of the app, whose only
+output selection lives in Settings. The legacy app duplex host is removed.
 Read [ADR 0017](../../adr/0017-monitoring-through-the-common-mixer.md), especially
 G1–G3. Coordinate hardware use and keep device UIDs, console receipts and any
 external recordings in the private development handbook's evidence storage.

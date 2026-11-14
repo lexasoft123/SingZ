@@ -8856,32 +8856,6 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
 }
 
 PlaybackPresentationQuery
-NativePlaybackSession::presentationQueryRealtime(uint64_t hostTimeNs) const noexcept {
-  const uint64_t active = impl_->activeGeneration.load(std::memory_order_acquire);
-  if (!active) return {};
-  const uint64_t outgoing = impl_->swapFromGeneration.load(std::memory_order_acquire);
-  const auto publication = impl_->position->sequence.load(std::memory_order_acquire);
-  if (publication & 1u) return {};
-  NativePlaybackPositionNow position;
-  int64_t publishedAt = 0;
-  if (!impl_->position->snapshot(&position, &publishedAt) ||
-      (position.generation != active && (!outgoing || position.generation != outgoing)))
-    return {};
-  if (position.transportState != NativePlaybackTransportState::Playing &&
-      position.transportState != NativePlaybackTransportState::PreRoll &&
-      position.transportState != NativePlaybackTransportState::Paused)
-    return {};
-  const auto result = impl_->position->presentationHistory.query(hostTimeNs);
-  // The journal and position are published together at the end of the song
-  // block. A concurrent reset/swap must miss rather than mix incarnations.
-  if (result.latestGeneration != position.generation ||
-      active != impl_->activeGeneration.load(std::memory_order_acquire) ||
-      publication != impl_->position->sequence.load(std::memory_order_acquire))
-    return {};
-  return result;
-}
-
-PlaybackPresentationQuery
 NativePlaybackSession::presentationQuery(uint64_t hostTimeNs) const {
   // Ordinary audio-process control thread only. The RT writer never takes
   // this lock. It protects graph lifetime while latency is read below.

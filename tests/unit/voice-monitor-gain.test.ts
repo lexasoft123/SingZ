@@ -24,10 +24,10 @@ describe('monitor gain range is one constant across every layer', () => {
     expect(main).not.toMatch(/Math\.min\(12/)
   })
   it('the native header, host and bridge use one constexpr pair equal to the TS constants', () => {
-    const header = read('native/playback/voice_monitor.h')
+    const header = read('native/playback/voice_monitor_client.h')
     expect(header).toContain(`kVoiceMonitorGainMinDb = ${VOICE_MONITOR_GAIN_MIN_DB}.0f`)
     expect(header).toContain(`kVoiceMonitorGainMaxDb = ${VOICE_MONITOR_GAIN_MAX_DB}.0f`)
-    for (const f of ['native/playback/voice_monitor.cpp', 'native/electron/voice_monitor_bridge.cpp']) {
+    for (const f of ['native/playback/voice_monitor_client.cpp', 'native/electron/voice_monitor_bridge.cpp']) {
       const src = read(f)
       expect(src, f).toContain('kVoiceMonitorGainMaxDb')
       expect(src, f).not.toMatch(/clamp\(gain,\s*-60\.0f?,\s*12\.0f?\)/)

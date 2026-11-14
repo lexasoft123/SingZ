@@ -5,7 +5,7 @@ import { conformTake, invalidateConformedTake, releaseConformedTake, isConformTa
 import { isVoiceTakeEffects, safeVoiceTakeMessage, type VoiceTakeConformRequest, type VoiceTakeConformResult } from '../shared/voice-take'
 import { desktopAudioProcess } from './audio-process'
 import { log } from './log'
-import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange, type VoicePlayTakeRequest } from '../shared/voice-take'
+import { VOICE_IPC, VOICE_TAKE_MAX_OFFSET_SEC, VOICE_TAKE_CONFORM_NATIVE_BUDGET_MS, type VoiceTakeMoveRequest, type VoiceTakePeaksRequest, type VoiceArmRequest, type VoiceInputLevel, type VoiceRecordStartRequest, type VoiceRecordSettingsChange } from '../shared/voice-take'
 import { VoiceTakeStore, createUnavailableVoiceNative, type VoiceTakeNative } from './voice-takes'
 
 const normalizeDeviceLabel = (value: string): string => value.trim().replace(/\s+\([^()]*\)\s*$/, '').trim().toLocaleLowerCase()
@@ -143,8 +143,6 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
   },
   presentationQuery,
   transportState: async () => (await desktopAudioProcess.call<import('../shared/types').DesktopPlaybackStatus>('binding', 'playbackStatus', [])).transportState,
-  playTake: args => desktopAudioProcess.call('binding', 'playTake', [{ path: args.path, mode: args.mode, startPositionSec: args.startPositionSec, ...(args.gain === undefined ? {} : { gain: args.gain }), ...(args.tempo === undefined ? {} : { tempo: args.tempo }) }, args.generation]),
-  stopTake: generation => desktopAudioProcess.call('binding', 'stopTake', generation === undefined ? [] : [generation]),
   captureStats: () => desktopAudioProcess.call('binding', 'captureStats', []),
   level: async () => {
     const stats = await desktopAudioProcess.call<Awaited<ReturnType<import('./capture').NativeCaptureBinding['captureStats']>>>('binding', 'captureStats', [])
@@ -292,10 +290,6 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
     const change = value as VoiceRecordSettingsChange
     return Boolean(change && typeof change === 'object' && typeof change.takeId === 'string' && Number.isFinite(change.tempo) && Number.isFinite(change.transposeSemitones))
   }
-  const playValid = (value: unknown): value is VoicePlayTakeRequest => {
-    const play = value as VoicePlayTakeRequest
-    return Boolean(play && typeof play === 'object' && typeof play.takeId === 'string' && (play.mode === 'take' || play.mode === 'with-song') && (play.gain === undefined || Number.isFinite(play.gain)))
-  }
   const armValid = (value: unknown): value is VoiceArmRequest => {
     const arm = value as VoiceArmRequest
     return Boolean(arm && typeof arm === 'object' && (arm.monitorOnly === undefined || typeof arm.monitorOnly === 'boolean') && arm.input && typeof arm.input.deviceName === 'string' && Number.isFinite(arm.input.channelIndex))
@@ -345,8 +339,6 @@ export function registerVoiceTakeIpc(store: VoiceTakeStore): void {
   })
   ipcMain.handle(VOICE_IPC.recordSettings, async (_event, change: unknown) => { try { return settingsValid(change) ? await store.settings(change) : { ok: false, error: 'Invalid recording settings.' } } catch { return { ok: false, error: 'Recording settings could not be applied.' } } })
   ipcMain.handle(VOICE_IPC.list, async (_event, songId: unknown) => { try { return typeof songId === 'string' ? await store.list(songId) : [] } catch { return [] } })
-  ipcMain.handle(VOICE_IPC.play, async (_event, request: unknown) => { try { return playValid(request) ? await store.play(request) : { ok: false, error: 'Invalid take playback request.' } } catch { return { ok: false, error: 'Take playback is unavailable.' } } })
-  ipcMain.handle(VOICE_IPC.stopPlay, async () => { try { return await store.stopPlay() } catch { return { ok: false, error: 'Take playback could not stop.' } } })
   ipcMain.handle(VOICE_IPC.remove, (_event, songId: unknown, takeId: unknown) =>
     typeof songId === 'string' && typeof takeId === 'string' ? store.remove(songId, takeId).catch(() => ({ ok: false, error: 'Take could not be deleted.' })) : { ok: false, error: 'Invalid take id.' })
   const takeRefValid = (value: unknown): value is VoiceTakePeaksRequest => {

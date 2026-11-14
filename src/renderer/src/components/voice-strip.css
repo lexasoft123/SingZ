@@ -169,7 +169,7 @@
 .vs-meter i.peak.peak.peak.peak { background: #f4efe6; }
 
 /* take lane */
-.vs-tl { grid-column: 2; grid-row: var(--extra-row); display: flex; flex-direction: column; min-width: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.vs-tl { grid-column: 2; grid-row: var(--extra-row); display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 /* The stack's scrub overlay (z 5) covers this lane for seeking and the playhead; real controls sit above it. */
 .vs-note .vs-btn, .vs-take-actions, .vs-head > .sz-tip-wrap > .vs-effect-chip, .vs-head > .sz-tip-wrap > .vs-lane-state, .vs-head > .sz-tip-wrap > .vs-btn { position: relative; z-index: 6; } /* above the stack's scrub overlay (z 5); the playhead layer (z 7) stays pointer-events: none */
 .vs-head { container-type: inline-size; container-name: vs-head; height: 30px; display: flex; align-items: center; gap: 10px; padding: 4px 0 0 12px; min-width: 0; }
@@ -181,15 +181,17 @@
 .vs-btn:hover { background: rgba(255, 240, 214, 0.09); }
 .vs-take-actions { display: inline-flex; gap: 2px; }
 /* Takes stack like a DAW: one row per take, the newest on top; the selected take is the audible one. */
-.vs-track { position: relative; flex: 1 0 auto; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; max-height: 240px; }
-.vs-take-row { position: relative; flex: 1 0 56px; }
+/* The lane never grows the strip: its height is whatever the controls column gives it. The rows share it
+   evenly (few takes: taller rows up to a cap; many: thinner, never below a legible minimum, then it scrolls). */
+.vs-track { position: relative; flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; }
+.vs-take-row { position: relative; flex: 1 1 0; min-height: 30px; max-height: 80px; }
 .vs-take-row + .vs-take-row { border-top: 1px solid var(--line); }
-.vs-take-row::before { content: ''; position: absolute; left: 0; right: 0; top: calc(50% + 8px); border-top: 1px dashed var(--line); }
+.vs-take-row::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed var(--line); }
 .vs-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 11.5px; text-align: center; padding: 0 20px; }
 .vs-clip {
   position: absolute;
-  top: 20px;
-  bottom: 6px;
+  top: 2px;
+  bottom: 2px;
   min-width: 6px;
   z-index: 6; /* above the stack's scrub overlay: only the clip itself captures the click */
   border-radius: 8px;
@@ -210,7 +212,7 @@
 .vs-clip.playing { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--voice) 30%, transparent); }
 .vs-wave { position: absolute; inset: 2px 0; width: 100%; height: calc(100% - 4px); fill: color-mix(in srgb, var(--voice) 70%, transparent); pointer-events: none; }
 .vs-clip.recording .vs-wave { fill: color-mix(in srgb, var(--danger) 75%, transparent); }
-.vs-clip-tags { position: absolute; left: -1px; top: -19px; display: flex; gap: 4px; white-space: nowrap; }
+.vs-clip-tags { position: absolute; left: 4px; top: 3px; z-index: 1; display: flex; gap: 4px; white-space: nowrap; }
 .vs-clip-tag { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }
 .vs-clip-tag.silent { color: var(--danger); border-color: var(--danger); }
 .vs-clip-tag.changed { color: var(--accent); border-color: var(--accent); }

@@ -12,8 +12,8 @@ import './voice-strip.css'
 function routeLine(m: VoiceModel): string {
   if (!m.monitor.on && m.monitor.avail !== 'ok' && m.monitor.reason) return t(REASON_KEY[m.monitor.reason])
   const lat = m.monitor.latency
-  if (!m.monitor.on || !lat) return m.monitorOutputDevice ? t('player.voice.routeOutput', { device: m.monitorOutputDevice.name }) : t('player.voice.routeIdle')
-  const out = m.monitorOutputDevice?.name ?? t('settings.common.systemDefault')
+  if (!m.monitor.on || !lat) return m.monitorCommonOutputName ? t('player.voice.routeOutput', { device: m.monitorCommonOutputName }) : t('player.voice.routeIdle')
+  const out = m.monitorCommonOutputName ?? t('settings.common.systemDefault')
   const inn = m.monitorInputDevice?.name
   const device = inn && inn !== out ? t('player.voice.routeDevices', { input: inn, output: out }) : out
   const key = lat.source === 'measured'

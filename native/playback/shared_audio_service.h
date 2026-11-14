@@ -115,7 +115,7 @@ struct ServiceMasterStage {
 
 // Process-lifetime device owner. Client stop retires only that client's render
 // context; the output keeps the silent base route ready for the next client.
-// Song and monitor buffer holds release independently; graph stop retains the song hold.
+// Graph stop retains the service output while an additive client still needs it.
 // Input capture is deliberately separate and inactive until explicitly begun.
 class SharedAudioService final {
  public:
@@ -168,16 +168,12 @@ class SharedAudioService final {
   // UID and physical output channel map copied together under the route lock.
   AudioHostConfig activeOutputConfig() const;
   // Selected output (or current system default), without opening a song host.
-  AudioHostConfig voiceMonitorOutputConfig(const std::optional<std::string>& selectedUid = {}, bool independent = false) const;
-  // Weakly tracked activity: a joining song adopts the monitor period without writing.
-  std::shared_ptr<const AudioHostConfig> retainVoiceMonitorOutput(const AudioHostConfig& config);
+  AudioHostConfig commonOutputConfig() const;
   // Current song output intent, independent of transient client/host stop.
   // A completed browser handback clears it; a native client open sets it.
   bool playbackOutputCurrent() const;
   OutputCallbackDiagnosticSnapshot callbackDiagnostics() const noexcept;
   bool setPlaybackOutputCurrent(bool current);
-  // An existing song host negotiates once and holds until its session ends.
-  AudioHostResult prepareVoiceMonitor(uint32_t targetFrames = 32, uint32_t maximumFrames = 256);
   // Prepare a replacement graph for the retained physical host's capacity.
   uint32_t retainedPlaybackCapacity(const AudioHostConfig& config) const;
   uint64_t outputRouteGeneration() const noexcept;

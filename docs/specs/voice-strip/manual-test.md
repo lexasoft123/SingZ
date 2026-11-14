@@ -1,7 +1,8 @@
 # Voice strip: manual test, live monitoring (macOS, M2)
 
 For a person with a Mac and a USB audio interface. Spec: [spec.md](spec.md);
-design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
+design: [ADR 0016](../../adr/0016-take-as-playback-lane.md) and
+[ADR 0017](../../adr/0017-monitoring-through-the-common-mixer.md). Statements marked
 **[inferred]** are expected behaviour not yet confirmed with a real microphone.
 
 ## Before you start
@@ -9,9 +10,9 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
 - Plug in the interface. Connect a microphone to one input and headphones to the
   interface's own output. Do not use speakers.
 - Turn the interface's input trim and its direct-monitor knob down to minimum.
-- Use a song with stems, a wired or USB route only. Bluetooth and a separate
-  built-in mic plus other output are unavailable for monitoring in v1 (the strip
-  shows the reason).
+- Use a song with stems, a wired or USB route only. Bluetooth and wireless are refused with a visible reason. Also repeat
+  with a built-in or wired mic and a different wired output; it must be allowed
+  and show the estimated delay.
 
 ## Steps
 
@@ -31,16 +32,13 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
    the gear. Check the monitor level, the take level and the route line. There is NO
    monitor output picker: the route line names the one common output ("Output: <device>
    (Settings › Audio route)"); to change it use Settings > Audio route. With the Speaker
-   on, the line adds the buffer and delay. A separate input and output device (until
-   ADR 0017's mixer client lands) leaves the monitor off with the reason "Monitoring needs
-   the input and output on one device"; that message never mentions a monitor output. A
+   on, the line adds the buffer and delay. Separate wired devices work. A
    running take is not interrupted. A `singz.voice.monitorOutput` left by an older build
    is ignored and removed.
 4. Play the song. Turn the Speaker button on (it works with or without the song
    playing). Expect: a moderate start at -6 dB, the song keeps playing, no
-   confirmation dialog, a one-time hint "Use headphones to avoid feedback", a
-   latency badge of a few ms (an estimate, about 5 ms at the smallest buffer on
-   the verification interface).
+   confirmation dialog, a one-time hint "Use headphones to avoid feedback", an
+   estimated latency badge, with a delayed marker above 10 ms.
 5. Sing or speak. You should hear yourself with the song. Raise the interface
    output level slowly if too quiet. **[inferred]** (not yet verified with a real
    microphone).
@@ -51,9 +49,8 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
    feedback risk" appears; 0 dB is marked on the slider. Return to -6 dB.
 6. Adjust the monitor level with the fader while monitoring. Expect your voice
    level to change and the song level not to.
-7. Toggle monitoring off and on a few times. Expect one tiny click or gap at the
-   first on of this song only; later toggles should be inaudible or nearly so
-   (about 2.8 ms residual measured).
+7. Toggle monitoring off and on a few times. Expect the existing song period to stay unchanged and the song
+   to continue without a monitor-induced output reopen.
 8. Press the transport Record button while monitoring (one press starts the take; arming first is not needed). Sing for 30 s or more. During the take, toggle
    monitoring off and on once. Expect the song never to stop and the meter to stay
    live; the input must not be released by the toggle.
@@ -61,13 +58,13 @@ design: [ADR 0014](../../adr/0014-voice-strip.md). Statements marked
    sang). Press Record once more with the take unkept: it keeps the old take and starts a new one.
    Play the take back with the song. Listen for the take being aligned with
    the song by ear (a clap or a sung start on the beat). Note any early or late
-   feel; the mid-take monitor toggle should add at most a ~30 ms silence once.
+   feel; the mid-take monitor toggle must preserve capture continuity.
 9b. Hover every Voice button (arm, speaker, gear, take actions, Record): each shows a tooltip, Record
     and Discard with their shortcut. The take clip shows a real waveform (also after quitting and
     reopening the app); a silent take is a flat line. Click the clip: it is selected (outline, focus
     ring); click an empty part of the lane or press Esc: deselected, and the click still seeks the stems.
     Drag the selected clip left/right (ghost and readout, Esc cancels), or use the arrow keys (Shift =
-    larger); Listen with song starts where you moved it, also after restart; Reset position puts it
+    larger); normal transport Play starts where you moved it, also after restart; Reset position puts it
     back. Delete (or the trash button) removes it and clears the selection. A take that is still
     recording cannot be selected.
 10. Switch to another song (while it loads), open the library and come back, then stop playback. Expect the monitor (Speaker on)
@@ -99,4 +96,4 @@ input trim down, and wear headphones that isolate you from the microphone.
 2. Change the song key. The "Pitch follow ±N st" chip updates, is dim at 0, and the tag shows "Voice shifted" beyond 3 st. Click the chip: it reads "Pitch follow off" and the voice is no longer shifted offline (the song key still moves every lane).
 3. Track settings > Effects: toggle Pitch follow, move the manual offset, toggle Preserve formants; each change re-prepares the take ("Preparing take for playback" with a spinner on the clip). Controls are disabled while recording.
 4. Force failures (very long take, low memory, many tracks, cancel the song during preparation): each shows its own message, M and S are disabled with "No playable take", and only error states show Retry; after Retry focus lands on the status text.
-5. "Listen back (old)" group still works. Tooltips appear on every new control; Tab reaches chip, Retry, M, S in order; check at narrow and wide windows (lane header must not overflow or cover the clip).
+5. Only the normal transport plays the take; there is no standalone replay group. Tooltips appear on every new control; Tab reaches chip, Retry, M, S in order; check at narrow and wide windows (lane header must not overflow or cover the clip).

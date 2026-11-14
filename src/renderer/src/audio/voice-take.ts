@@ -8,7 +8,7 @@
  * (components/VoiceStrip.tsx) binds it to React.
  *
  * Records takes over the song (every take is kept; the selected one is the audible lane), deletes one, and (M2)
- * monitors live: monitoring is a second duplex host in main; this controller toggles it,
+ * monitors live: monitoring joins the common mixer and output; this controller toggles it,
  * routes the fader to its gain, and releases it with everything else.
  */
 import type {
@@ -16,7 +16,6 @@ import type {
   VoiceMonitorAvailabilityRequest,
   VoiceMonitorGainRequest,
   VoiceMonitorLatency,
-    VoiceMonitorOutputDevice,
   VoiceMonitorReason,
   VoiceMonitorSetRequest,
   VoiceMonitorState,
@@ -191,7 +190,7 @@ export interface VoiceModel {
   /** The take clip is selected (one take at a time; never while recording). Reset with the song. */
   takeSelected: boolean
   /** The common output (display name) main resolved for the monitor, when it reported one. Display only: the monitor follows the app's output. */
-  monitorOutputDevice: VoiceMonitorOutputDevice | null
+  monitorCommonOutputName: string | null
   monitorInputDevice: { name: string } | null
   /** True during the first monitoring episode of the session: shows the quiet headphones hint. */
   monitorHint: boolean
@@ -248,7 +247,7 @@ export const INITIAL_VOICE_MODEL: VoiceModel = {
   monitor: { avail: 'ok', reason: null, on: false, latency: null, warnings: [] },
   monitorGainDb: MONITOR_GAIN_DEFAULT_DB,
   takeSelected: false,
-  monitorOutputDevice: null,
+  monitorCommonOutputName: null,
   monitorInputDevice: null,
   monitorHint: false,
   monitorNote: null,
@@ -871,7 +870,7 @@ export class VoiceController {
   }
 
   /**
-   * Open the chosen input (input open, meter live). With `respectBlock` the take/listen/error blocks of
+   * Open the chosen input (input open, meter live). With `respectBlock` the take/error blocks of
    * Record apply; monitoring opens it without them (it works with a take waiting and without a song: the
    * monitor IPC carries no song). `setArmed` makes it the explicit arm (record-ready); a monitor-only open
    * leaves the arm state alone. Failures map to the existing recoverable states and return false.
@@ -1223,7 +1222,8 @@ export class VoiceController {
     }
     const salvaged = res.take
     this.set({
-      error: res.reason === 'device-lost' ? 'device-lost' : 'error',
+      // A take that was salvaged (stopped at the song end, say) is a result, not a failure: only a lost device is reported.
+      error: res.reason === 'device-lost' ? 'device-lost' : salvaged ? null : 'error',
       take: salvaged
         ? { ...this.withTimeline(this.fromSummary(salvaged, false, cur?.n ?? this.takeCount), cur), partial: true }
         : cur && elapsed > 0 && res.reason === 'device-lost'
@@ -1450,7 +1450,7 @@ export class VoiceController {
       ...(on && st.warnings.includes('route-feedback-risk') && !this.monitorGainSending && !this.monitorGainDirty && Number.isFinite(st.gainDb)
         ? { monitorGainDb: clampMonitorGainDb(st.gainDb) } : {}),
       ...(on ? {} : { monitorHint: false }),
-      ...(st.outputDevice !== undefined ? { monitorOutputDevice: st.outputDevice } : {}),
+      ...(st.commonOutputName !== undefined ? { monitorCommonOutputName: st.commonOutputName } : {}),
       ...(st.inputDevice !== undefined ? { monitorInputDevice: st.inputDevice } : {}),
       monitor: { avail, reason, on, latency: on ? st.latency : null, warnings: on ? st.warnings : [] },
       ...(wasOn !== on ? this.say(on ? 'announceMonitorOn' : 'announceMonitorOff') : {})
@@ -1796,7 +1796,7 @@ export function takeGainDb(level: number): number {
   if (level <= 0) return -Infinity
   return 20 * Math.log10(TAKE_GAIN_MAX) - 60 * (1 - Math.min(100, level) / 100)
 }
-/** Linear gain sent with a play request; the M chip forces silence. */
+/** Linear take-lane gain; the M chip forces silence. */
 export function takeGain(level: number, muted: boolean): number {
   if (muted || level <= 0) return 0
   return Math.min(TAKE_GAIN_MAX, 10 ** (takeGainDb(level) / 20))

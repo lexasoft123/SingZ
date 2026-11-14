@@ -168,17 +168,11 @@ function statusLine(
   }
   if (m.monitor.on && m.monitor.warnings.includes('route-feedback-risk')) return { cls: 'warn', text: monitorWarningText('route-feedback-risk') }
   if (m.monitorNote === 'other-input') return { cls: 'warn', text: t('player.voice.monitorOtherInput') }
-  // Why a recording ended by itself at a transport boundary: short, and only until the next take.
-  if (state === 'take-review') {
-    if (m.stoppedBy === 'seek') return { cls: 'warn', text: t('player.voice.msgSeekStopped') }
-    if (m.stoppedBy === 'pause') return { cls: '', text: t('player.voice.msgPauseStopped') }
-    if (m.stoppedBy === 'song-end') return { cls: '', text: t('player.voice.msgSongEndStopped') }
-  }
   if (m.monitor.on && m.monitor.warnings.length > 0) {
     const w = m.monitor.warnings[0]!
     return { cls: 'warn', text: isKnownMonitorWarning(w) ? t('player.voice.monitorWarning', { text: monitorWarningText(w) }) : monitorWarningText(w) }
   }
-  // Everything else (recording, review, monitoring hint, why a take stopped) is a tooltip, not lane text.
+  // Everything else (recording, review, monitoring hint) is a tooltip, not lane text.
   return null
 }
 
@@ -389,7 +383,7 @@ export default function VoiceStrip({
           {m.monitor.on && m.monitor.latency && (
             <Tooltip label={badgeTip}>
               <span className={`vs-badge${m.monitor.latency.delayed ? ' delayed' : ''}`} tabIndex={0} aria-label={badgeTip}>
-                {t(m.monitor.latency.delayed ? 'player.voice.monitorBadgeDelayed' : 'player.voice.monitorBadge', { ms: Math.round(m.monitor.latency.roundTripMs) })}
+                {t('player.voice.monitorBadge', { ms: Math.round(m.monitor.latency.roundTripMs) })}
               </span>
             </Tooltip>
           )}

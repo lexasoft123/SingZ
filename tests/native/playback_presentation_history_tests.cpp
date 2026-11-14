@@ -145,10 +145,6 @@ public:
     return {true, AudioHostError::None, status_.state, status_.format, {}, {}};
   }
   void stop() noexcept override {
-    if (reentrantSession) {
-      (void)reentrantSession->presentationQueryRealtime(lastHostNs);
-      reentrantQueryReturned = true;
-    }
     status_.state = AudioHostState::Stopped;
     callback = nullptr; opaque = nullptr;
   }
@@ -168,8 +164,6 @@ public:
     CHECK(callback && callback(opaque, b));
     ++status_.callbacks; status_.renderedFrames += b.frames;
   }
-  NativePlaybackSession *reentrantSession{nullptr};
-  bool reentrantQueryReturned{false};
   uint64_t lastHostNs{0};
 private:
   AudioHostStatus status_{};
@@ -177,13 +171,11 @@ private:
   void *opaque{nullptr};
   float left[512]{}, right[512]{};
 };
-void realtimeSessionQuery(double rate = 1, double transpose = 0) {
-  static_assert(noexcept(std::declval<const NativePlaybackSession &>()
-                             .presentationQueryRealtime(uint64_t{})));
+void sessionPlacementQuery(double rate = 1, double transpose = 0) {
   auto backend = std::make_unique<PresentationBackend>();
   auto *fake = backend.get();
   NativePlaybackSession session(std::move(backend));
-  CHECK(!session.presentationQueryRealtime(origin).found);
+  CHECK(!session.presentationQuery(origin).found);
   const auto path = (std::filesystem::temp_directory_path() /
       ("singz-presentation-" + std::to_string(
           std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav")).string();
@@ -204,10 +196,10 @@ void realtimeSessionQuery(double rate = 1, double transpose = 0) {
   config.requestedSampleRate = 48000; config.maximumFrames = 512;
   config.playbackRate = rate; config.transposeSemitones = transpose;
   CHECK(session.prepare(config, std::move(lanes), 1).ok);
-  CHECK(!session.presentationQueryRealtime(origin).found);
+  CHECK(!session.presentationQuery(origin).found);
   CHECK(session.openOutput(1).ok && session.start(1).ok);
   fake->drive();
-  auto first = session.presentationQueryRealtime(origin + 5000000);
+  auto first = session.presentationQuery(origin + 5000000);
   CHECK(first.found && first.projectFrame == 240 * rate && first.rate == rate && !first.paused);
   // The first captured block may arrive before the time/pitch pipeline has
   // presented any song audio. The old immediate-writer path looked up this
@@ -227,26 +219,15 @@ void realtimeSessionQuery(double rate = 1, double transpose = 0) {
   CHECK(placed.found && !placed.paused);
   CHECK(std::abs(placed.songSeconds - (aligned - origin) / 1.e9 * rate) < 1.e-8);
   CHECK(session.seek(1, 48000).ok); fake->drive();
-  const auto sought = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  const auto sought = session.presentationQuery(fake->lastHostNs + 5000000);
   CHECK(sought.found && sought.projectFrame == 48000 + 240 * rate);
   CHECK(sought.discontinuitySerial != first.discontinuitySerial);
   CHECK(session.pause(1).ok); fake->drive();
-  const auto paused = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  const auto paused = session.presentationQuery(fake->lastHostNs + 5000000);
   CHECK(paused.found && paused.paused && paused.rate == 0 && paused.projectFrame == 48000 + 480 * rate);
-  zdsp::test::resetAllocationTrap(); zdsp::test::setAllocationTrapEnabled(true);
-  for (uint32_t i = 0; i < 20000; ++i) {
-    const auto p = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
-    CHECK(p.found && p.projectFrame == 48000 + 480 * rate);
-  }
-  zdsp::test::setAllocationTrapEnabled(false);
-  CHECK(zdsp::test::trappedAllocationCount() == 0);
-  fake->reentrantSession = &session;
   CHECK(session.stop(1).ok);
-  CHECK(fake->reentrantQueryReturned);
-  CHECK(!session.presentationQueryRealtime(fake->lastHostNs + 5000000).found);
   CHECK(session.unload(1).ok);
-  CHECK(!session.presentationQueryRealtime(fake->lastHostNs + 5000000).found);
-  fake->reentrantSession = nullptr;
+  CHECK(!session.presentationQuery(fake->lastHostNs + 5000000).found);
   std::remove(path.c_str());
 }
 
@@ -278,7 +259,7 @@ void allocationFreeAndConcurrent() {
   (void)hits; // Scheduling is unconstrained; every observed hit must be coherent.
 }
 
-void realtimeSettingsSeam() {
+void settingsSeam() {
   auto backend = std::make_unique<PresentationBackend>();
   auto *fake = backend.get();
   NativePlaybackTestHooks hooks;
@@ -307,18 +288,18 @@ void realtimeSettingsSeam() {
   CHECK(session.prepare(config, lanes(), 1).ok);
   CHECK(session.openOutput(1).ok && session.start(1).ok);
   for (unsigned n = 0; n < 30; ++n) fake->drive();
-  const auto before = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  const auto before = session.presentationQuery(fake->lastHostNs + 5000000);
   CHECK(before.found);
   config.swapFromGeneration = 1; config.preparedStartProjectFrame = 14400;
   config.playbackRate = .5; config.transposeSemitones = 2;
   CHECK(session.prepare(config, lanes(), 2).ok);
   for (unsigned n = 0; n < 100; ++n) fake->drive();
-  const auto after = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  const auto after = session.presentationQuery(fake->lastHostNs + 5000000);
   CHECK(after.found && after.generation == 2 && after.rate == .5 && after.transposeSemitones == 2);
   CHECK(after.discontinuitySerial > before.discontinuitySerial);
   if (after.faultSerial != before.faultSerial) {
-    const auto left = session.presentationQueryRealtime(after.mappingStartHostNs - 1);
-    const auto right = session.presentationQueryRealtime(after.mappingStartHostNs);
+    const auto left = session.presentationQuery(after.mappingStartHostNs - 1);
+    const auto right = session.presentationQuery(after.mappingStartHostNs);
     std::fprintf(stderr, "seam fault: before=%llu after=%llu edge=%llu left(found=%d gen=%llu frame=%.12f rate=%.6f) right(found=%d gen=%llu frame=%.12f rate=%.6f)\n",
         static_cast<unsigned long long>(before.faultSerial), static_cast<unsigned long long>(after.faultSerial),
         static_cast<unsigned long long>(after.mappingStartHostNs), left.found, static_cast<unsigned long long>(left.generation),
@@ -328,16 +309,16 @@ void realtimeSettingsSeam() {
   CHECK(after.mappingStartHostNs > before.mappingStartHostNs);
   CHECK((after.mappingStartHostNs - origin) % 10000000 != 0); // Seam is inside a 10 ms callback.
   CHECK(session.seek(2, 96000).ok); fake->drive();
-  const auto fault = session.presentationQueryRealtime(fake->lastHostNs + 5000000);
+  const auto fault = session.presentationQuery(fake->lastHostNs + 5000000);
   CHECK(fault.found && fault.faultSerial > after.faultSerial);
   CHECK(session.stop(2).ok && session.unload(2).ok);
   std::remove(path.c_str());
 }
 }
 int main() {
-  affineAndEdges(); boundariesAndEviction(); settingsSeamsVersusFaults(); allocationFreeAndConcurrent(); realtimeSessionQuery();
-  for (double rate : {.25, .5, 2.0}) realtimeSessionQuery(rate);
-  realtimeSessionQuery(1, 2);
-  realtimeSettingsSeam();
+  affineAndEdges(); boundariesAndEviction(); settingsSeamsVersusFaults(); allocationFreeAndConcurrent(); sessionPlacementQuery();
+  for (double rate : {.25, .5, 2.0}) sessionPlacementQuery(rate);
+  sessionPlacementQuery(1, 2);
+  settingsSeam();
   std::puts("playback presentation history tests passed");
 }

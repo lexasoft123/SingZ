@@ -55,6 +55,13 @@ bool song(void* ctx,const AudioHostRenderBlock& b) noexcept {
 }
 }
 int main(){
+  // Shared bridge guards survive deletion of the old host tests.
+  CHECK(voiceMonitorUseAllowed(false,false,true));
+  CHECK(!voiceMonitorUseAllowed(true,false,true));
+  CHECK(!voiceMonitorUseAllowed(false,true,true));
+  CHECK(!voiceMonitorUseAllowed(false,false,false));
+  VoiceMonitorEnvironmentLifetime environments;environments.attach();environments.attach();
+  CHECK(!environments.detach());CHECK(environments.detach());CHECK(!environments.detach());
   auto backend=std::make_unique<Output>();auto* output=backend.get();
   SharedAudioService service(std::move(backend),"coreaudio");VoiceMonitorCapture capture(makeInput);
   CommonVoiceMonitor monitor(service,capture);

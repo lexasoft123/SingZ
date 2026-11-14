@@ -1,19 +1,18 @@
-import { VOICE_MONITOR_MAX_FRAMES, VOICE_MONITOR_TARGET_FRAMES, type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorState, type VoiceMonitorReason, type VoiceMonitorLatency, type VoiceMonitorPlaybackContext } from '../shared/voice-take'
+import { type VoiceMonitorAvailabilityRequest, type VoiceMonitorSetRequest, type VoiceMonitorState, type VoiceMonitorReason, type VoiceMonitorLatency, type VoiceMonitorPlaybackContext } from '../shared/voice-take'
 import { clampMonitorGainDb } from '../shared/voice-monitor-gain'
 import { log } from './log'
-import type { CaptureInputDevice, DesktopAudioHostInventoryResult } from '../shared/types'
+import type { CaptureInputDevice } from '../shared/types'
 
-type OutputDetails = Pick<VoiceMonitorState, 'outputDevice' | 'outputCandidates'>
+type CommonOutputDetails = Pick<VoiceMonitorState, 'commonOutputName'>
 // Native-only diagnostics stay in main; VoiceMonitorState is the renderer API.
 type MonitorDiagnostics = { monitorHistoryDiagnostics?: Record<string, string>; monitorPeak?: number; monitorRms?: number; monitorObservedCallbackFrames?: number; latency?: VoiceMonitorLatency }
-type Availability = OutputDetails & { available: boolean; reason?: VoiceMonitorReason; detail?: string; deviceUid?: string; minBufferFrames?: number; maxBufferFrames?: number }
+type Availability = CommonOutputDetails & { available: boolean; reason?: VoiceMonitorReason; detail?: string; deviceUid?: string; minBufferFrames?: number; maxBufferFrames?: number }
 export interface VoiceMonitorNative {
-  hostDevices(): Promise<DesktopAudioHostInventoryResult>
   inputDevices(): Promise<{ ok: boolean; devices: CaptureInputDevice[] }>
-  voiceMonitorAvailability(args: { inputUid: string; inputChannel: number; outputDeviceId?: string | null; contextOnly?: boolean } & Partial<VoiceMonitorPlaybackContext>): Promise<Availability>
-  beginVoiceMonitor(args: { inputUid: string; inputChannel: number; outputDeviceId?: string | null; gainDb: number; targetFrames: number; maxFrames: number }, generation: bigint): Promise<OutputDetails & { ok: boolean; reason?: VoiceMonitorReason; error?: string; latency?: VoiceMonitorLatency; warnings?: string[]; gainDb?: number }>
+  voiceMonitorAvailability(args: { inputUid: string; inputChannel: number; contextOnly?: boolean } & Partial<VoiceMonitorPlaybackContext>): Promise<Availability>
+  beginVoiceMonitor(args: { inputUid: string; inputChannel: number; gainDb: number }, generation: bigint): Promise<CommonOutputDetails & { ok: boolean; reason?: VoiceMonitorReason; error?: string; latency?: VoiceMonitorLatency; warnings?: string[]; gainDb?: number }>
   setVoiceMonitorGain(gainDb: number): Promise<{ ok: boolean }>
-  voiceMonitorStatus(): Promise<OutputDetails & MonitorDiagnostics & { running: boolean; latency?: VoiceMonitorLatency; warnings?: string[]; lost?: boolean; reason?: VoiceMonitorReason; gainDb?: number }>
+  voiceMonitorStatus(): Promise<CommonOutputDetails & MonitorDiagnostics & { running: boolean; latency?: VoiceMonitorLatency; warnings?: string[]; lost?: boolean; reason?: VoiceMonitorReason; gainDb?: number }>
   endVoiceMonitor(generation: bigint): Promise<{ ok: boolean; warnings?: string[] }>
 }
 export function microphonePermission(preferences: { getMediaAccessStatus(type: 'microphone'): string }): boolean {
@@ -30,7 +29,7 @@ export function isAudioProcessFailure(error: unknown): boolean {
 let nextGeneration = BigInt(Date.now()) * 1000n
 
 export class VoiceMonitorStore {
-  private current: VoiceMonitorState = { available: true, on: false, gainDb: 0, latency: null, warnings: [], outputDevice: null, outputCandidates: [] }
+  private current: VoiceMonitorState = { available: true, on: false, gainDb: 0, latency: null, warnings: [] }
   private rememberedGainDb = 0 // User intent, separate from native route safety reductions.
   private activeSelection: string | undefined
   private generation: bigint | undefined
@@ -69,15 +68,12 @@ export class VoiceMonitorStore {
     listener(this.snapshot())
     return () => { this.listeners.delete(listener) }
   }
-  private snapshot(): VoiceMonitorState { return { ...this.current, latency: this.current.latency ? { ...this.current.latency } : null, warnings: [...this.current.warnings],
-    outputDevice: this.current.outputDevice ? { ...this.current.outputDevice } : null,
-    ...(this.current.inputDevice ? { inputDevice: { ...this.current.inputDevice } } : {}),
-    outputCandidates: this.current.outputCandidates?.map(device => ({ ...device })) ?? [] } }
-  /** A probe never rewrites the route of a monitor that is running; only its own status (`running`) does. */
-  private outputs(details: OutputDetails, running = false): void {
+  private snapshot(): VoiceMonitorState { return { ...this.current, latency: this.current.latency ? { ...this.current.latency } : null,
+    warnings: [...this.current.warnings], ...(this.current.inputDevice ? { inputDevice: { ...this.current.inputDevice } } : {}) } }
+  /** Probes cannot rewrite a running route; status owns common-output migration. */
+  private commonOutput(details: CommonOutputDetails, running = false): void {
     if (this.current.on && !running) return
-    if (details.outputDevice !== undefined) this.current.outputDevice = details.outputDevice
-    if (details.outputCandidates !== undefined) this.current.outputCandidates = details.outputCandidates
+    if (details.commonOutputName !== undefined) this.current.commonOutputName = details.commonOutputName
   }
   private actualGain(details: { gainDb?: number }): void { if (details.gainDb !== undefined && Number.isFinite(details.gainDb)) this.current.gainDb = clamp(details.gainDb) }
   private fail(reason: VoiceMonitorReason): VoiceMonitorState {
@@ -99,7 +95,7 @@ export class VoiceMonitorStore {
     const device = name ? unique(devices.filter(d => d.uid === name)) ?? unique(devices.filter(d => d.label === name)) ?? unique(devices.filter(d => normalize(d.label) === normalize(name))) : undefined
     if (device && input.channelIndex >= device.channels) { await this.close(); return { state: this.fail('no-input') } }
     if (!device) {
-      this.outputs(await this.native.voiceMonitorAvailability({ inputUid: '', inputChannel: 0 }), owns)
+      this.commonOutput(await this.native.voiceMonitorAvailability({ inputUid: '', inputChannel: 0 }), owns)
       await this.close(); return { state: this.fail('no-input') }
     }
     this.current.inputDevice = { name: device.label }
@@ -107,7 +103,7 @@ export class VoiceMonitorStore {
     // unclassified transports. Do not reapply the old duplex metadata policy.
     const channel = input.channelIndex
     const availability = await this.native.voiceMonitorAvailability({ inputUid: device.uid, inputChannel: channel })
-    this.outputs(availability, owns) // a foreground probe never rewrites a running monitor's route; a set() owns it
+    this.commonOutput(availability, owns) // a foreground probe never rewrites a running monitor's route; a set() owns it
     if (!availability.available) { await this.close(); return { state: this.fail(availability.reason ?? 'error') } }
     this.current.available = true
     return { state: this.snapshot(), uid: device.uid, channel }
@@ -122,7 +118,7 @@ export class VoiceMonitorStore {
         if (!status.running || status.lost) { this.clearGeneration(); return this.fail(status.reason ?? (status.lost ? 'device-lost' : 'error')) }
         this.actualGain(status)
         this.diagnostics(status)
-        this.outputs(status, true)
+        this.commonOutput(status, true)
         this.current.latency = status.latency ?? this.current.latency
         this.current.warnings = status.warnings ?? this.current.warnings
       }
@@ -148,8 +144,8 @@ export class VoiceMonitorStore {
       this.current.gainDb = this.rememberedGainDb
       const generation = ++nextGeneration
       this.generation = generation
-      const result = await this.native.beginVoiceMonitor({ inputUid: selected.uid, inputChannel: selected.channel, gainDb: this.current.gainDb, targetFrames: VOICE_MONITOR_TARGET_FRAMES, maxFrames: VOICE_MONITOR_MAX_FRAMES }, generation)
-      this.outputs(result)
+      const result = await this.native.beginVoiceMonitor({ inputUid: selected.uid, inputChannel: selected.channel, gainDb: this.current.gainDb }, generation)
+      this.commonOutput(result)
       if (!result.ok) { await this.close(); return this.fail(result.reason ?? 'error') }
       this.actualGain(result)
       this.activeInput = { deviceName: selected.uid, channelIndex: selected.channel }
@@ -175,7 +171,7 @@ export class VoiceMonitorStore {
     }
     this.actualGain(status)
     this.diagnostics(status)
-    this.outputs(status, true); this.current.latency = status.latency ?? this.current.latency
+    this.commonOutput(status, true); this.current.latency = status.latency ?? this.current.latency
     this.current.warnings = status.warnings ?? this.current.warnings
     return this.snapshot()
   } catch (error) { if (isAudioProcessFailure(error)) return this.processFailed(); if (!(error instanceof MonitorCloseError)) await this.close().catch(() => undefined); return this.fail('error') } }) }

@@ -210,13 +210,6 @@ export interface VoiceRecordSettingsChange {
   transposeSemitones: number
 }
 
-export type VoicePlayTakeRequest = {
-  takeId: string
-  /** 'take' = take alone; 'with-song' = alongside the song (renderer sets the song to the take's settings first). */
-  mode: 'take' | 'with-song'
-  gain?: number
-}
-
 /** Live input level, polled or pushed ~30 Hz while the input is live. dBFS, -Infinity clamped to -120. */
 export interface VoiceInputLevel {
   peakDb: number
@@ -236,8 +229,6 @@ export const VOICE_IPC = {
   recordStop: 'voice:record-stop',
   recordSettings: 'voice:record-settings',
   list: 'voice:list',
-  play: 'voice:play',
-  stopPlay: 'voice:stop-play',
   remove: 'voice:remove',
   level: 'voice:level',
   peaks: 'voice:peaks',
@@ -273,16 +264,10 @@ export interface VoiceTakeMoveRequest {
 export type VoiceTakeMoveResult = { ok: true; take: VoiceTakeSummary } | { ok: false; error: string }
 
 // ---- Live monitoring (ADR 0017 common mixer + shared capture history) ----
-// The selected input may differ from the common app output. Output selection
-// fields remain deprecated until WP6; they never choose a monitor output.
-
-/** Buffer target and the largest accepted IO buffer, in frames at the device rate. */
-export const VOICE_MONITOR_TARGET_FRAMES = 32
-export const VOICE_MONITOR_MAX_FRAMES = 256
+// The selected input may differ from the common app output.
 
 export type VoiceMonitorReason =
-  | 'route-separate-devices' // input and output are different physical devices
-  | 'route-latency' // the device cannot reach VOICE_MONITOR_MAX_FRAMES
+  | 'route-latency' // history queue cannot safely serve the current route
   | 'route-bluetooth'
   | 'route-wireless'
   | 'route-feedback'
@@ -318,18 +303,10 @@ export interface VoiceMonitorLatency {
   delayed?: boolean
 }
 
-export interface VoiceMonitorOutputDevice { id: string; name: string }
-export interface VoiceMonitorOutputCandidate extends VoiceMonitorOutputDevice {
-  usable: boolean
-  reason?: VoiceMonitorReason
-}
 export interface VoiceMonitorState {
-  /** Display-only name of the common output the monitor resolved to (feeds the route line). The id is deprecated (ADR 0017 WP6). */
-  outputDevice?: VoiceMonitorOutputDevice | null
-  /** Display-only name of the input device the monitor opened (feeds the route line when it differs from the output). */
+  /** Display metadata for the common Settings output; never a monitor selector. */
+  commonOutputName?: string
   inputDevice?: { name: string } | null
-  /** @deprecated No UI or controller reads this; the monitor follows the common output (ADR 0017 WP6 deletes it). */
-  outputCandidates?: VoiceMonitorOutputCandidate[]
   available: true | { reason: VoiceMonitorReason; detail?: string }
   on: boolean
   gainDb: number
@@ -345,8 +322,6 @@ export interface VoiceMonitorPlaybackContext {
   selectedOutputUid: string
 }
 export interface VoiceMonitorAvailabilityRequest {
-  /** @deprecated The renderer never sets it; the monitor follows the app's common output (ADR 0017 WP6 deletes it). */
-  outputDeviceId?: string | null
   /** Publish route context through the existing serialized monitor IPC without selecting/arming input. */
   contextOnly?: boolean
   playbackContext?: VoiceMonitorPlaybackContext
@@ -354,11 +329,9 @@ export interface VoiceMonitorAvailabilityRequest {
 }
 
 export interface VoiceMonitorSetRequest {
-  /** @deprecated The renderer never sets it; see monitorAvailability (ADR 0017 WP6 deletes it). */
-  outputDeviceId?: string | null
   input: { deviceName: string; channelIndex: number }
   on: boolean
-  /** Monitor gain in dB, clamped main-side to [-60, +12]. */
+  /** Monitor gain in dB, clamped main-side to [-60, +36]. */
   gainDb?: number
 }
 

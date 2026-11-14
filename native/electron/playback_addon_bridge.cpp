@@ -72,9 +72,6 @@ DesktopPlaybackOwner playback;
 // Session lifetime is the addon's static owner, including graph seams. The
 // training renderer stores only this function pointer; it never borrows a
 // prepared graph or copies a reference-counted owner on the render thread.
-PlaybackPresentationQuery takePresentation(uint64_t hostTimeNs) noexcept {
-  return playback.session.presentationQueryRealtime(hostTimeNs);
-}
 
 /**
  * Wait out an in-flight prepare, having first asked it to stop.
@@ -1643,7 +1640,6 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
                     : unavailableReason),
             "platform-not-ready"));
   backend = sharedPlaybackBackend(std::move(backend), provider);
-  setTakePresentationProvider(nullptr);
   if (!playback.session.replaceAudioHostBackend(std::move(backend)))
     return settledPromise(
         env,
@@ -1671,7 +1667,6 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
   playback.handoffLease = 0;
   playback.generation = generation;
   playback.provider = provider;
-  setTakePresentationProvider(takePresentation);
   config.handoffLease = handoff;
   auto job = std::make_unique<PrepareJob>();
   job->config = std::move(config);
@@ -1961,7 +1956,6 @@ napi_value unloadPlaybackWithRetention(napi_env env,
   NativePlaybackUnloadReceipt receipt =
       playback.session.unloadWithCleanup(generation, retention);
   if (receipt.cleanup.globallyComplete()) {
-    setTakePresentationProvider(nullptr);
     playback.handoffLease = receipt.cleanup.handoffLease;
     if (playback.generation != 0)
       playback.ownership->release(NativeAudioOwnerKind::Playback,
@@ -2639,7 +2633,6 @@ void definePlaybackExports(napi_env env, napi_value exports,
                            DesktopPlaybackBackendFactory backendFactory) {
   playback.ownership = ownership;
   playback.backendFactory = backendFactory;
-  setTakePresentationProvider(takePresentation);
   napi_property_descriptor properties[] = {
       {"preparePlayback", nullptr, preparePlayback, nullptr, nullptr, nullptr,
        napi_default, nullptr},
@@ -2684,7 +2677,6 @@ void definePlaybackExports(napi_env env, napi_value exports,
 }
 
 void cleanupPlaybackBridge() noexcept {
-  setTakePresentationProvider(nullptr);
   // The env is going away: a worker still decoding would outlive it, and its
   // completion callback would touch an env that is closing. The lane measure
   // is a worker of the same kind and drains the same way.
@@ -2697,7 +2689,6 @@ void cleanupPlaybackBridge() noexcept {
   NativePlaybackUnloadReceipt receipt =
       playback.session.unloadWithCleanup(generation);
   if (receipt.cleanup.globallyComplete()) {
-    setTakePresentationProvider(nullptr);
     playback.handoffLease = receipt.cleanup.handoffLease;
     playback.ownership->release(NativeAudioOwnerKind::Playback, generation);
     playback.generation = 0;

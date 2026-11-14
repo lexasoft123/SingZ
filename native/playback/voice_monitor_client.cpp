@@ -79,7 +79,7 @@ CommonVoiceMonitor::CommonVoiceMonitor(SharedAudioService& service, VoiceMonitor
 CommonVoiceMonitor::~CommonVoiceMonitor() { close(); }
 VoiceMonitorAvailability CommonVoiceMonitor::availability(const std::string& uid, uint32_t channel, bool permission) const {
   return classifyCommonVoiceMonitorRoute(service_.inventory(), uid, channel,
-      service_.voiceMonitorOutputConfig().outputDeviceUid, permission);
+      service_.commonOutputConfig().outputDeviceUid, permission);
 }
 VoiceMonitorResult CommonVoiceMonitor::begin(const std::string& uid, uint32_t channel,
     bool permission, float gainDb, uint64_t generation, uint32_t queueFrames) {

@@ -6106,17 +6106,18 @@ void heldSongCapacitySurvivesSmallerGraphRequest() {
   if(!firstOpen.ok)std::fprintf(stderr,"held initial open: %s\n",firstOpen.message.c_str());
   CHECK(firstOpen.ok);CHECK(session.start(701).ok);
   fake->setPresentationLatency(0,512,0);
-  CHECK(service.prepareVoiceMonitor().ok && service.status().latency.bufferFrames==32);
+  service.setVoiceMonitorRenderer([](void*,const singz::AudioHostRenderBlock&) noexcept { return true; },nullptr);
+  CHECK(service.status().latency.bufferFrames==512);
   const auto opens=fake->opens,stops=fake->stops;
   CHECK(session.unload(701).ok);request.maximumFrames=2048;
   lanes.clear();lanes.push_back(lane("song",path));
   const auto prepared=session.prepare(request,std::move(lanes),702);
   CHECK(prepared.ok && prepared.format.maximumFrames==4096);
   CHECK(session.openOutput(702).ok && session.start(702).ok && fake->drive(32));
-  CHECK(fake->opens==opens && fake->stops==stops && service.status().latency.bufferFrames==32);
+  CHECK(fake->opens==opens && fake->stops==stops && service.status().latency.bufferFrames==512);
   CHECK(session.status().renderedProjectFrame==32 && session.status().adapterRenderFailures==0);
   CHECK(session.unload(702).ok);CHECK(service.setPlaybackOutputCurrent(false));
-  service.shutdown();std::remove(path.c_str());
+  service.clearVoiceMonitorRenderer();service.shutdown();std::remove(path.c_str());
 #endif
 }
 void callbackPeriodChangesKeepTheSourceContinuous() {

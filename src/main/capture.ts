@@ -76,8 +76,6 @@ export interface NativeCaptureBinding {
   cancelTakeConform: import('./voice-take-conform').TakeConformNative['cancelTakeConform']
   finishTake(generation: bigint): Promise<Record<string, unknown>>
   cancelTake(generation: bigint): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
-  playTake(config: unknown, generation: bigint): Promise<{ ok: boolean; error?: string; startHostTimeNs?: string }>
-  stopTake(generation?: bigint): Promise<{ ok: boolean; error?: string }>
   presentationQuery(hostNs: string | bigint | number): Promise<Record<string, unknown>>
   voiceMonitorAvailability: import('./voice-monitor').VoiceMonitorNative['voiceMonitorAvailability']
   beginVoiceMonitor: import('./voice-monitor').VoiceMonitorNative['beginVoiceMonitor']
@@ -821,7 +819,7 @@ export function validateCaptureBindingIdentity(
   }
   for (const name of [
     'initializeSharedAudio', 'refreshSharedAudioInventory', 'scheduleTrainingCue', 'cancelTrainingCues', 'setTrainingCueGain', 'trainingCueStatus', 'captureRecording',
-    'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats', 'recordTake', 'finishTake', 'cancelTake', 'playTake', 'stopTake', 'presentationQuery',
+    'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats', 'recordTake', 'finishTake', 'cancelTake', 'presentationQuery',
     'audioHostProviders', 'audioHostDevices', 'voiceMonitorAvailability', 'beginVoiceMonitor',
     'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor', 'setPlaybackOutputCurrent',
     'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',

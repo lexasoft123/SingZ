@@ -33,12 +33,7 @@ std::mutex control;
 bool attached = false;
 NativeAudioOwnership* ownership = nullptr;
 DesktopPlaybackBackendFactory factory = nullptr;
-std::atomic<TakePresentationProvider> presentationProvider{nullptr};
-static_assert(std::atomic<TakePresentationProvider>::is_always_lock_free);
-bool render(void*, const AudioHostRenderBlock& block) noexcept {
-  const auto provider = presentationProvider.load(std::memory_order_acquire);
-  return mixer.render(block, provider ? provider(block.callbackHostTimeNs) : PlaybackPresentationQuery{});
-}
+bool render(void*, const AudioHostRenderBlock& block) noexcept { return mixer.render(block); }
 napi_value object(napi_env env) { napi_value o; napi_create_object(env, &o); return o; }
 void number(napi_env env, napi_value o, const char* k, double n) { napi_value v; napi_create_double(env,n,&v); napi_set_named_property(env,o,k,v); }
 void text(napi_env env, napi_value o, const char* k, const std::string& s) { napi_value v; napi_create_string_utf8(env,s.c_str(),s.size(),&v); napi_set_named_property(env,o,k,v); }
@@ -48,15 +43,6 @@ bool scalar(napi_env env, napi_value o, const char* k, double* n) {
   napi_value v; return napi_get_named_property(env,o,k,&v)==napi_ok && napi_get_value_double(env,v,n)==napi_ok && std::isfinite(*n);
 }
 bool generation(napi_env env, napi_value v, uint64_t& g) { bool lossless=false; return napi_get_value_bigint_uint64(env,v,&g,&lossless)==napi_ok && lossless && g; }
-bool stringProperty(napi_env env, napi_value o, const char* key, std::string& value, size_t maximum) {
-  napi_value v; size_t length = 0;
-  if (napi_get_named_property(env,o,key,&v)!=napi_ok ||
-      napi_get_value_string_utf8(env,v,nullptr,0,&length)!=napi_ok || !length || length>maximum) return false;
-  value.resize(length+1);
-  if (napi_get_value_string_utf8(env,v,value.data(),value.size(),&length)!=napi_ok) return false;
-  value.resize(length);
-  return value.find('\0') == std::string::npos;
-}
 napi_value initialize(napi_env env, napi_callback_info info) {
   size_t argc=1; napi_value arg{}; napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);
   AudioHostConfig config;
@@ -147,41 +133,6 @@ napi_value cancel(napi_env env,napi_callback_info info) {
   mixer.cancel(g);
   auto o=object(env); boolean(env,o,"ok",true); return o;
 }
-napi_value playTake(napi_env env, napi_callback_info info) {
-  size_t argc = 2; napi_value args[2]{};
-  napi_get_cb_info(env,info,&argc,args,nullptr,nullptr);
-  uint64_t g = 0; double position = 0, gain = 1, tempo = 1;
-  std::string path, mode;
-  if (argc != 2 || !generation(env,args[1],g) ||
-      !stringProperty(env,args[0],"path",path,32768) ||
-      !stringProperty(env,args[0],"mode",mode,16) || (mode != "take" && mode != "with-song") ||
-      !scalar(env,args[0],"startPositionSec",&position)) return failure(env,"Invalid voice take configuration");
-  bool present = false;
-  napi_has_named_property(env,args[0],"gain",&present);
-  if (present && (!scalar(env,args[0],"gain",&gain) || gain<0 || gain>8)) return failure(env,"Invalid voice take gain");
-  napi_has_named_property(env,args[0],"tempo",&present);
-  if (present && (!scalar(env,args[0],"tempo",&tempo) || tempo<=0 || tempo>8)) return failure(env,"Invalid recorded voice take tempo");
-  std::lock_guard<std::mutex> lock(control);
-  // Like training cues, takes join the shared output without claiming the
-  // song/capture lease.
-  if (mode == "with-song" && !presentationProvider.load(std::memory_order_acquire))
-    return failure(env,"Song playback is unavailable");
-  auto ready = sharedAudioService().ensureOutput();
-  if (!ready.ok) return failure(env,ready.message.c_str());
-  if (!attached) { sharedAudioService().setTrainingRenderer(render,nullptr); attached=true; }
-  if (!mixer.scheduleTake(path,g,position,mode=="with-song",0,static_cast<float>(gain),tempo))
-    return failure(env,"Cannot open voice take or voice take capacity exceeded");
-  auto result=object(env); boolean(env,result,"ok",true);
-  return result;
-}
-napi_value stopTake(napi_env env, napi_callback_info info) {
-  size_t argc = 1; napi_value arg{}; uint64_t g = 0;
-  napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);
-  if (argc && !generation(env,arg,g)) return failure(env,"Invalid voice take generation");
-  std::lock_guard<std::mutex> lock(control);
-  mixer.cancelTakes(g);
-  auto result=object(env); boolean(env,result,"ok",true); return result;
-}
 napi_value setGain(napi_env env,napi_callback_info info) {
   size_t argc=2; napi_value args[2]{}; napi_get_cb_info(env,info,&argc,args,nullptr,nullptr);
   uint64_t g=0; double gain=0;
@@ -220,15 +171,10 @@ void defineTrainingAudioExports(napi_env env,napi_value exports,NativeAudioOwner
     {"initializeSharedAudio",nullptr,guarded<initialize>,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"scheduleTrainingCue",nullptr,guarded<schedule>,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"cancelTrainingCues",nullptr,guarded<cancel>,nullptr,nullptr,nullptr,napi_default,nullptr},
-    {"playTake",nullptr,guarded<playTake>,nullptr,nullptr,nullptr,napi_default,nullptr},
-    {"stopTake",nullptr,guarded<stopTake>,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"refreshSharedAudioInventory",nullptr,guarded<refreshInventory>,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"setTrainingCueGain",nullptr,guarded<setGain>,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"trainingCueStatus",nullptr,guarded<status>,nullptr,nullptr,nullptr,napi_default,nullptr}};
   napi_define_properties(env,exports,sizeof(p)/sizeof(p[0]),p);
-}
-void setTakePresentationProvider(TakePresentationProvider provider) noexcept {
-  presentationProvider.store(provider,std::memory_order_release);
 }
 void cleanupTrainingAudio() noexcept {
   std::lock_guard<std::mutex> lock(control);

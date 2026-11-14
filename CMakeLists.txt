@@ -274,25 +274,6 @@ add_custom_target(singz_check_playback_realtime
 add_dependencies(singz_native_playback_callback
   singz_check_playback_realtime)
 
-# The render body lives in the header so the lifecycle owner can remain in one
-# source file. Extract the complete marked leaf into the policy/strict compile
-# target; changes to that header force regeneration, including policy fixtures.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/voice_monitor.h native/playback/voice_monitor.cpp native/playback/shared_audio_service.cpp
-  third_party/zcore/zcore/platform/macos/audio_device_macos_buffer.h
-  third_party/zcore/zcore/platform/macos/audio_host_macos_helpers.h)
-file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor.h" _voice_monitor_header)
-string(REGEX MATCH "// SINGZ_VOICE_MONITOR_RT_BEGIN[^@]*// SINGZ_VOICE_MONITOR_RT_END" _voice_monitor_rt "${_voice_monitor_header}")
-if(NOT _voice_monitor_rt)
-  message(FATAL_ERROR "Voice monitor realtime leaf markers are missing")
-endif()
-set(_voice_rt_source "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-render.cpp")
-file(WRITE "${_voice_rt_source}" "#include <algorithm>\n#include <atomic>\n#include <bit>\n#include <cmath>\n#include <zcore/device/audio_host_render.h>\nnamespace singz {\n${_voice_monitor_rt}\n}\n")
-set(SINGZ_VOICE_MONITOR_RT_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-realtime.cmake")
-file(WRITE "${SINGZ_VOICE_MONITOR_RT_MANIFEST}" "set(SINGZ_ZDSP_RT_FILES [==[${_voice_rt_source}]==] [==[${ZCORE_ROOT}/zcore/include/zcore/device/audio_host_render.h]==] [==[${SINGZ_REPO_ROOT}/native/playback/output_callback_diagnostics.h]==])\n")
-add_library(singz_voice_monitor_render OBJECT "${_voice_rt_source}")
-target_compile_features(singz_voice_monitor_render PRIVATE cxx_std_20)
-target_link_libraries(singz_voice_monitor_render PRIVATE SingZ::zcore_device)
-singz_configure_realtime_target(singz_voice_monitor_render)
 # Compile the additional callback telemetry leaf under the same strict rules.
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/output-callback-diagnostics-rt.cpp"
   "#include \"${SINGZ_REPO_ROOT}/native/playback/output_callback_diagnostics.h\"\nvoid checkOutputCallback(singz::OutputCallbackDiagnostics& d, const singz::AudioHostRenderBlock& b) noexcept { d.observe(b); }\n")
@@ -300,11 +281,11 @@ add_library(singz_output_callback_diagnostics_render OBJECT "${CMAKE_CURRENT_BIN
 target_compile_features(singz_output_callback_diagnostics_render PRIVATE cxx_std_20)
 target_link_libraries(singz_output_callback_diagnostics_render PRIVATE SingZ::zcore_device)
 singz_configure_realtime_target(singz_output_callback_diagnostics_render)
-add_dependencies(singz_voice_monitor_render singz_output_callback_diagnostics_render)
+
 
 # The complete service master leaf and the final callback ordering are checked
 # independently of the control-domain service (which owns device locks).
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/shared_audio_service.h)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/shared_audio_service.h native/playback/output_callback_diagnostics.h)
 file(READ "${SINGZ_REPO_ROOT}/native/playback/shared_audio_service.h" _service_header)
 string(REGEX MATCH "// SINGZ_SERVICE_MASTER_RT_BEGIN[^@]*// SINGZ_SERVICE_MASTER_RT_END" _service_master_rt "${_service_header}")
 if(NOT _service_master_rt)
@@ -319,7 +300,7 @@ if(NOT _service_callback)
 endif()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/service-mix-callback-rt.txt" "${_service_callback}")
 set(SINGZ_SERVICE_MASTER_RT_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/service-master-realtime.cmake")
-file(WRITE "${SINGZ_SERVICE_MASTER_RT_MANIFEST}" "set(SINGZ_ZDSP_RT_FILES [==[${_master_rt_source}]==] [==[${CMAKE_CURRENT_BINARY_DIR}/service-mix-callback-rt.txt]==])\n")
+file(WRITE "${SINGZ_SERVICE_MASTER_RT_MANIFEST}" "set(SINGZ_ZDSP_RT_FILES [==[${_master_rt_source}]==] [==[${CMAKE_CURRENT_BINARY_DIR}/service-mix-callback-rt.txt]==] [==[${SINGZ_REPO_ROOT}/native/playback/output_callback_diagnostics.h]==])\n")
 add_library(singz_service_master_render OBJECT "${_master_rt_source}")
 target_compile_features(singz_service_master_render PRIVATE cxx_std_20)
 target_link_libraries(singz_service_master_render PRIVATE SingZ::zcore_device)
@@ -329,17 +310,6 @@ add_custom_target(singz_check_service_master_realtime ALL
     -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake"
   VERBATIM)
 add_dependencies(singz_native_playback_callback singz_check_service_master_realtime singz_service_master_render)
-add_custom_target(singz_check_voice_monitor_realtime ALL
-  COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_VOICE_MONITOR_RT_MANIFEST}"
-    -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake"
-  VERBATIM)
-add_library(singz_voice_monitor STATIC native/playback/voice_monitor.cpp native/playback/voice_monitor.h)
-target_compile_features(singz_voice_monitor PUBLIC cxx_std_20)
-target_include_directories(singz_voice_monitor PUBLIC "${SINGZ_REPO_ROOT}")
-target_link_libraries(singz_voice_monitor PUBLIC SingZ::zcore_device Threads::Threads)
-set_target_properties(singz_voice_monitor PROPERTIES POSITION_INDEPENDENT_CODE YES)
-add_dependencies(singz_voice_monitor singz_check_voice_monitor_realtime singz_voice_monitor_render)
-
 # WP1 capture/history publication: owning control code and a separately strict
 # compiled/scanned callback leaf. The marker extraction tracks both inputs.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -400,7 +370,7 @@ add_library(singz_voice_monitor_client STATIC native/playback/voice_monitor_clie
 target_compile_features(singz_voice_monitor_client PUBLIC cxx_std_20)
 target_link_libraries(singz_voice_monitor_client PUBLIC singz_voice_monitor_source)
 set_target_properties(singz_voice_monitor_client PROPERTIES POSITION_INDEPENDENT_CODE YES)
-add_dependencies(singz_voice_monitor_client singz_voice_monitor_client_rt singz_check_voice_monitor_client_realtime)
+add_dependencies(singz_voice_monitor_client singz_voice_monitor_client_rt singz_check_voice_monitor_client_realtime singz_output_callback_diagnostics_render)
 
 add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/record_placement.cpp
@@ -408,7 +378,6 @@ add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/shared_audio_service.cpp
   native/playback/shared_audio_service.h
   native/playback/training_pcm_mixer.h
-  native/playback/training_pcm_mixer.cpp
   native/playback/native_playback_graph_document.cpp
   native/playback/native_playback_graph_document.h
   native/playback/playback_cue_plan.cpp
@@ -498,7 +467,6 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     SingZ::zcore_audio_export
     singz_microphone_mix
     singz_voice_monitor_source
-    singz_voice_monitor
     singz_voice_monitor_client
     SingZ::native_playback_session
     singz_native_audio_ownership)
@@ -922,227 +890,6 @@ if(SINGZ_CORE_TESTS)
   target_include_directories(microphone_mix_tests PRIVATE "${SINGZ_REPO_ROOT}")
   target_link_libraries(microphone_mix_tests PRIVATE singz_microphone_mix Threads::Threads)
   add_test(NAME microphone_mix_tests COMMAND microphone_mix_tests)
-
-  add_executable(voice_monitor_tests tests/native/voice_monitor_tests.cpp native/playback/shared_audio_service.cpp)
-  target_compile_features(voice_monitor_tests PRIVATE cxx_std_20)
-  target_link_libraries(voice_monitor_tests PRIVATE singz_voice_monitor Threads::Threads)
-  add_test(NAME voice_monitor_tests COMMAND voice_monitor_tests)
-  # Compile each deliberate fault into the real leaf/lifecycle, then run the
-  # identical behavior suite. Expected failure proves the checks are sensitive.
-  file(READ "${SINGZ_REPO_ROOT}/native/playback/voice_monitor.cpp" _voice_monitor_control)
-  foreach(_mutant IN ITEMS ramp clamp limiter finite timestamp xrun mono route buffer steps generation lost song gain latency fade
-      song_optin suitability latency_suitability provider_error sanitized denormal denormal_output route_fade route_reason environments guard_box guard_mix guard_owner inventory settle all_outputs output_map input_channel input_range stale_song_period native_route_state current_native_route monitor_writer monitor_ceiling monitor_capacity retained_reopen idle_monitor_hold idle_song_hold idle_adopt_period browser_route idle_begin idle_late_registration output_choice_identity output_choice_usable output_choice_outputs independent_monitor_output other_song_buffer pinned_monitor_pair)
-    if((_mutant STREQUAL "song_optin" OR _mutant STREQUAL "stale_song_period" OR _mutant STREQUAL "steps" OR _mutant STREQUAL "retained_reopen") AND NOT APPLE)
-      continue() # This opt-in policy is macOS-only.
-    endif()
-    set(_header "${_voice_monitor_header}")
-    set(_control "${_voice_monitor_control}")
-    set(_service_source "${SINGZ_REPO_ROOT}/native/playback/shared_audio_service.cpp")
-    file(READ "${_service_source}" _service_original)
-    set(_service "${_service_original}")
-    if(_mutant STREQUAL "ramp")
-      string(REPLACE "kVoiceMonitorRampFrames = 128" "kVoiceMonitorRampFrames = 1" _header "${_header}")
-    elseif(_mutant STREQUAL "clamp")
-      string(REPLACE "0.8912509381337456f" "1.0f" _header "${_header}")
-    elseif(_mutant STREQUAL "limiter")
-      string(REPLACE "return std::clamp(scaled, -double(kVoiceMonitorCeiling), double(kVoiceMonitorCeiling));" "return scaled;" _header "${_header}")
-    elseif(_mutant STREQUAL "finite")
-      string(REPLACE "valid && std::isfinite(block.input[0][frame])" "valid" _header "${_header}")
-    elseif(_mutant STREQUAL "timestamp")
-      string(REPLACE "block.inputTimestampHardware &&" "true &&" _header "${_header}")
-    elseif(_mutant STREQUAL "xrun")
-      string(REPLACE "AudioHostDiscontinuityXRun |" "0u |" _header "${_header}")
-    elseif(_mutant STREQUAL "mono")
-      string(REPLACE "selected ? voice : 0.0f" "selected && channel == 0 ? voice : 0.0f" _header "${_header}")
-    elseif(_mutant STREQUAL "route")
-      string(REPLACE "switch (input->transport)" "switch (input->label == \"AirPods\" ? AudioHostTransport::Bluetooth : input->transport)" _control "${_control}")
-    elseif(_mutant STREQUAL "buffer")
-      string(REPLACE "if (!chooseMonitorBufferFrames(" "if (false && !chooseMonitorBufferFrames(" _control "${_control}")
-    elseif(_mutant STREQUAL "steps")
-      string(REPLACE "frames*=2" "frames=512" _service "${_service}")
-    elseif(_mutant STREQUAL "gain")
-      string(REPLACE "std::clamp(gain,kVoiceMonitorGainMinDb,kVoiceMonitorGainMaxDb)" "gain" _control "${_control}")
-    elseif(_mutant STREQUAL "latency")
-      string(REPLACE "uint64_t(result.bufferFrames)*2" "uint64_t(result.bufferFrames)" _control "${_control}")
-    elseif(_mutant STREQUAL "fade")
-      string(REPLACE "if (running && ramp)" "if (false && running && ramp)" _control "${_control}")
-    elseif(_mutant STREQUAL "song_optin")
-      file(READ "${_service_source}" _service)
-      string(REPLACE "config.allowSharedDeviceBufferChange = true;" "config.allowSharedDeviceBufferChange = config.requestedBufferFrames == 0;" _service "${_service}")
-      set(_service_source "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-negative-${_mutant}/shared_audio_service.cpp")
-    elseif(_mutant STREQUAL "stale_song_period")
-      file(READ "${_service_source}" _service)
-      string(REPLACE "currentBufferConfig.requestedBufferFrames = 0;" "currentBufferConfig.requestedBufferFrames = config.requestedBufferFrames;" _service "${_service}")
-      set(_service_source "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-negative-${_mutant}/shared_audio_service.cpp")
-    elseif(_mutant STREQUAL "suitability")
-      string(REPLACE "if (input->monitoringSuitability==AudioHostMonitoringSuitability::Unsupported)" "if (false)" _control "${_control}")
-    elseif(_mutant STREQUAL "latency_suitability")
-      string(REPLACE "if (input->monitoringSuitability==AudioHostMonitoringSuitability::HighLatency)" "if (false)" _control "${_control}")
-    elseif(_mutant STREQUAL "provider_error")
-      string(REPLACE "periodTooLarge ? \"route-latency\" : \"error\"" "\"route-latency\"" _control "${_control}")
-    elseif(_mutant STREQUAL "sanitized")
-      string(REPLACE "result.error=periodTooLarge ? \"Monitor buffer exceeds the supported limit\" : \"Native voice monitor could not start\"" "result.error=opened.message" _control "${_control}")
-    elseif(_mutant STREQUAL "denormal")
-      string(REPLACE "return (std::bit_cast<uint32_t>(sample) & 0x7f800000u) == 0 ? 0.0f : sample;" "return sample;" _header "${_header}")
-    elseif(_mutant STREQUAL "denormal_output")
-      string(REPLACE "std::abs(scaled) < 0x1p-126" "false" _header "${_header}")
-    elseif(_mutant STREQUAL "route_fade")
-      string(REPLACE "void VoiceMonitorHost::routeChanged() {\n  impl_->stop(true);" "void VoiceMonitorHost::routeChanged() {\n  impl_->stop(false);" _control "${_control}")
-    elseif(_mutant STREQUAL "route_reason")
-      string(REPLACE "impl_->lost=true;" "impl_->lost=false;" _control "${_control}")
-    elseif(_mutant STREQUAL "environments")
-      string(REPLACE "references_ != 0 && --references_ == 0" "references_ != 0 && (--references_, true)" _header "${_header}")
-    elseif(_mutant STREQUAL "guard_box")
-      string(REPLACE "!boxOwnsCapture && !micMixActive && ownerSupported" "!micMixActive && ownerSupported" _header "${_header}")
-    elseif(_mutant STREQUAL "guard_mix")
-      string(REPLACE "!boxOwnsCapture && !micMixActive && ownerSupported" "!boxOwnsCapture && ownerSupported" _header "${_header}")
-    elseif(_mutant STREQUAL "guard_owner")
-      string(REPLACE "!boxOwnsCapture && !micMixActive && ownerSupported" "!boxOwnsCapture && !micMixActive" _header "${_header}")
-    elseif(_mutant STREQUAL "inventory")
-      string(REPLACE "  const auto route=classifyVoiceMonitorRoute(inventory" "  (void)self.host.enumerate();\n  const auto route=classifyVoiceMonitorRoute(inventory" _control "${_control}")
-    elseif(_mutant STREQUAL "settle")
-      string(REPLACE "kVoiceMonitorSettleWaitMs = 25" "kVoiceMonitorSettleWaitMs = 250" _header "${_header}")
-    elseif(_mutant STREQUAL "all_outputs")
-      string(REPLACE "selected ? voice : 0.0f" "voice" _header "${_header}")
-    elseif(_mutant STREQUAL "output_map")
-      string(REPLACE "config.outputChannels=physicalOutputs;" "config.outputChannels={0,1};" _control "${_control}")
-    elseif(_mutant STREQUAL "input_channel")
-      string(REPLACE "config.inputChannels={channel};" "config.inputChannels={0};" _control "${_control}")
-    elseif(_mutant STREQUAL "input_range")
-      string(REPLACE "if (channel>=input->inputChannels)" "if (false)" _control "${_control}")
-    elseif(_mutant STREQUAL "monitor_writer")
-      string(REPLACE "config.requestedBufferFrames=frames;" "config.requestedBufferFrames=target;" _control "${_control}")
-    elseif(_mutant STREQUAL "monitor_capacity")
-      string(REPLACE "config.maximumFrames=kAudioHostMaxFrames;" "config.maximumFrames=maximum;" _control "${_control}")
-    elseif(_mutant STREQUAL "monitor_ceiling")
-      string(REPLACE "config.maximumAcceptableBufferFrames=maximum;" "config.maximumAcceptableBufferFrames=0;" _control "${_control}")
-    elseif(_mutant STREQUAL "retained_reopen")
-      string(REPLACE "if (monitorBufferHeld && samePhysical" "if (false && monitorBufferHeld && samePhysical" _service "${_service}")
-    elseif(_mutant STREQUAL "output_choice_identity")
-      string(REPLACE "if (device.uid==output)" "if (device.label==output)" _control "${_control}")
-    elseif(_mutant STREQUAL "output_choice_usable")
-      string(REPLACE "device.label,eligibility.available,eligibility.reason" "device.label,true,eligibility.reason" _control "${_control}")
-    elseif(_mutant STREQUAL "output_choice_outputs")
-      string(REPLACE "if (!device.outputChannels) continue;" "if (false) continue;" _control "${_control}")
-    elseif(_mutant STREQUAL "independent_monitor_output")
-      string(REPLACE "impl_->songOutputCurrent && !independent" "impl_->songOutputCurrent" _service "${_service}")
-    elseif(_mutant STREQUAL "pinned_monitor_pair")
-      string(REPLACE "if (independent) {" "if (false) {" _service "${_service}")
-    elseif(_mutant STREQUAL "other_song_buffer")
-      string(REPLACE "songService->activeOutputUid()==uid &&" "" _control "${_control}")
-    elseif(_mutant STREQUAL "idle_late_registration")
-      string(REPLACE "    if (songService) self.outputUse=songService->retainVoiceMonitorOutput(config);" "" _control "${_control}")
-      string(REPLACE "        self.requested=target; self.latency=latencyOf(status,target);" "        self.requested=target; self.latency=latencyOf(status,target);\n        if (songService) self.outputUse=songService->retainVoiceMonitorOutput(config);" _control "${_control}")
-    elseif(_mutant STREQUAL "idle_begin")
-      string(REPLACE "  if (!songOpen) frames=" "  if (!songOpen) return result;\n  if (!songOpen) frames=" _control "${_control}")
-    elseif(_mutant STREQUAL "idle_monitor_hold")
-      string(REPLACE "config.holdSharedDeviceBuffer=true;" "config.holdSharedDeviceBuffer=false;" _control "${_control}")
-    elseif(_mutant STREQUAL "idle_song_hold")
-      string(REPLACE "config_.holdSharedDeviceBuffer = provider_ == \"coreaudio\";" "config_.holdSharedDeviceBuffer = false;" _service "${_service}")
-    elseif(_mutant STREQUAL "idle_adopt_period")
-      string(REPLACE "actualConfig.requestedBufferFrames = 0;" "actualConfig.requestedBufferFrames = config.requestedBufferFrames;" _service "${_service}")
-    elseif(_mutant STREQUAL "browser_route")
-      string(REPLACE "return !playing || browserUid.empty() || browserUid==monitorUid;" "return true;" _header "${_header}")
-    elseif(_mutant STREQUAL "current_native_route")
-      string(REPLACE "currentSongOutput && provider" "provider" _header "${_header}")
-    elseif(_mutant STREQUAL "native_route_state")
-      string(REPLACE "provider==\"coreaudio\" && !config.outputDeviceUid.empty()"
-        "provider==\"coreaudio\" && !config.outputDeviceUid.empty() && (status.state==AudioHostState::Open || status.state==AudioHostState::Running || status.state==AudioHostState::Suspended)"
-        _header "${_header}")
-    elseif(_mutant STREQUAL "generation")
-      string(REPLACE "generation!=impl_->generation" "false" _control "${_control}")
-    elseif(_mutant STREQUAL "lost")
-      string(REPLACE "self.lost=status.state==AudioHostState::DeviceLost || status.terminalReason==AudioHostTerminalReason::DeviceLost" "self.lost=false" _control "${_control}")
-    elseif(_mutant STREQUAL "song")
-      string(REPLACE "  self.stop(true); self.generation=generation;" "  sharedAudioService().shutdown(); self.stop(true); self.generation=generation;" _control "${_control}")
-      string(PREPEND _control "#include \"native/playback/shared_audio_service.h\"\n")
-    endif()
-    # A stale mutant (its target text edited away) would be byte-identical and silently pass.
-    if(_header STREQUAL _voice_monitor_header AND _control STREQUAL _voice_monitor_control AND _service STREQUAL _service_original)
-      message(FATAL_ERROR "voice_monitor negative control '${_mutant}' no longer changes any source; update its REPLACE text")
-    endif()
-    set(_dir "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-negative-${_mutant}")
-    file(MAKE_DIRECTORY "${_dir}")
-    if(NOT _service STREQUAL _service_original)
-      set(_service_source "${_dir}/shared_audio_service.cpp")
-      file(WRITE "${_service_source}" "${_service}")
-    endif()
-    file(WRITE "${_dir}/voice_monitor.h" "${_header}")
-    file(WRITE "${_dir}/voice_monitor.cpp" "${_control}")
-    add_executable(voice_monitor_negative_${_mutant}
-      tests/native/voice_monitor_tests.cpp "${_dir}/voice_monitor.cpp" "${_service_source}")
-    target_compile_features(voice_monitor_negative_${_mutant} PRIVATE cxx_std_20)
-    target_compile_definitions(voice_monitor_negative_${_mutant} PRIVATE VOICE_MONITOR_HEADER="${_dir}/voice_monitor.h")
-    target_include_directories(voice_monitor_negative_${_mutant} PRIVATE "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback")
-    target_link_libraries(voice_monitor_negative_${_mutant} PRIVATE SingZ::zcore_device Threads::Threads)
-    add_dependencies(voice_monitor_tests voice_monitor_negative_${_mutant})
-    add_test(NAME voice_monitor_negative_${_mutant} COMMAND voice_monitor_negative_${_mutant})
-    set_tests_properties(voice_monitor_negative_${_mutant} PROPERTIES WILL_FAIL TRUE)
-  endforeach()
-  if(APPLE)
-    add_executable(voice_monitor_negative_restore_on_stop tests/native/voice_monitor_tests.cpp native/playback/shared_audio_service.cpp)
-    target_compile_features(voice_monitor_negative_restore_on_stop PRIVATE cxx_std_20)
-    target_compile_definitions(voice_monitor_negative_restore_on_stop PRIVATE VOICE_MONITOR_RESTORE_ON_STOP=1)
-    target_link_libraries(voice_monitor_negative_restore_on_stop PRIVATE singz_voice_monitor Threads::Threads)
-    add_dependencies(voice_monitor_tests voice_monitor_negative_restore_on_stop)
-    add_test(NAME voice_monitor_negative_restore_on_stop COMMAND voice_monitor_negative_restore_on_stop)
-    set_tests_properties(voice_monitor_negative_restore_on_stop PROPERTIES WILL_FAIL TRUE)
-  endif()
-  # Compile regressions against deliberately broken copies of the REAL zCore
-  # seams; do not edit the pinned submodule. Same parent behavior suite must fail.
-  foreach(_seam IN ITEMS restore_capacity restore_external redundant_notification)
-    if(NOT APPLE)
-      continue() # Shared CoreAudio parent sequences are macOS-only.
-    endif()
-    set(_dir "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-negative-${_seam}")
-    file(MAKE_DIRECTORY "${_dir}")
-    if(_seam STREQUAL "redundant_notification")
-      file(READ "${ZCORE_ROOT}/zcore/platform/macos/audio_host_macos_helpers.h" _original)
-      string(REPLACE "return !readable || !same ? kMacAudioHostFormatChanged : 0u;"
-        "(void)readable; (void)same; return kMacAudioHostFormatChanged;" _fault "${_original}")
-      set(_definition VOICE_MONITOR_MAC_HELPERS_HEADER)
-    else()
-      file(READ "${ZCORE_ROOT}/zcore/platform/macos/audio_device_macos_buffer.h" _original)
-      if(_seam STREQUAL "restore_capacity")
-        # Old behavior: wait for even a capacity-only song lease to close.
-        string(REPLACE "if (owner.second.changed || owner.second.hold) return AudioBufferWarningNone;"
-          "{ (void)owner; return AudioBufferWarningNone; }" _fault "${_original}")
-      else()
-        # Ignore the external-value guard: even a CAS failure must not be
-        # misreported as restoration or lose the new baseline for re-arm.
-        string(REPLACE "} else if (current != entry.lastWritten) {"
-          "} else if (false) {" _fault "${_original}")
-      endif()
-      set(_definition VOICE_MONITOR_BUFFER_HEADER)
-    endif()
-    if(_fault STREQUAL _original)
-      message(FATAL_ERROR "Voice monitor zCore seam negative control ${_seam} needs updating")
-    endif()
-    file(WRITE "${_dir}/seam.h" "${_fault}")
-    add_executable(voice_monitor_negative_${_seam}
-      tests/native/voice_monitor_tests.cpp native/playback/shared_audio_service.cpp)
-    target_compile_features(voice_monitor_negative_${_seam} PRIVATE cxx_std_20)
-    target_compile_definitions(voice_monitor_negative_${_seam} PRIVATE ${_definition}="${_dir}/seam.h")
-    target_link_libraries(voice_monitor_negative_${_seam} PRIVATE singz_voice_monitor Threads::Threads)
-    add_dependencies(voice_monitor_tests voice_monitor_negative_${_seam})
-    add_test(NAME voice_monitor_negative_${_seam} COMMAND voice_monitor_negative_${_seam})
-    set_tests_properties(voice_monitor_negative_${_seam} PROPERTIES WILL_FAIL TRUE)
-  endforeach()
-  add_test(NAME voice_monitor_realtime_source_policy
-    COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_VOICE_MONITOR_RT_MANIFEST}"
-      -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-rt-negative.cpp"
-    "#include <algorithm>\n#include <atomic>\n#include <bit>\n#include <cmath>\n#include <mutex>\n#include <zcore/device/audio_host_render.h>\nnamespace singz {\n${_voice_monitor_rt}\nstd::mutex forbidden;\n}\n")
-  add_library(voice_monitor_rt_negative_fixture OBJECT EXCLUDE_FROM_ALL "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-rt-negative.cpp")
-  target_compile_features(voice_monitor_rt_negative_fixture PRIVATE cxx_std_20)
-  target_link_libraries(voice_monitor_rt_negative_fixture PRIVATE SingZ::zcore_device)
-  add_dependencies(voice_monitor_tests voice_monitor_rt_negative_fixture)
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-rt-negative.cmake"
-    "set(SINGZ_ZDSP_RT_FILES [==[${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-rt-negative.cpp]==])\n")
-  add_test(NAME voice_monitor_realtime_policy_negative
-    COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/voice-monitor-rt-negative.cmake"
-      -DSINGZ_ZDSP_RT_PROFILE=monitor -P "${ZCORE_ROOT}/cmake/CheckZdspRealtime.cmake")
-  set_tests_properties(voice_monitor_realtime_policy_negative PROPERTIES WILL_FAIL TRUE)
 
   add_executable(voice_monitor_client_tests tests/native/voice_monitor_client_tests.cpp native/playback/shared_audio_service.cpp
     "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
@@ -1861,22 +1608,12 @@ if(SINGZ_CORE_TESTS)
 endif()
 
 if(SINGZ_CORE_TESTS)
-  add_executable(training_pcm_mixer_tests native/playback/training_pcm_mixer_tests.cpp
-    native/playback/training_pcm_mixer.cpp)
+  add_executable(training_pcm_mixer_tests native/playback/training_pcm_mixer_tests.cpp)
   target_compile_features(training_pcm_mixer_tests PRIVATE cxx_std_20)
   target_compile_options(training_pcm_mixer_tests PRIVATE
     "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>" "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
   target_link_libraries(training_pcm_mixer_tests PRIVATE SingZ::zcore_device Threads::Threads)
   add_test(NAME training_pcm_mixer_tests COMMAND training_pcm_mixer_tests)
-  add_executable(take_playback_tests tests/native/take_playback_tests.cpp
-    native/playback/training_pcm_mixer.cpp native/playback/presentation_history.cpp
-    ${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp)
-  target_compile_features(take_playback_tests PRIVATE cxx_std_20)
-  target_compile_options(take_playback_tests PRIVATE
-    "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>" "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
-  target_include_directories(take_playback_tests PRIVATE "${SINGZ_REPO_ROOT}" "${ZCORE_ROOT}/zdsp/tests")
-  target_link_libraries(take_playback_tests PRIVATE SingZ::zcore_device Threads::Threads)
-  add_test(NAME take_playback_tests COMMAND take_playback_tests)
 endif()
 
 if(BUILD_TESTING AND SINGZ_BOX_LOOPZ_ROUTING)
@@ -2009,13 +1746,4 @@ if(SINGZ_CORE_TESTS AND SINGZ_BUILD_HOST_TOOLS)
       set_tests_properties(take_writer_negative_concatenate_long PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
     endif()
   endforeach()
-endif()
-
-if(TARGET voice_monitor_tests AND TARGET voice_monitor_source_tests)
-  add_dependencies(voice_monitor_tests voice_monitor_source_tests)
-endif()
-
-# Canonical monitor preset target builds every common-client test it selects.
-if(TARGET voice_monitor_tests AND TARGET voice_monitor_client_tests AND TARGET voice_monitor_client_clock_tests)
-  add_dependencies(voice_monitor_tests voice_monitor_client_tests voice_monitor_client_clock_tests voice_monitor_waveform_tests)
 endif()

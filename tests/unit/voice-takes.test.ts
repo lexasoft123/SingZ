@@ -43,7 +43,7 @@ const fakeNative = (finish: Partial<Awaited<ReturnType<VoiceTakeNative['finishTa
   cancelTake: async () => ({ ok: true }),
   presentationQuery: async () => ({ ok: true, startPositionSec: 12, inputLatencyFrames: 1, outputLatencyFrames: 2, graphLatencyFrames: 3, latencySource: 'measured-trim' as const, ...placement }),
   captureStats: async () => ({ firstSampleCaptured: true, firstSampleHostNs: '1000000000', lastSampleHostNs: '1000000000', firstSampleQuality: 'hardware' as const, sampleRate: 44100, inputLevel: { peakDb: -20, rmsDb: -30 } }),
-  playTake: async () => ({ ok: true }), stopTake: async () => ({ ok: true }), level: async () => ({ peakDb: -20, rmsDb: -30 })
+  level: async () => ({ peakDb: -20, rmsDb: -30 })
 })
 
 const request = { songId: 'song-1', songTitle: 'Song', songArtist: 'Artist', input: { deviceName: 'Mic', channelIndex: 0 }, tempo: 1, transposeSemitones: 0 }
@@ -171,19 +171,7 @@ describe('voice take storage', () => {
     expect(sidecar.status).toBe('partial-error'); expect(sidecar.latencySource).toBe('measured-trim'); expect(Number.isFinite(sidecar.startPositionSec)).toBe(true)
   })
 
-  it('plays with-song using the sidecar start position and recorded tempo, and surfaces native errors', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
-    let playArgs: Record<string, unknown> | undefined
-    const native = fakeNative()
-    native.playTake = async args => { playArgs = args as unknown as Record<string, unknown>; return { ok: true } }
-    const s = new VoiceTakeStore({ rootDir: root, native })
-    const started = await s.start({ ...request, tempo: 0.87 }); await s.stop()
-    expect(await s.play({ takeId: started.ok ? started.takeId : '', mode: 'with-song', gain: 99 })).toMatchObject({ ok: true })
-    expect(playArgs).toMatchObject({ mode: 'with-song', startPositionSec: 12, tempo: 0.87, gain: 8 })
-    native.playTake = async () => ({ ok: false, error: 'playback unavailable' })
-    expect(await s.play({ takeId: started.ok ? started.takeId : '', mode: 'take' })).toMatchObject({ ok: false, error: 'playback unavailable' })
-    expect(await s.stopPlay()).toMatchObject({ ok: true })
-  })
+
 
   it('writes a provisional sidecar after placement and recovers its placement after a crash', async () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-voice-')); roots.push(root)
@@ -683,18 +671,7 @@ describe('take peaks, moving and deleting (voice lane)', () => {
     expect(await s.move({ songId: 'song-1', takeId: '../bad', userOffsetSec: 1 })).toMatchObject({ ok: false })
     expect(await s.move({ songId: 'song-1', takeId: 'missing', userOffsetSec: 1 })).toMatchObject({ ok: false, error: 'Take not found.' })
   })
-  it('playback starts from the moved position (negative control: the unmoved take starts at the measured one)', async () => {
-    const root = withRoot()
-    const native = fakeNative()
-    const playTake = vi.fn(async () => ({ ok: true }))
-    native.playTake = playTake
-    const { s, takeId } = await recordOne(root, native)
-    await s.play({ takeId, mode: 'take' })
-    expect(playTake).toHaveBeenLastCalledWith(expect.objectContaining({ startPositionSec: 12 }))
-    await s.move({ songId: 'song-1', takeId, userOffsetSec: 3 })
-    await s.play({ takeId, mode: 'with-song' })
-    expect(playTake).toHaveBeenLastCalledWith(expect.objectContaining({ startPositionSec: 15, mode: 'with-song' }))
-  })
+
   it('remove deletes the wav and the sidecar and forgets the peaks', async () => {
     const root = withRoot(); const { s, takeId } = await recordOne(root)
     expect(await s.peaks({ songId: 'song-1', takeId })).toMatchObject({ ok: true })

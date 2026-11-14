@@ -1,8 +1,8 @@
 # ADR 0016: The recorded take is a playback lane
 
-Status: proposed<br>
+Status: implemented (WP5 removal complete; hardware/listening qualification remains WP7)<br>
 Date: 2026-11-13<br>
-Supersedes (when accepted): ADR 0014 rule "plays back as sung, with the settings
+Supersedes: ADR 0014 rule "plays back as sung, with the settings
 it was recorded under" and its milestone 1 rate-1 output-mix playback; spec R3,
 VS-PLAY-001/002/003/006, the `playing-take` state and the listen-back part of
 VS-TAKE-005.
@@ -122,7 +122,7 @@ was sung, exactly on the song timeline at any tempo. For a take recorded at
   same native solo group: Voice Solo silences un-soloed stems; a stem's Solo
   silences the take unless Voice is soloed too.
 - **The live monitor obeys only the Speaker button.** It is never silenced by M,
-  by another lane's Solo or by the recording rule (separate host; "solo-safe"
+  by another lane's Solo or by the recording rule (common additive client; "solo-safe"
   like DAW input monitoring). Voice Solo with Speaker on gives take plus live
   voice, the outcome VS-PLAY-006 asked for.
 - M and S are disabled, with the reason as tooltip, while the lane has no
@@ -255,3 +255,24 @@ later without new real-time code.
 - Take pitch: the voice follows the song key (shifted by current minus recorded transposition), as a VISIBLE adjustment, not a hidden one: the voice lane header and the Track settings popup show the applied shift (for example "Pitch follow +3 st") and a bypass switch; the clip tag keeps "voice shifted" beyond about 3 semitones. Decided by the user.
 - The pitch adjustment is the first effect of a future FX chain on the voice track: model it now as a named, ordered effect slot ("pitch-follow") with its own parameters (enabled, amount derived from the song key, later manual offset, formant preservation when the shifter supports it), stored per take/lane, so adding more effects later (EQ, compressor, reverb, tuner) is additive. WP1 to WP3 must keep the conform step parameterised by an effect description, not hard-coded, and WP4 builds the visible control around that slot. The FX chain itself (UI, ordering, presets, live vs offline effects) is out of scope for this ADR and needs its own decision record.
 - The take plays as a lane under the normal Play; the "Listen" and "Listen with song" buttons go away (WP5), after a listening check of stretched takes.
+
+## WP5 removal and regression mapping
+
+The standalone replay IPC, preload API, main store methods, native exports,
+streaming take reader, presentation-provider hook and its callback-only session
+query are deleted. Session placement/seek/pause/seam assertions now use the
+recording control query; capture-history concurrency and allocation checks stay. The training
+mixer is header-only and serves cues on desktop, phones and Box.
+
+| Deleted replay case | Replacement evidence |
+| --- | --- |
+| Seek (including host-clock negative control), pause/resume, tempo seam, missing song | `native_playback_session_tests`; `voice-strip.test.ts` take-lane transport cases |
+| Recorded-tempo seek and interior onset | `take_conform_tests` anchor/placement regressions and ratio/placement negative controls |
+| Standalone rate-1 replay and host-jitter cursor | Removed product behavior; normal transport is the only take player; cue cursor coverage stays in `training_pcm_mixer_tests` |
+| Cross-rate interpolation | `take_conform_tests` rate conversion and native lane feeder/session tests |
+| Long, unpatched and sparse WAV; distant seek; bounded windows | `take_writer_tests` recovery, conform streaming/high-rate/conversion/resident gates, native streaming-lane tests |
+| Invalid file/config, capacity and cancellation | Conform/store validation, `voice-take-conform.test.ts`, lane admission/budget and cache-lease tests |
+| Cue/take generation cancellation separation | Takes no longer enter the cue mixer; training cancellation remains in `training_pcm_mixer_tests` and voice recording silence in `voice-strip.test.ts` |
+| Callback allocation negative control | Native session and common monitor allocation traps and realtime policies |
+
+Hardware and listening gates are not replaced by these portable results.
