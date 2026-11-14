@@ -312,7 +312,8 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
     // loop was observed long enough to judge, so the window is extended to a minimum rather than the floor lowered:
     // keep sampling (the song is playing, the build is behind us) until the heartbeat has run for BEAT_MIN_WINDOW_MS.
     const BEAT_MIN_WINDOW_MS = 2500
-    for (;;) {
+    const beatDeadline = Date.now() + 5000
+    while (Date.now() < beatDeadline) {
       const t = await app.evaluate(() => globalThis.__beat.ticks)
       if (t * 50 >= BEAT_MIN_WINDOW_MS) break
       await sleep(100)

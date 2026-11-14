@@ -7,7 +7,7 @@ const assert = require('node:assert/strict')
 const { mkdtempSync, writeFileSync, rmSync } = require('node:fs')
 const { tmpdir } = require('node:os')
 const { join, resolve } = require('node:path')
-const SCALE_CLICK_GAIN = 0.0005 // about -66 dBFS before the system volume: inaudible
+const SCALE_CLICK_GAIN = 0.00005 // about -86 dBFS before the system volume: inaudible
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function until(label, read, ready) {
   const deadline = Date.now() + 5000
@@ -82,14 +82,17 @@ async function main() {
       return peak
     }
     const scaling = []
-    for (let round = 0; round < 3; round++) {
-      const full = await scalePeak(1), quarter = await scalePeak(.25)
-      assert.ok(full > 1e-5, `master 1.0 preview peak must be measurable (got ${full})`)
-      scaling.push({ full, quarter, ratio: quarter / full })
+    try {
+      for (let round = 0; round < 3; round++) {
+        const full = await scalePeak(1), quarter = await scalePeak(.25)
+        assert.ok(full > 1e-6, `master 1.0 preview peak must be measurable (got ${full})`)
+        scaling.push({ full, quarter, ratio: quarter / full })
+      }
+    } finally {
+      assert.equal(addon.setPlaybackMasterGain(0n, 0).ok, true) // Back to silent real device callbacks, including a failed measurement.
     }
     const ratios = scaling.map(r => r.ratio).sort((a, b) => a - b), median = ratios[1]
     assert.ok(Math.abs(median - .25) < .02, `preview peak ratio master .25 / 1.0 must be ~0.25, got ${median} (${JSON.stringify(scaling)})`)
-    assert.equal(addon.setPlaybackMasterGain(0n, 0).ok, true) // Back to silent real device callbacks.
     receipts.push({ label: 'preview master scaling', clickGain: SCALE_CLICK_GAIN, scaling, medianRatio: median })
     const wav = join(scratch, 'silence.wav'); writeFileSync(wav, silentWav())
     const prepared = await addon.preparePlayback({

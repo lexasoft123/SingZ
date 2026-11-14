@@ -1,6 +1,7 @@
 import { clampNativeTranspose, clampPlaybackRate } from './audio/native-playback-limits'
 import { QUICK_START_SEEN, quickStartTitle } from '../../shared/quick-start/meta'
 import { sanitizeSongVolume } from './audio/song-volume'
+import { UnavailableCustomTracks } from './unavailable-custom-tracks'
 import type { TrainingSound } from '../../shared/training-sound'
 import {
   Suspense,
@@ -748,6 +749,7 @@ export default function App(): React.JSX.Element {
   const beatInfoRef = useRef(beatInfo)
   beatInfoRef.current = beatInfo
   const loadSeq = useRef(0)
+  const unavailableCustom = useRef(new UnavailableCustomTracks())
   const beatMutationSeq = useRef(0)
   const metronomeMutationSeq = useRef(0)
   const regionMutationSeq = useRef(0)
@@ -1371,6 +1373,7 @@ export default function App(): React.JSX.Element {
       setAppSection('songs')
       setShowCatalog(false)
       const seq = ++loadSeq.current
+      unavailableCustom.current.reset(seq)
       if (splitRunRef.current) splitRunRef.current.cancelled = true
       splitRunRef.current = null
       // Native goes first: every control reset below would otherwise be a
@@ -1469,7 +1472,8 @@ export default function App(): React.JSX.Element {
           host,
           requiredLanes
         )
-        if (superseded) return out
+        if (superseded || seq !== loadSeq.current) return out
+        unavailableCustom.current.retain(seq, defs, defs.filter(c => !reads.has(c.id)).map(c => c.id))
         for (const c of defs) {
           const read = reads.get(c.id)
           if (!read) {
@@ -1956,7 +1960,11 @@ export default function App(): React.JSX.Element {
         ))
       }
       // Commit synchronously after the final cancellation check.
+      unavailableCustom.current.advance(run.seq, loadSeq.current + 1)
       run.seq = ++loadSeq.current
+      unavailableCustom.current.retain(run.seq, kept.map(t => ({
+        id: t.id, label: t.label, color: t.color, file: t.custom!.file
+      })), optional.errors.keys())
       melodyWorkerRef.current?.terminate()
       melodyWorkerRef.current = null
       pendingCoreAnalysisRef.current = null
@@ -2055,12 +2063,16 @@ export default function App(): React.JSX.Element {
         commit: (result, lead, backing) => {
           // No await after this point: cancellation cannot interleave halfway
           // through publishing the new lanes and retiring the old analyses.
+          unavailableCustom.current.advance(run.seq, loadSeq.current + 1)
           run.seq = ++loadSeq.current
           melodyWorkerRef.current?.terminate()
           melodyWorkerRef.current = null
           pendingCoreAnalysisRef.current = null
           keyCarriedBySeqRef.current = null
-          const taken = new Set(tracksRef.current.map(t => t.id))
+          const taken = new Set([
+            ...tracksRef.current.map(t => t.id),
+            ...unavailableCustom.current.forSave(run.seq, []).map(t => t.id)
+          ])
           // customTrackId's argument seeds the generated file/lane id — kept in
           // English on purpose (see rule 6: not translated, unlike the label below)
           const id = customTrackId('Backing vocals', taken)
@@ -2197,7 +2209,10 @@ export default function App(): React.JSX.Element {
   const addTracks = useCallback(
     async (files: File[]) => {
       const before = engine.duration
-      const taken = new Set(tracksRef.current.map((t) => t.id))
+      const taken = new Set([
+        ...tracksRef.current.map(t => t.id),
+        ...unavailableCustom.current.forSave(loadSeq.current, []).map(t => t.id)
+      ])
       const customSoFar = tracksRef.current.filter((t) => t.custom).length
       const added: UITrack[] = []
       const fresh = new Map<string, AudioBuffer>()
@@ -2277,6 +2292,7 @@ export default function App(): React.JSX.Element {
    */
   const reanchorCustom = useCallback((list: CustomTrack[] | undefined) => {
     if (!list || list.length === 0) return
+    unavailableCustom.current.reanchor(loadSeq.current, list)
     setTracks((ts) =>
       ts.map((t) => {
         const c = t.custom ? list.find((x) => x.id === t.id) : undefined
@@ -2901,9 +2917,9 @@ export default function App(): React.JSX.Element {
       melody: melodyInfo ?? undefined,
       key: keyInfo ?? undefined,
       metronome: metCfg,
-      custom: tracks
+      custom: unavailableCustom.current.forSave(seq, tracks
         .filter((t) => t.custom)
-        .map((t) => ({ id: t.id, label: t.label, color: t.color, file: t.custom!.file })),
+        .map((t) => ({ id: t.id, label: t.label, color: t.color, file: t.custom!.file }))),
       tracks: Object.fromEntries(
         tracks.map((t) => [t.id, { muted: t.muted, solo: t.solo, volume: t.volume }])
       )
