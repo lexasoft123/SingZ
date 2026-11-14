@@ -138,6 +138,8 @@ jobs:
           archive="$RUNNER_TEMP/ffmpeg-8.0.1.tar.xz"
           curl -fL --retry 3 --output "$archive" https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
           test "$(shasum -a 256 "$archive" | awk '{print $1}')" = 05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41
+          # The pack builder creates only the pack directory itself, never its parent.
+          mkdir -p "$GITHUB_WORKSPACE/vendor/ffmpeg-codec"
           python3 scripts/gpui-codec-runtime.py build --target darwin-${{ matrix.arch }} \
             --pack-dir "$GITHUB_WORKSPACE/vendor/ffmpeg-codec/darwin-${{ matrix.arch }}" \
             --source-archive "$archive" --work-dir "$RUNNER_TEMP/gpui-codec-work" --jobs 2
@@ -276,7 +278,9 @@ jobs:
   windows:
     name: Windows native (unsigned NSIS)
     needs: resolve
-    runs-on: windows-latest
+    # Pinned like checks.yml gpui-native: the helper build asks CMake for the
+    # "Visual Studio 17 2022" generator, which windows-latest no longer carries.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
         with:
