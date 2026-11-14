@@ -236,6 +236,16 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   if (stagePhase(state) == kStageSwapping)
     return false;
   const bool armed = stagePhase(state) == kStageArmed;
+  // A published command owns its landing until the callback commits or cancels
+  // it. Refilling the old position must not reclaim that stage between its
+  // publication and the next callback, even when the live ring is running low.
+  // Keep the existing stale-stage limit for an output that never calls back.
+  const uint64_t request = lane.stageRequest.load(std::memory_order_relaxed);
+  if (armed && request != 0 &&
+      jumpSequence_.load(std::memory_order_acquire) == request &&
+      completedJump_.load(std::memory_order_acquire) != request &&
+      std::chrono::steady_clock::now() - lane.stagedAt < kStageStale)
+    return false;
 
   uint64_t demand = lane.residentStart;
   if (!zdsp::streamingWindowDemand(&lane.window, &demand))
@@ -286,11 +296,20 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   // the live ring holds everything up to the wrap, which is also the moment
   // the decoder has nothing else to do.
   const uint64_t total = lane.window.totalFrames;
+  bool loopEnabled;
+  uint64_t loopStart;
+  uint64_t loopEnd;
+  {
+    std::lock_guard<std::mutex> lock(loopMutex_);
+    loopEnabled = loopEnabled_;
+    loopStart = loopStart_;
+    loopEnd = loopEnd_;
+  }
   bool looping = false;
   uint64_t loopFill = total;
-  if (loopEnabled_ && loopStart_ < total) {
-    const uint64_t loopEnd = std::min(loopEnd_, total);
-    if (demand >= loopStart_ && demand < loopEnd) {
+  if (loopEnabled && loopStart < total) {
+    loopEnd = std::min(loopEnd, total);
+    if (demand >= loopStart && demand < loopEnd) {
       looping = true;
       loopFill = std::min(loopEnd + kLoopTailFrames, total);
     }
@@ -301,7 +320,7 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   if (lane.residentEnd >= want) {
     if (!looping || lane.residentEnd < loopFill)
       return false;
-    const uint64_t head = loopStart_;
+    const uint64_t head = loopStart;
     const bool headResident =
         head >= lane.residentStart &&
         (head + 1u < lane.residentEnd ||
@@ -318,7 +337,6 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
       if (!reclaimStage(lane))
         return true;
     }
-    lane.stageRequest.store(0, std::memory_order_relaxed);
     return stageLane(lane, head);
   }
 
@@ -450,9 +468,16 @@ bool StreamingLaneGroup::repositionDecoder(Lane& lane, uint64_t outputFrame) {
 // the render thread. Nothing here is visible to the node until the transport
 // swaps the window over, so it may take as long as the decoder needs.
 // Precondition: the stage is Idle (the feeder owns both rings).
-bool StreamingLaneGroup::stageLane(Lane& lane, uint64_t frame) {
+bool StreamingLaneGroup::stageLane(Lane& lane, uint64_t frame, uint64_t request) {
+  lane.stageRequest.store(request, std::memory_order_relaxed);
   if (options_.beforeStageDecode != nullptr)
     options_.beforeStageDecode(options_.stageDecodeContext);
+  // A slow decoder may have been superseded before it even began reading.
+  // Leave the standby free for the latest request instead of decoding a stale
+  // landing ahead of it.
+  if (request != 0 &&
+      jumpSequence_.load(std::memory_order_acquire) != request)
+    return false;
   const uint64_t total = lane.window.totalFrames;
   if (frame >= total)
     return false;
@@ -668,8 +693,7 @@ bool StreamingLaneGroup::serviceJumpRequest() {
     if (!reclaimStage(lane)) return true;
     // Only one lane per round: visit/refill the live lanes between decodes,
     // and observe a superseding drag request before starting another decoder.
-    lane.stageRequest.store(token, std::memory_order_relaxed);
-    return stageLane(lane, frame);
+    return stageLane(lane, frame, token);
   }
   return false;
 }
@@ -721,7 +745,7 @@ bool StreamingLaneGroup::commitJump(uint64_t token, uint64_t frame) noexcept {
 
 void StreamingLaneGroup::setLoop(uint64_t startFrame, uint64_t endFrame) {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(loopMutex_);
     loopEnabled_ = endFrame > startFrame;
     loopStart_ = startFrame;
     loopEnd_ = endFrame;
@@ -730,7 +754,7 @@ void StreamingLaneGroup::setLoop(uint64_t startFrame, uint64_t endFrame) {
 }
 
 void StreamingLaneGroup::clearLoop() {
-  std::unique_lock<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(loopMutex_);
   loopEnabled_ = false;
   loopStart_ = 0;
   loopEnd_ = 0;

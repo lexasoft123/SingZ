@@ -838,7 +838,10 @@ void streamingSeekReturnsBeforeDecoder() {
     while (!g.released.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
   };
   std::vector<float> tone(1500000, 0.25F);
-  const auto path = writeWav("slow-stage.wav", 1, tone, 44100);
+  // This gate tests command ordering, not sanitizer resampler throughput.
+  // Resampled seek/stage recovery is covered by streamedJumpsNeverStarve and
+  // the feeder's sample-exact checkJumpsNeverStarve(44100, 48000) campaign.
+  const auto path = writeWav("slow-stage.wav", 1, tone, 48000);
   auto backend = std::make_unique<ManualOutputBackend>();
   auto* fake = backend.get();
   singz::NativePlaybackSession session(std::move(backend), &hooks);
@@ -873,6 +876,16 @@ void streamingSeekReturnsBeforeDecoder() {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     CHECK(gate.entered.load());
     // A preceding loop edit must not pin the superseded seeks either.
+    const auto loopCallAt = std::chrono::steady_clock::now();
+    CHECK(session.setLoop(1, 200000, 1400000).ok);
+    const auto loopCallMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - loopCallAt).count();
+    std::fprintf(stderr, "blocked decoder: loop accepted in %.3f ms\n", loopCallMs);
+    CHECK(loopCallMs < 50.0);
+    const auto clearLoopAt = std::chrono::steady_clock::now();
+    CHECK(session.clearLoop(1).ok);
+    CHECK(std::chrono::steady_clock::now() - clearLoopAt <
+          std::chrono::milliseconds(50));
     CHECK(session.setLoop(1, 200000, 1400000).ok);
     for (int i = 0; i < 128; ++i) {
       const auto callAt = std::chrono::steady_clock::now();
@@ -895,6 +908,11 @@ void streamingSeekReturnsBeforeDecoder() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   const auto after = session.status();
+  std::fprintf(stderr, "blocked decoder: seeks=%llu frame=%lld staged=%llu starved=%llu\n",
+      static_cast<unsigned long long>(after.seekCount),
+      static_cast<long long>(after.renderedProjectFrame),
+      static_cast<unsigned long long>(after.lanes[0].stagedJumps),
+      static_cast<unsigned long long>(after.lanes[0].starvedBlocks));
   CHECK(after.seekCount == 129 && after.renderedProjectFrame >= 627000 &&
         after.renderedProjectFrame < 700000);
   CHECK(after.lanes[0].stagedJumps <= 3);
@@ -8525,6 +8543,12 @@ int main() {
   if (std::getenv("SINGZ_NATIVE_PLAYBACK_QUARANTINED_SWAP") != nullptr) {
     aQuarantinedSwapKeepsRenderingAfterTheSessionIsGone();
     std::puts("native playback quarantined swap tests: ok");
+    return 0;
+  }
+  // Repeat the shared streaming prefix without the unrelated full-session DSP
+  // campaign; injected-failure modes above still execute their lifecycle test.
+  if (std::getenv("SINGZ_NATIVE_PLAYBACK_STREAMING_ONLY") != nullptr) {
+    std::puts("native playback streaming tests: ok");
     return 0;
   }
   mixerEditsWithoutCallbacksKeepTheLatestValues();

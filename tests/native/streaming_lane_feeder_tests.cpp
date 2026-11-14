@@ -739,9 +739,67 @@ void checkCommitAfterQuietWaitEntryNeverStarves192kHz4x(int repeat) {
   std::remove(path.c_str());
 }
 
+// The feeder can finish a seek between callbacks while the outgoing ring is
+// low. It must preserve that command's ready landing, rather than reclaim it
+// to refill the outgoing position before the callback gets to commit it.
+void checkPendingSeekSurvivesLowLiveRing() {
+  const auto path = writeFloatWav(kFrames, kRate);
+  singz::StreamingLaneGroup group;
+  auto options = group.options();
+  options.primeFrames = 1024;
+  group.setOptions(options);
+  check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+        "pending-seek lane opens");
+  check(group.prime(0) == singz::DecodedAudioStatus::Ok,
+        "pending-seek lane primes a low live ring");
+  const auto token = group.requestJump(200000);
+  (void)group.serviceOnceForTesting();
+  check(group.commitJump(token, 200000),
+        "a ready pending seek survives refilling the low outgoing ring");
+  (void)group.serviceOnceForTesting();  // adopt the committed stage
+  check(group.stats(0).stages == 1 && group.stats(0).swaps == 1,
+        "a low outgoing ring never discards and restages the seek");
+  std::remove(path.c_str());
+}
+
+void checkSupersededSeekDoesNotDecodeAfterItsGate() {
+  const auto path = writeFloatWav(kFrames, kRate);
+  singz::StreamingLaneGroup group;
+  struct Supersede {
+    singz::StreamingLaneGroup* group;
+    uint64_t replacement{0};
+  } supersede{&group};
+  auto options = group.options();
+  options.beforeStageDecode = [](void* context) noexcept {
+    auto& request = *static_cast<Supersede*>(context);
+    if (request.replacement == 0)
+      request.replacement = request.group->requestJump(200000);
+  };
+  options.stageDecodeContext = &supersede;
+  group.setOptions(options);
+  check(group.addLane(openRead(path), {}, kRate) == singz::DecodedAudioStatus::Ok,
+        "superseded-seek lane opens");
+  check(group.prime(0) == singz::DecodedAudioStatus::Ok,
+        "superseded-seek lane primes");
+  (void)group.requestJump(100000);
+  (void)group.serviceOnceForTesting();
+  check(supersede.replacement != 0 && group.stats(0).stages == 0,
+        "a request superseded at the decode gate is never decoded");
+  for (int round = 0; round < 8; ++round)
+    (void)group.serviceOnceForTesting();
+  check(group.stats(0).stages == 1,
+        "only the latest scrub target is decoded after the gate");
+  check(group.commitJump(supersede.replacement, 200000),
+        "the latest scrub target can commit");
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  checkPendingSeekSurvivesLowLiveRing();
+  checkSupersededSeekDoesNotDecodeAfterItsGate();
+  if (std::getenv("SINGZ_STAGING_PENDING_ONLY") != nullptr) return failures ? 1 : 0;
   checkClearLoopWakesAQuietFeeder();
   checkWakeContendingWithTheWaitIsNotLost();
   for (int repeat = 0; repeat < 3; ++repeat)

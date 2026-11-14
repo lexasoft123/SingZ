@@ -366,7 +366,7 @@ class StreamingLaneGroup {
   uint64_t fillLane(Lane& lane, float* const* ring, uint64_t index,
                     uint64_t frames);
   // Decode [frame, frame + stageFrames) into the standby ring and arm it.
-  bool stageLane(Lane& lane, uint64_t frame);
+  bool stageLane(Lane& lane, uint64_t frame, uint64_t request = 0);
   // The stage, taken back from the render thread. False when the render
   // thread swapped it in first, in which case the swap has been adopted.
   bool reclaimStage(Lane& lane);
@@ -389,8 +389,9 @@ class StreamingLaneGroup {
   // reported from OUTSIDE the loop that stopped advancing.
   std::atomic<bool> waveformAlive_{false};
   std::chrono::steady_clock::time_point waveformStartedAt_{};
-  // The loop the transport wraps in, SOURCE frames. Feeder-thread state,
-  // guarded by mutex_.
+  // The loop the transport wraps in, SOURCE frames. Its publication lock is
+  // separate from decoder I/O so control-domain loop edits cannot wait on it.
+  std::mutex loopMutex_;
   bool loopEnabled_{false};
   uint64_t loopStart_{0};
   uint64_t loopEnd_{0};
