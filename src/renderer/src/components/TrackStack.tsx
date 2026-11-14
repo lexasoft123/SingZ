@@ -5,6 +5,7 @@ import { modalCoversApp, type TimeView, type UITrack } from '../model'
 import { createPlayheadWriter } from '../playhead-writes'
 import BeatGrid from './BeatGrid'
 import TrackLane from './TrackLane'
+import { wheelAction } from './stack-wheel'
 const StemExport = lazy(() => import('./StemExport'))
 import { t } from '../i18n'
 
@@ -12,6 +13,10 @@ import { t } from '../i18n'
 const RULER_H = 30
 /** The extra (Voice) lane row is as tall as a stem lane (same 1fr share); never below this, so the take's waveform reads. */
 const EXTRA_ROW_MIN_H = 104
+/** Lane row minimum: 64px for a few stems; 48px from DENSE_LANES on, so a 7-stem split plus the Voice row fits a 820px window without scrolling. */
+const LANE_MIN_H = 64
+const DENSE_LANE_MIN_H = 48
+const DENSE_LANES = 6
 
 /** When the lanes' played layer catches up with a rolling playhead: once the
  *  sliver the kit's edge layer draws behind the line is this many device
@@ -323,6 +328,16 @@ export default function TrackStack({
     const el = overlayRef.current
     if (!el) return
     const onWheel = (e: WheelEvent): void => {
+      const stack = stackRef.current
+      const action = wheelAction({
+        zoomKey: e.ctrlKey || e.metaKey,
+        zoomed: viewRef.current.zoomed,
+        deltaX: e.deltaX,
+        deltaY: e.deltaY,
+        stackScrollable: !!stack && stack.scrollHeight > stack.clientHeight
+      })
+      // a vertical gesture over a scrolling stack is the browser's to scroll
+      if (action === 'scroll') return
       e.preventDefault()
       const v = viewRef.current
       const rect = el.getBoundingClientRect()
@@ -376,8 +391,9 @@ export default function TrackStack({
     <div
       className="stack"
       ref={stackRef}
+      data-dense={tracks.length >= DENSE_LANES ? '' : undefined}
       style={{
-        gridTemplateRows: `${RULER_H}px repeat(${tracks.length}, minmax(64px, 1fr))${extra ? ` minmax(${EXTRA_ROW_MIN_H}px, 1fr)` : ''}`,
+        gridTemplateRows: `${RULER_H}px repeat(${tracks.length}, minmax(${tracks.length >= DENSE_LANES ? DENSE_LANE_MIN_H : LANE_MIN_H}px, 1fr))${extra ? ` minmax(${EXTRA_ROW_MIN_H}px, 1fr)` : ''}`,
         ['--extra-row' as string]: tracks.length + 2
       }}
     >
@@ -405,40 +421,42 @@ export default function TrackStack({
             {tick.label}
           </span>
         ))}
-        <div className="zoom-cluster no-drag">
-          <div className="zoom-seg">
-            <button
-              type="button"
-              title={t('player.stack.zoomOutTitle')}
-              onClick={(e) => {
-                e.currentTarget.blur()
-                onZoom(1.4)
-              }}
-            >
-              −
-            </button>
-            <button
-              type="button"
-              title={t('player.stack.zoomInTitle')}
-              onClick={(e) => {
-                e.currentTarget.blur()
-                onZoom(0.65)
-              }}
-            >
-              +
-            </button>
-            <button
-              type="button"
-              title={t('player.stack.showWholeSongTitle')}
-              disabled={!view}
-              onClick={(e) => {
-                e.currentTarget.blur()
-                onResetZoom()
-              }}
-            >
-              {t('player.stack.full')}
-            </button>
-          </div>
+      </div>
+      {/* A direct child of the stack, not of the sticky .ruler: the ruler is a stacking context at z 5
+          and would confine the cluster under the scrub overlay (z 5, later sibling). */}
+      <div className="zoom-cluster no-drag">
+        <div className="zoom-seg">
+          <button
+            type="button"
+            title={t('player.stack.zoomOutTitle')}
+            onClick={(e) => {
+              e.currentTarget.blur()
+              onZoom(1.4)
+            }}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            title={t('player.stack.zoomInTitle')}
+            onClick={(e) => {
+              e.currentTarget.blur()
+              onZoom(0.65)
+            }}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            title={t('player.stack.showWholeSongTitle')}
+            disabled={!view}
+            onClick={(e) => {
+              e.currentTarget.blur()
+              onResetZoom()
+            }}
+          >
+            {t('player.stack.full')}
+          </button>
         </div>
       </div>
 

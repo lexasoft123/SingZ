@@ -355,13 +355,34 @@ button.chip-status:hover {
   grid-template-columns: var(--controls-w) 1fr;
   padding: 4px 22px 10px 10px;
   position: relative;
+  /* The rows have minimums (lane rows, the Voice row), and a split song in a
+     normal window needs more than the stack's flex share. The stack never paints
+     outside its box: it scrolls vertically, the overlay, playhead and rows with
+     it, while the ruler row stays pinned (see .ruler-spacer, .ruler). */
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* Many lanes (the stack sets data-dense at 6 or more) trade the two-line lane
+   control for a tighter one, so a 7-stem split fits the default window with no
+   scrolling. */
+.stack[data-dense] .lane-controls {
+  gap: 2px;
+  padding: 3px 18px 3px 14px;
 }
 
 .zoom-cluster {
-  position: absolute;
-  right: 0;
+  /* a direct child of .stack (not of the sticky .ruler, whose z 5 stacking context would confine
+     this under the scrub overlay): pinned with the ruler row, above the overlay */
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  align-self: start;
+  margin-top: 3px;
+  position: sticky;
   top: 3px;
-  z-index: 6;
+  /* 7: above the overlay (5) and the bar-handles strip (6, a later sibling covering the whole ruler row) */
+  z-index: 7;
   padding-left: 10px;
   background: var(--bg);
 }
@@ -414,6 +435,11 @@ button.chip-status:hover {
   display: flex;
   align-items: center;
   padding-left: 14px;
+  /* pinned while the stack scrolls; above the Voice controls' own z 6 */
+  position: sticky;
+  top: -4px; /* the stack's own top padding */
+  z-index: 7;
+  background: var(--bg);
 }
 
 /* "+ Add track…" — sits in the controls column, above the lane names. */
@@ -516,7 +542,13 @@ button.chip-status:hover {
 
 .ruler {
   grid-column: 2;
-  position: relative;
+  /* pinned while the stack scrolls; z 5 sits above the beat lines (4) and the
+     lanes, and below the scrub overlay (same z, later sibling) so the
+     playhead cap and the ruler scrub still work */
+  position: sticky;
+  top: -4px; /* the stack's own top padding */
+  z-index: 5;
+  background: var(--bg);
   border-bottom: 1px solid var(--line);
   font-family: var(--font-mono);
   font-size: 9px;
@@ -3046,12 +3078,13 @@ body.modal-open .persistent-monitor.active .persistent-monitor-dot {
    swallow the clicks the waveforms need for seeking and selection. */
 .bar-handles {
   grid-column: 2;
-  position: relative;
   /* Above .scrub-overlay, which is also 5 and spans every row INCLUDING the
      ruler — on an equal z-index the later sibling wins, and that is the
      overlay, so at 5 this strip never received a single pointer event.
      Scrubbing keeps the whole waveform area; the ruler row is the grid's. */
   z-index: 6;
+  position: sticky;
+  top: -4px; /* the stack's own top padding */
   width: 100%;
   cursor: ew-resize;
 }
