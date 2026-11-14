@@ -8,6 +8,26 @@ use crate::ui_training_run::draw;
 use crate::ui_transport_timing::{key, press, shot};
 use std::{path::PathBuf, time::Duration};
 
+fn project_identity(path: PathBuf) -> std::io::Result<PathBuf> {
+    path.canonicalize()
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::project_identity;
+
+    #[test]
+    fn driver_identity_matches_loaded_project() {
+        let dir = std::env::current_dir().unwrap();
+        let raw = dir.join("src").join("..");
+        let loaded = dir.canonicalize().unwrap();
+        assert_eq!(project_identity(raw.clone()).unwrap(), loaded);
+        assert_ne!(raw, loaded, "the uncanonicalized driver path is the negative control");
+        #[cfg(windows)]
+        assert!(loaded.to_string_lossy().starts_with(r"\\?\"));
+    }
+}
+
 /// Judges 10 ms samples `(position, native loop_count)` of the quarter-second
 /// loop. Wraps are accounted against the native lap counter: every backward
 /// fold of the position must be matched by a counted lap, in either order, and
@@ -70,7 +90,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     cx.spawn(async move |cx| {
         let result: anyhow::Result<()> = async {
             std::fs::create_dir_all(&out)?;
-            let project = PathBuf::from(std::env::var_os("SINGZ_GPUI_TEST_PROJECT").unwrap());
+            let project = project_identity(PathBuf::from(std::env::var_os("SINGZ_GPUI_TEST_PROJECT").unwrap()))?;
             macro_rules! wait {($p:ident,$app:ident=>$test:expr)=>{{
                 let deadline = Instant::now() + Duration::from_secs(25);
                 loop {
@@ -107,7 +127,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             // Player's input route does not exist, so a first song is loaded and Space is
             // proven to drive it. While the next song then opens, the Player screen, its
             // transport and its Space route are live, and the loading refusal is reachable.
-            let warmup = PathBuf::from(std::env::var_os("SINGZ_GPUI_LEGS_WARMUP_PROJECT").unwrap());
+            let warmup = project_identity(PathBuf::from(std::env::var_os("SINGZ_GPUI_LEGS_WARMUP_PROJECT").unwrap()))?;
             handle.update(cx, |_, _, cx| view.update(cx, |p, cx| p.open_project(warmup.clone(), cx)))?;
             wait!(p, cx => !p.loading && p.project.as_ref().is_some_and(|p| p.dir == warmup));
             wait!(p, cx => p.release_startup_ready && p.model_auto_checked);
