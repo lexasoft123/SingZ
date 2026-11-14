@@ -86,3 +86,8 @@ export function takeTags(tk: Pick<VoiceTake, 'tempo' | 'transpose' | 'changed'>,
   if (tk.changed) parts.push(t('player.voice.tagChanged'))
   return parts.join(' · ')
 }
+
+/** Number of distinct take hues (the --take-N custom properties in voice-strip.css). */
+export const TAKE_HUES = 6
+/** The hue slot of take number n: cycled, stable for a take across reloads (n is its persistent number). */
+export const takeHue = (n: number): number => ((Math.trunc(n) - 1) % TAKE_HUES + TAKE_HUES) % TAKE_HUES

@@ -181,36 +181,50 @@
 .vs-btn:hover { background: rgba(255, 240, 214, 0.09); }
 .vs-take-actions { display: inline-flex; gap: 2px; }
 /* Takes stack like a DAW: one row per take, the newest on top; the selected take is the audible one. */
-/* The lane never grows the strip: its height is whatever the controls column gives it. The rows share it
-   evenly (few takes: taller rows up to a cap; many: thinner, never below a legible minimum, then it scrolls). */
+/* The rows fill the whole track area and share it evenly: one take is the full lane height, many get thinner
+   down to a legible minimum, then the track scrolls. The lane never grows the strip (its height is whatever
+   the controls column gives it), and there is no max height, so no empty band is left above, below or between. */
 .vs-track { position: relative; flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; }
-.vs-take-row { position: relative; flex: 1 1 0; min-height: 30px; max-height: 80px; }
+.vs-take-row { position: relative; flex: 1 1 0; min-height: 30px; }
 .vs-take-row + .vs-take-row { border-top: 1px solid var(--line); }
 .vs-take-row::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed var(--line); }
 .vs-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 11.5px; text-align: center; padding: 0 20px; }
+/* Each take has its own hue, cycled by the take's number (voice-format takeHue), so a take keeps its colour
+   across reloads. The palette avoids the accent orange and the danger red (selection and recording). */
+.voice-row { --take: var(--voice); --take-0: #5be3b0; --take-1: #6cb8ff; --take-2: #c3a4ff; --take-3: #ff93c4; --take-4: #ffd75e; --take-5: #5fe0e6; }
+[data-sz-palette='atelier'] .voice-row { --take-0: #0b7a55; --take-1: #1a62b3; --take-2: #6a3fc4; --take-3: #b02a72; --take-4: #8a5a00; --take-5: #0a727c; }
+.vs-hue-0 { --take: var(--take-0); }
+.vs-hue-1 { --take: var(--take-1); }
+.vs-hue-2 { --take: var(--take-2); }
+.vs-hue-3 { --take: var(--take-3); }
+.vs-hue-4 { --take: var(--take-4); }
+.vs-hue-5 { --take: var(--take-5); }
 .vs-clip {
   position: absolute;
-  top: 2px;
-  bottom: 2px;
+  top: 1px;
+  bottom: 1px;
   min-width: 6px;
   z-index: 6; /* above the stack's scrub overlay: only the clip itself captures the click */
   border-radius: 8px;
-  border: 1px solid color-mix(in srgb, var(--voice) 70%, transparent);
-  background: color-mix(in srgb, var(--voice) 12%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--take) 70%, transparent);
+  background: color-mix(in srgb, var(--take) 12%, var(--panel));
   touch-action: none;
 }
 .vs-clip.selectable { cursor: grab; }
 .vs-clip.dragging { cursor: grabbing; border-style: dashed; }
-.vs-clip:not(.audible):not(.recording) { opacity: 0.55; }
-.vs-clip.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
-.vs-clip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Unselected takes dim but keep their hue. */
+.vs-clip:not(.audible):not(.recording) { opacity: 0.68; }
+/* The audible take is the strongest: full opacity, a solid hue border and an inset glow (an outer shadow or
+   outline would be cut by the lane's overflow). */
+.vs-clip.selected { border-color: var(--take); box-shadow: inset 0 0 0 1px var(--take), inset 0 0 14px color-mix(in srgb, var(--take) 35%, transparent); background: color-mix(in srgb, var(--take) 20%, var(--panel)); }
+.vs-clip:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 .vs-clip-ghost { z-index: 5; pointer-events: none; opacity: 0.35; border-style: dashed; background: none; }
-.vs-wave-mid { stroke: color-mix(in srgb, var(--voice) 80%, transparent); stroke-width: 1.5; }
+.vs-wave-mid { stroke: color-mix(in srgb, var(--take) 80%, transparent); stroke-width: 1.5; }
 .vs-clip.recording .vs-wave-mid { stroke: color-mix(in srgb, var(--danger) 85%, transparent); }
 .vs-clip.recording { border-color: var(--danger); background: rgba(255, 122, 92, 0.1); }
 .vs-clip.partial { border-style: dashed; }
-.vs-clip.playing { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--voice) 30%, transparent); }
-.vs-wave { position: absolute; inset: 2px 0; width: 100%; height: calc(100% - 4px); fill: color-mix(in srgb, var(--voice) 70%, transparent); pointer-events: none; }
+.vs-clip.playing { box-shadow: inset 0 0 0 1px var(--take), inset 0 0 18px color-mix(in srgb, var(--take) 40%, transparent); }
+.vs-wave { position: absolute; inset: 2px 0; width: 100%; height: calc(100% - 4px); fill: color-mix(in srgb, var(--take) 78%, transparent); pointer-events: none; }
 .vs-clip.recording .vs-wave { fill: color-mix(in srgb, var(--danger) 75%, transparent); }
 .vs-clip-tags { position: absolute; left: 4px; top: 3px; z-index: 1; display: flex; gap: 4px; white-space: nowrap; }
 .vs-clip-tag { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }

@@ -3,7 +3,7 @@ import type { MultitrackEngine } from '../audio/engine'
 import type { TimeView } from '../model'
 import { allTakes, meterFraction, monitorDbToFader, primaryState, recordBlock, songSpan, type VoiceController, type VoiceInputOption, type VoiceModel, type VoiceTake } from '../audio/voice-take'
 import { t, type Key } from '../i18n'
-import { blockText, clock, dbText, laneCanRetry, isKnownMonitorWarning, laneText, monitorWarningText, pitchFollowShift, REASON_KEY, sgn, takeIsSilent, takeTags, voiceIsShifted } from './voice-format'
+import { blockText, clock, dbText, laneCanRetry, isKnownMonitorWarning, laneText, monitorWarningText, pitchFollowShift, REASON_KEY, sgn, takeHue, takeIsSilent, takeTags, voiceIsShifted } from './voice-format'
 import Tooltip from './Tooltip'
 import VoiceTrackSettings from './VoiceTrackSettings'
 import { useVoiceModel } from './voice-host'
@@ -296,7 +296,7 @@ export default function VoiceStrip({
           role="option"
           aria-selected={sel}
           tabIndex={0}
-          className={`vs-clip${live ? ' recording' : ''}${peaks?.length ? ' has-wave' : ''}${tk.partial ? ' partial' : ''}${active ? ' audible' : ''}${sel ? ' selected' : ''}${dragging ? ' dragging' : ''}${rec ? '' : ' selectable'}`}
+          className={`vs-clip vs-hue-${takeHue(tk.n)}${live ? ' recording' : ''}${peaks?.length ? ' has-wave' : ''}${tk.partial ? ' partial' : ''}${active ? ' audible' : ''}${sel ? ' selected' : ''}${dragging ? ' dragging' : ''}${rec ? '' : ' selectable'}`}
           style={{ left: `${left}%`, width: `${width}%` }}
           aria-label={t('player.voice.clipLabel', { n: tk.n, time: clock(shownStart) })}
           onPointerDown={(e) => {

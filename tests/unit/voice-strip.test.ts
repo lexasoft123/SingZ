@@ -36,7 +36,7 @@ import { MonitorChipView } from '../../src/renderer/src/components/VoiceMonitorC
 import Tooltip, { placeTip, TipController, TIP_DELAY_MS } from '../../src/renderer/src/components/Tooltip'
 import { micOwnership, PREVIEW_YIELD_TIMEOUT_MS } from '../../src/renderer/src/audio/mic-ownership'
 import { micPreviewErrorCopy, micPreviewErrorKind } from '../../src/renderer/src/audio/mic-preview'
-import { laneText, takeIsSilent, takeTags, voiceIsShifted } from '../../src/renderer/src/components/voice-format'
+import { laneText, takeHue, TAKE_HUES, takeIsSilent, takeTags, voiceIsShifted } from '../../src/renderer/src/components/voice-format'
 import VoiceTrackSettings, { OrderedEffects } from '../../src/renderer/src/components/VoiceTrackSettings'
 import { VoiceRecordButton } from '../../src/renderer/src/components/voice-record-button'
 import type { VoiceMonitorState, VoiceTakeSummary, VoiceTakeConformResult } from '../../src/shared/voice-take'
@@ -3249,7 +3249,7 @@ describe('stacked take rows share a fixed lane height (CSS)', () => {
     const row = body('.vs-take-row')
     expect(row).toMatch(/flex:\s*1 1 0/)
     expect(row).toMatch(/min-height:\s*\d+px/)
-    expect(row).toMatch(/max-height:\s*\d+px/)
+    expect(row).not.toMatch(/max-height/) // old: an 80px cap left an empty band under few takes
     expect(row).not.toMatch(/flex:\s*1 0 56px/) // old: fixed 56px basis that grew the strip and left gaps
     const track = body('.vs-track')
     expect(track).toMatch(/min-height:\s*0/)
@@ -3264,6 +3264,37 @@ describe('stacked take rows share a fixed lane height (CSS)', () => {
   })
   it('the selected take stays obvious: others are dimmed, the audible one is not', () => {
     expect(css).toMatch(/\.vs-clip:not\(\.audible\):not\(\.recording\) \{ opacity: 0\.\d+/)
-    expect(css).toMatch(/\.vs-clip\.selected \{[^}]*border-color: var\(--accent\)/)
+    expect(css).toMatch(/\.vs-clip\.selected \{[^}]*border-color: var\(--take\)/)
+    expect(css).toMatch(/\.vs-clip\.selected \{[^}]*inset 0 0 \d+px/) // inset glow: an outer shadow is cut by the lane's overflow
+    const focus = /\.vs-clip:focus-visible \{([^}]*)\}/.exec(css)![1]!
+    expect(Number(/outline-offset:\s*(-?\d+)px/.exec(focus)![1])).toBeLessThan(0) // old: +2px, cut off at the clip's top edge
+  })
+  it('every take hue slot has a dark and a light value, and unselected takes keep their hue', () => {
+    for (let k = 0; k < TAKE_HUES; k++) {
+      expect(css).toMatch(new RegExp(`\\.voice-row \\{[^}]*--take-${k}: #[0-9a-f]{6}`))
+      expect(css).toMatch(new RegExp(`\\[data-sz-palette='atelier'\\] \\.voice-row \\{[^}]*--take-${k}: #[0-9a-f]{6}`))
+      expect(css).toMatch(new RegExp(`\\.vs-hue-${k} \\{ --take: var\\(--take-${k}\\)`))
+    }
+    expect(/\n\.vs-clip \{([^}]*)\}/.exec(css)![1]).toContain('var(--take)')
+    expect(/\n\.vs-clip \{([^}]*)\}/.exec(css)![1]).not.toMatch(/--take:/) // a default here would override the .vs-hue-N classes (same specificity, later rule)
+    expect(/\.vs-clip:not\(\.audible\)[^{]*\{([^}]*)\}/.exec(css)![1]).not.toMatch(/filter|grayscale/)
+  })
+})
+
+describe('take colours', () => {
+  it('cycle by the take number, stably, with distinct neighbours', () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 8].map(takeHue)).toEqual([0, 1, 2, 3, 4, 5, 0, 1])
+    expect(takeHue(1)).toBe(takeHue(1 + TAKE_HUES))
+    expect(takeHue(0)).toBe(TAKE_HUES - 1)
+    for (let n = 1; n < 20; n++) expect(takeHue(n)).not.toBe(takeHue(n + 1))
+  })
+  it('the strip renders each clip with the hue class of its take number', async () => {
+    const r = await setup({ recordStop: vi.fn(async () => ({ ok: true, take: summary({ takeId: 'take-1' }) })) })
+    await r.c.toggleRecord()
+    await r.c.toggleRecord()
+    const html = renderToStaticMarkup(createElement(VoiceStrip, { controller: r.c, engine: r.engine as never, view: null }))
+    const n = r.c.getSnapshot().take!.n
+    expect(html).toContain(`vs-clip vs-hue-${takeHue(n)}`)
+    r.c.dispose()
   })
 })
