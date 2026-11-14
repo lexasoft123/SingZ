@@ -145,10 +145,18 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
     finally { if (captureGeneration === generation) { captureGeneration = undefined; captureDeviceName = ''; captureDeviceUid = ''; captureChannel = -1 } }
   },
   presentationQuery,
-  transportState: async () => (await desktopAudioProcess.call<import('../shared/types').DesktopPlaybackStatus>('binding', 'playbackStatus', [])).transportState,
+  // playbackStatus is an OWNER method of the audio process (AUDIO_OWNER_METHODS), not a binding method: a 'binding'
+  // call is rejected as an unknown command. The store treats a rejected read as 'unknown' (it catches both reads), and
+  // the snapshot below degrades to null: the recording must not fail to start because the transport could not be read.
+  transportState: async () => {
+    const status = await desktopAudioProcess.call<import('../shared/types').DesktopPlaybackStatus | null>('owner', 'playbackStatus', [])
+    if (!status) throw new Error('Playback status is unavailable')
+    return status.transportState
+  },
   transportSnapshot: async () => {
-    const status = await desktopAudioProcess.call<import('../shared/types').DesktopPlaybackStatus>('binding', 'playbackStatus', [])
-    if (status.transportTelemetryQuality !== 'current' || !status.transportState ||
+    let status: import('../shared/types').DesktopPlaybackStatus | null
+    try { status = await desktopAudioProcess.call<import('../shared/types').DesktopPlaybackStatus | null>('owner', 'playbackStatus', []) } catch { return null }
+    if (!status || status.transportTelemetryQuality !== 'current' || !status.transportState ||
         typeof status.seekCount !== 'string' || typeof status.loopCount !== 'string') return null
     return { state: status.transportState, seekCount: status.seekCount, loopCount: status.loopCount, sampleRate: status.format?.sampleRate }
   },

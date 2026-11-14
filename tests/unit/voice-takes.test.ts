@@ -7,6 +7,7 @@ import { defaultVoiceTakeEffects, isVoiceTakeAnchors, isVoiceTakeEffects, resolv
 import { EventEmitter } from 'node:events'
 import { isAllowed } from '../../src/main/media'
 import { createVoiceTakeNative, registerVoiceTakeIpc } from '../../src/main/voice-takes-ipc'
+import { AUDIO_BINDING_METHODS, AUDIO_OWNER_METHODS } from '../../src/main/audio-process-rpc'
 import { ConformTakeError, type ConformTakeErrorCode } from '../../src/main/voice-take-conform'
 import { logEntries } from '../../src/main/log'
 import { VoiceMonitorStore, type VoiceMonitorNative } from '../../src/main/voice-monitor'
@@ -54,7 +55,30 @@ describe('voice take storage', () => {
     const call = vi.fn(async () => ({ transportTelemetryQuality: 'current', transportState: 'playing', seekCount: '2', loopCount: '3', format: { sampleRate: 48000 } }))
     const native = createVoiceTakeNative({ call } as unknown as typeof import('../../src/main/audio-process').desktopAudioProcess)
     expect(await native.transportSnapshot!()).toEqual({ state: 'playing', seekCount: '2', loopCount: '3', sampleRate: 48000 })
-    expect(call).toHaveBeenCalledWith('binding', 'playbackStatus', [])
+    expect(call).toHaveBeenCalledWith('owner', 'playbackStatus', [])
+  })
+
+  it('only issues audio-process calls the RPC allowlists accept (playbackStatus is an owner method, not a binding method)', async () => {
+    // The real audio process rejects an unknown target/method pair; a permissive fake hid the original binding-target call
+    // (every recording start failed with "Unknown audio command: binding.playbackStatus" on macOS).
+    const status = { transportTelemetryQuality: 'current', transportState: 'playing', seekCount: '1', loopCount: '0', format: { sampleRate: 48000 } }
+    const call = vi.fn(async (target: string, method: string) => {
+      const known = target === 'owner' ? AUDIO_OWNER_METHODS : target === 'binding' ? AUDIO_BINDING_METHODS : new Set<string>()
+      if (!known.has(method)) throw new Error(`Unknown audio command: ${target}.${method}`)
+      return status
+    })
+    const native = createVoiceTakeNative({ call } as unknown as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    expect(await native.transportSnapshot!()).toEqual({ state: 'playing', seekCount: '1', loopCount: '0', sampleRate: 48000 })
+    expect(await native.transportState!()).toBe('playing')
+  })
+
+  it('a failing or null transport read degrades to unknown instead of failing the recording start', async () => {
+    const rejecting = createVoiceTakeNative({ call: vi.fn(async () => { throw new Error('Unknown audio command: x') }) } as unknown as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    expect(await rejecting.transportSnapshot!()).toBeNull()
+    await expect(rejecting.transportState!()).rejects.toThrow()
+    const none = createVoiceTakeNative({ call: vi.fn(async () => null) } as unknown as typeof import('../../src/main/audio-process').desktopAudioProcess)
+    expect(await none.transportSnapshot!()).toBeNull()
+    await expect(none.transportState!()).rejects.toThrow()
   })
 
   it.each(['initial', 'lastGood', 'unavailable'])('does not use %s status as evidence for stopping a take', async quality => {
