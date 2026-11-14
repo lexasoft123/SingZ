@@ -76,6 +76,12 @@ class AssemblyTests(unittest.TestCase):
         self.assertFalse(self.output.with_name(self.output.name + '.manifest.json').exists())
         self.assertFalse(list(self.base.glob('.singz-package-*')))
 
+    def test_default_font_notices_are_packaged_from_repo(self):
+        self.assemble(font_license_dir=None)
+        for name in package.FONT_LICENSES:
+            self.assertEqual((self.output / 'Contents/Resources/licenses' / name).read_bytes(),
+                             (package.ROOT / 'experiments/gpui-player/assets' / name).read_bytes())
+
     def test_plist_manifest_and_exact_payload_paths(self):
         manifest_path = self.assemble()
         with (self.output / 'Contents/Info.plist').open('rb') as stream:

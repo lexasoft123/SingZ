@@ -77,6 +77,12 @@ class AssemblyTests(unittest.TestCase):
     def assemble(self, platform=None, **kwargs):
         return package.assemble(platform or self.platform, self.runtime, self.output, uikit_dir=self.uikit, **kwargs)
 
+    def test_default_font_notices_are_packaged_from_repo(self):
+        package.assemble(self.platform, self.runtime, self.output)
+        for name in package.FONT_LICENSES:
+            self.assertEqual((self.output / 'licenses' / name).read_bytes(),
+                             (package.ROOT / 'experiments/gpui-player/assets' / name).read_bytes())
+
     def test_windows_packages_lyric_engines(self):
         self.executables('windows')
         engines = self.base / 'engines'

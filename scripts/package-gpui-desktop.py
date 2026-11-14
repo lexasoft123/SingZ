@@ -554,12 +554,16 @@ def assemble(platform: str, runtime: Path, output: Path, *, uikit_dir: Path | No
     output = output.parent.resolve() / output.name
     if os.path.lexists(output):
         raise PackageError(f'Output already exists: {output}')
-    uikit = Path(uikit_dir).absolute() if uikit_dir is not None else ROOT.parent / 'singz-ui'
-    ordinary(uikit, True)
-    gpui = uikit / 'gpui' if (uikit / 'gpui').exists() else uikit
-    for directory in (gpui, gpui / 'assets', gpui / 'assets/fonts'):
-        ordinary(directory, True)
-    notices = gpui / 'assets/fonts'
+    uikit = Path(uikit_dir).absolute() if uikit_dir is not None else None
+    if uikit is None:
+        notices = ROOT / 'experiments/gpui-player/assets'
+    else:
+        ordinary(uikit, True)
+        gpui = uikit / 'gpui' if (uikit / 'gpui').exists() else uikit
+        for directory in (gpui, gpui / 'assets', gpui / 'assets/fonts'):
+            ordinary(directory, True)
+        notices = gpui / 'assets/fonts'
+    ordinary(notices, True)
     selected = []
     suffix = '.exe' if platform == 'windows' else ''
     for executable in EXECUTABLES:
@@ -632,7 +636,7 @@ def assemble(platform: str, runtime: Path, output: Path, *, uikit_dir: Path | No
                   'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'mode': stat.S_IMODE(path.stat().st_mode)}
                  for path in sorted(payload.rglob('*')) if path.is_file()]
         manifest = {'schema': 1, 'signing': ('authenticode' if config else 'unsigned') if platform == 'windows' else 'not-applicable', 'nativeBuildInfo': build_info, 'driveConfigRequired': require_drive_config, 'platform': platform, 'architecture': architecture,
-                    'runtimeSelection': str(runtime.resolve()), 'uikitSelection': str(uikit.resolve()),
+                    'runtimeSelection': str(runtime.resolve()), 'uikitSelection': str((uikit or notices).resolve()),
                     'binaries': binaries, 'sources': sources, 'files': files, 'codecRuntime': codec_runtime,
                     'inventoryExcludes': ['manifest.json'],
                     'windowsAclPolicy': 'destination-parent-DACL-snapshot-before-publication' if os.name == 'nt' else 'not-applicable-on-assembly-host',

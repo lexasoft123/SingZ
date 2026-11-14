@@ -74,7 +74,7 @@ function assertFlatMainChunkFileNames(pattern) {
 }
 
 test('main bootstrap is emitted as index and keeps dynamic chunks in the flat main directory', () => {
-  const source = readFileSync(join(repository, 'electron.vite.config.ts'), 'utf8')
+  const source = readFileSync(join(repository, 'electron.vite.config.ts'), 'utf8').replace(/\r\n/g, '\n')
   const main = source.match(/main:\s*\{([\s\S]*?)\n      \},\n      preload:/)?.[1]
   assert.ok(main, 'main Vite config must remain present for Desktop and development builds')
   assert.match(main, /rollupOptions:\s*\{/)

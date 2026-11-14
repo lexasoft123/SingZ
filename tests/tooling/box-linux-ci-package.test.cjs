@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
+const os = require('node:os')
 const { test } = require('node:test')
 const vm = require('node:vm')
 
@@ -413,8 +414,8 @@ test('workflow uploads both package sets without inventing Box update metadata',
   assert.match(workflow, /SINGZ_E2E_PACKAGED: \/opt\/SingZ\/singz/)
 })
 
-function loadLaunchFixture(t, text = fs.readFileSync(launchSmokePath, 'utf8')) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join('/tmp/', 'sz-box-launch-')))
+function loadLaunchFixture(t, text = fs.readFileSync(launchSmokePath, 'utf8').replace(/\r\n/g, '\n')) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sz-box-launch-')))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   fs.mkdirSync(path.join(root, 'tmp'))
   const processEnv = {
@@ -482,7 +483,7 @@ async function assertLaunchEnvironment(f) {
   ]) {
     const expected = path.join(f.scratch, directory)
     assert.equal(env[key], expected, key)
-    assert.equal(fs.statSync(expected).mode & 0o777, 0o700, key)
+    if (process.platform !== 'win32') assert.equal(fs.statSync(expected).mode & 0o777, 0o700, key)
   }
   assert.equal(env.SINGZ_MUTE, '1')
   assert.equal(env.SINGZ_NO_SYNC, '1')
@@ -532,7 +533,7 @@ test('Box launch executes with sanitized hidden mode, private roots and no argum
 })
 
 test('Box launch negative control rejects in-memory restored forced HIDDEN', async t => {
-  const source = fs.readFileSync(launchSmokePath, 'utf8')
+  const source = fs.readFileSync(launchSmokePath, 'utf8').replace(/\r\n/g, '\n')
   const withoutHiddenOverride = source.replace(
     "  'E2E_PACKAGED', 'SINGZ_E2E_PACKAGED', 'SINGZ_E2E_HIDDEN'\n]",
     "  'E2E_PACKAGED', 'SINGZ_E2E_PACKAGED'\n]"
@@ -554,7 +555,7 @@ test('Box launch negative control rejects in-memory restored forced HIDDEN', asy
 })
 
 test('Box screenshot guard checks the current page BrowserWindow and rejects hidden windows', async () => {
-  const text = fs.readFileSync(launchSmokePath, 'utf8')
+  const text = fs.readFileSync(launchSmokePath, 'utf8').replace(/\r\n/g, '\n')
   await assertVisibilityGuard(text, true)
   await assertVisibilityGuard(text, false)
 })

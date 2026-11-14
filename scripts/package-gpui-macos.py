@@ -609,7 +609,7 @@ def assemble(runtime: Path, output: Path, *, version: str | None = None, engines
     # gated name must be refused here too (the desktop packager does the same).
     for name in EXECUTABLES:
         reject_ui_tests_binary(runtime / name)
-    font_license_dir = Path(font_license_dir) if font_license_dir is not None else ROOT.parent / 'singz-ui/gpui/assets/fonts'
+    font_license_dir = Path(font_license_dir) if font_license_dir is not None else ROOT / 'experiments/gpui-player/assets'
     try:
         ordinary(font_license_dir, True)
         for name in FONT_LICENSES:

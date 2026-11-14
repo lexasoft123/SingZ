@@ -130,6 +130,9 @@ jobs:
         with:
           path: vendor/ffmpeg-codec/darwin-${{ matrix.arch }}
           key: gpui-codec-darwin-${{ matrix.arch }}-${{ hashFiles('third_party/ffmpeg-codec/profile.json', 'scripts/gpui-codec-runtime.py') }}
+      - name: Install NASM for x64 codec
+        if: matrix.arch == 'x64' && steps.codec-cache.outputs.cache-hit != 'true'
+        run: brew install nasm
       - name: Build pinned FFmpeg codec pack
         if: steps.codec-cache.outputs.cache-hit != 'true'
         shell: bash
@@ -257,7 +260,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          for log in "$RUNNER_TEMP"/native-build/*.log "$RUNNER_TEMP"/gpui-codec-work/*/config.log; do
+          for log in "$RUNNER_TEMP"/native-build/*.log "$RUNNER_TEMP"/gpui-codec-work/build/ffbuild/config.log; do
             [[ -f "$log" ]] || continue
             echo "::group::tail -n 120 $log"; tail -n 120 "$log"; echo "::endgroup::"
           done
