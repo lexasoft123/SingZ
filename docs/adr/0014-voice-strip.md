@@ -142,9 +142,8 @@ default, without opening a song host. The same typed inventory, duplex-device,
 transport, channel, 32-frame target / 256-frame maximum and already-granted
 microphone-permission checks apply. No permission request is made. An additive
 playback-context update over the existing monitor availability IPC reports the
-selected native UID and the physical Web Audio output UID. `output-not-native`
-is reserved for Web Audio actually playing on a *known different* output; idle,
-paused and same-device Web Audio are compatible.
+selected native UID and the physical Web Audio output UID. (The
+`output-not-native` reason this once fed is retired: no producer remains.)
 
 The first host negotiates the small period. Both native song hosts and monitor
 hosts opt into zCore `holdSharedDeviceBuffer`; ordinary armed capture retains

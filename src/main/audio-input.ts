@@ -341,8 +341,13 @@ export class DesktopAudioInput {
       const result = await binding.scheduleTrainingCue({ ...config, gain: process.env.SINGZ_MUTE === '1' ? 0 : config.gain }, BigInt(config.generation))
       if (!result.ok) return { ok: false, error: result.error || 'Training audio could not start.' }
       const status = await binding.trainingCueStatus()
+      if (!status.routeLatency) {
+        await binding.cancelTrainingCues(BigInt(config.generation))
+        return { ok: false, error: 'The native training route has no latency snapshot.' }
+      }
       return { ok: true, startsAfterMs: Number(BigInt(result.startHostTimeNs) - BigInt(status.hostTimeNs)) / 1e6,
-        durationMs: result.durationMs, outputLatencyMs: status.outputLatencyMs, processingMs: performance.now() - processingAt }
+        durationMs: result.durationMs, outputLatencyMs: status.outputLatencyMs, routeLatency: status.routeLatency,
+        processingMs: performance.now() - processingAt }
     } catch (error) { return { ok: false, error: String(error) } }
   }
 

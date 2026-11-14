@@ -36,7 +36,7 @@ import { MonitorChipView } from '../../src/renderer/src/components/VoiceMonitorC
 import Tooltip, { placeTip, TipController, TIP_DELAY_MS } from '../../src/renderer/src/components/Tooltip'
 import { micOwnership, PREVIEW_YIELD_TIMEOUT_MS } from '../../src/renderer/src/audio/mic-ownership'
 import { micPreviewErrorCopy, micPreviewErrorKind } from '../../src/renderer/src/audio/mic-preview'
-import { laneText, takeHue, TAKE_HUES, takeIsSilent, takeTags, voiceIsShifted } from '../../src/renderer/src/components/voice-format'
+import { laneText, monitorBadgeTip, takeHue, TAKE_HUES, takeIsSilent, takeTags, voiceIsShifted } from '../../src/renderer/src/components/voice-format'
 import VoiceTrackSettings, { OrderedEffects } from '../../src/renderer/src/components/VoiceTrackSettings'
 import { VoiceRecordButton } from '../../src/renderer/src/components/voice-record-button'
 import type { VoiceMonitorState, VoiceTakeSummary, VoiceTakeConformResult } from '../../src/shared/voice-take'
@@ -776,7 +776,7 @@ describe('live monitoring (M2)', () => {
     fresh.c.dispose()
   })
   it('maps every unavailable reason to the two unavailable states and keeps the reason', async () => {
-    const reasons = ['route-latency', 'route-bluetooth', 'route-wireless', 'route-feedback', 'no-input', 'permission', 'output-not-native', 'platform', 'device-lost', 'error'] as const
+    const reasons = ['route-latency', 'route-bluetooth', 'route-wireless', 'route-feedback', 'no-input', 'permission', 'platform', 'device-lost', 'error'] as const
     for (const reason of reasons) {
       const { c, api } = await setup({ monitorAvailability: unavailable({ reason }) })
       await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe(reason))
@@ -915,7 +915,7 @@ describe('live monitoring (M2)', () => {
     expect(html).toContain('aria-label="Monitoring on. Click to turn off"')
     expect(html).toContain('>6 ms<')
     expect(html).not.toContain('≈ 6 ms')
-    expect(html).toContain('Estimated round-trip delay · 64 frames')
+    expect(html).toContain('Estimated round-trip delay: 6 ms · 288 frames · buffer 64')
     expect(html).toContain('aria-label="Monitor level"')
     on.c.dispose()
     const off = await setup({ monitorAvailability: unavailable({ reason: 'route-bluetooth' }) })
@@ -1574,7 +1574,6 @@ describe('monitoring during a take, route changes, and the arm window (hardware 
 })
 
 describe('availability follows the route, not song playback; a recovered route clears a monitor error', () => {
-  const notNative = () => monState({ available: { reason: 'output-not-native' }, on: false, latency: null })
   const transient = () => monState({ available: { reason: 'error' }, on: false, latency: null })
   /** An engine whose subscribers can be fired, with settable native/play state. */
   async function withEngine(apiOver: Partial<VoiceTakeApi> = {}) {
@@ -1608,9 +1607,9 @@ describe('availability follows the route, not song playback; a recovered route c
     expect(api.monitorAvailability).toHaveBeenCalledTimes(1)
     c.dispose()
   })
-  it('output-not-native is not retried because of Play, only after a route change or context publish (bounded)', async () => {
-    const { c, api, engine, fire, native } = await withEngine({ monitorAvailability: vi.fn(async () => notNative()) })
-    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('output-not-native'))
+  it('a transient error is not retried because of Play, only after a route change or context publish (bounded)', async () => {
+    const { c, api, engine, fire, native } = await withEngine({ monitorAvailability: vi.fn(async () => transient()) })
+    await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('error'))
     api.monitorAvailability.mockClear()
     engine._playing = true
     fire()
@@ -1622,13 +1621,13 @@ describe('availability follows the route, not song playback; a recovered route c
     expect(api.monitorAvailability).toHaveBeenCalledTimes(4)
     c.dispose()
   })
-  it('a stale output-not-native is replaced once App\'s context publish lands', async () => {
+  it('a stale error is replaced once App\'s context publish lands', async () => {
     const g = globalThis as unknown as { window?: EventTarget }
     const prior = g.window
     g.window = new EventTarget()
     try {
-      const { c, api } = await withEngine({ monitorAvailability: vi.fn(async () => notNative()) })
-      await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('output-not-native'))
+      const { c, api } = await withEngine({ monitorAvailability: vi.fn(async () => transient()) })
+      await vi.waitFor(() => expect(c.getSnapshot().monitor.reason).toBe('error'))
       api.monitorAvailability.mockResolvedValue(monState({ on: false }))
       g.window.dispatchEvent(new Event(VOICE_CONTEXT_EVENT)) // App: publish resolved
       await vi.waitFor(() => expect(c.getSnapshot().monitor.avail).toBe('ok'))
@@ -2910,7 +2909,8 @@ describe('delayed monitor route (VS-MON)', () => {
     const { strip, settings } = await route(true)
     expect(strip).toMatch(/class="vs-badge delayed"[^>]*>52 ms</)
     expect(strip).not.toMatch(/>[^<]*delayed[^<]*</)
-    expect(strip).toContain('different devices or use a larger buffer: expect a noticeable delay')
+    expect(strip).toContain('Estimated round-trip delay: 52 ms · 288 frames · buffer 512. A larger buffer adds delay')
+    expect(strip).not.toContain('different devices')
     expect(settings).toContain('estimated delay ≈ 52 ms · delayed')
   })
   it('not delayed: no marker anywhere (negative control)', async () => {
@@ -3296,5 +3296,43 @@ describe('take colours', () => {
     const n = r.c.getSnapshot().take!.n
     expect(html).toContain(`vs-clip vs-hue-${takeHue(n)}`)
     r.c.dispose()
+  })
+})
+
+describe('monitor pill tooltip is truthful about delay causes', () => {
+  const lat = (over: Record<string, unknown> = {}) => ({
+    sampleRate: 48000, requestedFrames: 128, bufferFrames: 128, inputDeviceFrames: 0, outputDeviceFrames: 0,
+    roundTripFrames: 256, roundTripMs: 5.3, source: 'estimated' as const, ...over
+  })
+  it('always shows ms, frames and the buffer', () => {
+    const tip = monitorBadgeTip(lat(), 'Zen', 'Zen')
+    expect(tip).toContain('5 ms')
+    expect(tip).toContain('256 frames')
+    expect(tip).toContain('buffer 128')
+  })
+  it('same device at buffer 128 or 64, even when flagged delayed, blames neither devices nor buffer', () => {
+    for (const bufferFrames of [128, 64]) {
+      const tip = monitorBadgeTip(lat({ bufferFrames, delayed: true }), 'Zen', 'Zen')
+      expect(tip).not.toMatch(/different devices/i)
+      expect(tip).not.toMatch(/larger buffer/i)
+    }
+  })
+  it('names different devices only when the names differ, and a large buffer only from 256 frames', () => {
+    expect(monitorBadgeTip(lat({ delayed: true }), 'Zen', 'Speakers')).toMatch(/different devices/)
+    expect(monitorBadgeTip(lat({ delayed: true }), 'Zen', undefined)).not.toMatch(/different devices/)
+    expect(monitorBadgeTip(lat({ delayed: true, bufferFrames: 255 }), 'Zen', 'Zen')).not.toMatch(/larger buffer/)
+    expect(monitorBadgeTip(lat({ delayed: true, bufferFrames: 256 }), 'Zen', 'Zen')).toMatch(/larger buffer/)
+    expect(monitorBadgeTip(lat({ source: 'measured' }), 'Zen', 'Zen')).toMatch(/Measured/)
+  })
+})
+
+describe('take clip tags stay inside a narrow clip (CSS)', () => {
+  const css = readFileSync(new URL('../../src/renderer/src/components/voice-strip.css', import.meta.url), 'utf8')
+  it('the tag row is clipped to the clip and each tag ellipsises', () => {
+    expect(css).toMatch(/\.vs-clip-tags \{[^}]*right: 4px[^}]*overflow: hidden/)
+    expect(css).toMatch(/\.vs-clip-tag \{[^}]*min-width: 0[^}]*overflow: hidden[^}]*text-overflow: ellipsis/)
+  })
+  it('the dead .vs-clip.playing rule stays removed', () => {
+    expect(css).not.toMatch(/\.vs-clip\.playing/)
   })
 })

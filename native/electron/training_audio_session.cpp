@@ -1,4 +1,5 @@
 #include "training_audio_session.h"
+#include "training_route_latency.h"
 #include "../playback/shared_audio_service.h"
 #include "native_audio_ownership.h"
 #include "../playback/training_pcm_mixer.h"
@@ -150,8 +151,34 @@ napi_value status(napi_env env,napi_callback_info) {
   number(env,o,"streamGeneration",static_cast<double>(host.streamGeneration));
   number(env,o,"enumerationCount",static_cast<double>(sharedAudioService().enumerationCount()));
   number(env,o,"watchedDeviceCount",static_cast<double>(sharedAudioService().watchedDeviceCount()));
-  const auto& latency=host.latency; const double rate=sharedAudioService().sampleRate();
-  number(env,o,"outputLatencyMs",rate>0 ? (latency.outputDeviceFrames+latency.bufferFrames+latency.externalRouteFrames)*1000.0/rate:0); return o;
+  const auto route = trainingRouteLatency(host, nowNs());
+  napi_value latency{}; napi_get_null(env, &latency);
+  if (route) {
+    latency = object(env);
+    const auto& s = route->snapshot;
+    number(env, latency, "interfaceVersion", s.interfaceVersion);
+    number(env, latency, "structSize", s.structSize);
+    text(env, latency, "routeGeneration", std::to_string(s.routeGeneration.value));
+    text(env, latency, "provenance", "platform-reported");
+    number(env, latency, "flags", s.flags);
+    number(env, latency, "confidencePermille", s.confidencePermille);
+    text(env, latency, "measuredAtNs", std::to_string(s.measuredAt.value));
+    text(env, latency, "automaticPresentationNs", std::to_string(s.automaticPresentation.value));
+    text(env, latency, "renderDeviceNs", std::to_string(s.renderDevice.value));
+    text(env, latency, "externalRouteNs", std::to_string(s.externalRoute.value));
+    text(env, latency, "userTrimNs", std::to_string(s.userTrim.value));
+    text(env, latency, "graphToAudibleNs", std::to_string(route->composed.graphToAudible.value));
+  }
+  napi_set_named_property(env, o, "routeLatency", latency);
+  number(env, o, "outputLatencyMs", route ? route->composed.graphToAudible.value / 1e6 : 0);
+  auto preview = object(env);
+  const auto counts = sharedAudioService().previewClickStatus();
+  text(env, preview, "enqueued", std::to_string(counts.enqueued));
+  text(env, preview, "started", std::to_string(counts.started));
+  text(env, preview, "completed", std::to_string(counts.completed));
+  number(env, preview, "pending", counts.pending);
+  napi_set_named_property(env, o, "previewClicks", preview);
+  return o;
 }
 // N-API is an exception boundary: allocation or provider exceptions become
 // ordinary result errors, never an unwind across the C ABI.

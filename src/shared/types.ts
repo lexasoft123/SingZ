@@ -1234,7 +1234,29 @@ export type DesktopMicrophoneMixStatus = {
   }[]
 } | { ok: false; error: string }
 
+/** Immutable native ADR 0004 projection. Components are explanatory; native
+ * graphToAudibleNs has already composed AutomaticComplete and user trim once. */
+export interface DesktopRouteLatencySnapshot {
+  readonly interfaceVersion: 1
+  readonly structSize: number
+  readonly routeGeneration: string
+  readonly provenance: 'platform-reported'
+  readonly flags: number
+  readonly confidencePermille: number
+  readonly measuredAtNs: string
+  readonly automaticPresentationNs: string
+  readonly renderDeviceNs: string
+  readonly externalRouteNs: string
+  readonly userTrimNs: string
+  readonly graphToAudibleNs: string
+}
+export type DesktopPreviewClickResult =
+  | { ok: true }
+  | { ok: false; errorCode: 'invalid-configuration' | 'output-unavailable' | 'queue-full' | 'addon-unavailable'; error: string }
+
 export interface DesktopTrainingAudioStatus {
+  routeLatency: DesktopRouteLatencySnapshot | null
+  previewClicks?: { enqueued: string; started: string; completed: string; pending: number }
   hostTimeNs: string
   outputLatencyMs: number
   renderedFrames?: string
@@ -1252,7 +1274,7 @@ export interface DesktopTrainingPcmCue {
   generation: string
 }
 export type DesktopTrainingPcmResult =
-  | { ok: true; startsAfterMs: number; durationMs: number; outputLatencyMs: number; processingMs: number }
+  | { ok: true; startsAfterMs: number; durationMs: number; outputLatencyMs: number; routeLatency: DesktopRouteLatencySnapshot; processingMs: number }
   | { ok: false; error: string }
 
 export type DesktopAudioInputEvent =
@@ -1347,6 +1369,7 @@ export interface SingzApi {
     channel?: number
   }): Promise<DesktopAudioInputStartResult>
   configureDesktopTrainingOutput(outputDeviceUid: string, provider: DesktopPlaybackProvider): Promise<{ ok: boolean; error?: string }>
+  previewDesktopClick(accent: boolean, gain: number): Promise<DesktopPreviewClickResult>
   desktopTrainingAudioStatus(): Promise<DesktopTrainingAudioStatus | null>
   configureMicrophoneMix(config: DesktopMicrophoneMixConfig): Promise<DesktopMicrophoneMixResult>
   stopMicrophoneMix(): Promise<DesktopMicrophoneMixResult>

@@ -276,6 +276,7 @@ const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
   listDesktopAudioInputs: () => ipcRenderer.invoke('audio-input:list'),
   startDesktopAudioInput: (options) => ipcRenderer.invoke('audio-input:start', options),
   configureDesktopTrainingOutput: (uid, provider) => ipcRenderer.invoke('training:output-route', uid, provider),
+  previewDesktopClick: (accent, gain) => ipcRenderer.invoke('audio-host:preview-click', accent, gain),
   desktopTrainingAudioStatus: () => ipcRenderer.invoke('training:audio-status'),
   configureMicrophoneMix: config => ipcRenderer.invoke('audio-host:microphone-mix-configure', config),
   stopMicrophoneMix: () => ipcRenderer.invoke('audio-host:microphone-mix-stop'),

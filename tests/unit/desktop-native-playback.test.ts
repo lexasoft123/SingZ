@@ -1644,6 +1644,26 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
+  it('adopts an unchanged WASAPI graph at the 480-frame shared period and the same Play position', async () => {
+    const h = seamHarness(generation => playing(generation))
+    const inventory = await h.api.audioHostDevices('coreaudio')
+    if (!inventory.ok) throw new Error(inventory.error)
+    vi.mocked(h.api.desktopPlaybackProviders).mockResolvedValue([{ id: 'wasapi', label: 'WASAPI', available: true, errorCode: 'none', detail: '' }])
+    vi.mocked(h.api.audioHostDevices).mockResolvedValue({ ...inventory, provider: 'wasapi', platform: 'win32',
+      devices: inventory.devices.map(device => ({ ...device, bufferFrames: { ...device.bufferFrames, preferredFrames: 480 } })) })
+    const request: DesktopNativePlaybackPrepare = { provider: 'wasapi',
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.flac', gain: 1, muted: false, solo: false }],
+      beat: null, metronome: h.metronome, countIn: false, positionSeconds: 0, durationSeconds: 10,
+      sampleRate: 48000, masterGain: 0, playbackRate: 1, transpose: 0, training: null, loop: null }
+    expect(await h.client.prepareAhead(request)).toBe(true)
+    expect(h.prepared[0].bufferFrames).toBe(480)
+    await h.client.prepareRetainedForPlay({ ...request, nativeAudioProvider: 'wasapi', graphDocument: null,
+      lanes: request.lanes.map(lane => ({ ...lane, volume: lane.gain })) })
+    expect(await h.client.prepareAndStart(request)).toBe(true)
+    expect(h.calls).toEqual(['prepare:1', 'open:1', 'start:1'])
+    await h.client.unload()
+  })
+
   it('a graph prepared ahead for a different request is unloaded, and Play prepares afresh', async () => {
     const h = seamHarness((generation) => playing(generation))
     const request = {

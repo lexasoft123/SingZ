@@ -387,6 +387,16 @@ describe('playback output latest-intent arbitration', () => {
 describe('legacy output migration', () => {
   const browser = [{ id: 'sink', label: 'Interface' }]
   const native = [{ uid: 'uid', label: 'Interface', outputChannels: 2 }]
+  it('preserves the exact comma-containing CoreAudio UID during saved native-ID migration', async () => {
+    const uid = 'AppleUSBAudioEngine:Antelope Audio:Zen Quadro SC:4912524000285:1,2'
+    const inventory = [{ uid, label: 'Zen Quadro SC Playback', outputChannels: 16 }]
+    const setOutput = vi.fn(async () => {})
+    const commit = vi.fn()
+    const arbiter = new PlaybackOutputArbiter(`native:${uid}`, { setOutput, commit, enumerateOutputs: vi.fn(async () => []) })
+    expect(await arbiter.migrateLegacy(id => Promise.resolve(nativeOutputUidForBrowser(id, [], inventory)))).toBe('migrated')
+    expect(setOutput).toHaveBeenCalledWith(`native:${uid}`)
+    expect(commit).toHaveBeenCalledWith(`native:${uid}`)
+  })
   it('maps a unique label and a legacy native ID, rejecting ambiguity', () => {
     expect(nativeOutputUidForBrowser('sink', browser, native)).toBe('uid')
     expect(nativeOutputUidForBrowser('native:uid', browser, native)).toBe('uid')

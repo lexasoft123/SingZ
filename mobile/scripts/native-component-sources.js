@@ -53,6 +53,7 @@ const nativePlaybackSessionFiles = [
   'playback/shared_audio_service.cpp',
   'playback/shared_audio_service.h',
   'playback/training_pcm_mixer.h',
+  'playback/preview_click_mixer.h',
   'playback/record_placement.cpp',
   'playback/record_placement.h',
   'playback/native_playback_graph_document.cpp',

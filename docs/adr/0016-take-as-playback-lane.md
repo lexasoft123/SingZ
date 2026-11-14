@@ -276,3 +276,9 @@ mixer is header-only and serves cues on desktop, phones and Box.
 | Callback allocation negative control | Native session and common monitor allocation traps and realtime policies |
 
 Hardware and listening gates are not replaced by these portable results.
+
+## Final strip UI (release)
+
+Take rows fill the lane height, each take has its own colour (`--take-0..5`),
+and clip tags (position, silent, "No signal recorded") are clipped to the clip
+with an ellipsis, so they never spill outside a narrow clip at low zoom.

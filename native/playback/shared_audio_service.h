@@ -1,6 +1,7 @@
 #pragma once
 
 #include "output_callback_diagnostics.h"
+#include "preview_click_mixer.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -141,6 +142,11 @@ class SharedAudioService final {
 
   AudioHostResult initialize(const AudioHostConfig& config = {});
   AudioHostResult ensureOutput();
+  enum class PreviewClickError { None, InvalidConfiguration, OutputUnavailable, QueueFull };
+  struct PreviewClickResult { bool ok; PreviewClickError error; std::string message; };
+  // Opens only the existing selected base route; never requests a new period.
+  PreviewClickResult previewClick(bool accent, float gain);
+  PreviewClickMixer::Status previewClickStatus() const noexcept;
   // Empty UID explicitly follows subsequent system default changes.
   AudioHostResult configureOutput(const std::string& preferredUid);
   AudioHostResult configureProvider(std::unique_ptr<AudioHostBackend> backend, const std::string& provider);

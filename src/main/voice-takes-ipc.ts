@@ -115,11 +115,14 @@ export const createVoiceTakeNative = (audioProcess: typeof desktopAudioProcess =
           lastProbe.placed = placed
           if (placed.ok && placed.found && !placed.paused && !placed.seekDuringCallback) {
             covered = true
-            // The first callback can precede settled device latency telemetry.
-            // Do not freeze a known-stale input snapshot or a zero output delay.
-            if (stats.inputLatencyStable !== false && raw.outputLatencyFrames !== 0) {
+            // Wait for audible timeline coverage and the output's cold-start
+            // delay, not optional input telemetry. Waiting for an input that
+            // never reports stability drops the singer's first two seconds:
+            // the writer does not exist yet. Preserve the estimate explicitly.
+            if (raw.outputLatencyFrames !== 0) {
               ready = true
-              if (stats.inputLatencySource !== 'reported' || raw.outputLatencyFrames === undefined) placementEstimated = 'latency-unreported'
+              if (stats.inputLatencyStable === false) placementEstimated = 'latency-not-settled'
+              else if (stats.inputLatencySource !== 'reported' || raw.outputLatencyFrames === undefined) placementEstimated = 'latency-unreported'
               break
             }
           }

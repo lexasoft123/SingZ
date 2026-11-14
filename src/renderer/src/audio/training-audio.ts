@@ -1,4 +1,6 @@
 import { reportTrainingTiming } from './training-timing'
+import type { DesktopRouteLatencySnapshot } from '../../../shared/types'
+import { nativeTrainingOutputLatencySec } from '../training-ui-state'
 
 import { type TrainingSound } from '../../../shared/training-sound'
 import { TRAINING_REACHED_TONE } from '../../../shared/training-tone'
@@ -74,14 +76,14 @@ export class DesktopTrainingCueController {
   private referenceVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
   private readonly samples = new Map<string, AudioBuffer>()
   private reachedTargets = new WeakSet<object>()
-  private latencySeconds = 0
+  private nativeRouteLatency: DesktopRouteLatencySnapshot | null = null
 
   constructor(private readonly context: AudioContext, _output: AudioNode,
     private readonly beforeSchedule?: () => void | Promise<void>) {}
 
   get currentTime(): number { return performance.now() / 1000 }
-  get outputLatency(): number { return this.latencySeconds }
-  get baseLatency(): number { return this.latencySeconds }
+  get routeLatency(): DesktopRouteLatencySnapshot | null { return this.nativeRouteLatency }
+  get outputLatency(): number { return nativeTrainingOutputLatencySec(this.nativeRouteLatency) }
   setSound(sound: TrainingSound): void { this.sound = sound }
 
   async schedule(cues: readonly TrainingCue[], overrides?: Partial<TrainingCueTimingOptions>): Promise<TrainingCueTimeline> {
@@ -104,7 +106,7 @@ export class DesktopTrainingCueController {
     })
     this.assertCurrent(generation)
     if (!result.ok) throw new Error(result.error)
-    this.latencySeconds = result.outputLatencyMs / 1000
+    this.nativeRouteLatency = result.routeLatency
     const receivedAt = this.currentTime
     // PCM preparation in main is already excluded from its remaining delay.
     // Estimate only IPC transit, so an expensive schedule cannot lead the sound.

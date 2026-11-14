@@ -184,7 +184,7 @@ ready.then(async () => {
   const voiceInput = { inputUid: 'smoke:never-opened', inputChannel: 0 }
   const voiceAvailability = addon.voiceMonitorAvailability(voiceInput)
   assert.equal(voiceAvailability.available, false)
-  assert.ok(['platform', 'output-not-native', 'no-input', 'permission'].includes(voiceAvailability.reason))
+  assert.ok(['platform', 'no-input', 'permission'].includes(voiceAvailability.reason))
   const idleContext = { contextOnly: true, webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: '' }
   const idleAvailability = addon.voiceMonitorAvailability(idleContext)
   if (process.platform === 'darwin') {

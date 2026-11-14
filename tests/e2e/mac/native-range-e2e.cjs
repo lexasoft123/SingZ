@@ -19,6 +19,8 @@ const path = require('node:path')
 const { _electron } = require('playwright-core')
 const { createProject } = require('../../shared/box-retained-fixture.cjs')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
+const { selectNativeOutputBeforeOpen } = require('./native-output.cjs')
 const root = path.resolve(__dirname, '../../..')
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-native-range-'))
 const profile = path.join(scratch, 'profile'), library = path.join(scratch, 'library'), songDir = path.join(library, 'Native range fixture')
@@ -37,22 +39,20 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
     delete doc.graphHash // the ordinary synthesized song bus, with its time-pitch node
     doc.name = 'Native range fixture'; doc.settings.masterVolume = .2
     fs.writeFileSync(pj, JSON.stringify(doc)); fs.rmSync(path.join(songDir, 'graph.json'))
-    fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ projectsRoot: library, language: 'en',
-      ...(process.env.E2E_OUTPUT_UID ? { outputDeviceId: `native:${process.env.E2E_OUTPUT_UID}` } : {}) }))
     app = await _electron.launch({ executablePath: require('electron'), args: [path.join(root, 'out/main/index.js')], env: { ...process.env,
-      SINGZ_USERDATA_DIR: profile, SINGZ_MODELS_DIR: path.join(scratch, 'models'), SINGZ_PACK_DIR: path.join(scratch, 'pack'), SINGZ_NO_SYNC: '1', SINGZ_MUTE: '1',
+      ...scratchProfileEnv({ dir: profile, projectsRoot: library, settings: { language: 'en' } }), SINGZ_MODELS_DIR: path.join(scratch, 'models'), SINGZ_PACK_DIR: path.join(scratch, 'pack'), SINGZ_NO_SYNC: '1', SINGZ_MUTE: '1',
       SINGZ_E2E_HIDDEN: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en' } })
     await quietLaunch(app) // seeds the first-run quick-start flag
     const win = await app.firstWindow()
+    if (process.env.E2E_OUTPUT_UID) await selectNativeOutputBeforeOpen(win, process.env.E2E_OUTPUT_UID)
     // A profile without the models shows the 'Setting up SingZ' wizard; skip it as a singer would.
     for (const deadline = Date.now() + 60000; Date.now() < deadline; await delay(200)) {
       const skip = win.getByRole('button', { name: 'Skip for now' })
       if (await skip.count()) { await skip.first().click().catch(() => {}); continue }
-      if (await win.locator('.lib-card').count()) break
+      if (await win.locator('.lib-card').count() && !(await win.locator('.wizard, .quick-start-overlay').count())) break
     }
     await win.locator('.lib-card').filter({ hasText: 'Native range fixture' }).first().click()
     await win.waitForFunction(() => window.__test?.phase === 'ready' && __test.engine.duration > 0, null, { timeout: 60000 })
-    if (process.env.E2E_OUTPUT_UID) await win.evaluate(uid => __test.engine.setOutput(`native:${uid}`), process.env.E2E_OUTPUT_UID)
     // Native must own the output before the first Play, or the first rows measure a fallback/startup race.
     await win.waitForFunction(() => __test.engine.nativeActive === true || __test.engine.nativePlayback?.preparedAhead === true, null, { timeout: 60000 })
     const duration = await win.evaluate(() => __test.engine.duration)

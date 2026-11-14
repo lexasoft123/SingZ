@@ -66,6 +66,7 @@ export interface NativeCaptureBinding {
   scheduleTrainingCue(config: { channels: Float32Array[]; sampleRate: number; startDelayMs: number; gain: number }, generation: bigint): { ok: boolean; error?: string; startHostTimeNs: string; durationMs: number }
   setTrainingCueGain(generation: bigint, gain: number): { ok: boolean; error?: string }
   cancelTrainingCues(generation: bigint): { ok: boolean; error?: string }
+  previewClick(accent: boolean, gain: number): import('../shared/types').DesktopPreviewClickResult
   trainingCueStatus(): DesktopTrainingAudioStatus
   configureMicrophoneMix?(config: DesktopMicrophoneMixConfig): DesktopMicrophoneMixResult
   stopMicrophoneMix?(): DesktopMicrophoneMixResult
@@ -818,7 +819,7 @@ export function validateCaptureBindingIdentity(
     )
   }
   for (const name of [
-    'initializeSharedAudio', 'refreshSharedAudioInventory', 'scheduleTrainingCue', 'cancelTrainingCues', 'setTrainingCueGain', 'trainingCueStatus', 'captureRecording',
+    'initializeSharedAudio', 'refreshSharedAudioInventory', 'previewClick', 'scheduleTrainingCue', 'cancelTrainingCues', 'setTrainingCueGain', 'trainingCueStatus', 'captureRecording',
     'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats', 'recordTake', 'finishTake', 'cancelTake', 'presentationQuery',
     'audioHostProviders', 'audioHostDevices', 'voiceMonitorAvailability', 'beginVoiceMonitor',
     'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor', 'setPlaybackOutputCurrent',

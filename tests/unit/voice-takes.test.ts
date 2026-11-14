@@ -1363,6 +1363,51 @@ describe('renderer meter arm ownership', () => {
 
 
 describe('cold-session placement latency readiness', () => {
+  it.each([false, true])('keeps the synthetic 100 ms onset when Zen input stability is %s', async stable => {
+    vi.useFakeTimers()
+    const root = mkdtempSync(join(tmpdir(), 'singz-zen-onset-')); roots.push(root)
+    const startedAt = Date.now(), origin = 10_000_000_000n, rate = 48000
+    let writer = false, writerMs = -1, first = origin
+    const rpc = { call: async <T>(_target: string, method: string, args: unknown[]): Promise<T> => {
+      if (method === 'inputDevices') return { ok: true, devices: [{ uid: 'zen', label: 'Zen', channels: 1, isDefault: true }] } as T
+      if (method === 'captureStats') return { sampleRate: rate, lastSampleHostNs: (origin + BigInt(Date.now() - startedAt) * 1_000_000n).toString(),
+        firstSampleCaptured: writer, firstSampleHostNs: first.toString(), firstSampleQuality: 'hardware',
+        inputLatencyFrames: 148, inputLatencySource: stable ? 'reported' : 'unknown', inputLatencyStable: stable, inputBufferFrames: 128 } as T
+      if (method === 'presentationQuery') return { found: true, paused: false, sampleRate: rate, graphLatencyFrames: 0,
+        outputLatencyFrames: 128, songSeconds: 12 + Number(BigInt(args[0] as string) - origin) / 1e9 } as T
+      if (method === 'recordTake') {
+        writer = true; writerMs = Date.now() - startedAt; first = origin + BigInt(writerMs) * 1_000_000n
+        const pcm = wav(rate, rate)
+        pcm.fill(0, 44)
+        const pulse = Math.round((.1 - writerMs / 1000) * rate)
+        if (pulse >= 0 && pulse < rate) pcm.writeInt16LE(16000, 44 + pulse * 2)
+        writeFileSync(join(args[0] as string, `${args[1]}.wav`), pcm)
+      }
+      if (method === 'finishTake') return { ok: true, frames: rate, sampleRate: rate } as T
+      return { ok: true } as T
+    } }
+    const store = new VoiceTakeStore({ rootDir: root, native: createVoiceTakeNative(rpc as typeof import('../../src/main/audio-process').desktopAudioProcess) })
+    try {
+      const pending = store.start({ ...request, input: { deviceName: 'zen', channelIndex: 0 } })
+      // A two-second metadata gate loses the known onset before a writer exists.
+      await vi.waitFor(() => expect(writer).toBe(true), { timeout: 100, interval: 5 })
+      const start = await pending; if (!start.ok) throw new Error('start failed')
+      await store.stop()
+      expect(writerMs).toBeLessThan(100)
+      const pcm = readFileSync(join(root, request.songId, `${start.takeId}.wav`))
+      let peak = -1
+      for (let frame = 0; frame < rate; frame++) if (pcm.readInt16LE(44 + frame * 2) === 16000) { peak = frame; break }
+      expect(peak).toBeGreaterThanOrEqual(0)
+      const sidecar = JSON.parse(readFileSync(join(root, request.songId, `${start.takeId}.json`), 'utf8'))
+      const expected = 12 + .1 - (148 + 128) / rate
+      const errorFrames = Math.round((sidecar.startPositionSec + peak / rate - expected) * rate)
+      expect(errorFrames).toBe(stable ? 0 : 148)
+      expect(sidecar.inputLatencyFrames).toBe(stable ? 148 : 0)
+      expect(sidecar.placementEstimated).toBe(stable ? undefined : 'latency-not-settled')
+      console.log(`Zen synthetic onset: writer=${writerMs} ms, stable=${stable}, placement error=${errorFrames} frames (${errorFrames / 48} ms)`)
+    } finally { await store.cancel(); vi.useRealTimers() }
+  })
+
   const fixture = (legacy = false) => {
     const root = mkdtempSync(join(tmpdir(), 'singz-cold-placement-')); roots.push(root)
     const origin = 10_000_000_000n

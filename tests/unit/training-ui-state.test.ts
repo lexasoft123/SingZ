@@ -1,3 +1,4 @@
+import { nativeRouteLatency } from '../shared/native-route-latency'
 import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -772,9 +773,12 @@ describe('desktop vocal-training orchestration', () => {
     expect(trainingCaptureDecision(false, 12_000, 10_000)).toBe('interrupt')
     expect(trainingCaptureDecision(true, 12_000, 10_000)).toBe('score')
     expect(trainingCaptureDecision(true, 9_000, 10_000)).toBe('sample')
-    expect(audibleCueEndTimeSec(10, { outputLatency: 0.12, baseLatency: 0.02 })).toBeCloseTo(10.12)
-    expect(audibleCueEndTimeSec(10, { outputLatency: 0, baseLatency: 0.02 })).toBeCloseTo(10.02)
-    expect(audibleCueEndTimeSec(10, { outputLatency: 0, baseLatency: 0 })).toBe(10)
+    const audio = { routeLatency: nativeRouteLatency('120000000'), outputLatency: 9, baseLatency: 8 }
+    expect(audibleCueEndTimeSec(10, audio)).toBeCloseTo(10.12)
+    expect(audibleCueEndTimeSec(10, { routeLatency: nativeRouteLatency('0') })).toBe(10)
+    expect(audibleCueEndTimeSec(10, { routeLatency: null })).toBe(10)
+    // A signed trim already composed by native is retained, including negatives.
+    expect(audibleCueEndTimeSec(10, { routeLatency: { ...nativeRouteLatency('-10000000'), userTrimNs: '-130000000' } })).toBeCloseTo(9.99)
   })
 
   it('summarizes categorical attempts and time-weighted pitch metrics without requiring persistence', () => {

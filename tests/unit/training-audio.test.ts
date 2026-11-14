@@ -1,3 +1,4 @@
+import { nativeRouteLatency } from '../shared/native-route-latency'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_PLAYBACK_CAPABILITY,
@@ -158,7 +159,7 @@ class FakeOfflineAudioContext extends FakeAudioContext {
     return { sampleRate: this.sampleRate, getChannelData: () => new Float32Array(this.length) } as unknown as AudioBuffer
   }
 }
-const nativeSchedule = vi.fn(async (_config: unknown) => ({ ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 175, processingMs: 0 }))
+const nativeSchedule = vi.fn(async (_config: unknown) => ({ ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 999, routeLatency: nativeRouteLatency(), processingMs: 0 }))
 const nativeCancel = vi.fn(async () => ({ ok: true }))
 beforeEach(() => {
   nativeSchedule.mockClear(); nativeCancel.mockClear()
@@ -216,6 +217,7 @@ describe('shared native training cues', () => {
     // The native timeline uses the render clock, so physical output latency
     // is applied once by the training countdown.
     expect(controller.outputLatency).toBe(.175)
+    expect(controller.routeLatency).toEqual(nativeRouteLatency())
     controller.dispose()
   })
   it('honors different context and melody note durations', async () => {
@@ -237,7 +239,7 @@ describe('shared native training cues', () => {
     const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
     nativeSchedule.mockImplementationOnce(async () => {
       now = 1400
-      return { ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 175, processingMs: 400 }
+      return { ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 999, routeLatency: nativeRouteLatency(), processingMs: 400 }
     })
     const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
     controller.setSound('organ')

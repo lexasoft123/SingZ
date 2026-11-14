@@ -606,7 +606,7 @@ export class VoiceController {
       this.scheduleAvailabilityRetries()
     })
     // App publishes the playback context to main asynchronously after a route change; once that has
-    // landed, ask again so a stale answer (e.g. 'output-not-native') is replaced.
+    // landed, ask again so a stale answer is replaced.
     const onContext = (): void => {
       void this.refreshMonitorAvailability()
       this.scheduleAvailabilityRetries()
@@ -1484,14 +1484,14 @@ export class VoiceController {
 
   /**
    * After a route change the answer can lag a moment: while availability still reports the transient
-   * 'error' or 'output-not-native' reason, ask again at +0.5 s, +1.5 s and +3 s, then stop. No timer storm.
+   * 'error' reason, ask again at +0.5 s, +1.5 s and +3 s, then stop. No timer storm.
    */
   private scheduleAvailabilityRetries(): void {
     this.cancelAvailabilityRetries()
     for (const delay of AVAILABILITY_RETRY_MS) {
       this.availRetryTimers.push(
         setTimeout(() => {
-          if (this.disposed || this.model.monitor.on || (this.model.monitor.reason !== 'error' && this.model.monitor.reason !== 'output-not-native')) return
+          if (this.disposed || this.model.monitor.on || this.model.monitor.reason !== 'error') return
           void this.refreshMonitorAvailability()
         }, delay)
       )

@@ -63,6 +63,7 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
     std::atomic<uint64_t> frames{0};
   } playback, training, microphone, monitor;
   ServiceMasterStage master;
+  PreviewClickMixer preview;
   // Song/cue render time belongs to this service, not an AUHAL incarnation.
   // A period-only reopen pauses that clock and keeps DSP/PCM cursors intact.
   struct ClientClock {
@@ -352,6 +353,7 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
           !self.monitor.render(self.monitor.context, block))
         self.monitor.failed.store(true, std::memory_order_release);
     }
+    self.preview.render(clientBlock);
     self.master.process(block);
     self.frames.fetch_add(block.frames, std::memory_order_relaxed);
     return true;
@@ -462,7 +464,7 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
   // or microphone output; keep its ledger hold until the last client detaches.
   void completeIdleBufferHandbackLocked() {
     if (songOutputCurrent || monitor.render || !route.holdSharedDeviceBuffer) return;
-    if (training.render || microphone.render) return;
+    if (training.render || microphone.render || preview.status().pending) return;
     backend->stop();
     outputGeneration.fetch_add(1, std::memory_order_release);
     route.holdSharedDeviceBuffer = false;
@@ -470,7 +472,7 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
   void retireIdleBoxProducerLocked() noexcept {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (provider == "box-loopz" && !playback.render &&
-        !training.render && !microphone.render) backend->stop();
+        !training.render && !microphone.render && !preview.status().pending) backend->stop();
 #endif
   }
   AudioHostResult ensureLocked() {
@@ -760,6 +762,7 @@ AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostB
   if (!backend) return failure("The selected audio provider is unavailable");
   impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
+  impl_->preview.clearQuiesced(); // the stopped backend no longer renders: drop a queued or playing click
   impl_->removeListeners();
   impl_->backend = std::move(backend); impl_->provider = effectiveProvider;
   impl_->route = {}; impl_->songOutputCurrent = false;
@@ -769,6 +772,21 @@ AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostB
 AudioHostResult SharedAudioService::ensureOutput() {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->ensureLocked();
+}
+SharedAudioService::PreviewClickResult SharedAudioService::previewClick(bool accent, float gain) {
+  if (!std::isfinite(gain) || gain < 0 || gain > 4)
+    return {false, PreviewClickError::InvalidConfiguration, "Invalid preview click gain"};
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->preview.status().pending >= PreviewClickMixer::capacity)
+    return {false, PreviewClickError::QueueFull, "The preview click queue is full"};
+  const auto ready = impl_->ensureLocked();
+  if (!ready.ok) return {false, PreviewClickError::OutputUnavailable, ready.message};
+  if (!impl_->preview.enqueue(accent, gain))
+    return {false, PreviewClickError::QueueFull, "The preview click queue is full"};
+  return {true, PreviewClickError::None, {}};
+}
+PreviewClickMixer::Status SharedAudioService::previewClickStatus() const noexcept {
+  return impl_->preview.status();
 }
 AudioHostInventory SharedAudioService::inventory() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -910,6 +928,7 @@ void SharedAudioService::parkOutput() noexcept {
   impl_->parked = true;
   impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
+  impl_->preview.clearQuiesced(); // the stopped backend no longer renders: drop a queued or playing click
 }
 void SharedAudioService::shutdown() noexcept {
   impl_->quitting.store(true, std::memory_order_release);
@@ -927,6 +946,7 @@ void SharedAudioService::shutdown() noexcept {
 
   impl_->playback.render = nullptr;
   impl_->training.render = nullptr;
+  impl_->preview.clearQuiesced();
   impl_->removeListeners();
 }
 std::unique_ptr<AudioHostBackend> SharedAudioService::playbackBackend(

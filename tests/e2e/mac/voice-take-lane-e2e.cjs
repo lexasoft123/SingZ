@@ -24,6 +24,8 @@ const path = require('node:path')
 const { _electron } = require('playwright-core')
 const { createProject } = require('../../shared/box-retained-fixture.cjs')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
+const { selectNativeOutputBeforeOpen } = require('./native-output.cjs')
 const root = path.resolve(__dirname, '../../..'), rate = 48000
 const outputUid = process.env.E2E_OUTPUT_UID
 assert.ok(outputUid, 'E2E_OUTPUT_UID must select the output endpoint (a virtual loopback/NoMachine-type output is preferred)')
@@ -86,22 +88,18 @@ function writeTone(file) {
   return b.length
 }
 async function startApp(profileDir, mute) {
-  fs.writeFileSync(path.join(profileDir, 'settings.json'), JSON.stringify({ projectsRoot: library, language: 'en', outputDeviceId: `native:${outputUid}` }))
-  const env = { ...process.env, SINGZ_USERDATA_DIR: profileDir, SINGZ_MODELS_DIR: path.join(scratch, 'models'), SINGZ_PACK_DIR: path.join(scratch, 'pack'),
+  const env = { ...process.env, ...scratchProfileEnv({ dir: profileDir, projectsRoot: library, settings: { language: 'en' } }), SINGZ_MODELS_DIR: path.join(scratch, 'models'), SINGZ_PACK_DIR: path.join(scratch, 'pack'),
     SINGZ_NO_SYNC: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en' }
   delete env.SINGZ_MUTE
   if (mute) env.SINGZ_MUTE = '1'
   app = await _electron.launch({ executablePath: require('electron'), args: [path.join(root, 'out/main/index.js')], env })
   await quietLaunch(app)
   const win = await app.firstWindow()
+  const output = await selectNativeOutputBeforeOpen(win, outputUid)
   await clearFirstRun(win)
   await win.waitForSelector('.lib-card', { timeout: 60000 })
   await win.locator('.lib-card').filter({ hasText: 'Voice lane fixture' }).first().click()
   await win.waitForFunction(() => window.__test?.phase === 'ready' && __test.engine.duration > 0, null, { timeout: 60000 })
-  const inventory = await win.evaluate(() => window.singz.audioHostDevices('coreaudio'))
-  const output = inventory.ok && inventory.devices.find(d => d.uid === outputUid && d.outputChannels > 0)
-  assert.ok(output, 'E2E_OUTPUT_UID is not a connected output')
-  await win.evaluate(uid => __test.engine.setOutput(`native:${uid}`), outputUid)
   await win.waitForFunction(() => __test.engine.voiceTakeLaneState.status === 'ready', null, { timeout: 110000 })
   return { win, virtual: output.transport === 'virtual' }
 }

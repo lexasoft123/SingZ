@@ -210,8 +210,8 @@ history mechanism. No CPU or jitter figure is recorded for either path.
 - Types (`src/shared/voice-take.ts:294-302, 317-329`): `VoiceMonitorOutputDevice`,
   `VoiceMonitorOutputCandidate`, `outputDevice`, `outputCandidates`, both
   `outputDeviceId` fields, reason `route-separate-devices`. Added: queue and
-  measured-latency fields. `output-not-native` and `VoiceMonitorPlaybackContext`
-  go once ADR 0015 lands.
+  measured-latency fields. `output-not-native` is removed (no producer, no
+  locale string); `VoiceMonitorPlaybackContext` goes once ADR 0015 lands.
 - Main (`voice-monitor.ts:4-12, 43-47`): `OutputDetails`, `outputs()`, the
   output part of `activeSelection`, the matching IPC and preload arguments.
 - Renderer: the picker and its note (`VoiceTrackSettings.tsx:32-36, 77-98`),
@@ -366,3 +366,11 @@ Output display metadata is `commonOutputName`; Settings owns the only output.
 | Legacy render/host/lease mutation targets | Common source/client/clock/waveform/master mutation and realtime policy gates remain, including queue floor, admission, master order, cue handback, period and telemetry failures |
 
 Portable evidence does not claim new hardware continuity or round-trip results.
+
+## Final strip UI (release)
+
+The monitor pill shows milliseconds only (`{ms} ms`); its tooltip carries the
+estimated or measured round trip in ms and frames plus the negotiated buffer,
+and names "different devices" only when input and output names differ and
+"larger buffer" only from 256 frames. Takes keep a per-take colour (six hues,
+atelier variants) that tints the clip, its waveform and selection.

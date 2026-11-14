@@ -211,10 +211,11 @@ function fakeBinding(): NativeCaptureBinding & {
     buildInfo: { electronVersion: 'test', sourceStamp: 'test' },
     initializeSharedAudio: () => ({ ok: true }),
     refreshSharedAudioInventory: () => ({ ok: true }),
+    previewClick: () => ({ ok: true }),
     scheduleTrainingCue: () => ({ ok: true, startHostTimeNs: '1000000000', durationMs: 550 }),
     cancelTrainingCues: () => ({ ok: true }),
     setTrainingCueGain: () => ({ ok: true }),
-    trainingCueStatus: () => ({ hostTimeNs: '950000000', outputLatencyMs: 10 }),
+    trainingCueStatus: () => ({ hostTimeNs: '950000000', outputLatencyMs: 10, routeLatency: null }),
     captureRecording: () => ({ ok: true }),
     recordTake: async () => ({ ok: true }),
     finishTake: async () => ({ ok: true }),
@@ -1268,6 +1269,11 @@ describe('streamed-lane starvation', () => {
 
 
 describe('voice monitor addon identity', () => {
+  it('requires the shared idle preview export in a current addon', () => {
+    const binding = { ...fakeBinding(), previewClick: undefined }
+    expect(() => validateCaptureBindingIdentity(binding, 'test', 'test')).toThrow('does not export previewClick')
+  })
+
   it('rejects each missing monitor export', () => {
     const methods = ['voiceMonitorAvailability', 'beginVoiceMonitor', 'setVoiceMonitorGain', 'voiceMonitorStatus', 'endVoiceMonitor', 'setPlaybackOutputCurrent'] as const
     for (const method of methods) {

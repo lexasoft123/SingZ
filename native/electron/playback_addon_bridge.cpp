@@ -1802,6 +1802,35 @@ napi_value clearPlaybackLoop(napi_env env, napi_callback_info info) {
   });
 }
 
+// Service client, deliberately independent of a prepared song/generation.
+napi_value previewClick(napi_env env, napi_callback_info info) noexcept {
+  const auto reply = [&](bool ok, const char* code, const std::string& message) {
+    napi_value result{}; napi_create_object(env, &result);
+    setValue(env, result, "ok", makeBool(env, ok));
+    if (!ok) {
+      setValue(env, result, "errorCode", makeString(env, code));
+      setValue(env, result, "error", makeString(env, message));
+    }
+    return result;
+  };
+  try {
+    size_t argc = 2; napi_value args[2]{};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool accent = false; double gain = 0;
+    if (argc != 2 || napi_get_value_bool(env, args[0], &accent) != napi_ok ||
+        napi_get_value_double(env, args[1], &gain) != napi_ok ||
+        !std::isfinite(gain) || gain < 0 || gain > 4)
+      return reply(false, "invalid-configuration", "Invalid preview click configuration");
+    const auto result = sharedAudioService().previewClick(accent, static_cast<float>(gain));
+    using Error = SharedAudioService::PreviewClickError;
+    const char* code = result.error == Error::QueueFull ? "queue-full" :
+        result.error == Error::InvalidConfiguration ? "invalid-configuration" : "output-unavailable";
+    return reply(result.ok, code, result.message);
+  } catch (const std::exception& error) {
+    return reply(false, "output-unavailable", error.what());
+  } catch (...) { return reply(false, "output-unavailable", "Native click preview failed"); }
+}
+
 napi_value setPlaybackMasterGain(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2]{};
@@ -2658,6 +2687,8 @@ void definePlaybackExports(napi_env env, napi_value exports,
        napi_default, nullptr},
       {"setPlaybackMasterGain", nullptr, setPlaybackMasterGain, nullptr,
        nullptr, nullptr, napi_default, nullptr},
+      {"previewClick", nullptr, previewClick, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"playbackStatus", nullptr, playbackStatus, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"presentationQuery", nullptr, presentationQuery, nullptr, nullptr, nullptr,

@@ -3,7 +3,7 @@ import type { MultitrackEngine } from '../audio/engine'
 import type { TimeView } from '../model'
 import { allTakes, meterFraction, monitorDbToFader, primaryState, recordBlock, songSpan, type VoiceController, type VoiceInputOption, type VoiceModel, type VoiceTake } from '../audio/voice-take'
 import { t, type Key } from '../i18n'
-import { blockText, clock, dbText, laneCanRetry, isKnownMonitorWarning, laneText, monitorWarningText, pitchFollowShift, REASON_KEY, sgn, takeHue, takeIsSilent, takeTags, voiceIsShifted } from './voice-format'
+import { blockText, clock, dbText, laneCanRetry, isKnownMonitorWarning, laneText, monitorBadgeTip, monitorWarningText, pitchFollowShift, REASON_KEY, sgn, takeHue, takeIsSilent, takeTags, voiceIsShifted } from './voice-format'
 import Tooltip from './Tooltip'
 import VoiceTrackSettings from './VoiceTrackSettings'
 import { useVoiceModel } from './voice-host'
@@ -259,9 +259,7 @@ export default function VoiceStrip({
   const laneMessage = take && !rec ? laneText(m.lane) : ''
   const laneBad = m.lane.status === 'error' || m.lane.status === 'omitted'
   const lat = m.monitor.latency
-  const badgeTip = !lat ? '' : lat.delayed
-    ? t('player.voice.monitorBadgeDelayedTip')
-    : t(lat.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', { frames: lat.bufferFrames })
+  const badgeTip = !lat ? '' : monitorBadgeTip(lat, m.monitorInputDevice?.name, m.monitorCommonOutputName)
   const monitorWhy = monitorReasonText(m)
   const monitorUnavailable = !m.monitor.on && m.monitor.avail !== 'ok'
   const monitorLabel = m.monitor.on ? t('player.voice.monitorOn') : t('player.voice.monitorOff')

@@ -353,6 +353,10 @@ export class VoiceTakeStore {
               const startPositionSec = placed.startPositionSec ?? placed.songSeconds
               if (!Number.isFinite(startPositionSec)) active.placementFault = true
               else active.startPositionSec = startPositionSec!
+              // Readiness can observe a notification just before the native
+              // control thread revalidates it. Freeze the first sample's final
+              // latency facts, rather than retaining that earlier warning.
+              if (reported && raw.outputLatencyFrames !== undefined && raw.outputLatencyFrames > 0) active.placementEstimated = undefined
               if (stamp.inputLatencyStable === false || raw.outputLatencyFrames === 0) active.placementEstimated = 'latency-not-settled'
               else if (!reported || raw.outputLatencyFrames === undefined) active.placementEstimated ??= 'latency-unreported'
               active.latencySource = reported && !active.placementEstimated ? 'reported' : 'measured-trim'

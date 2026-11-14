@@ -223,11 +223,10 @@
 .vs-clip.recording .vs-wave-mid { stroke: color-mix(in srgb, var(--danger) 85%, transparent); }
 .vs-clip.recording { border-color: var(--danger); background: rgba(255, 122, 92, 0.1); }
 .vs-clip.partial { border-style: dashed; }
-.vs-clip.playing { box-shadow: inset 0 0 0 1px var(--take), inset 0 0 18px color-mix(in srgb, var(--take) 40%, transparent); }
 .vs-wave { position: absolute; inset: 2px 0; width: 100%; height: calc(100% - 4px); fill: color-mix(in srgb, var(--take) 78%, transparent); pointer-events: none; }
 .vs-clip.recording .vs-wave { fill: color-mix(in srgb, var(--danger) 75%, transparent); }
-.vs-clip-tags { position: absolute; left: 4px; top: 3px; z-index: 1; display: flex; gap: 4px; white-space: nowrap; }
-.vs-clip-tag { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; }
+.vs-clip-tags { position: absolute; left: 4px; right: 4px; top: 3px; z-index: 1; display: flex; gap: 4px; white-space: nowrap; overflow: hidden; }
+.vs-clip-tag { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 7px; border-radius: 999px; background: rgba(15, 13, 10, 0.82); border: 1px solid var(--line-strong); color: var(--dim); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
 .vs-clip-tag.silent { color: var(--danger); border-color: var(--danger); }
 .vs-clip-tag.changed { color: var(--accent); border-color: var(--accent); }
 

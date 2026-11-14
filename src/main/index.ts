@@ -954,6 +954,12 @@ function registerIpc(): void {
       playbackGeneration(generation),
       typeof gain === 'number' ? gain : Number.NaN
     ))
+  ipcMain.handle('audio-host:preview-click', async (_event, accent: unknown, gain: unknown): Promise<import('../shared/types').DesktopPreviewClickResult> => {
+    if (typeof accent !== 'boolean' || typeof gain !== 'number' || !Number.isFinite(gain) || gain < 0 || gain > 4)
+      return { ok: false, errorCode: 'invalid-configuration', error: 'Invalid preview click configuration' }
+    try { return await remoteCaptureBinding().previewClick(accent, process.env.SINGZ_MUTE === '1' ? 0 : gain) }
+    catch (error) { return { ok: false, errorCode: 'output-unavailable', error: String(error) } }
+  })
   ipcMain.handle('audio-host:playback-status', () => captureOwner.playbackStatus())
   // The open's lane measure. Same gate as prepare — every path registered
   // and of a format the runtime reads — and the same silence on refusal: the

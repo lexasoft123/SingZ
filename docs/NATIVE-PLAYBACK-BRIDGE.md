@@ -229,8 +229,8 @@ compile error.
 
 ### The desktop: a different contract
 
-Seventeen addon exports, fifteen with an IPC channel and a preload method, two
-with neither.
+Nineteen addon exports: sixteen have an IPC channel and preload method, one
+is internal to main, and two are dormant.
 
 | export | IPC channel | preload |
 |---|---|---|
@@ -246,7 +246,9 @@ with neither.
 | `reanchorPlayback` | `audio-host:playback-reanchor` | `reanchorDesktopPlayback` |
 | `setPlaybackLane` | `audio-host:playback-lane` | `setDesktopPlaybackLane` |
 | `setPlaybackMasterGain` | `audio-host:playback-master` | `setDesktopPlaybackMasterGain` |
+| `previewClick` | `audio-host:preview-click` | `previewDesktopClick` |
 | `playbackStatus` | `audio-host:playback-status` | `desktopPlaybackStatus` |
+| `presentationQuery` | **none (internal)** | **none** |
 | `unloadPlayback` | `audio-host:playback-unload` | `unloadDesktopPlayback` |
 | `unloadPlaybackRetainingLanes` | **none** | **none** |
 | `playbackLanePeaks` | **none** | **none** |
@@ -277,9 +279,40 @@ served from main-process state, which `src/main/capture.ts` assembles by
 calling `audioHostProviders` and `playbackStatus`.
 
 Absent on the desktop entirely: `session`, `configureOutputSession`,
-`previewClick`, and any training toggle. The desktop's transport is per-command
+and any training toggle. The desktop's transport is per-command
 rather than one `transport(command)` call, and its `mediaCodec` block is
 assembled in TypeScript (`capture.ts`) rather than read from the addon.
+
+### Desktop idle click preview and training route latency (ADR 0015 WP1b)
+
+Desktop `previewClick(accent, gain)` is a shared-service client, independent of
+song generation. Accent is boolean and gain is the metronome's linear 0..4
+client level. It opens the selected common output when idle and renders while
+a song is paused, without advancing that song or changing the host's buffer
+policy. Sixteen queued/active 55-ms one-shots are the total bound; overflow
+returns `queue-full`. Invalid input returns `invalid-configuration`; output
+failure returns `output-unavailable`. The renderer returns a typed failure and
+never falls back to Chromium after a native refusal. The temporary legacy
+preview remains only when the native entry and native owner are both absent.
+
+`PreviewClickMixer` prepares ordinary/accent PCM at 48 kHz using the timbres
+in §10 and interpolates it at the current output rate. Queue and voices have
+fixed storage; the callback neither allocates nor locks. Its client level is
+applied before the shared service master ramp and final ceiling, so app volume
+is applied once. `trainingCueStatus().previewClicks` publishes decimal-string
+enqueued/started/completed counters and numeric pending count independently of
+song lifetime. The hardware driver is `tests/e2e/idle-click-preview-smoke.cjs`.
+
+`trainingCueStatus().routeLatency` is an immutable ADR 0004 snapshot projected
+from one native host status, or null when no live output exists. It carries
+interface version, V1 struct size, route generation, platform-reported provenance, confidence, flags,
+measurement time, automatic/render/external/user-trim nanoseconds and the
+native-composed `graphToAudibleNs`; all 64-bit values cross as decimal strings.
+Native uses `composeRouteLatency` with `AutomaticComplete`, so explanatory
+components are never added twice. Scheduling requires a snapshot and returns
+that same object with its cue receipt. Training's audible deadlines use only
+`graphToAudibleNs / 1e9`, including any already-composed signed trim; no
+Chromium `outputLatency` or `baseLatency` participates.
 
 ## 4. What goes down
 
@@ -975,8 +1008,10 @@ silently.
 The catch is that **both legacy engines** restate three of them by hand, and
 those copies do not move when the core does. The click synthesis appears
 verbatim in `src/renderer/src/audio/engine.ts` (`makeClickBuffers`, ~:787-799)
-and again in `mobile/src/engine.ts` (`ensureClickAudio`, ~:699-720) — three
-definitions of one timbre. The gridless count-in constants
+and again in `mobile/src/engine.ts` (`ensureClickAudio`, ~:699-720) — two
+legacy copies of the native timbre. The shared-service idle preview has its own
+fixed PCM table, compared directly with the canonical cue plan by
+`preview_click_tests`. The gridless count-in constants
 (`SEC_COUNT_TICKS`, `SEC_COUNT_PERIOD`) are in both files too, and both
 engines compute the training parity themselves. Change a click constant in the
 core and both legacy metronomes keep the old timbre — a difference a singer
@@ -1128,7 +1163,7 @@ unnoticed, and each is a candidate for its own change — none should be
    desktop as a hardcoded `true`, the core from whether a cue plan exists.
 10. **Both legacy engines restate the click and the gridless count-in** —
     `src/renderer/src/audio/engine.ts` and `mobile/src/engine.ts`. One timbre,
-    three definitions, and nothing compares them.
+    with neither legacy copy compared against the canonical native plan.
 11. **The training parity is computed in seconds by both TypeScript engines**
     and in frames by the core, so the two can disagree by one block at a
     period boundary.

@@ -273,7 +273,6 @@ export type VoiceMonitorReason =
   | 'route-feedback'
   | 'no-input'
   | 'permission'
-  | 'output-not-native' // Web Audio is playing on a different physical output
   | 'platform' // not supported on this platform yet
   | 'device-lost'
   | 'error'

@@ -237,6 +237,14 @@
         "synchronous": true
       },
       {
+        "name": "previewClick",
+        "ipc": "audio-host:preview-click",
+        "preload": "previewDesktopClick",
+        "note": "Shared service client; boolean accent and linear client gain, no song or generation required. Bounded to 16 pending clicks; failures never fall back to Chromium.",
+        "dormant": false,
+        "synchronous": true
+      },
+      {
         "name": "playbackStatus",
         "ipc": "audio-host:playback-status",
         "preload": "desktopPlaybackStatus",

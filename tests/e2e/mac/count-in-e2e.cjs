@@ -483,7 +483,7 @@ function judgeSteadyPause(label, r, fail) {
  * facade takes with the bar either side of it, the lowest the bar went and
  * every step back between two samples of one status: the projection
  * itself, which must never run backwards except at a loop's wrap. */
-const EDGE = (action, ms, armed = 'true') => `(async function(){
+const EDGE = (action, ms, armed = 'true', fastRead = false) => `(async function(){
   const e = __test.engine
   const np = e.nativePlayback
   const button = document.querySelector('button.play')
@@ -499,6 +499,17 @@ const EDGE = (action, ms, armed = 'true') => `(async function(){
   let last = null
   let lowest = Infinity
   let samples = 0
+  // fastRead: the app's own edge poll is 10 ms, longer than the plain route's
+  // 3 ms latency window at buffer 128, so the unmatured status can fall between
+  // two polls. Read the core's status back to back beside the sampler instead
+  // (each read updates the facade's status exactly as its poll does). Only the
+  // observation gets faster: mustSee still demands that an unmatured status was
+  // actually seen, and fails the leg when none was.
+  let reading = ${fastRead ? 'true' : 'false'}
+  if (reading && typeof np.readStatus === 'function') {
+    const generation = np.generation
+    ;(async () => { while (reading) { try { await np.readStatus(generation) } catch (e) { break } } })()
+  }
   const channel = new MessageChannel()
   return await new Promise((resolve) => {
     channel.port1.onmessage = () => {
@@ -518,6 +529,7 @@ const EDGE = (action, ms, armed = 'true') => `(async function(){
       status = np.status
       if (now - at.t >= ${ms}) {
         channel.port1.close()
+        reading = false
         const s = np.status
         resolve({ at, switches, within, lowest, samples, final: row, armed: last !== null,
           latency: s ? Number(s.presentationLatencyFrames) : 0, sampleRate: s ? s.format.sampleRate : 0 })
@@ -539,7 +551,9 @@ const EDGE = (action, ms, armed = 'true') => `(async function(){
  * way, 6-8 ms on the Mac's 512-frame route, on every status the song plays
  * through — and is no edge's doing. `mustSee` requires the unmatured window
  * to have been observed: after a Play the facade polls every 10 ms until
- * the projection matures, so it always is. A seek while playing is polled
+ * the projection matures, which only catches a window longer than that; the
+ * plain-route legs add back-to-back status reads (EDGE's fastRead) so it is
+ * seen at buffer 128 too. A seek while playing is polled
  * every 10 ms too, but its unmatured window is one latency long, 11 ms on the
  * Mac's plain route, barely more than that period, so a read can still step
  * over it; a 151 ms window it can never miss.
@@ -1280,7 +1294,7 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
       await sleep(600)
       const from = JSON.parse(await val(win, SNAP)).pos
       const label = `Play ${k} from a settled pause`
-      const r = await val(win, EDGE('button.click()', 600))
+      const r = await val(win, EDGE('button.click()', 600, 'true', true))
       console.log(`14. ${label} at ${from.toFixed(3)} s: ${judgeEdge(label, r, from, fail, { mustSee: true, votes: plain })}`)
       await pauseAndWait(win)
     }

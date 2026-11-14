@@ -282,7 +282,6 @@ target_compile_features(singz_output_callback_diagnostics_render PRIVATE cxx_std
 target_link_libraries(singz_output_callback_diagnostics_render PRIVATE SingZ::zcore_device)
 singz_configure_realtime_target(singz_output_callback_diagnostics_render)
 
-
 # The complete service master leaf and the final callback ordering are checked
 # independently of the control-domain service (which owns device locks).
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/playback/shared_audio_service.h native/playback/output_callback_diagnostics.h)
@@ -378,6 +377,7 @@ add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/shared_audio_service.cpp
   native/playback/shared_audio_service.h
   native/playback/training_pcm_mixer.h
+  native/playback/preview_click_mixer.h
   native/playback/native_playback_graph_document.cpp
   native/playback/native_playback_graph_document.h
   native/playback/playback_cue_plan.cpp
@@ -438,6 +438,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     native/electron/microphone_mix_bridge.cpp
     native/electron/training_audio_session.cpp
     native/electron/training_audio_session.h
+    native/electron/training_route_latency.h
     native/electron/native_audio_ownership.h)
   target_compile_features(singz_capture PRIVATE cxx_std_20)
   target_include_directories(singz_capture SYSTEM PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
@@ -923,7 +924,7 @@ if(SINGZ_CORE_TESTS)
   add_dependencies(voice_monitor_client_tests voice_monitor_client_negative_after_master)
   add_test(NAME voice_monitor_client_negative_after_master COMMAND voice_monitor_client_negative_after_master)
   set_tests_properties(voice_monitor_client_negative_after_master PROPERTIES WILL_FAIL TRUE)
-  string(REPLACE "    if (training.render || microphone.render) return;\n" ""
+  string(REPLACE "    if (training.render || microphone.render || preview.status().pending) return;\n" ""
     _client_early_handback "${_client_service}")
   if(_client_early_handback STREQUAL _client_service)
     message(FATAL_ERROR "Common monitor cue-handback mutant no longer changes source")
@@ -1112,6 +1113,25 @@ if(SINGZ_CORE_TESTS)
     set_tests_properties(voice_monitor_client_clock_tests voice_monitor_client_negative_clock
       PROPERTIES ENVIRONMENT "SINGZ_MONITOR_CLOCK_SECONDS=10")
   endif()
+
+  add_executable(preview_click_tests tests/native/preview_click_tests.cpp native/playback/playback_cue_plan.cpp native/playback/shared_audio_service.cpp "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(preview_click_tests PRIVATE cxx_std_20)
+  target_include_directories(preview_click_tests PRIVATE "${SINGZ_REPO_ROOT}" "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(preview_click_tests PRIVATE SingZ::zcore_device SingZ::zdsp_runtime Threads::Threads)
+  add_test(NAME preview_click_tests COMMAND preview_click_tests)
+  # Old behavior/negative control: omit the new additive callback. Generate
+  # outside the source tree so mutation proof never races a worker's edits.
+  file(READ "${SINGZ_REPO_ROOT}/native/playback/shared_audio_service.cpp" _preview_service)
+  string(REPLACE "self.preview.render(clientBlock);" "/* negative: missing preview client */" _preview_negative "${_preview_service}")
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/preview-negative")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/preview-negative/shared_audio_service.cpp" "${_preview_negative}")
+  add_executable(preview_click_negative_render tests/native/preview_click_tests.cpp native/playback/playback_cue_plan.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/preview-negative/shared_audio_service.cpp" "${ZCORE_ROOT}/zdsp/tests/allocation_trap.cpp")
+  target_compile_features(preview_click_negative_render PRIVATE cxx_std_20)
+  target_include_directories(preview_click_negative_render PRIVATE "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback" "${ZCORE_ROOT}/zdsp/tests")
+  target_link_libraries(preview_click_negative_render PRIVATE SingZ::zcore_device SingZ::zdsp_runtime Threads::Threads)
+  add_test(NAME preview_click_negative_render COMMAND preview_click_negative_render)
+  set_tests_properties(preview_click_negative_render PROPERTIES WILL_FAIL TRUE)
 
   add_executable(shared_audio_service_tests
     native/playback/shared_audio_service.cpp

@@ -1,6 +1,6 @@
 import { t, type Key } from '../i18n'
 import type { RecordBlock, VoiceModel, VoiceTake } from '../audio/voice-take'
-import type { VoiceMonitorReason, VoiceTakeLaneState } from '../../../shared/voice-take'
+import type { VoiceMonitorLatency, VoiceMonitorReason, VoiceTakeLaneState } from '../../../shared/voice-take'
 
 export const sgn = (n: number): string => (n > 0 ? `+${n}` : n < 0 ? `\u2212${-n}` : '0')
 export const clock = (s: number): string => {
@@ -27,7 +27,6 @@ export const REASON_KEY: Record<VoiceMonitorReason, Key> = {
   'route-wireless': 'player.voice.monReasonWireless',
   'no-input': 'player.voice.monReasonNoInput',
   permission: 'player.voice.monReasonPermission',
-  'output-not-native': 'player.voice.monReasonOutputNotNative',
   platform: 'player.voice.monReasonPlatform',
   'device-lost': 'player.voice.monReasonDeviceLost',
   error: 'player.voice.monReasonError'
@@ -91,3 +90,28 @@ export function takeTags(tk: Pick<VoiceTake, 'tempo' | 'transpose' | 'changed'>,
 export const TAKE_HUES = 6
 /** The hue slot of take number n: cycled, stable for a take across reloads (n is its persistent number). */
 export const takeHue = (n: number): number => ((Math.trunc(n) - 1) % TAKE_HUES + TAKE_HUES) % TAKE_HUES
+
+/** A buffer at or above this is what makes the monitor noticeably late; below it the buffer is never blamed. */
+export const LARGE_BUFFER_FRAMES = 256
+
+/**
+ * Tooltip for the monitor pill: always the round trip in ms and frames plus the buffer, then only the
+ * causes that are really present (different devices by name, buffer >= 256 frames), and only when the
+ * route is flagged delayed.
+ */
+export function monitorBadgeTip(lat: VoiceMonitorLatency, inputName?: string | null, outputName?: string | null): string {
+  const parts = [
+    t(lat.source === 'measured' ? 'player.voice.monitorBadgeMeasured' : 'player.voice.monitorBadgeEstimated', {
+      ms: Math.round(lat.roundTripMs),
+      frames: Math.round(lat.roundTripFrames),
+      buffer: lat.bufferFrames
+    })
+  ]
+  if (lat.delayed) {
+    const a = inputName?.trim()
+    const b = outputName?.trim()
+    if (a && b && a !== b) parts.push(t('player.voice.monitorBadgeDifferentDevicesTip'))
+    if (lat.bufferFrames >= LARGE_BUFFER_FRAMES) parts.push(t('player.voice.monitorBadgeLargeBufferTip'))
+  }
+  return parts.join('. ')
+}

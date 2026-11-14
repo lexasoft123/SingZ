@@ -514,9 +514,11 @@ export class MultitrackEngine {
     if (!desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback)) return
     const epoch = this._songEpoch
     const ahead = this.aheadEpoch
+    // Play waits for nativeAheadPending and adopts this graph. Its pending
+    // request must not invalidate the build it is waiting to use.
     const stale = (): boolean =>
       epoch !== this._songEpoch || ahead !== this.aheadEpoch || this._playing ||
-      this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.teardownStarted ||
+      !this.aheadAllowed || this.teardownStarted ||
       this.betweenSongs
     const module = await this.ensureNativePlayback()
     if (stale() || module.client.recoveryPending) return
@@ -895,6 +897,9 @@ export class MultitrackEngine {
     await this.applyDesiredOutputRoute()
     if (detectedDesktopPlatform() !== 'linux' || deviceId.startsWith('native:')) await this.configureTrainingOutput()
     if (this._playing && this.ctx.state !== 'running') await this.ctx.resume()
+    // A paused song's prepared graph belonged to the old route. Restore its
+    // head start after the new route succeeds, just as after song settings.
+    this.scheduleNativePrepareAhead()
   }
 
   /** Native playback owns a native: output; Chromium only needs a physical sink for the Web Audio fallback.
@@ -1234,8 +1239,26 @@ export class MultitrackEngine {
   }
 
   /** One immediate click — popover feedback (volume preview, tap confirmation). */
-  previewClick(accent = false): void {
-    if (this.teardownStarted || this.nativeMonitorLease) return
+  previewClick(accent = false): Promise<import('../../../shared/types').DesktopPreviewClickResult> | void {
+    if (this.teardownStarted) return
+    if (typeof window.singz?.previewDesktopClick === 'function') {
+      return window.singz.previewDesktopClick(accent, this.met.volume).then(result => {
+        if (!result.ok) console.error('Metronome preview could not start:', result.errorCode, result.error)
+        return result
+      }).catch((error: unknown): import('../../../shared/types').DesktopPreviewClickResult => {
+        const failure = { ok: false, errorCode: 'output-unavailable', error: String(error) } as const
+        console.error('Metronome preview could not start:', failure.errorCode, failure.error)
+        return failure
+      })
+    }
+    // A native owner must never acquire a second Chromium output on refusal.
+    if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead || this.nativeMonitorLease) {
+      const failure: import('../../../shared/types').DesktopPreviewClickResult = {
+        ok: false, errorCode: 'addon-unavailable', error: 'Native click preview is unavailable'
+      }
+      console.error('Metronome preview could not start:', failure.errorCode, failure.error)
+      return Promise.resolve(failure)
+    }
     if (this.ctx.state === 'suspended') {
       void this.ctx.resume().then(() => {
         if (!this.teardownStarted && !this.nativeMonitorLease) this.scheduleClick(this.ctx.currentTime, accent)
