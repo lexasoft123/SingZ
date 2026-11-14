@@ -15,6 +15,80 @@ import urllib.parse
 from drive_fixture import FOLDER, Server
 
 
+class CountingServer(Server):
+    def __init__(self):
+        self.accepted_connections = 0
+        super().__init__()
+
+    def get_request(self):
+        request, address = super().get_request()
+        self.accepted_connections += 1
+        return request, address
+
+
+class Connections(unittest.TestCase):
+    def setUp(self):
+        self.server = CountingServer()
+        self.server.state.access.add('focused-fixture-access')
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .01})
+        self.thread.start()
+        self.connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=4)
+
+    def tearDown(self):
+        self.connection.close()
+        self.server.stop()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+        self.assertFalse(self.thread.is_alive(), 'Fixture thread survived test')
+
+    def about(self, headers=None):
+        self.connection.request('GET', '/drive/v3/about', headers={
+            'Authorization': 'Bearer focused-fixture-access', **(headers or {})})
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.read())['user']['permissionId'],
+                         self.server.state.permission_id)
+        return response.will_close
+
+    def test_complete_responses_reuse_one_accepted_socket(self):
+        closes = [self.about() for _ in range(12)]
+        # Count accepted sockets, not the client object's reconnects or requests.
+        self.assertEqual(self.server.accepted_connections, 1)
+        self.assertFalse(any(closes))
+
+    def test_client_connection_close_is_honored(self):
+        self.assertTrue(self.about({'Connection': 'close'}))
+        self.assertFalse(self.about())
+        self.assertEqual(self.server.accepted_connections, 2)
+
+    def test_truncated_response_closes_connection(self):
+        payload = b'complete response framing remains observable'
+        control = {'seed': [{'id': 'audio', 'name': 'audio',
+                            'contentBase64': base64.b64encode(payload).decode()}],
+                   'failNext': [{'method': 'GET', 'path': '/drive/v3/files/audio', 'truncateBytes': 3}]}
+        self.connection.request('POST', '/control', json.dumps(control), {'Content-Type': 'application/json'})
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        response.read()
+        self.connection.request('GET', '/drive/v3/files/audio?alt=media', headers={
+            'Authorization': 'Bearer focused-fixture-access'})
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.will_close)
+        with self.assertRaises(http.client.IncompleteRead):
+            response.read()
+        self.assertEqual(self.server.accepted_connections, 1)
+
+    def test_unread_invalid_body_closes_connection(self):
+        self.connection.request('POST', '/control', b'unconsumed', {'Transfer-Encoding': 'chunked'})
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertTrue(response.will_close)
+        response.read()
+        self.assertFalse(self.about())
+        self.assertEqual(self.server.accepted_connections, 2)
+
+
 class Moves(unittest.TestCase):
     def setUp(self):
         self.server = Server()

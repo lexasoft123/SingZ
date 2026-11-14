@@ -329,6 +329,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def setup(self):
         super().setup()
         self.connection.settimeout(3)
+        # Headers and bodies are separate writes on persistent connections.
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     def log_message(self, *_args):
         pass
@@ -376,12 +378,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 status = int(fault['status'])
         self.send_response(status)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Connection', 'close')
+        # Fully framed HTTP/1.1 responses can use the real client's pool.
+        # Truncation needs EOF, and a client's explicit close remains binding.
+        if self.close_connection or truncate is not None:
+            self.send_header('Connection', 'close')
+            self.close_connection = True
         self.send_header('Cache-Control', 'no-store')
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
-        self.close_connection = True
         data = body if truncate is None else body[:max(0, truncate)]
         gate_index = 0
         for offset in range(0, len(data), 16384):
@@ -482,11 +487,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             self.server.state.finish(self.row, 499, cancelled=True)
         except FixtureError as error:
+            # Validation may fail before the request body has been consumed.
+            self.close_connection = True
             try:
                 self.json(error.status, {'error': error.message})
             except OSError:
                 self.server.state.finish(self.row, 499, cancelled=True)
         except (ValueError, TypeError, KeyError, UnicodeError):
+            self.close_connection = True
             try:
                 self.json(400, {'error': 'Invalid fixture request'})
             except OSError:
