@@ -5,6 +5,9 @@ use std::{
     time::Duration,
 };
 
+/// Upper bound on a measuring window extended by `minFrames`, well inside the control timeout.
+const MAX_WINDOW_SECONDS: f64 = 30.;
+
 fn receipt(
     dir: &Path,
     action: &str,
@@ -149,6 +152,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                             let playing = action == "steady-playback";
                             let settle = command["settleSeconds"].as_f64().unwrap_or(if playing { 0. } else { 2. });
                             let seconds = command["seconds"].as_f64().unwrap_or(2.);
+                            // A slow renderer (a CI VM) draws fewer frames per second; keep measuring
+                            // until the window has demanded enough frames to mean something.
+                            let min_frames = command["minFrames"].as_u64().unwrap_or(0);
                             anyhow::ensure!(settle >= 0. && seconds > 0. && settle.is_finite() && seconds.is_finite(), "invalid window duration");
                             if !playing {
                                 // Draw the target state before settling, so a change made by the
@@ -157,9 +163,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                             }
                             let (mut demanded, mut callbacks, mut dirtied) = (0u64, 0u64, 0u64);
                             let mut trace: Vec<String> = Vec::new();
+                            let mut measured_seconds = 0.;
                             for (measuring, duration) in [(false, settle), (true, seconds)] {
                                 let started = Instant::now();
-                                while started.elapsed().as_secs_f64() < duration {
+                                while started.elapsed().as_secs_f64() < duration
+                                    || (measuring && demanded < min_frames && started.elapsed().as_secs_f64() < MAX_WINDOW_SECONDS)
+                                {
                                     let (pending, dirty) = handle.update(cx, |_, window, app| -> anyhow::Result<(usize, bool)> {
                                         anyhow::ensure!(!window.is_visible() && !window.is_window_active(), "scenario window became visible");
                                         if playing { anyhow::ensure!(view.read(app).playing, "playback stopped during steady window"); }
@@ -177,8 +186,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, dir: PathBuf, cx: &mut
                                     }
                                     cx.background_executor().timer(Duration::from_millis(8)).await;
                                 }
+                                if measuring { measured_seconds = started.elapsed().as_secs_f64(); }
                             }
-                            Ok(serde_json::json!({"demandedFrames": demanded, "pendingCallbacks": callbacks, "dirtyTicks": dirtied, "trace": trace}))
+                            Ok(serde_json::json!({"demandedFrames": demanded, "pendingCallbacks": callbacks, "dirtyTicks": dirtied, "seconds": measured_seconds, "trace": trace}))
                         }
                         // First-run Models screen (D-02 N5): open it, start the fixture download,
                         // and read the service's published progress.

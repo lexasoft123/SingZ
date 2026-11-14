@@ -187,7 +187,7 @@ def run_probe(binary: Path, reference: dict[str, Any], scratch: Path, helpers: P
             act("play")
             act("steady-playback", settleSeconds=1, seconds=1)  # warm-up: scene and queue capacities
             windows["before"] = act("render-metrics")
-            windows["steady"] = act("steady-playback", seconds=2)
+            windows["steady"] = act("steady-playback", seconds=2, minFrames=120)
             windows["after"] = act("render-metrics")
             act("quit")
             child.wait(timeout=30)
