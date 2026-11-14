@@ -633,7 +633,7 @@ fn quit_skips_a_queued_slow_probe_but_retains_preferences() {
         .unwrap();
     rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let retired = backend.provider_retired.clone();
-    let (ready, release) = backend.requests.jobs.hooks.hold("preparation", true);
+    let (ready, release) = backend.requests.jobs.hooks.hold("preparation", false);
     backend
         .read_publication(
             1,
@@ -653,14 +653,20 @@ fn quit_skips_a_queued_slow_probe_but_retains_preferences() {
         .unwrap();
     backend.karaoke_pref(7, true).unwrap();
     let (finished, done) = mpsc::channel();
+    let alive = backend.alive.clone();
     let started = Instant::now();
+    let deadline = started + Duration::from_millis(750);
     let quitting = thread::spawn(move || {
         drop(backend);
         let _ = finished.send(());
     });
-    thread::sleep(Duration::from_millis(10));
+    // Keep the probe queued until shutdown actually starts, even if the quit
+    // thread is delayed by the scheduler. Include that delay in the budget.
+    while alive.load(Ordering::Acquire) && Instant::now() < deadline {
+        thread::yield_now();
+    }
     let _ = release.send(());
-    let result = done.recv_timeout(Duration::from_millis(750));
+    let result = done.recv_timeout(deadline.saturating_duration_since(Instant::now()));
     quitting.join().unwrap();
     assert!(
         result.is_ok(),
