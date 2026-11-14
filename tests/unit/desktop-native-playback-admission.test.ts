@@ -37,17 +37,17 @@ const runtime = (full = false): DesktopPlaybackRuntimeCapability => ({
   }
 })
 const features = (): DesktopNativePlaybackFeatures => ({
-  enabled: true, playbackRate: 1, transpose: 0, training: null,
+   playbackRate: 1, transpose: 0, training: null,
   lanes: [{ id: 'guide', path: '/authorized/guide.flac' }], runtime: runtime()
 })
 it('admits 300-character Windows and namespaced stem paths', () => {
   const path='C:\\'+('p'.repeat(100)+'\\').repeat(3)+'vocals.flac'
   for(const value of [path,'\\\\?\\'+path]) expect(selectDesktopPlaybackBackend('win32',{...features(),lanes:[{id:'guide',path:value}]}).backend).toBe('native')
-  expect(selectDesktopPlaybackBackend('win32',{...features(),lanes:[{id:'guide',path:'C:\\'+('p'.repeat(200)+'\\').repeat(164)+'vocals.flac'}]}).backend).toBe('legacy')
+  expect(selectDesktopPlaybackBackend('win32',{...features(),lanes:[{id:'guide',path:'C:\\'+('p'.repeat(200)+'\\').repeat(164)+'vocals.flac'}]}).backend).toBe('rejected')
 })
 const request = (): DesktopNativePlaybackEngineRequest => ({
   ...features(), lanes: [{ id: 'guide', path: '/authorized/guide.flac', volume: 1, muted: false, solo: false }],
-  nativePlaybackEnabled: true, nativeAudioProvider: 'wasapi', graphDocument: null,
+   nativeAudioProvider: 'wasapi', graphDocument: null,
   beat: null, metronome: { ...MET_DEFAULTS }, countIn: false, positionSeconds: 0,
   durationSeconds: 10, sampleRate: 48000, masterGain: 1, loop: null
 })
@@ -71,12 +71,12 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
   })
   it.each([0, -1, 0.24999, 4.00001, NaN, Infinity])('names invalid tempo %s', (playbackRate) => {
     const decision = selectDesktopPlaybackBackend('darwin', { ...features(), playbackRate })
-    expect(decision).toMatchObject({ backend: 'legacy', failure: { code: 'graph-rejected', detail: expect.stringContaining('0.25..4') } })
+    expect(decision).toMatchObject({ backend: 'rejected', failure: { code: 'graph-rejected', detail: expect.stringContaining('0.25..4') } })
     expect(console.warn).toHaveBeenCalledWith('Native playback declined:', expect.objectContaining({ code: 'graph-rejected' }))
   })
   it.each([-24.001, 24.001, NaN, Infinity])('names invalid transpose %s', (transpose) => {
     expect(selectDesktopPlaybackBackend('darwin', { ...features(), transpose })).toMatchObject({
-      backend: 'legacy', failure: { code: 'graph-rejected', detail: expect.stringContaining('-24..24') }
+      backend: 'rejected', failure: { code: 'graph-rejected', detail: expect.stringContaining('-24..24') }
     })
   })
   it('accepts 1..16 lanes and explicitly names empty and excessive songs', () => {
@@ -84,7 +84,7 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
       const lanes = Array.from({ length: count }, (_, i) => ({ id: `lane-${i}`, path: `/song/${i}.flac` }))
       const decision = selectDesktopPlaybackBackend('darwin', { ...features(), lanes })
       if (count === 1 || count === 16) expect(decision.backend).toBe('native')
-      else expect(decision).toMatchObject({ backend: 'legacy', failure: {
+      else expect(decision).toMatchObject({ backend: 'rejected', failure: {
         code: 'graph-rejected', detail: expect.stringContaining(count === 0 ? 'song is empty' : '17 lanes')
       } })
     }
@@ -97,14 +97,14 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
   it.each([undefined, '/song/guide', '/song/guide.', '/song/.flac', '/song/guide.M4A?download=1', '/song/guide.wav#fragment', '/dir.flac/guide', '/song/guide.xyz'])('names lane and unsupported/absent format for %s', (path) => {
     expect(selectDesktopPlaybackBackend('darwin', {
       ...features(), runtime: runtime(true), lanes: [{ id: 'guide', path }]
-    })).toMatchObject({ backend: 'legacy', failure: {
+    })).toMatchObject({ backend: 'rejected', failure: {
       code: 'graph-rejected', laneId: 'guide', format: expect.any(String), detail: expect.stringContaining('lane guide')
     } })
   })
   it('never treats the importable codec list as proof of runtime decoder support', () => {
     const lanes = [{ id: 'guide', path: '/song/guide.M4A' }]
     expect(selectDesktopPlaybackBackend('darwin', { ...features(), lanes })).toMatchObject({
-      backend: 'legacy', failure: { code: 'graph-rejected', laneId: 'guide', format: 'm4a' }
+      backend: 'rejected', failure: { code: 'graph-rejected', laneId: 'guide', format: 'm4a' }
     })
     expect(selectDesktopPlaybackBackend('darwin', { ...features(), lanes, runtime: runtime(true) }).backend).toBe('native')
   })
@@ -115,11 +115,10 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
     { runtime: { ...runtime(), mediaCodec: undefined } as unknown as DesktopPlaybackRuntimeCapability }
   ])('names missing or incompatible addon capability', (patch) => {
     expect(selectDesktopPlaybackBackend('darwin', { ...features(), ...patch })).toMatchObject({
-      backend: 'legacy', failure: { code: 'addon-unavailable', detail: expect.any(String) }
+      backend: 'rejected', failure: { code: 'addon-unavailable', detail: expect.any(String) }
     })
   })
   it('names disabled native playback and mismatched providers', () => {
-    expect(selectDesktopPlaybackBackend('darwin', { ...features(), enabled: false })).toMatchObject({ failure: { code: 'disabled-by-preference' } })
     expect(selectDesktopPlaybackBackend('linux', { ...features(), requestedProvider: 'wasapi' })).toMatchObject({
       failure: { code: 'provider-unavailable', detail: expect.stringContaining('wasapi') }
     })
@@ -132,8 +131,7 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
     expect(console.warn).toHaveBeenCalledWith('Native playback declined:', expect.objectContaining({ code: 'addon-unavailable' }))
   })
   it.each([tryStartDesktopNativePlayback, prepareDesktopNativePlaybackAhead])('retains selector failures on the boolean adapter client', async (admit) => {
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined,
-      restoreLegacyOutput: async () => undefined }, () => undefined)
+    const client = new DesktopNativePlaybackClient(() => undefined)
     const onDecline = vi.fn()
     expect(await admit(client, { ...request(), playbackRate: 0.1 }, onDecline)).toBe(false)
     expect(client.lastFailure).toMatchObject({ code: 'graph-rejected', detail: expect.stringContaining('0.25..4') })
@@ -145,7 +143,7 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
     req.playbackRate = 0.8
     req.training = { mode: 'period', periodSec: 8, stems: ['lane-0'] }
     const decision = await inspectDesktopNativePlayback(req)
-    expect(decision).toMatchObject({ backend: 'legacy', failure: { code: 'graph-rejected', detail:
+    expect(decision).toMatchObject({ backend: 'rejected', failure: { code: 'graph-rejected', detail:
       'native graph exceeds 128 nodes: total=131, lanes=40 (120 nodes), training stems=1 (1 nodes), reference=5, time-pitch=1, mix/master/limiter/output=4'
     } })
   })
@@ -156,13 +154,12 @@ describe('native selector admission diagnostics (ADR 0015 WP1a)', () => {
         ports: { inputs: [{ id: 'in', channels: 2 }], outputs: [{ id: 'out', channels: 2 }] }, parameters: { gain: 1 } })), connections: [] }))
     const decision = await inspectDesktopNativePlayback({ ...request(), graphDocument })
     if (count === 128) expect(decision.backend).toBe('native')
-    else expect(decision).toMatchObject({ backend: 'legacy', failure: { code: 'graph-rejected', detail: expect.stringContaining('native topology cap') } })
+    else expect(decision).toMatchObject({ backend: 'rejected', failure: { code: 'graph-rejected', detail: expect.stringContaining('native topology cap') } })
   })
   it.each([[0.25, 13.5], [4, -24]])('reattaches retained tempo %s/transpose %s without rejecting valid native controls', async (playbackRate, transposeSemitones) => {
     const snapshot = retainedStatus('7', 'playing', { playbackRate, transposeSemitones })
     vi.stubGlobal('window', { singz: { boxAudioPersistent: true } })
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined,
-      restoreLegacyOutput: async () => undefined }, () => undefined)
+    const client = new DesktopNativePlaybackClient(() => undefined)
     try {
       expect(client.attachRetained(retainedRecovery(snapshot), null)).toMatchObject({ playbackRate, transpose: transposeSemitones })
     } finally { await client.detachPersistentPlayback() }

@@ -9,13 +9,7 @@ import {
   PlaybackOutputSelectionError
 } from '../../src/renderer/src/audio/output-routing'
 
-const outputDevice = (deviceId: string): MediaDeviceInfo => ({
-  deviceId,
-  groupId: 'outputs',
-  kind: 'audiooutput',
-  label: deviceId,
-  toJSON: () => ({})
-})
+const outputDevice = (uid: string): { uid: string } => ({ uid })
 
 describe('playback output latest-intent arbitration', () => {
   it.each([
@@ -24,8 +18,8 @@ describe('playback output latest-intent arbitration', () => {
   ] as const)(
     'invalidates a reconcile paused in inventory before selecting %s',
     async (_name, selected) => {
-      let finishInventory!: (devices: readonly MediaDeviceInfo[]) => void
-      const inventory = new Promise<readonly MediaDeviceInfo[]>((resolve) => {
+      let finishInventory!: (devices: readonly { uid: string }[]) => void
+      const inventory = new Promise<readonly { uid: string }[]>((resolve) => {
         finishInventory = resolve
       })
       const setOutput = vi.fn(async () => undefined)
@@ -253,8 +247,8 @@ describe('playback output latest-intent arbitration', () => {
       if (sinkId === 'C') throw new Error('C handoff failed')
       if (sinkId === 'A' && ++aCalls === 1) throw new Error('A rollback failed')
     })
-    let finishInventory!: (devices: readonly MediaDeviceInfo[]) => void
-    const inventory = new Promise<readonly MediaDeviceInfo[]>((resolve) => {
+    let finishInventory!: (devices: readonly { uid: string }[]) => void
+    const inventory = new Promise<readonly { uid: string }[]>((resolve) => {
       finishInventory = resolve
     })
     const commit = vi.fn()
@@ -284,7 +278,7 @@ describe('playback output latest-intent arbitration', () => {
 
   it('treats a superseded inventory rejection as stale but surfaces the current one', async () => {
     let rejectOldInventory!: (error: Error) => void
-    const oldInventory = new Promise<readonly MediaDeviceInfo[]>((_resolve, reject) => {
+    const oldInventory = new Promise<readonly { uid: string }[]>((_resolve, reject) => {
       rejectOldInventory = reject
     })
     const enumerateOutputs = vi.fn()
@@ -394,12 +388,13 @@ describe('legacy output migration', () => {
     const commit = vi.fn()
     const arbiter = new PlaybackOutputArbiter(`native:${uid}`, { setOutput, commit, enumerateOutputs: vi.fn(async () => []) })
     expect(await arbiter.migrateLegacy(id => Promise.resolve(nativeOutputUidForBrowser(id, [], inventory)))).toBe('migrated')
-    expect(setOutput).toHaveBeenCalledWith(`native:${uid}`)
-    expect(commit).toHaveBeenCalledWith(`native:${uid}`)
+    expect(setOutput).toHaveBeenCalledWith(uid)
+    expect(commit).toHaveBeenCalledWith(uid)
   })
   it('maps a unique label and a legacy native ID, rejecting ambiguity', () => {
     expect(nativeOutputUidForBrowser('sink', browser, native)).toBe('uid')
     expect(nativeOutputUidForBrowser('native:uid', browser, native)).toBe('uid')
+    expect(nativeOutputUidForBrowser('uid', browser, native)).toBe('uid')
     expect(nativeOutputUidForBrowser('missing', browser, native)).toBeUndefined()
     expect(nativeOutputUidForBrowser('sink', browser, [...native, { uid: 'other', label: 'Interface', outputChannels: 2 }])).toBeUndefined()
     expect(nativeOutputUidForBrowser('sink', [...browser, { id: 'other', label: 'Interface' }], native)).toBeUndefined()
@@ -411,7 +406,7 @@ describe('legacy output migration', () => {
     expect(nativeOutputUidForBrowser('m', decorated, [...bare, { uid: 'dup', label: 'MacBook Pro Speakers (Virtual)', outputChannels: 2 }])).toBeUndefined()
     expect(remapNativeOutputUid('zu', bare, [{ uid: 'zasio', label: 'Zen Quadro SC Playback (ASIO)', outputChannels: 2 }])).toBe('zasio')
   })
-  it.each([['sink', 'uid', 'migrated', 'native:uid'], ['sink', undefined, 'missing', ''], ['native:uid', 'uid', 'migrated', 'native:uid']] as const)(
+  it.each([['sink', 'uid', 'migrated', 'uid'], ['sink', undefined, 'missing', ''], ['native:uid', 'uid', 'migrated', 'uid']] as const)(
     'commits the migration for %s', async (legacy, uid, expected, route) => {
       const commit = vi.fn()
       const setOutput = vi.fn(async () => {})
@@ -447,7 +442,7 @@ describe('provider UID remapping', () => {
 })
 
 
-it.each([['Interface', 'mapped', ['default', 'provider:asio', 'native:asio']], ['Other', 'missing', ['default', 'provider:asio']]] as const)(
+it.each([['Interface', 'mapped', ['default', 'provider:asio', 'asio']], ['Other', 'missing', ['default', 'provider:asio']]] as const)(
   'switches provider safely when destination label is %s', async (label, expected, calls) => {
     const events: string[] = []
     const result = await switchPlaybackProvider('wasapi', 'asio', 'old', {

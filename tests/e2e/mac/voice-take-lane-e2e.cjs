@@ -178,7 +178,14 @@ function writeSidecar(dir, takeId, songId, name, bytes, extra) {
     // Unmuted is only safe while native playback owns the output: if it declined, the engine would fall back to Web
     // Audio and play the song and tone through a PHYSICAL sink before any alignment assert could fail. SINGZ_MUTE is
     // fixed at launch, so relaunch muted; if native is still not in charge, abort before the first Play.
-    const nativeOwns = w => w.evaluate(() => { const e = __test.engine; return e.nativeActive === true || e.nativePlayback?.preparedAhead === true })
+    // The prepare-ahead timer fires some seconds after the lane is ready, so the first read can legitimately say "not
+    // yet". Poll (bounded) for prepared or active ownership; a decline stays a decline once the deadline passes.
+    const nativeOwnsNow = w => w.evaluate(() => { const e = __test.engine; return e.nativeActive === true || e.nativePlayback?.preparedAhead === true })
+    const nativeOwns = async (w, timeoutMs = 20000) => {
+      const deadline = Date.now() + timeoutMs
+      do { if (await nativeOwnsNow(w)) return true; await delay(100) } while (Date.now() < deadline)
+      return false
+    }
     if (!muted && !(await nativeOwns(started.win))) {
       rows.push({ test: 'native playback owns the output before Play', value: 0, limit: '-', result: 'INFO', note: 'unmuted run refused; relaunching with SINGZ_MUTE=1' })
       await app.close().catch(() => {}); app = null

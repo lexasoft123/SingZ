@@ -23,7 +23,7 @@ function fixture(persistent: boolean) {
   } as unknown as SingzApi
   vi.stubGlobal('window', { singz: api })
   const restore = vi.fn(async () => {})
-  const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => {}, restoreLegacyOutput: restore }, () => {})
+  const client = new DesktopNativePlaybackClient(() => {})
   Object.assign(client, { generation: '9', ownsOutput: true, started: true, request: { provider: 'alsa' } })
   const engine = new MultitrackEngine()
   Object.assign(engine, { nativePlayback: client })
@@ -61,7 +61,7 @@ describe('graceful TV close', () => {
     const { api, transport, restore } = fixture(false)
     await closeBoxSession(transport, async () => {}, () => {})
     expect(api.unloadDesktopPlayback).toHaveBeenCalledWith('9')
-    expect(restore).toHaveBeenCalledOnce()
+    expect(restore).not.toHaveBeenCalled()
   })
   it('keeps a failed persistent detach retryable in the engine and the native client', async () => {
     const { engine, client } = fixture(true)

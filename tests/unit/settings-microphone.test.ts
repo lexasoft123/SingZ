@@ -472,7 +472,7 @@ describe('settings microphone input strip', () => {
       /routeApplicationQueue\.schedule\(\s*stopPreviewForRouteEdit,\s*apply,/
     )
     expect(source).toMatch(
-      /const outputId = event\.target\.value \? `native:\$\{event\.target\.value\}` : undefined[\s\S]*afterRouteStops\(\(\) => onChangeOutput\(outputId\)\)/
+      /const outputId = event\.target\.value \|\| undefined[\s\S]*afterRouteStops\(\(\) => onChangeOutput\(outputId\)\)/
     )
   })
 

@@ -29,8 +29,8 @@ export class PlaybackOutputSelectionError extends Error {
 }
 
 interface PlaybackOutputArbiterDependencies {
-  setOutput: (sinkId: string) => Promise<void>
-  enumerateOutputs: () => Promise<readonly Pick<MediaDeviceInfo, 'kind' | 'deviceId'>[]>
+  setOutput: (uid: string) => Promise<void>
+  enumerateOutputs: () => Promise<readonly { uid: string }[]>
   commit: (outputId: PlaybackOutputId) => void
 }
 
@@ -65,10 +65,10 @@ export class PlaybackOutputRouteSafety {
   }
 }
 
-/** One app-lifetime, serialized authority for Chromium playback routing.
+/** One app-lifetime, serialized authority for native playback routing.
  *
  * A direct user choice establishes desired intent and its version before any
- * asynchronous browser handoff starts. Inventory may run concurrently so a
+ * asynchronous native route change starts. Inventory may run concurrently so a
  * direct choice never waits behind a stalled enumeration; only physical sink
  * writes serialize. Every await is followed by a version check, so an older
  * inventory result cannot write a sink after a newer pick, while an already
@@ -80,7 +80,7 @@ export class PlaybackOutputArbiter {
   private committedOutputId: PlaybackOutputId
   private intentVersion = 0
   private reconcileRequest = 0
-  private sinkTail: Promise<void> = Promise.resolve()
+  private routeTail: Promise<void> = Promise.resolve()
 
   constructor(
     initialOutputId: PlaybackOutputId,
@@ -97,7 +97,7 @@ export class PlaybackOutputArbiter {
     // Direct intent invalidates all older boot/device inventory immediately.
     this.reconcileRequest += 1
     this.desiredOutputId = outputId
-    return this.enqueueSink(async () => {
+    return this.enqueueRoute(async () => {
       if (!this.current(version)) return false
       try {
         await this.dependencies.setOutput(outputId ?? '')
@@ -139,13 +139,13 @@ export class PlaybackOutputArbiter {
   }
 
   /** Migrate only if no direct choice arrived while inventory was loading. */
-  async migrateLegacy(resolve: (id: string) => Promise<string | undefined>): Promise<'migrated' | 'missing' | 'stale'> {
-    const id = this.desiredOutputId
+  async migrateLegacy(resolve: (id: string) => Promise<string | undefined>, legacyId?: string): Promise<'migrated' | 'missing' | 'stale'> {
+    const id = legacyId ?? this.desiredOutputId
     if (!id) return 'stale'
     const version = this.intentVersion
     const uid = await resolve(id)
     if (!this.current(version)) return 'stale'
-    if (!(await this.select(uid ? `native:${uid}` : undefined, !!uid))) return 'stale'
+    if (!(await this.select(uid, !!uid))) return 'stale'
     return uid ? 'migrated' : 'missing'
   }
 
@@ -157,7 +157,7 @@ export class PlaybackOutputArbiter {
       const version = this.intentVersion
       const outputId = this.desiredOutputId
       if (outputId) {
-        let devices: readonly Pick<MediaDeviceInfo, 'kind' | 'deviceId'>[]
+        let devices: readonly { uid: string }[]
         try {
           devices = await this.dependencies.enumerateOutputs()
         } catch (error) {
@@ -172,9 +172,9 @@ export class PlaybackOutputArbiter {
         if (request !== this.reconcileRequest) return { kind: 'stale' }
         if (!this.current(version)) continue
         if (!devices.some((device) =>
-          device.kind === 'audiooutput' && device.deviceId === outputId
+          device.uid === outputId
         )) {
-          const result = await this.enqueueSink(async () => {
+          const result = await this.enqueueRoute(async () => {
             if (request !== this.reconcileRequest) return 'stale' as const
             if (!this.current(version)) return 'retry' as const
             try {
@@ -196,7 +196,7 @@ export class PlaybackOutputArbiter {
       }
       if (request !== this.reconcileRequest) return { kind: 'stale' }
       if (!this.current(version)) continue
-      const result = await this.enqueueSink(async () => {
+      const result = await this.enqueueRoute(async () => {
         if (request !== this.reconcileRequest) return 'stale' as const
         if (!this.current(version)) return 'retry' as const
         try {
@@ -233,7 +233,7 @@ export class PlaybackOutputArbiter {
     this.reconcileRequest += 1
     const outputId = this.desiredOutputId
     if (outputId) {
-      let devices: readonly Pick<MediaDeviceInfo, 'kind' | 'deviceId'>[]
+      let devices: readonly { uid: string }[]
       try {
         devices = await this.dependencies.enumerateOutputs()
       } catch (error) {
@@ -242,9 +242,9 @@ export class PlaybackOutputArbiter {
       }
       if (!this.current(version)) return { kind: 'stale' }
       if (!devices.some((device) =>
-        device.kind === 'audiooutput' && device.deviceId === outputId
+        device.uid === outputId
       )) {
-        return this.enqueueSink(async () => {
+        return this.enqueueRoute(async () => {
           if (!this.current(version)) return { kind: 'stale' } as const
           try {
             await this.dependencies.setOutput('')
@@ -257,7 +257,7 @@ export class PlaybackOutputArbiter {
         })
       }
     }
-    return this.enqueueSink(async () => {
+    return this.enqueueRoute(async () => {
       if (!this.current(version)) return { kind: 'stale' } as const
       try {
         await this.dependencies.setOutput(outputId ?? '')
@@ -274,9 +274,9 @@ export class PlaybackOutputArbiter {
     return version === this.intentVersion
   }
 
-  private enqueueSink<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.sinkTail.then(operation, operation)
-    this.sinkTail = result.then(() => undefined, () => undefined)
+  private enqueueRoute<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.routeTail.then(operation, operation)
+    this.routeTail = result.then(() => undefined, () => undefined)
     return result
   }
 }
@@ -285,7 +285,7 @@ export class PlaybackOutputArbiter {
  * PlaybackOutputArbiter so direct and reconciliation paths share authority. */
 export async function applyPlaybackOutputSelection(
   id: PlaybackOutputId,
-  setOutput: (sinkId: string) => Promise<void>,
+  setOutput: (uid: string) => Promise<void>,
   commit: (id: PlaybackOutputId) => void
 ): Promise<void> {
   await setOutput(id ?? '')
@@ -298,11 +298,10 @@ export function nativeOutputUidForBrowser(
   browser: readonly { id: string; label: string }[],
   native: readonly { uid: string; label: string; outputChannels: number }[]
 ): string | undefined {
-  if (id.startsWith('native:')) {
-    const uid = id.slice(7)
-    return native.some(row => row.uid === uid && row.outputChannels > 0) ? uid : undefined
-  }
-  const direct = native.filter(row => row.uid === id && row.outputChannels > 0)
+  // Historical builds persisted native:<uid> in the browser output preference.
+  // Strip only that obsolete wrapper; a native UID may itself contain colons or commas.
+  const uid = id.startsWith('native:') ? id.slice(7) : id
+  const direct = native.filter(row => row.uid === uid && row.outputChannels > 0)
   if (direct.length === 1) return direct[0].uid
   const selected = browser.find(row => row.id === id)
   const label = selected ? outputLabelKey(selected.label) : ''
@@ -346,6 +345,6 @@ export async function switchPlaybackProvider(
   }
   if (!(await deps.select(undefined))) return 'stale'
   deps.setProvider(next)
-  if (mapped && !(await deps.select(`native:${mapped}`))) return 'stale'
+  if (mapped && !(await deps.select(mapped))) return 'stale'
   return uid && !mapped ? 'missing' : 'mapped'
 }

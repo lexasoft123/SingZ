@@ -2,21 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { sanitizeAudioPrefs } from '../../src/renderer/src/model'
 import {
   DESKTOP_STREAM_LANES_KEY,
-  desktopNativePlaybackPreferred,
   desktopStreamLanesPreferred,
   detectedDesktopPlatform
 } from '../../src/renderer/src/audio/native-playback-preference'
 
 describe('desktop native playback preference', () => {
   afterEach(() => vi.unstubAllGlobals())
-
-  it.each(['darwin', 'win32', 'linux', 'other'] as const)('ignores stored choices on %s', (platform) => {
-    const getItem = vi.fn(() => '0')
-    vi.stubGlobal('localStorage', { getItem })
-    expect(desktopNativePlaybackPreferred(platform)).toBe(true)
-    expect(getItem).not.toHaveBeenCalled()
-    expect(desktopNativePlaybackPreferred(platform, false)).toBe(false)
-  })
 
   it('drops both legacy AudioPrefs toggle values', () => {
     expect(sanitizeAudioPrefs({ nativePlayback: true })).toEqual({})

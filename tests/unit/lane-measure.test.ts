@@ -1,11 +1,5 @@
-/**
- * The open's lane read: measured by the core where native playback will play
- * the song, decoded by Chromium where it will not — and, above all, never
- * WORSE than the decode. Every refusal here (the preference off, a runtime
- * that cannot read a format, a measure that throws, a lane the core could not
- * open, an answer shaped wrongly) has to land on the decode path, because a
- * song that opened yesterday must open today.
- */
+import { readFileSync } from 'node:fs'
+/** Native open metadata rejects unsupported or unreadable lanes without a browser playback decode. */
 import { describe, expect, it, vi } from 'vitest'
 
 import {
@@ -14,6 +8,7 @@ import {
   laneReadFromBuffer,
   measureLanes,
   readLanes,
+  readOptionalLanes,
   sampledRms,
   SILENT_LANE_RMS,
   type LaneMeasureHost
@@ -134,27 +129,13 @@ describe('desktopLaneMeasureApplies', () => {
     expect(await desktopLaneMeasureApplies(flacLanes, host({}, 'win32'))).toBe(true)
   })
 
-  it('does not apply where native playback is not preferred', async () => {
-    expect(await desktopLaneMeasureApplies(flacLanes, host({}, 'other'))).toBe(false)
-  })
+  it('rejects a platform without a native provider', async () => { await expect(desktopLaneMeasureApplies(flacLanes, host({}, 'other'))).rejects.toMatchObject({ failure: { code: 'provider-unavailable' } }) })
 
-  it('does not apply when the runtime is unavailable or cannot read a lane', async () => {
-    expect(
-      await desktopLaneMeasureApplies(
-        flacLanes,
-        host({ desktopPlaybackCapability: async () => ({ ...baseRuntime(), available: false }) })
-      )
-    ).toBe(false)
-    expect(
-      await desktopLaneMeasureApplies(
-        flacLanes,
-        host({ desktopPlaybackCapability: async () => { throw new Error('no addon') } })
-      )
-    ).toBe(false)
-    expect(
-      await desktopLaneMeasureApplies([...flacLanes, { id: 'custom-riff', path: '/lib/song/stems/custom-riff.mp3' }], host())
-    ).toBe(false)
-  })
+  it('names unavailable native runtimes and unsupported lane formats', async () => {
+ await expect(desktopLaneMeasureApplies(flacLanes, host({ desktopPlaybackCapability: async () => ({ ...baseRuntime(), available: false }) }))).rejects.toMatchObject({ failure: { code: 'addon-unavailable' } })
+ await expect(desktopLaneMeasureApplies(flacLanes, host({ desktopPlaybackCapability: async () => { throw new Error('no addon') } }))).rejects.toMatchObject({ failure: { code: 'addon-unavailable' } })
+ await expect(desktopLaneMeasureApplies([...flacLanes, { id: 'custom-riff', path: '/lib/custom.mp3' }], host())).rejects.toMatchObject({ failure: { code: 'graph-rejected', laneId: 'custom-riff', format: 'mp3' } })
+ })
 })
 
 describe('measureLanes', () => {
@@ -174,7 +155,7 @@ describe('measureLanes', () => {
     expect(vocals.peaks[1]).toBe(0.5)
   })
 
-  it('leaves out a lane the core refused, so it is decoded instead', async () => {
+  it('keeps refused lanes out of drawing metadata', async () => {
     const { lanes: reads } = await measureLanes(
       flacLanes,
       host({
@@ -212,27 +193,12 @@ describe('measureLanes', () => {
     }
   })
 
-  it('answers empty — never throws — when the measure fails or is refused', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      expect(
-        (await measureLanes(flacLanes, host({ measureDesktopPlaybackLanes: async () => { throw new Error('ipc down') } }))).lanes.size
-      ).toBe(0)
-      expect(
-        (await measureLanes(flacLanes, host({ measureDesktopPlaybackLanes: async () => ({ ok: false, error: 'no addon', lanes: [] }) }))).lanes.size
-      ).toBe(0)
-      expect(warn).toHaveBeenCalledTimes(2)
-    } finally {
-      warn.mockRestore()
-    }
-  })
+  it('publishes a typed preparation failure when measurement is unavailable', async () => {
+ await expect(measureLanes(flacLanes, host({ measureDesktopPlaybackLanes: async () => { throw new Error('ipc down') } }))).rejects.toMatchObject({ failure: { code: 'prepare-failed' } })
+ await expect(measureLanes(flacLanes, host({ measureDesktopPlaybackLanes: async () => ({ ok: false, error: 'no addon', lanes: [] }) }))).rejects.toMatchObject({ failure: { code: 'prepare-failed', detail: 'no addon' } })
+ })
 
-  it('asks nothing when the measure does not apply, or there is nothing to measure', async () => {
-    const measure = vi.fn()
-    expect((await measureLanes(flacLanes, host({ measureDesktopPlaybackLanes: measure }, 'other'))).lanes.size).toBe(0)
-    expect((await measureLanes([], host({ measureDesktopPlaybackLanes: measure }))).lanes.size).toBe(0)
-    expect(measure).not.toHaveBeenCalled()
-  })
+  it('asks nothing when the measure does not apply, or there is nothing to measure', async () => { const measure=vi.fn(); await expect(measureLanes(flacLanes,host({measureDesktopPlaybackLanes:measure},'other'))).rejects.toThrow(); expect((await measureLanes([],host({measureDesktopPlaybackLanes:measure}))).lanes.size).toBe(0); expect(measure).not.toHaveBeenCalled() })
 
   it('takes the song-wide gate over its own, in both directions', async () => {
     const measure = vi.fn(async (request: DesktopPlaybackLaneMeasureRequest) => ({
@@ -314,40 +280,66 @@ describe('readLanes', () => {
     }
   })
 
-  it('decodes only what the core did not measure', async () => {
-    const decode = vi.fn(async (path: string) => buffer([tone(44100, path.includes('drums') ? 0.3 : 0.6)]))
-    const { reads, errors } = await readLanes(
-      [...flacLanes, { id: 'other', path: '/lib/song/stems/other.flac' }],
-      decode,
-      host({
-        measureDesktopPlaybackLanes: async (request) => ({
-          ok: true,
-          error: '',
-          lanes: request.lanes.map((lane) =>
-            lane.id === 'vocals' ? measured(lane.id) : measured(lane.id, { ok: false, error: 'io-error' })
-          )
-        })
-      })
-    )
-    expect(errors.size).toBe(0)
-    expect([...reads.keys()].sort()).toEqual(['drums', 'other', 'vocals'])
-    expect(decode.mock.calls.map(([path]) => path).sort()).toEqual([
-      '/lib/song/stems/drums.flac',
-      '/lib/song/stems/other.flac'
+  it('reports each refused native lane without decoding it in Chromium', async () => {
+ const decode=vi.fn(async()=>buffer([tone(4410,.5)]))
+ const {reads,errors}=await readLanes(flacLanes,decode,host({measureDesktopPlaybackLanes:async request=>({ok:true,error:'',lanes:request.lanes.map(lane=>measured(lane.id,lane.id==='vocals'?{}:{ok:false,error:'io-error'}))})}))
+ expect([...reads.keys()]).toEqual(['vocals']); expect([...errors.keys()]).toEqual(['drums']); expect(errors.get('drums')).toMatchObject({failure:{code:'io-error',laneId:'drums'}}); expect(decode).not.toHaveBeenCalled()
+ })
+
+  it('refuses unavailable native measurement without decoding any lane', async () => { const decode=vi.fn(async()=>buffer([tone(4410,.5)])); await expect(readLanes(flacLanes,decode,host({},'other'))).rejects.toMatchObject({failure:{code:'provider-unavailable'}}); expect(decode).not.toHaveBeenCalled() })
+})
+
+
+describe('optional custom lane admission', () => {
+  it('opens required FLAC stems while dropping unsupported MP3 and M4A custom tracks', async () => {
+    const measure = vi.fn(async (request: DesktopPlaybackLaneMeasureRequest) => ({
+      ok: true, error: '', lanes: request.lanes.map(lane => measured(lane.id))
+    }))
+    const api = host({ measureDesktopPlaybackLanes: measure })
+    const decode = vi.fn(async () => { throw new Error('Browser decode is forbidden') })
+    expect(await desktopLaneMeasureApplies(flacLanes, api)).toBe(true)
+    const stems = await readLanes(flacLanes, decode, { ...api, applies: true })
+    const extras = await readOptionalLanes([
+      { id: 'harmony', path: '/song/harmony.mp3' },
+      { id: 'reference', path: '/song/reference.m4a' },
+      { id: 'guide', path: '/song/guide.wav' }
+    ], decode, api, flacLanes)
+    expect([...stems.reads.keys()]).toEqual(['vocals', 'drums'])
+    expect([...extras.reads.keys()]).toEqual(['guide'])
+    expect([...extras.errors.keys()]).toEqual(['harmony', 'reference'])
+    for (const id of ['harmony', 'reference']) expect(extras.errors.get(id)).toMatchObject({
+      failure: { code: 'graph-rejected', laneId: id }
+    })
+    expect(measure.mock.calls.map(([request]) => request.lanes.map(lane => lane.id))).toEqual([
+      ['vocals', 'drums'], ['guide']
     ])
-    expect(reads.get('vocals')!.buffer).toBeNull()
-    expect(reads.get('drums')!.buffer).not.toBeNull()
+    expect(decode).not.toHaveBeenCalled()
   })
 
-  it('decodes everything where the measure does not apply, and names a lane that fails both', async () => {
-    const decode = vi.fn(async (path: string) => {
-      if (path.includes('drums')) throw new Error('EncodingError')
-      return buffer([tone(4410, 0.5)])
-    })
-    const { reads, errors } = await readLanes(flacLanes, decode, host({}, 'other'))
-    expect([...reads.keys()]).toEqual(['vocals'])
-    expect([...errors.keys()]).toEqual(['drums'])
-    expect(String(errors.get('drums'))).toContain('EncodingError')
-    expect(decode).toHaveBeenCalledTimes(2)
+  it('still rejects an unsupported required stem instead of dropping it', async () => {
+    await expect(desktopLaneMeasureApplies([{ id: 'vocals', path: '/song/vocals.m4a' }], host()))
+      .rejects.toMatchObject({ failure: { code: 'graph-rejected', laneId: 'vocals' } })
   })
+
+  it('drops an optional track that would exceed the native lane limit', async () => {
+    const required = Array.from({ length: 15 }, (_, index) => ({ id: `stem-${index}`, path: `/song/${index}.flac` }))
+    const read = await readOptionalLanes([
+      { id: 'first', path: '/song/first.wav' }, { id: 'overflow', path: '/song/overflow.wav' }
+    ], vi.fn(), host(), required)
+    expect([...read.errors.keys()]).toEqual(['overflow'])
+    expect(read.errors.get('overflow')).toMatchObject({ failure: { code: 'graph-rejected' } })
+  })
+})
+
+
+it('wires project open and post-split stem admission independently of optional custom tracks', () => {
+  const app = readFileSync('src/renderer/src/App.tsx', 'utf8')
+  const requiredCalls = [...app.matchAll(/desktopLaneMeasureApplies\(\[([\s\S]*?)\]\)/g)]
+  expect(requiredCalls.length).toBe(3)
+  for (const [, lanes] of requiredCalls) {
+    expect(lanes).not.toContain('.custom')
+    expect(lanes).not.toContain('kept.map')
+  }
+  expect(app.match(/await (?:checked\()?readOptionalLanes\(/g)).toHaveLength(2)
+  expect(app).toContain("setNotice(t('app.load.laneMissing'")
 })

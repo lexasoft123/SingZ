@@ -43,11 +43,11 @@ describe('native idle click preview', () => {
     expect(report).toHaveBeenCalledOnce()
     expect(scheduleClick).not.toHaveBeenCalled()
   })
-  it('keeps the preexisting legacy path while there is no native client or owner', () => {
+  it('refuses a missing native preview even without a song owner', async () => {
     vi.stubGlobal('window', { singz: {} })
     const { engine, scheduleClick } = engineFixture()
     Object.assign(engine, { ctx: { state: 'running', currentTime: 12 } })
-    engine.previewClick(true)
-    expect(scheduleClick).toHaveBeenCalledWith(12, true)
+    await expect(engine.previewClick(true)).resolves.toMatchObject({ ok: false, errorCode: 'addon-unavailable' })
+    expect(scheduleClick).not.toHaveBeenCalled()
   })
 })

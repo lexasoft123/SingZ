@@ -39,6 +39,7 @@ import { Modal } from '@singz/ui'
 import { t } from '../i18n'
 
 export interface SettingsModalProps {
+  focusAudioRoute?: boolean
   onQuickStart?: () => void
   audio: AudioPrefs
   onChangeOutput: (id: string | undefined) => Promise<void>
@@ -386,6 +387,7 @@ export function OutputRouteRecovery({
 export default function SettingsModal({
   onQuickStart,
   audio,
+  focusAudioRoute,
   onChangeOutput,
   onChangeInput,
   onMigrateNativeInput,
@@ -844,7 +846,7 @@ export default function SettingsModal({
   ): Promise<boolean> => {
     // The queue stops the preview first, then holds it dormant across the
     // route edit's own asynchronous apply, so capture cannot reopen in the gap
-    // before setSinkId settles.
+    // before the native route change settles.
     const operation = routeApplicationQueue.schedule(
       stopPreviewForRouteEdit,
       apply,
@@ -924,6 +926,10 @@ export default function SettingsModal({
     }
   }
 
+  useEffect(() => {
+    if (focusAudioRoute) document.getElementById('settings-output')?.focus()
+  }, [focusAudioRoute])
+
   return (
     <Modal onClose={closeSettings} cardClassName="settings-card">
       <h2>{t('settings.title')}</h2>
@@ -936,7 +942,7 @@ export default function SettingsModal({
           <select id="settings-output" className="settings-select" value={audio.nativeOutputUid ?? ''} onChange={(event) => {
             // Snapshot before the controlled select renders its saved value
             // again; the physical route apply intentionally runs later.
-            const outputId = event.target.value ? `native:${event.target.value}` : undefined
+            const outputId = event.target.value || undefined
             afterRouteStops(() => onChangeOutput(outputId))
           }}>
             <option value="">{t('settings.common.systemDefault')}</option>

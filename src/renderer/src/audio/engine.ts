@@ -3,7 +3,6 @@ import { recordRendererDecode } from './decode-guard'
 import { VOICE_TAKE_LANE_ID, type VoiceMonitorPlaybackContext, type VoiceTakeLaneState, type VoiceTakeLaneSource, type VoiceTakeLaneControl } from '../../../shared/voice-take'
 import { sanitizeSongVolume } from './song-volume'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
-import { nativeOutputForBrowserLabel, outputLabelKey } from '../../../shared/output-device-policy'
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch'
 import {
   accentIndex,
@@ -21,10 +20,10 @@ import type {
 } from './desktop-native-playback'
 import type { DesktopNativePlaybackEngineRequest } from './desktop-native-playback'
 import type { AcceptedControlHost } from './accepted-controls'
-import { desktopNativePlaybackPreferred, detectedDesktopPlatform, type DesktopNativePlaybackPolicy } from './native-playback-preference'
+import { detectedDesktopPlatform, type DesktopNativePlaybackPolicy } from './native-playback-preference'
 import type { DesktopPlaybackProvider, DesktopPlaybackStatus } from '../../../shared/types'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
-import { t } from '../i18n'
+import type { DesktopNativePlaybackFailure } from './native-playback-failure'
 
 export interface EngineTrackInput {
   id: string
@@ -71,6 +70,9 @@ export interface EnginePlaybackError {
   provider: DesktopPlaybackProvider | null
   message: string
   cause: unknown
+  failure?: DesktopNativePlaybackFailure
+  /** Focus recovery controls only after an explicit playback action. */
+  userInitiated?: boolean
 }
 
 const PROVIDER_PLAYBACK_ERROR_CODES = new Set<EnginePlaybackErrorCode>([
@@ -91,7 +93,6 @@ export type TrainingSpec =
   | { mode: 'period'; periodSec: number; stems: string[] }
   | { mode: 'windows'; windows: { s: number; e: number }[]; stems: string[] }
 
-const START_DELAY = 0.04 // scheduling headroom so all stems start sample-locked
 const CLICK_LOOKAHEAD = 0.18 // clicks are queued this far ahead on the audio clock
 const CLICK_TICK_MS = 60
 // Grid-less (rubato) count-in: each chosen "bar" is 3 ticks, one per second
@@ -109,9 +110,6 @@ export class MultitrackEngine {
   private desiredOutputId = ''
   private trainingConfiguredOutputId: string | null = null
   private confirmedOutputId = ''
-  private outputRouteVersion = 0
-  private outputRouteApplyPending: Promise<void> | null = null
-  private nativeMonitorLease = false
   private nativePlayback: DesktopNativePlaybackClient | null = null
   /** The prepare-ahead debounce: the loader and the settings that follow a
    * load (grid, metronome, transpose, tempo, training, region, faders) each
@@ -325,7 +323,9 @@ export class MultitrackEngine {
         ? 'Audio playback stopped after a buffer underrun. Press Play to retry.'
         : `Audio playback stopped (${status.terminalReason || status.hostState}). Press Play to retry.`)
       this.requestedPlaybackError = { reason: 'toggle', code: 'provider-failure',
-        provider: this.nativePlayback.recoveryProviderId, message, cause: status }
+        provider: this.nativePlayback.recoveryProviderId, message, cause: status,
+        failure: { code: status.terminalReason === 'device-lost' || status.hostState === 'device-lost'
+          ? 'device-lost' : status.state === 'quarantined' ? 'recovery-required' : 'provider-failure', detail: message } }
       console.error('Native playback stopped:', message)
     }
     if (status?.transportState === 'completed' && this._playing && this.nativePlayback?.active) {
@@ -432,10 +432,9 @@ export class MultitrackEngine {
     this.training = request.training
     this.region = request.loop ? { ...request.loop } : null
     this.regionLoop = request.loop !== null
-    if (request.browserOutputId !== undefined) {
-      this.desiredOutputId = request.browserOutputId
-      this.confirmedOutputId = request.browserOutputId
-      this.outputRouteVersion++
+    if (request.preferredOutputUid !== undefined) {
+      this.desiredOutputId = request.preferredOutputUid
+      this.confirmedOutputId = request.preferredOutputUid
     }
     this.master.gain.value = this.masterVol
     this.clickGain.gain.value = this.met.volume * this.masterVol
@@ -462,7 +461,7 @@ export class MultitrackEngine {
     positionSeconds = this.startOffset
   ): DesktopNativePlaybackEngineRequest {
     return {
-      browserOutputId: this.desiredOutputId,
+      preferredOutputUid: this.desiredOutputId,
       lanes: this.tracks,
       ...(this.voiceTakeSource ? { voiceTake: { ...this.voiceTakeSource, ...this.voiceTakeControl } } : {}),
       onVoiceTakeState: this.publishVoiceTakeState,
@@ -480,7 +479,6 @@ export class MultitrackEngine {
       nativeAudioProvider: this.nativeAudioProvider,
       graphDocument: this.graphDocument,
       ...(this.retainedProjectIdentity ? { retainedProject: { ...this.retainedProjectIdentity } } : {}),
-      nativePlaybackEnabled: this.nativePlaybackPolicy.playback,
       streamLanes: this.nativePlaybackPolicy.streamLanes
     }
   }
@@ -498,8 +496,10 @@ export class MultitrackEngine {
         !this.aheadAllowed || this.betweenSongs) return
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null
+      const songEpoch = this._songEpoch
+      const aheadEpoch = this.aheadEpoch
       const pending = this.prepareNativeAhead().catch((error) => {
-        console.error('Native prepare ahead of Play failed:', error)
+        if (songEpoch === this._songEpoch && aheadEpoch === this.aheadEpoch && !this.betweenSongs && !this.teardownStarted) this.reportPlaybackFailure(error)
       })
       this.nativeAheadPending = pending
       void pending.finally(() => {
@@ -511,7 +511,6 @@ export class MultitrackEngine {
   private async prepareNativeAhead(): Promise<void> {
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
         this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs) return
-    if (!desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback)) return
     const epoch = this._songEpoch
     const ahead = this.aheadEpoch
     // Play waits for nativeAheadPending and adopts this graph. Its pending
@@ -531,7 +530,10 @@ export class MultitrackEngine {
     if (module.client.active) return
     if (module.client.preparedAhead) await module.client.discardAhead()
     if (stale()) return
-    await module.prepareAhead(module.client, this.nativePlaybackRequest(true))
+    const prepared = await module.prepareAhead(module.client, this.nativePlaybackRequest(true))
+    if (!stale() && !prepared && module.client.lastFailure) {
+      this.reportPlaybackFailure(Object.assign(new Error(module.client.lastFailure.detail), { failure: module.client.lastFailure }))
+    }
     // Discarded while the prepare ran: it is serialized behind, so this
     // lands after the prepare and takes it with it.
     if (stale()) await module.client.discardAhead()
@@ -568,10 +570,6 @@ export class MultitrackEngine {
   }> {
     const module = await import('./desktop-native-playback')
     this.nativePlayback ??= new module.DesktopNativePlaybackClient(
-      {
-        releaseLegacyOutput: () => this.releaseOutputForNativeMonitor(),
-        restoreLegacyOutput: () => this.restoreOutputAfterNativeMonitor()
-      },
       (status) => this.onNativeStatus(status)
     )
     return {
@@ -675,8 +673,6 @@ export class MultitrackEngine {
       cleanupError = error
     }
 
-    if (detectedDesktopPlatform() === 'darwin')
-      await (typeof window === 'undefined' ? undefined : window.singz?.setDesktopPlaybackNativeOutputCurrent)?.(false)
 
     // No late completion may resurrect renderer transport state. Emit only
     // after native cleanup and route restoration have produced their final
@@ -755,31 +751,49 @@ export class MultitrackEngine {
   private requestPlay(reason: EnginePlayRequestReason, opts: { countIn?: boolean } = {}): void {
     if (this.teardownStarted) return
     const requestEpoch = ++this.playRequestEpoch
-    void this.play(opts).catch((cause: unknown) => {
-      if (this.teardownStarted || requestEpoch !== this.playRequestEpoch) return
-      const candidate = cause as { code?: unknown; provider?: unknown }
-      const code = typeof candidate?.code === 'string' &&
-        PROVIDER_PLAYBACK_ERROR_CODES.has(candidate.code as EnginePlaybackErrorCode)
-        ? candidate.code as EnginePlaybackErrorCode
-        : 'playback-failure'
-      const provider = candidate?.provider === 'asio' || candidate?.provider === 'wasapi' ||
-        candidate?.provider === 'coreaudio' || candidate?.provider === 'alsa'
-        ? candidate.provider
-        : null
-      const message = cause instanceof Error ? cause.message : String(cause)
-      this._playing = false
-      this.stopSources()
-      this.cancelPendingClicks()
-      this.nextClickIdx = null
-      this.countInfo = null
-      this.startBeatIdx = null
-      this.syncBoundWatcher()
-      this.syncTrainWatcher()
-      this.syncClickWatcher()
-      this.requestedPlaybackError = { reason, code, provider, message, cause }
-      console.error('Playback request failed:', this.requestedPlaybackError)
-      this.emit()
+    void this.play({ ...opts, reason }).catch((cause: unknown) => {
+      if (!this.teardownStarted && requestEpoch === this.playRequestEpoch && (this.requestedPlaybackError?.cause !== cause || this.requestedPlaybackError?.reason !== reason))
+        this.reportPlaybackFailure(cause, reason, reason === 'toggle')
     })
+  }
+
+  /** Only a deliberate Retry enters recovery; the persistent panel stays up until success. */
+  async retryPlayback(): Promise<void> {
+    const songEpoch = this._songEpoch
+    const current = (): boolean => !this.teardownStarted && songEpoch === this._songEpoch
+    try {
+      await this.discardNativeAhead()
+      if (!current()) return
+      if (this.nativePlayback?.active && !this.nativePlayback.recoveryPending) await this.nativePlayback.unload()
+      if (!current()) return
+      await this.play()
+    } catch (cause) {
+      if (current() && this.requestedPlaybackError?.cause !== cause) this.reportPlaybackFailure(cause, 'toggle', true)
+      throw cause
+    }
+  }
+
+  private reportPlaybackFailure(cause: unknown, reason: EnginePlayRequestReason = 'toggle', userInitiated = false): void {
+    const candidate = cause as { code?: unknown; provider?: unknown; failure?: DesktopNativePlaybackFailure }
+    const code = typeof candidate?.code === 'string' &&
+      PROVIDER_PLAYBACK_ERROR_CODES.has(candidate.code as EnginePlaybackErrorCode)
+      ? candidate.code as EnginePlaybackErrorCode : 'playback-failure'
+    const provider = candidate?.provider === 'asio' || candidate?.provider === 'wasapi' ||
+      candidate?.provider === 'coreaudio' || candidate?.provider === 'alsa' ? candidate.provider : null
+    const message = cause instanceof Error ? cause.message : String(cause)
+    this._playing = false
+    this.stopSources()
+    this.cancelPendingClicks()
+    this.nextClickIdx = null
+    this.countInfo = null
+    this.startBeatIdx = null
+    this.syncBoundWatcher()
+    this.syncTrainWatcher()
+    this.syncClickWatcher()
+    this.requestedPlaybackError = { reason, code, provider, message, cause, userInitiated,
+      failure: candidate?.failure ?? this.nativePlayback?.lastFailure ?? { code: 'prepare-failed', detail: message } }
+    console.error('Playback request failed:', this.requestedPlaybackError)
+    this.emit()
   }
 
   private clearRequestedPlaybackError(): void {
@@ -830,199 +844,39 @@ export class MultitrackEngine {
     const routeKey = `${provider}:${this.desiredOutputId}`
     if (this.nativePlayback?.active || this.trainingConfiguredOutputId === routeKey) return
     const requested = this.desiredOutputId
-    let uid = ''
-    if (requested.startsWith('native:')) {
-      uid = requested.slice(7)
-    } else if (requested && requested !== 'default') {
-      const inventory = await window.singz.audioHostDevices(provider)
-      if (!inventory.ok) throw new Error(inventory.error)
-      const outputs = await navigator.mediaDevices.enumerateDevices()
-      const selected = outputs.find(device => device.kind === 'audiooutput' && device.deviceId === requested)
-      if (!selected) throw new Error('The selected output is no longer connected.')
-      uid = nativeOutputForBrowserLabel(selected.label, inventory.devices).uid
-    }
+    const uid = requested
     const result = await window.singz.configureDesktopTrainingOutput(uid, provider)
     if (!result.ok) throw new Error(result.error || 'The training output could not open.')
     if (requested === this.desiredOutputId) this.trainingConfiguredOutputId = routeKey
   }
 
-  /** Physical output context for the independent live monitor. No capture or permission request. */
+  /** Native output context; the renderer never owns a browser output. */
   async voiceMonitorPlaybackContext(): Promise<VoiceMonitorPlaybackContext> {
-    const inventory = await window.singz.audioHostDevices('coreaudio')
-    if (!inventory.ok) throw new Error(inventory.error)
-    const devices = await navigator.mediaDevices.enumerateDevices()
-    const uidFor = (id: string): string => {
-      if (!id || id === 'default') return inventory.defaultOutputUid
-      if (id.startsWith('native:')) return id.slice(7)
-      const device = devices.find(row => row.kind === 'audiooutput' && row.deviceId === id)
-      return device ? nativeOutputForBrowserLabel(device.label, inventory.devices).uid : ''
-    }
-    const sink = this.ctx.sinkId
-    return {
-      webAudioPlaying: this.playing && !this.nativeActive,
-      browserOutputUid: typeof sink === 'string' ? uidFor(sink) : '',
-      selectedOutputUid: !this.desiredOutputId || this.desiredOutputId === 'default' ? '' : uidFor(this.desiredOutputId)
-    }
+    return { webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: this.desiredOutputId }
   }
 
-  /** Current output device id ('' = system default). */
-  get outputDeviceId(): string {
-    return this.desiredOutputId
-  }
+  /** Native output UID (empty = system default). */
+  get outputDeviceId(): string { return this.desiredOutputId }
 
-  /**
-   * Route everything audible to another device. Mix, metronome and the
-   * stretch path all terminate at ctx.destination, so one sinkId move
-   * carries them together; '' returns to the system default.
-   */
-  async setOutput(deviceId: string): Promise<void> {
-    if (!('setSinkId' in this.ctx)) throw new Error('Changing outputs is not supported here.')
-    this.desiredOutputId = deviceId
-    this.outputRouteVersion++
-    // Native playback owns its own endpoint, independently of Chromium's sink.
-    if (this.nativePlayback?.active && !this.nativePlayback.retainedPrepared) {
-      try {
-        await this.nativePlayback.reconfigure({ browserOutputId: deviceId }, { refreshRoute: true })
-        this.confirmedOutputId = deviceId
-      } catch (error) {
-        this.desiredOutputId = this.confirmedOutputId
-        throw error
-      }
-      return
-    }
-    await this.discardNativeAhead()
-    // A native monitor owns the physical output. Remember route changes for
-    // restoration, but never let Chromium reacquire a device underneath it.
-    if (this.nativeMonitorLease) return
-    await this.applyDesiredOutputRoute()
-    if (detectedDesktopPlatform() !== 'linux' || deviceId.startsWith('native:')) await this.configureTrainingOutput()
-    if (this._playing && this.ctx.state !== 'running') await this.ctx.resume()
-    // A paused song's prepared graph belonged to the old route. Restore its
-    // head start after the new route succeeds, just as after song settings.
-    this.scheduleNativePrepareAhead()
-  }
-
-  /** Native playback owns a native: output; Chromium only needs a physical sink for the Web Audio fallback.
-   * While native is the path the browser stays on the silent sink and nothing is matched, so decorated or
-   * duplicated Chromium labels cannot block selecting the output. */
-  private nativePathOwnsOutput(): boolean {
-    return desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback)
-  }
-
-  private async browserSinkForRoute(nativeId: string): Promise<string | { type: 'none' }> {
-    if (this.nativePathOwnsOutput()) return { type: 'none' }
-    return (await this.chromiumSinkForNative(nativeId)) ?? { type: 'none' }
-  }
-
-  /** Web Audio is about to play a native: output: only now is a unique browser sink required. */
-  private async applyFallbackSink(nativeId: string): Promise<void> {
-    await this.outputRouteApplyPending?.catch(() => undefined)
-    const sink = await this.chromiumSinkForNative(nativeId)
-    if (!sink) throw new Error('The selected output is unavailable for fallback playback.')
-    await (this.ctx.setSinkId as unknown as (sink: string) => Promise<void>)(sink)
-  }
-
-  private async chromiumSinkForNative(uid: string): Promise<string | null> {
-    const platform = detectedDesktopPlatform()
-    if (platform === 'linux') return null
-    const provider = platform === 'win32' ? this.nativeAudioProvider : 'coreaudio'
-    const inventory = await window.singz.audioHostDevices(provider)
-    if (!inventory.ok) throw new Error(inventory.error)
-    const native = inventory.devices.filter(row => row.uid === uid && row.outputChannels > 0)
-    if (native.length !== 1) throw new Error('The selected output is no longer connected.')
-    const label = outputLabelKey(native[0].label)
-    if (!label) return null
-    const nativeMatches = inventory.devices.filter(row => row.outputChannels > 0 && outputLabelKey(row.label) === label)
-    const browser = (await navigator.mediaDevices.enumerateDevices()).filter(row => row.kind === 'audiooutput' && row.deviceId !== 'default' && row.deviceId !== 'communications' && outputLabelKey(row.label) === label)
-    if (nativeMatches.length !== 1 || browser.length !== 1) throw new Error('The selected output cannot be uniquely matched to a browser device.')
-    return browser[0].deviceId
-  }
-
-  /** Applies the newest desired Chromium route. A slower stale setSinkId can
-   * never finish after a newer request and silently become the physical sink. */
-  private async applyDesiredOutputRoute(): Promise<void> {
-    if (this.outputRouteApplyPending) return this.outputRouteApplyPending
-    const operation = (async (): Promise<void> => {
-      while (true) {
-        const version = this.outputRouteVersion
-        const target = this.desiredOutputId
-        try {
-          if (target.startsWith('native:')) {
-            const sink = await this.browserSinkForRoute(target.slice(7))
-            if (version !== this.outputRouteVersion) continue
-            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(sink)
-          } else if (this.ctx.sinkId !== target) await this.ctx.setSinkId(target)
-        } catch (error) {
-          if (version !== this.outputRouteVersion) continue
-          this.desiredOutputId = this.confirmedOutputId
-          this.outputRouteVersion++
-          const fallbackVersion = this.outputRouteVersion
-          if (this.ctx.sinkId !== this.confirmedOutputId) {
-            const rollback = this.confirmedOutputId.startsWith('native:')
-              ? await this.browserSinkForRoute(this.confirmedOutputId.slice(7)).catch(() => ({ type: 'none' as const }))
-              : this.confirmedOutputId
-            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(rollback)
-          }
-          if (fallbackVersion !== this.outputRouteVersion) continue
-          throw error
-        }
-        if (version !== this.outputRouteVersion) continue
-        this.confirmedOutputId = target
-        return
-      }
-    })()
-    this.outputRouteApplyPending = operation
+  async setOutput(uid: string): Promise<void> {
+    this.desiredOutputId = uid
     try {
-      await operation
-    } finally {
-      if (this.outputRouteApplyPending === operation) this.outputRouteApplyPending = null
-    }
-  }
-
-  async releaseOutputForNativeMonitor(): Promise<void> {
-    if (this.nativeMonitorLease) return
-    this.nativeMonitorLease = true
-    this.emit()
-    try {
-      // Drain a route switch already inside setSinkId, then make the silent
-      // sink the last physical operation before native begin.
-      if (this.outputRouteApplyPending) await this.outputRouteApplyPending
-      if (this.ctx.state === 'running') await this.ctx.suspend()
-      // Chromium accepts the standards-track silent sink object; the DOM lib
-      // bundled with this TypeScript release still declares only the older
-      // string overload.
-      await (this.ctx.setSinkId as unknown as (
-        sink: string | { type: 'none' }
-      ) => Promise<void>)({ type: 'none' })
+      if (this.nativePlayback?.active && !this.nativePlayback.retainedPrepared) {
+        await this.nativePlayback.reconfigure({ preferredOutputUid: uid }, { refreshRoute: true })
+      } else {
+        await this.discardNativeAhead()
+        if (detectedDesktopPlatform() !== 'linux' || uid) await this.configureTrainingOutput()
+      }
+      this.confirmedOutputId = uid
+      this.scheduleNativePrepareAhead()
     } catch (error) {
-      this.nativeMonitorLease = false
-      this.emit()
-      try { await this.ctx.resume() } catch { /* preserve the release failure */ }
+      this.desiredOutputId = this.confirmedOutputId
       throw error
     }
   }
 
-  /** Reattach the saved Chromium route and make the context ready. Sources
-   * remain paused; ending monitoring never resumes song playback. */
-  async restoreOutputAfterNativeMonitor(): Promise<void> {
-    if (!this.nativeMonitorLease) return
-    while (true) {
-      await this.applyDesiredOutputRoute()
-      const restoredVersion = this.outputRouteVersion
-      if (this.ctx.state !== 'running') await this.ctx.resume()
-      if (restoredVersion !== this.outputRouteVersion) continue
-      this.nativeMonitorLease = false
-      this.emit()
-      return
-    }
-  }
-
   get nativeMonitorOwnsOutput(): boolean {
-    // During a successful restore the AudioContext lease finishes one
-    // microtask before the client clears its renderer ownership. Expose the
-    // union so subscribers never observe an unsafe transient "unloaded and
-    // unowned" window in which Settings could replace the provider.
-    return this.nativeMonitorLease || this.nativePlayback?.active === true
+    return this.nativePlayback?.active === true
   }
 
   get position(): number {
@@ -1251,23 +1105,9 @@ export class MultitrackEngine {
         return failure
       })
     }
-    // A native owner must never acquire a second Chromium output on refusal.
-    if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead || this.nativeMonitorLease) {
-      const failure: import('../../../shared/types').DesktopPreviewClickResult = {
-        ok: false, errorCode: 'addon-unavailable', error: 'Native click preview is unavailable'
-      }
-      console.error('Metronome preview could not start:', failure.errorCode, failure.error)
-      return Promise.resolve(failure)
-    }
-    if (this.ctx.state === 'suspended') {
-      void this.ctx.resume().then(() => {
-        if (!this.teardownStarted && !this.nativeMonitorLease) this.scheduleClick(this.ctx.currentTime, accent)
-      }).catch((error: unknown) => {
-        if (!this.teardownStarted) console.error('Metronome preview could not start:', error)
-      })
-      return
-    }
-    this.scheduleClick(this.ctx.currentTime, accent)
+    const failure = { ok: false, errorCode: 'addon-unavailable', error: 'Native click preview is unavailable' } as const
+    console.error('Metronome preview could not start:', failure.errorCode, failure.error)
+    return Promise.resolve(failure)
   }
 
   /**
@@ -1917,9 +1757,15 @@ export class MultitrackEngine {
     }
   }
 
-  play(opts: { countIn?: boolean } = {}): Promise<void> {
+  play(opts: { countIn?: boolean; reason?: EnginePlayRequestReason } = {}): Promise<void> {
     if (this.teardownStarted) return Promise.resolve()
-    const operation = this.performPlay(opts)
+    const songEpoch = this._songEpoch
+    const play = this.performPlay(opts)
+    const generation = this.generation
+    const operation = play.catch((cause: unknown) => {
+      if (!this.teardownStarted && songEpoch === this._songEpoch && generation === this.generation) this.reportPlaybackFailure(cause, opts.reason, opts.reason === undefined || opts.reason === 'toggle')
+      throw cause
+    })
     this.pendingPlayRequests.add(operation)
     this.emit()
     return operation.finally(() => {
@@ -1986,7 +1832,7 @@ export class MultitrackEngine {
       // resume below is still the right fallback.
       if (opts.countIn !== false && this.met.countInBars > 0) {
         const from = atEnd ? restart : this.position
-        const prepare = await (await this.ensureNativePlayback()).decide(this.nativePlaybackRequest(true, from))
+        const prepare = await (await this.ensureNativePlayback()).decide(this.nativePlaybackRequest(true, from), failure => { this.nativePlayback!.lastFailure = failure })
         if (requestGeneration !== this.generation) return
         if (prepare) {
           await this.nativePlayback.restartWithCountIn(prepare)
@@ -1999,6 +1845,7 @@ export class MultitrackEngine {
           this.emit()
           return
         }
+        throw Object.assign(new Error(this.nativePlayback.lastFailure?.detail ?? 'Native count-in preparation failed.'), { failure: this.nativePlayback.lastFailure })
       }
       if (atEnd) {
         await this.nativePlayback.seek(restart)
@@ -2023,12 +1870,10 @@ export class MultitrackEngine {
       this.emit()
       return
     }
-    if ((this.nativeMonitorLease && !nativeRecoveryPending) ||
-        this._playing || this.tracks.length === 0) return
+    if (this._playing || this.tracks.length === 0) return
     this.trainingCues?.cancel()
     // A recovery retry deliberately keeps Chromium on the silent sink. It
     // must not reacquire WASAPI before retrying the exact native provider.
-    if (!nativeRecoveryPending && this.ctx.state === 'suspended') await this.ctx.resume()
     if (requestGeneration !== this.generation) return
     if (this.startOffset >= this.duration - 0.01) this.startOffset = 0
 
@@ -2069,130 +1914,12 @@ export class MultitrackEngine {
       this.emit()
       return
     }
-    if (nativeRecoveryPending) {
-      throw new nativeModule.RecoveryError(
-        nativeModule.client.recoveryProviderId ?? this.nativeAudioProvider,
-        'provider-recovery-unavailable',
-        null,
-        'The retained native provider cannot retry with the current runtime, toggle, or graph.'
-      )
+    const failure = nativeModule.client.lastFailure ?? {
+      code: 'prepare-failed' as const, detail: 'Native playback could not prepare this song.'
     }
-    if (this.nativePlaybackPolicy.requireNative) {
-      throw new Error(t('box.nativeRequired'))
-    }
-    if (this.desiredOutputId.startsWith('native:')) await this.applyFallbackSink(this.desiredOutputId.slice(7))
-
-    if (detectedDesktopPlatform() === 'darwin')
-      await (typeof window === 'undefined' ? undefined : window.singz?.setDesktopPlaybackNativeOutputCurrent)?.(false)
-
-    // Native declined, so Web Audio is about to do the playing — and it can
-    // only do it from samples. A lane released to an earlier native
-    // generation is decoded again here, which costs a second or two of
-    // silence at Play; a mix quietly missing a lane costs the singer the
-    // take. If a lane cannot be restored at all, say so rather than start a
-    // partial mix.
-    if (!(await this.ensureLaneBuffers())) {
-      throw new Error(t('library.engine.songUnreadable'))
-    }
-    if (requestGeneration !== this.generation) return
-
-    // The last await still belongs to this request; its source callbacks do too.
-    const gen = requestGeneration
-    let when = this.ctx.currentTime + START_DELAY
-    // Metronome pipeline. A count-in pushes the music start out and clicks
-    // through the beats leading up to it — real preceding beats when they
-    // exist (mid-song starts count in at the local tempo), extrapolated ones
-    // before the track begins. The playback click then carries on from the
-    // first in-song beat.
-    this.countInfo = null
-    this.startBeatIdx = null
-    this.nextClickIdx = null
-    this.clickLap = 0
-    const g = this.beatsInfo
-    const bars = this.met.countInBars
-    const countIn = opts.countIn !== false && bars > 0 && g !== null
-    if (g !== null && (countIn || this.met.click)) {
-      const i0 = beatIndexAtOrAfter(g, this.startOffset)
-      this.startBeatIdx = i0
-      if (countIn) {
-        // Bar length AT the entry beat: a count-in into a 3-beat bar counts 3.
-        const beats = bars * barLengthAt(g, i0)
-        const first = i0 - beats
-        when += (this.startOffset - beatTime(g, first)) / this.rate
-        this.nextClickIdx = first
-      } else if (beatTime(g, i0) <= this.duration) {
-        this.nextClickIdx = i0
-      }
-    }
-    // No grid (rubato) — count in by the clock instead: bars×3 ticks, one per
-    // second, the music entering one second after the last tick. Wall-clock
-    // pre-roll: the playback rate has no bearing on how humans count seconds.
-    const secTicks = opts.countIn !== false && bars > 0 && g === null ? bars * SEC_COUNT_TICKS : 0
-    when += secTicks * SEC_COUNT_PERIOD
-    this.sources = []
-    let longestIdx = 0
-    this.tracks.forEach((t, i) => {
-      const src = this.ctx.createBufferSource()
-      // `ensureLaneBuffers` above is what makes this non-null; a lane with no
-      // path and no samples has never been playable and still is not.
-      src.buffer = t.buffer
-      src.playbackRate.value = this.rate
-      this.applyLoop(src)
-      src.connect(t.gain)
-      src.start(when, Math.min(this.startOffset, t.duration))
-      this.sources.push(src)
-      if (t.duration > this.tracks[longestIdx].duration) longestIdx = i
-    })
-    const watched = this.sources[longestIdx]
-    if (watched) {
-      watched.onended = () => {
-        if (gen === this.generation && this._playing) {
-          this._playing = false
-          this.startOffset = this.duration
-          this.nextClickIdx = null
-          this.syncClickWatcher()
-          this.emit()
-        }
-      }
-    }
-    this.startedAt = when
-    this._playing = true
-    this.clearRequestedPlaybackError()
-    if (countIn && g !== null && this.nextClickIdx !== null && this.startBeatIdx !== null) {
-      const perBar = barLengthAt(g, this.startBeatIdx)
-      const total = bars * perBar
-      const span = this.startOffset - beatTime(g, this.nextClickIdx)
-      const first = this.nextClickIdx
-      this.countInfo = {
-        firstCtx: this.clickCtxTime(beatTime(g, first), 0),
-        periodCtx: span / total / this.rate,
-        clickCtx: Array.from({ length: total }, (_, k) => this.clickCtxTime(beatTime(g, first + k), 0)),
-        total,
-        perBar
-      }
-    } else if (secTicks > 0) {
-      // Short and bounded — schedule every tick now, no walker involved.
-      // Ticks carry the stretch-bus latency like beat clicks do, so the
-      // last-tick→music gap is exactly one second at the ear.
-      const firstCtx = when + (this.stretchOn ? this.stretchLatency : 0) - secTicks * SEC_COUNT_PERIOD
-      for (let k = 0; k < secTicks; k++) {
-        this.scheduleClick(firstCtx + k * SEC_COUNT_PERIOD, this.met.accent && k % SEC_COUNT_TICKS === 0)
-      }
-      this.countInfo = {
-        firstCtx,
-        periodCtx: SEC_COUNT_PERIOD,
-        clickCtx: Array.from({ length: secTicks }, (_, k) => firstCtx + k * SEC_COUNT_PERIOD),
-        total: secTicks,
-        perBar: SEC_COUNT_TICKS
-      }
-    }
-    this.syncBoundWatcher()
-    this.syncTrainWatcher()
-    this.trainTick() // duck state must be right before the first sample sounds
-    this.syncClickWatcher()
-    this.clickTick() // first clicks must land inside the initial lookahead
-    this.emit()
+    throw Object.assign(new Error(failure.detail), { failure })
   }
+
 
   pause(): void {
     void this.pauseAccepted().catch(error => console.error('Native pause failed:', error))

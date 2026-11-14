@@ -82,8 +82,9 @@ export interface NativeCaptureBinding {
   beginVoiceMonitor: import('./voice-monitor').VoiceMonitorNative['beginVoiceMonitor']
   setVoiceMonitorGain: import('./voice-monitor').VoiceMonitorNative['setVoiceMonitorGain']
   voiceMonitorStatus: import('./voice-monitor').VoiceMonitorNative['voiceMonitorStatus']
-  setPlaybackOutputCurrent(current: boolean): { ok: boolean; error?: string }
   endVoiceMonitor: import('./voice-monitor').VoiceMonitorNative['endVoiceMonitor']
+  /** Internal native route lifecycle; never exposed through renderer IPC. */
+  setPlaybackOutputCurrent(current: boolean): { ok: boolean; error?: string }
 
   exportAudio?(sourceFd: number | number[], destinationFd: number, format: 'wav' | 'flac' | 'mp3', job: string): Promise<{ ok: boolean; error?: string }>
   cancelAudioExport?(job: string): void
@@ -2052,17 +2053,6 @@ export class CaptureOwner {
     return result
   }
 
-  setPlaybackOutputCurrent(rendererId: number, current: unknown): { ok: boolean; error?: string } {
-    if (typeof current !== 'boolean' ||
-        (this.playbackRendererId !== null && this.playbackRendererId !== rendererId) ||
-        (current && (!this.playbackGeneration || this.playbackRendererId !== rendererId)))
-      return { ok: false, error: 'Invalid native output state' }
-    const binding = this.native()
-    if (!binding) return { ok: false, error: 'Native output is unavailable' }
-    try { return binding.setPlaybackOutputCurrent(current) }
-    catch { return { ok: false, error: 'Native output state could not be updated' } }
-  }
-
   unloadPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
     const pending = this.playbackPending?.generation === generation &&
       this.playbackPending.rendererId === rendererId ? this.playbackPending : null
@@ -2101,8 +2091,21 @@ export class CaptureOwner {
     if (result.ok && result.cleanupComplete) {
       this.playbackGeneration = ''
       this.playbackRendererId = null
+      this.clearIdleNativeSongOutput()
     }
     return result
+  }
+
+  /** A song route is no longer authoritative after proven native cleanup. */
+  private clearIdleNativeSongOutput(): void {
+    if (this.playbackGeneration || !this.binding ||
+        (this.playbackPending && !this.playbackAbandonCleanupComplete)) return
+    try {
+      const result = this.binding.setPlaybackOutputCurrent(false)
+      if (!result.ok) log('dsp', `Native song output handback failed: ${result.error ?? 'unknown error'}`, 'warn')
+    } catch (error) {
+      log('dsp', `Native song output handback failed: ${String(error)}`, 'warn')
+    }
   }
 
   begin(
@@ -2265,10 +2268,7 @@ export class CaptureOwner {
         }
       } catch { /* addon cleanup hook remains the final fail-closed owner */ }
     }
-    if (!this.playbackGeneration && this.binding) {
-      try { this.binding.setPlaybackOutputCurrent(false) }
-      catch { /* the process cleanup hook remains the final owner */ }
-    }
+    this.clearIdleNativeSongOutput()
     if (this.generation && this.binding) {
       try {
         this.binding.cancelCapture(BigInt(this.generation))

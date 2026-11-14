@@ -1314,25 +1314,81 @@ describe('one process-wide native capture binding', () => {
 })
 
 
-describe('native output currentness admission', () => {
-  it('validates boolean and renderer ownership, keeps native rebuilds current and clears explicit handback', async () => {
-    const native = fakeBinding()
-    native.preparePlayback = async (_config, _lanes, generation) => ({ ...playbackResult(generation.toString()), ownershipRetained: true })
-    const owner = new CaptureOwner(native)
-    const update = vi.mocked(native.setPlaybackOutputCurrent)
-    expect(owner.setPlaybackOutputCurrent(3, 'false').ok).toBe(false)
-    expect(owner.setPlaybackOutputCurrent(3, true).ok).toBe(false)
-    expect(update).not.toHaveBeenCalled()
-    const prepared = await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
-    expect(prepared.ok).toBe(true)
-    expect(owner.setPlaybackOutputCurrent(4, false).ok).toBe(false)
-    expect(owner.setPlaybackOutputCurrent(3, true).ok).toBe(true)
-    update.mockClear()
-    expect(owner.unloadPlayback(3, prepared.generation).ok).toBe(true)
-    expect(update).not.toHaveBeenCalled() // full native rebuild uses this unload too
-    expect(owner.setPlaybackOutputCurrent(3, false).ok).toBe(true)
-    expect(update).toHaveBeenCalledExactlyOnceWith(false)
-    const restarted = new CaptureOwner(undefined, () => { throw new Error('unavailable') })
-    expect(restarted.setPlaybackOutputCurrent(3, true).ok).toBe(false)
+it('does not expose the removed browser handback command', () => {
+  expect('setPlaybackOutputCurrent' in new CaptureOwner(fakeBinding())).toBe(false)
+})
+
+
+describe('internal native song route handback', () => {
+  function fixture() {
+    const binding = fakeBinding()
+    binding.preparePlayback = async (_config, _lanes, generation) => ({
+      ...playbackResult(generation.toString()), ownershipRetained: true
+    })
+    const owner = new CaptureOwner(binding)
+    return { binding, owner, clear: vi.mocked(binding.setPlaybackOutputCurrent) }
+  }
+
+  it('clears the stale song route after proven unload, so idle output can follow a new device', async () => {
+    const { binding, owner, clear } = fixture()
+    let songRouteCurrent = true
+    let selectedOutput = 'device-A'
+    const currentOutput = (): string => songRouteCurrent ? 'device-A' : selectedOutput
+    clear.mockImplementation(current => { songRouteCurrent = current; return { ok: true } })
+    await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    owner.openPlayback(3, '1')
+    owner.startPlayback(3, '1')
+    expect(currentOutput()).toBe('device-A')
+    const result = owner.unloadPlayback(3, '1')
+    expect(result).toMatchObject({ ok: true, cleanupComplete: true })
+    expect(clear).toHaveBeenCalledExactlyOnceWith(false)
+    selectedOutput = 'device-B'
+    expect(currentOutput()).toBe('device-B')
+    expect(binding.unloadPlayback).toBeDefined()
+  })
+
+  it('does not clear the song route for stale or incomplete cleanup', async () => {
+    const { binding, owner, clear } = fixture()
+    await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    expect(owner.unloadPlayback(4, '1').ok).toBe(false)
+    expect(clear).not.toHaveBeenCalled()
+    binding.unloadPlayback = generation => ({ ...playbackResult(generation.toString()), cleanupComplete: false })
+    expect(owner.unloadPlayback(3, '1').cleanupComplete).toBe(false)
+    owner.stop()
+    expect(clear).not.toHaveBeenCalled()
+  })
+
+  it('clears internal native routing at owner shutdown after the last generation closes', async () => {
+    const { owner, clear } = fixture()
+    await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    owner.stop()
+    expect(clear).toHaveBeenCalledExactlyOnceWith(false)
+    expect('setPlaybackOutputCurrent' in owner).toBe(false)
+  })
+
+  it('keeps a pending native prepare authoritative until its cleanup is proven', async () => {
+    const { binding, owner, clear } = fixture()
+    let finish!: () => void
+    const preparing = new Promise<void>(resolve => { finish = resolve })
+    binding.preparePlayback = async (_config, _lanes, generation) => {
+      await preparing
+      return { ...playbackResult(generation.toString()), ownershipRetained: true }
+    }
+    binding.unloadPlayback = generation => ({ ...playbackResult(generation.toString()), cleanupComplete: false })
+    const prepare = owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    owner.stop()
+    expect(clear).not.toHaveBeenCalled()
+    finish()
+    await prepare
+    expect(clear).not.toHaveBeenCalled()
+    binding.unloadPlayback = generation => ({ ...playbackResult(generation.toString()), state: 'unloaded', cleanupComplete: true })
+    owner.stop()
+    expect(clear).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it('also clears a leftover idle route when shutdown has no generation', () => {
+    const { owner, clear } = fixture()
+    owner.stop()
+    expect(clear).toHaveBeenCalledExactlyOnceWith(false)
   })
 })

@@ -17,11 +17,11 @@ it('distinguishes idle, Web Audio and native playback with physical output UIDs'
   vi.stubGlobal('window', { singz: { audioHostDevices: async () => ({ ok: true, devices: rows, defaultOutputUid: 'usb' }) } })
   const engine = new MultitrackEngine()
   const mutable = engine as unknown as { _playing: boolean; desiredOutputId: string; nativePlayback: unknown }
-  expect(await engine.voiceMonitorPlaybackContext()).toEqual({ webAudioPlaying: false, browserOutputUid: 'usb', selectedOutputUid: '' })
+  expect(await engine.voiceMonitorPlaybackContext()).toEqual({ webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: '' })
   mutable._playing = true
-  mutable.desiredOutputId = 'browser-usb'
+  mutable.desiredOutputId = 'usb'
   ;(engine.context as unknown as FakeContext).sinkId = 'browser-other'
-  expect(await engine.voiceMonitorPlaybackContext()).toEqual({ webAudioPlaying: true, browserOutputUid: 'other', selectedOutputUid: 'usb' })
+  expect(await engine.voiceMonitorPlaybackContext()).toEqual({ webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: 'usb' })
   mutable.nativePlayback = { active: true, transportActive: true }
   expect(await engine.voiceMonitorPlaybackContext()).toMatchObject({ webAudioPlaying: false })
   mutable.nativePlayback = null

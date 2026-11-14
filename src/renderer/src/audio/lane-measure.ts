@@ -1,39 +1,8 @@
-/**
- * How a song's lanes reach the screen: measured off their files by the core
- * when native playback is going to play them, decoded by Chromium otherwise.
- *
- * Until this existed the open decoded every lane through `decodeAudioData`
- * before a song was on screen — 1.6 s of decode and 0.9 s of JavaScript peak
- * passes for a five-minute six-lane song on a fast Mac, ten times that on the
- * Windows fleet — for three things: each lane's length, the picture of it,
- * and whether a guitar or piano lane was silent. Under native playback the
- * core then read the same files again for the graph, and the renderer let its
- * copy go a few seconds after Play (docs/DESKTOP-LANE-RESIDENCY.md). Seven
- * hundred megabytes of PCM decoded for a duration and a drawing.
- *
- * `readLanes` asks the addon for exactly those three things instead
- * (`measureDesktopPlaybackLanes`, native/playback/lane_measure.h): the header,
- * computePeaks' statistic at computePeaks' bucket count, laneEnvelope's
- * statistic, and the whole-lane RMS — read once, in blocks, on a thread per
- * lane, retaining nothing. The song opens with no `AudioBuffer` at all; the
- * engine's lanes carry `buffer: null` from the first frame, the waveforms draw
- * from peaks as they already do once the native graph has taken a song, and
- * anything that later needs samples (the lyrics editor, a Web Audio fallback,
- * an analysis whose stem cannot be read at its own rate) fetches them through
- * `ensureTrackBuffer` exactly as it does after a release.
- *
- * The decision is the facade's own backend decision with neutral controls:
- * native preferred on this platform, a runtime that can read every lane's
- * format. Anything else — and any lane the measure refuses (a WAV in a v1
- * project, a custom track in a format the streaming source does not read, a
- * file that will not open) — decodes exactly as before, one lane at a time,
- * so the measure can only ever make an open faster, never make one fail that
- * used to succeed.
- */
+/** Native lane measurements provide duration and waveforms without a playback decode.
+ * Offline analysis and editor decodes remain separate callers. */
 import type { DesktopPlaybackLaneMeasureRequest, SingzApi } from '../../../shared/types'
-import { recordRendererDecode } from './decode-guard'
 import { LANE_ENVELOPE_BUCKETS, laneEnvelope } from './lane-envelope'
-import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './native-playback-preference'
+import { detectedDesktopPlatform } from './native-playback-preference'
 import {
   PEAKS_MAXIMUM,
   PEAKS_MINIMUM,
@@ -101,47 +70,22 @@ export interface LaneEntry {
 export interface LaneMeasureHost {
   api: Pick<SingzApi, 'desktopPlaybackCapability' | 'measureDesktopPlaybackLanes'>
   platform?: ReturnType<typeof detectedDesktopPlatform>
-  /**
-   * The gate's answer for the WHOLE song, decided once by the caller over
-   * every lane the song will have and handed to each read of a part of it.
-   *
-   * Without it the gate was decided per call, over whichever lanes that call
-   * carried: six FLAC stems said "native", the mp3 custom track read after
-   * them said "legacy", the stems were measured with no samples, and Play —
-   * which asks the same gate over all seven lanes — refused native and put
-   * six Chromium decodes in front of the first sound. A song the measure
-   * takes must be a song native will play, and only the full lane set can
-   * say so.
-   */
+  /** Admission over the complete song, shared by each partial lane read. */
   applies?: boolean
-  /** In-memory surface override; never writes the Desktop preference. */
-  nativePlaybackEnabled?: boolean
 }
 
 const liveHost = (): LaneMeasureHost => ({ api: window.singz })
 
-/** Whether the core will be asked to measure these lanes rather than
- *  Chromium to decode them: native playback preferred here, and a runtime
- *  that reads every lane's format — the facade's own backend gate with
- *  neutral controls, so a song the measure takes is a song native will play. */
-export async function desktopLaneMeasureApplies(
-  lanes: LaneEntry[],
-  host: LaneMeasureHost = liveHost()
-): Promise<boolean> {
+/** Load one capability snapshot for admission of required or optional lanes. */
+async function laneAdmissionSelector(host: LaneMeasureHost): Promise<
+  (lanes: LaneEntry[]) => import('./desktop-native-playback').DesktopPlaybackBackendDecision
+> {
   const platform = host.platform ?? detectedDesktopPlatform()
-  const enabled = desktopNativePlaybackPreferred(platform, host.nativePlaybackEnabled)
-  if (!enabled) return false
+  const { DesktopNativePlaybackError, selectDesktopPlaybackBackend } = await import('./desktop-native-playback')
   let runtime
-  try {
-    runtime = await host.api.desktopPlaybackCapability()
-  } catch {
-    return false
-  }
-  // Lazily, like the engine: the facade is its own chunk and the entry stays
-  // the size scripts/check-renderer-split.mjs expects.
-  const { selectDesktopPlaybackBackend } = await import('./desktop-native-playback')
-  const decision = selectDesktopPlaybackBackend(platform, {
-    enabled,
+  try { runtime = await host.api.desktopPlaybackCapability() }
+  catch (error) { throw new DesktopNativePlaybackError('addon-unavailable', String(error)) }
+  return lanes => selectDesktopPlaybackBackend(platform, {
     playbackRate: 1,
     transpose: 0,
     training: null,
@@ -149,7 +93,16 @@ export async function desktopLaneMeasureApplies(
     runtime,
     requestedProvider: platform === 'win32' ? undefined : platform === 'linux' ? 'alsa' : 'coreaudio'
   })
-  return decision.backend === 'native'
+}
+
+/** Required song lanes must be admitted; an unsupported stem blocks opening. */
+export async function desktopLaneMeasureApplies(
+  lanes: LaneEntry[],
+  host: LaneMeasureHost = liveHost()
+): Promise<boolean> {
+  const decision = (await laneAdmissionSelector(host))(lanes)
+  if (decision.backend !== 'native') throw Object.assign(new Error(decision.reason), { failure: decision.failure })
+  return true
 }
 
 /** The measure's request for these lanes, at the renderer's own peak policy. */
@@ -172,13 +125,10 @@ export interface LaneMeasureOutcome {
    * decode of it: the caller drops the song on its own load guard instead.
    */
   superseded: boolean
+  errors?: Map<string, unknown>
 }
 
-/**
- * The lanes the core could measure, by id. Empty when the measure does not
- * apply, was refused, or failed — every one of which is logged by main and
- * answered here by decoding, never by an error the singer sees.
- */
+/** Measure native lanes, preserving per-lane failures for a named error. */
 export async function measureLanes(
   lanes: LaneEntry[],
   host: LaneMeasureHost = liveHost()
@@ -188,24 +138,15 @@ export async function measureLanes(
   const applies = host.applies ?? (await desktopLaneMeasureApplies(lanes, host))
   if (!applies) return { lanes: out, superseded: false }
   let result
-  try {
-    result = await host.api.measureDesktopPlaybackLanes(laneMeasureRequest(lanes))
-  } catch (error) {
-    console.warn('lane measure failed — decoding instead:', error)
-    return { lanes: out, superseded: false }
-  }
-  if (!result.ok) {
-    console.warn(`lane measure refused (${result.error}) — decoding instead`)
-    return { lanes: out, superseded: false }
-  }
+  try { result = await host.api.measureDesktopPlaybackLanes(laneMeasureRequest(lanes)) }
+  catch (error) { throw Object.assign(new Error(String(error)), { failure: { code: 'prepare-failed', detail: String(error) } }) }
+  if (!result.ok) throw Object.assign(new Error(result.error), { failure: { code: 'prepare-failed', detail: result.error } })
   if (result.lanes.length > 0 && result.lanes.every((lane) => !lane.ok && lane.error === 'cancelled')) {
     return { lanes: out, superseded: true }
   }
+  const errors = new Map<string, unknown>()
   for (const lane of result.lanes) {
-    // Anything the core could not read comes back with ok=false and stays
-    // out of the map; anything shaped wrongly is treated the same way rather
-    // than drawn — a lane decoded twice costs a second, a lane drawn from a
-    // wrong array costs the singer a picture they cannot trust.
+    // Never draw malformed metadata or turn a failed native lane into a browser decode.
     if (
       !lane.ok ||
       !Number.isFinite(lane.durationSeconds) || lane.durationSeconds <= 0 ||
@@ -213,6 +154,9 @@ export async function measureLanes(
       !(lane.envelope instanceof Float32Array) || lane.envelope.length !== LANE_ENVELOPE_BUCKETS ||
       !Number.isFinite(lane.rms)
     ) {
+      const detail = `${lane.id}: ${lane.error || 'invalid lane measurement'}`
+      errors.set(lane.id, Object.assign(new Error(detail), { failure: { code: ['invalid-argument', 'cancelled', 'io-error', 'unsupported-format', 'malformed-data', 'limit-exceeded', 'resource-exhausted'].includes(lane.error) ? lane.error : 'format-unreadable', laneId: lane.id,
+        detail, format: lanes.find(entry => entry.id === lane.id)?.path.split('.').pop() } }))
       continue
     }
     const { peaks, scale } = normalizePeaks(lane.peaks)
@@ -225,43 +169,54 @@ export async function measureLanes(
       buffer: null
     })
   }
-  return { lanes: out, superseded: false }
+  return { lanes: out, superseded: false, errors }
 }
 
-/**
- * Every lane of a song: measured by the core where it can be, decoded by
- * `decode` where it cannot. `errors` names the lanes that could be neither —
- * the caller decides whether that sinks the song (a stem) or one lane (a
- * track the singer added). A `superseded` read decoded nothing and carries
- * nothing: the song it was for has already been left.
- */
+/** Read drawing metadata without decoding an unreadable lane in Chromium. */
 export async function readLanes(
   lanes: LaneEntry[],
-  decode: (path: string) => Promise<AudioBuffer>,
+  _decode: (path: string) => Promise<AudioBuffer>,
   host: LaneMeasureHost = liveHost()
 ): Promise<{ reads: Map<string, LaneRead>; errors: Map<string, unknown>; superseded: boolean }> {
   const measured = await measureLanes(lanes, host)
   const reads = measured.lanes
   const errors = new Map<string, unknown>()
   if (measured.superseded) return { reads, errors, superseded: true }
-  // All at once, deliberately, as the decode always was: the lanes finish
-  // within milliseconds of each other after one long wait.
-  await Promise.all(
-    lanes
-      .filter((lane) => !reads.has(lane.id))
-      .map(async (lane) => {
-        try {
-          const buffer = await decode(lane.path)
-          // The only legitimate whole-lane decode on an open: a lane the core
-          // refused (v1 WAV, a custom track in an unsupported format, an
-          // unreadable file). When the core DID measure other lanes the song
-          // is a native one, so this is logged — see audio/decode-guard.ts.
-          recordRendererDecode(buffer, `lane-measure fallback: ${lane.id}`, reads.size > 0)
-          reads.set(lane.id, laneReadFromBuffer(buffer))
-        } catch (error) {
-          errors.set(lane.id, error)
-        }
-      })
-  )
+  for (const lane of lanes) {
+    if (reads.has(lane.id)) continue
+    const detail = `${lane.id}: native lane measurement is unavailable`
+    errors.set(lane.id, measured.errors?.get(lane.id) ?? Object.assign(new Error(detail), {
+      failure: { code: 'format-unreadable', laneId: lane.id, detail, format: lane.path.split('.').pop() }
+    }))
+  }
   return { reads, errors, superseded: false }
+}
+
+
+/** Custom tracks are optional: reject only the offending track, never its song.
+ * Admission includes the required stems and already-admitted tracks so the
+ * complete playable set still respects the native lane limit. */
+export async function readOptionalLanes(
+  lanes: LaneEntry[],
+  decode: (path: string) => Promise<AudioBuffer>,
+  host: LaneMeasureHost = liveHost(),
+  requiredLanes: LaneEntry[] = []
+): Promise<{ reads: Map<string, LaneRead>; errors: Map<string, unknown>; superseded: boolean }> {
+  const errors = new Map<string, unknown>()
+  if (lanes.length === 0) return { reads: new Map(), errors, superseded: false }
+  try {
+    const decide = await laneAdmissionSelector(host)
+    const admitted: LaneEntry[] = []
+    for (const lane of lanes) {
+      const decision = decide([...requiredLanes, ...admitted, lane])
+      if (decision.backend === 'native') admitted.push(lane)
+      else errors.set(lane.id, Object.assign(new Error(decision.reason), { failure: decision.failure }))
+    }
+    const read = await readLanes(admitted, decode, { ...host, applies: true })
+    for (const [id, error] of read.errors) errors.set(id, error)
+    return { ...read, errors }
+  } catch (error) {
+    for (const lane of lanes) if (!errors.has(lane.id)) errors.set(lane.id, error)
+    return { reads: new Map(), errors, superseded: false }
+  }
 }

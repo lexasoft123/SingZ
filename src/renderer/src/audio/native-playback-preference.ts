@@ -1,21 +1,11 @@
-/** Desktop playback defaults to the native backend; explicit policies remain for internal callers. */
+/** Desktop and Box always use native playback. Only its lane storage is configurable. */
 export interface DesktopNativePlaybackPolicy {
-  playback?: boolean
   streamLanes?: boolean
-  /** Refuse Web Audio when this surface requires the native backend. */
-  requireNative?: boolean
 }
 
 export function detectedDesktopPlatform(): 'darwin' | 'win32' | 'linux' | 'other' {
   const p = typeof navigator === 'undefined' ? '' : navigator.platform
   return /Mac/i.test(p) ? 'darwin' : /Win/i.test(p) ? 'win32' : /Linux/i.test(p) ? 'linux' : 'other'
-}
-
-export function desktopNativePlaybackPreferred(
-  _platform = detectedDesktopPlatform(),
-  override?: boolean
-): boolean {
-  return override ?? true
 }
 
 /** Stream the lanes out of their FLAC instead of decoding every one first —

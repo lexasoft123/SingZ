@@ -42,7 +42,7 @@ import {
   type DetectedBeats,
   type KeyGuess
 } from './audio/analysis-contract'
-import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './audio/native-playback-preference'
+import { detectedDesktopPlatform } from './audio/native-playback-preference'
 import type { MlGrid } from './audio/analysis'
 import {
   analysisStems,
@@ -93,6 +93,7 @@ import {
   desktopLaneMeasureApplies,
   laneReadFromBuffer,
   readLanes,
+  readOptionalLanes,
   SILENT_LANE_RMS,
   type LaneMeasureHost,
   type LaneRead
@@ -129,13 +130,14 @@ import VoiceBoundary from './components/VoiceBoundary'
 import VocalTraining from './components/VocalTrainingRoute'
 import { TrainingProgressMutations } from './training-progress-persistence'
 import { activatableAncestor, blocksSongTransportShortcut } from './keyboard'
-import { playbackErrorToast } from './playback-error-toast'
+import PlaybackFailurePanel from './components/PlaybackFailurePanel'
 import { createViewFrames } from './view-frames'
 import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
   restoreDesktopTrainingPracticeSettings
 } from './training-practice'
 import {
+  laneLabel,
   cleanSongName,
   customTrackId,
   CUSTOM_COLORS,
@@ -484,6 +486,7 @@ export default function App(): React.JSX.Element {
   /** Catalog page shown over a loaded song — the song stays live underneath. */
   const [showCatalog, setShowCatalog] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsAudioRouteFocus, setSettingsAudioRouteFocus] = useState(false)
   const [startupDialogsReady, setStartupDialogsReady] = useState(false)
   const [quickStart, setQuickStart] = useState<'welcome' | 'tour' | null>(() => {
     try { return localStorage.getItem(QUICK_START_SEEN) === 'seen' ? null : 'welcome' }
@@ -521,22 +524,19 @@ export default function App(): React.JSX.Element {
   const nativeProviderRef = useRef(audioPrefs.nativeAudioProvider)
   nativeProviderRef.current = audioPrefs.nativeAudioProvider
   const [outputArbiter] = useState(() => new PlaybackOutputArbiter(
-    audioPrefs.nativeOutputUid ? `native:${audioPrefs.nativeOutputUid}` : audioPrefs.outputId,
+    audioPrefs.nativeOutputUid,
     {
-      setOutput: (sinkId) => engine.setOutput(sinkId),
+      setOutput: (uid) => engine.setOutput(uid),
       enumerateOutputs: async () => {
-        const browser = await navigator.mediaDevices.enumerateDevices()
         const platform = detectedDesktopPlatform()
         const provider = platform === 'linux' ? 'alsa' : platform === 'win32' ? (nativeProviderRef.current ?? 'wasapi') : 'coreaudio'
         const inventory = await window.singz.audioHostDevices(provider)
         if (!inventory.ok) throw new Error(inventory.error)
-        return [...browser, ...inventory.devices.filter(device => device.outputChannels > 0).map(device => ({
-          kind: 'audiooutput' as const, deviceId: `native:${device.uid}`
-        }))]
+        return inventory.devices.filter(device => device.outputChannels > 0).map(device => ({ uid: device.uid }))
       },
       commit: (outputId) => setAudioPrefs((current) => {
         const { outputId: _legacy, nativeOutputUid: _native, ...rest } = current
-        return outputId?.startsWith('native:') ? { ...rest, nativeOutputUid: outputId.slice(7) } : { ...rest, ...(outputId ? { outputId } : {}) }
+        return { ...rest, ...(outputId ? { nativeOutputUid: outputId } : {}) }
       })
     }
   ))
@@ -584,11 +584,10 @@ export default function App(): React.JSX.Element {
    *  re-render that lets the waveforms ask the engine again. */
   const [lanesResident, setLanesResident] = useState(true)
   const [nativePlaybackLeaseBlocked, setNativePlaybackLeaseBlocked] = useState(false)
-  const enginePlaybackErrorRef = useRef(engine.playbackError)
-  const [enginePlaybackToast, setEnginePlaybackToast] = useState(
-    () => playbackErrorToast(engine.playbackError)
-  )
-  const visibleError = error ?? enginePlaybackToast?.message ?? null
+  const [failedOpenError, setFailedOpenError] = useState<typeof engine.playbackError>(null)
+  const [failedOpenPath, setFailedOpenPath] = useState<string | null>(null)
+  const [enginePlaybackError, setEnginePlaybackError] = useState(() => engine.playbackError)
+  const visibleError = error
   const [dragDepth, setDragDepth] = useState(0)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
   const [dirty, setDirty] = useState(false)
@@ -920,7 +919,7 @@ export default function App(): React.JSX.Element {
   }, [song, isProject])
 
   // Boot repair, device churn and direct Settings picks share one serialized,
-  // versioned intent owner. A devicechange raised during setSinkId therefore
+  // versioned intent owner. A devicechange raised during a native route change therefore
   // repairs the pending choice, never a render-captured old preference.
   // No argument is the explicit Settings retry and rejects unless this exact
   // request confirms the current sink; null is background reconciliation.
@@ -969,7 +968,7 @@ export default function App(): React.JSX.Element {
             const [browser, inventory] = await Promise.all([navigator.mediaDevices.enumerateDevices(), window.singz.audioHostDevices(provider)])
             if (!inventory.ok) throw new Error(inventory.error)
             return nativeOutputUidForBrowser(id, browser.filter(row => row.kind === 'audiooutput').map(row => ({ id: row.deviceId, label: row.label })), inventory.devices)
-          })
+          }, audioPrefs.outputId)
           if (disposed) return
           if (result === 'missing') { setOutputStatus(`${t('app.output.missingDefault')} ${t('settings.route.retryNextStart')}`); return }
         } catch { /* normal reconciliation retains the unconfirmed warning */ }
@@ -1171,7 +1170,7 @@ export default function App(): React.JSX.Element {
     let last = ''
     let source = ''
     const publish = (force = false): void => {
-      const next = JSON.stringify([engine.playing, engine.nativeActive, engine.outputDeviceId, engine.context.sinkId])
+      const next = JSON.stringify([engine.playing, engine.nativeActive, engine.outputDeviceId])
       if (!force && source === next) return
       source = next
       const token = ++revision
@@ -1190,7 +1189,7 @@ export default function App(): React.JSX.Element {
     const unsubscribe = engine.subscribe(publish)
     navigator.mediaDevices.addEventListener('devicechange', refresh)
     return () => { ++revision; unsubscribe(); navigator.mediaDevices.removeEventListener('devicechange', refresh) }
-  }, [engine, audioPrefs.outputId])
+  }, [engine, audioPrefs.nativeOutputUid])
 
   useEffect(() => engine.subscribe(() => {
     setPlaying(engine.playing)
@@ -1201,13 +1200,7 @@ export default function App(): React.JSX.Element {
     // song they draw from `peaks`, and a Web Audio fallback that fetches the
     // lanes back gets the sample-accurate zoom returned.
     setLanesResident(engine.lanesResident)
-    const playbackError = engine.playbackError
-    if (playbackError !== enginePlaybackErrorRef.current) {
-      enginePlaybackErrorRef.current = playbackError
-      // A successful provider retry publishes null and removes only the
-      // engine-owned recovery toast. Independent app failures remain intact.
-      setEnginePlaybackToast(playbackErrorToast(playbackError))
-    }
+    setEnginePlaybackError(engine.playbackError)
   }), [engine])
 
   useEffect(() => () => {
@@ -1306,6 +1299,7 @@ export default function App(): React.JSX.Element {
       // Song transport shortcuts never leak into the training section. The
       // exercise owns Space/arrow semantics while it is visible.
       if (appSectionRef.current !== 'songs') return
+      if (engine.playbackError && ['Space', 'ArrowLeft', 'ArrowRight'].includes(e.code)) return
       if (e.code === 'Escape') {
         if (showCatalogRef.current) {
           setShowCatalog(false)
@@ -1395,6 +1389,9 @@ export default function App(): React.JSX.Element {
       setSplit(false)
       setStemFiles(null)
       setError(null)
+      setEnginePlaybackError(null)
+      setFailedOpenError(null)
+      setFailedOpenPath(null)
       setNotice(null)
       setKaraoke(false)
       setLyrics({ status: 'idle' })
@@ -1461,14 +1458,16 @@ export default function App(): React.JSX.Element {
       const decodeCustom = async (
         defs: CustomTrack[] | undefined,
         fresh: Map<string, AudioBuffer>,
-        host: LaneMeasureHost
+        host: LaneMeasureHost,
+        requiredLanes: { id: string; path: string }[]
       ): Promise<UITrack[]> => {
         const out: UITrack[] = []
         if (!defs || defs.length === 0) return out
-        const { reads, superseded } = await readLanes(
+        const { reads, superseded } = await readOptionalLanes(
           defs.map((c) => ({ id: c.id, path: c.file })),
           async (path) => engine.decode(await window.singz.readAudio(path)),
-          host
+          host,
+          requiredLanes
         )
         if (superseded) return out
         for (const c of defs) {
@@ -1517,7 +1516,7 @@ export default function App(): React.JSX.Element {
         // Saved project with stems: load them directly and restore settings.
         if (reg.project?.stems) {
           let proj = reg.project
-          if ((proj.formatVersion ?? 1) < 2 && desktopNativePlaybackPreferred()) {
+          if ((proj.formatVersion ?? 1) < 2) {
             // Native playback opens the files at Play, rather than retaining
             // decoded buffers. Finish compaction before adopting its paths:
             // background migration could otherwise unlink a WAV between the
@@ -1551,16 +1550,12 @@ export default function App(): React.JSX.Element {
              exactly as a stem that would not decode always has. */
           const reading = creepUntil(mark, t('app.load.readingStems'), 0.05, 0.58, 1400)
           let reads: Map<string, LaneRead>
-          // Decided ONCE over every lane the song will have — stems and the
-          // singer's added tracks alike — because Play asks the same gate
-          // over the same set: a song the measure takes must be a song
-          // native will play, or the first Play decodes six lanes in front
-          // of the first sound.
+          // Stems are required. Optional custom tracks are admitted separately
+          // so one unsupported extra cannot prevent the project from opening.
           const host: LaneMeasureHost = {
             api: window.singz,
             applies: await desktopLaneMeasureApplies([
-              ...rawOrder.map((st) => ({ id: st, path: stems[st] })),
-              ...(proj.settings.custom ?? []).map((c) => ({ id: c.id, path: c.file }))
+              ...rawOrder.map((st) => ({ id: st, path: stems[st] }))
             ])
           }
           try {
@@ -1609,7 +1604,7 @@ export default function App(): React.JSX.Element {
           }
           const lanes = [
             ...order.map((s) => makeTrack(s, reads.get(s)!, { sourcePath: stems[s] })),
-            ...(await decodeCustom(proj.settings.custom, fresh, host))
+            ...(await decodeCustom(proj.settings.custom, fresh, host, order.map(id => ({ id, path: stems[id] }))))
           ]
           if (seq !== loadSeq.current) return
           mark(t('app.load.startingPlayback'), 0.9)
@@ -1688,38 +1683,6 @@ export default function App(): React.JSX.Element {
           setPhase('ready')
           setLoadProgress(null)
           void prepLyricsRef.current?.()
-          if ((proj.formatVersion ?? 1) < 2 && !desktopNativePlaybackPreferred()) {
-            // Old WAV project: repack stems as FLAC in the background (the
-            // buffers above are already in memory, so nothing here notices).
-            void window.singz.upgradeProject(proj.dir).then((r) => {
-              if (seq !== loadSeq.current) return // these are another song's stems now
-              if (r.ok && r.converted) {
-                // The wav this named has been unlinked. Nothing reachable reads
-                // it after this point — a melody run that wanted it started
-                // back at prepMelody, before the upgrade was even invoked — but
-                // a stale path here fails SILENTLY, falling back to the
-                // device-rate buffer under a v2 stamp, which is the old bug
-                // wearing the new stamp.
-                // Only the stems main says it moved. A lead/backing split
-                // leaves vocals.wav as float, which never compacts — repointing
-                // it at a vocals.flac nobody wrote is that silent failure.
-                const moved = new Set(r.compacted ?? [])
-                const repoint = (id: string, f: string): string =>
-                  moved.has(id) ? f.replace(/\.wav$/, '.flac') : f
-                stemPathsRef.current = stemPathsRef.current
-                  ? Object.fromEntries(
-                      Object.entries(stemPathsRef.current).map(([id, f]) => [id, repoint(id, f)])
-                    )
-                  : null
-                setStemFiles((prev) => {
-                  if (!prev) return prev
-                  const next: Record<string, string> = {}
-                  for (const [s, p] of Object.entries(prev)) next[s] = repoint(s, p)
-                  return next
-                })
-              }
-            })
-          }
           return
         }
 
@@ -1735,14 +1698,13 @@ export default function App(): React.JSX.Element {
         const rawHost: LaneMeasureHost = {
           api: window.singz,
           applies: await desktopLaneMeasureApplies([
-            { id: 'original', path: reg.path },
-            ...(reg.project?.settings.custom ?? []).map((c) => ({ id: c.id, path: c.file }))
+            { id: 'original', path: reg.path }
           ])
         }
         if (seq !== loadSeq.current) return
         const lanes = [
           makeTrack('original', laneReadFromBuffer(audio), { sourcePath: reg.path }),
-          ...(await decodeCustom(reg.project?.settings.custom, fresh, rawHost))
+          ...(await decodeCustom(reg.project?.settings.custom, fresh, rawHost, [{ id: 'original', path: reg.path }]))
         ]
         if (seq !== loadSeq.current) return
         engine.load(
@@ -1778,6 +1740,13 @@ export default function App(): React.JSX.Element {
         setPhase('empty')
         setSong(null)
         setTracks([])
+        const failure = (err as { failure?: import('./audio/native-playback-failure').DesktopNativePlaybackFailure })?.failure
+        if (failure) {
+          setFailedOpenPath(path)
+          setFailedOpenError({ reason: 'toggle', code: 'playback-failure', provider: null,
+            message: failure.detail, cause: err, failure, userInitiated: true })
+          return
+        }
         setError(
           projectGraphModule !== null &&
           err instanceof projectGraphModule.DesktopProjectGraphLoadError
@@ -1948,11 +1917,9 @@ export default function App(): React.JSX.Element {
         async (path) => engine.decode(await window.singz.readAudio(path)),
         {
           api: window.singz,
-          // Over the song as it will be: the new stems and the added tracks
-          // that stay with them.
+          // New stems are required; unsupported custom tracks are dropped below.
           applies: await checked(desktopLaneMeasureApplies([
-            ...rawOrder.map((s) => ({ id: s, path: stems[s] })),
-            ...kept.map((t) => ({ id: t.id, path: t.sourcePath! }))
+            ...rawOrder.map((s) => ({ id: s, path: stems[s] }))
           ]))
         }
       ))
@@ -1960,7 +1927,17 @@ export default function App(): React.JSX.Element {
       const missing = rawOrder.find((s) => !reads.has(s))
       if (missing) throw errors.get(missing) ?? new Error(`${missing} could not be read`)
       const order = audibleStems(rawOrder, reads)
-      // The stems replace the full-mix lane; tracks the singer added stay.
+      const optional = await checked(readOptionalLanes(
+        kept.map(track => ({ id: track.id, path: track.sourcePath! })),
+        async path => engine.decode(await window.singz.readAudio(path)),
+        { api: window.singz },
+        order.map(id => ({ id, path: stems[id] }))
+      ))
+      if (optional.superseded) throw new Error('the split was superseded by another open')
+      for (const track of kept) {
+        if (optional.errors.has(track.id)) setNotice(t('app.load.laneMissing', { label: laneLabel(track) }))
+      }
+      // The stems replace the full-mix lane; admitted custom tracks stay.
       const fresh = new Map<string, AudioBuffer>()
       for (const s of order) {
         const buffer = reads.get(s)?.buffer
@@ -1987,7 +1964,7 @@ export default function App(): React.JSX.Element {
       loadLanes(
         [
           ...order.map((s) => makeTrack(s, reads.get(s)!, { sourcePath: stems[s] })),
-          ...tracksRef.current.filter((t) => t.custom)
+          ...tracksRef.current.filter((t) => t.custom && !optional.errors.has(t.id))
         ],
         fresh
       )
@@ -3136,6 +3113,7 @@ export default function App(): React.JSX.Element {
 
   /** Space / play button: starting with a selection armed targets the selection. */
   const togglePlay = useCallback(() => {
+    if (engine.playbackError) return
     const trainingCleanupBlocked = trainingCleanupCoordinator.blocksAudio
     // An owner lease may prevent opening a new physical output session, but
     // an already-playing song keeps its pause/stop path.
@@ -3660,6 +3638,7 @@ export default function App(): React.JSX.Element {
     }
   }, [engine, desktopTraining, trainingMic, trainingCues, playing, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath, selection])
 
+  const playbackFailureLane = tracks.find(track => track.id === enginePlaybackError?.failure?.laneId)
   return (
     <div className="app">
       <header className="titlebar">
@@ -3993,7 +3972,10 @@ export default function App(): React.JSX.Element {
               />
             )}
           </div>
-          <Transport
+          {enginePlaybackError ? <PlaybackFailurePanel error={enginePlaybackError}
+            laneName={playbackFailureLane ? laneLabel(playbackFailureLane) : undefined}
+            onRetry={() => engine.retryPlayback()}
+            onChooseDevice={() => { setSettingsAudioRouteFocus(true); setShowSettings(true) }} /> : <Transport
             engine={engine}
             playing={playing}
             onTogglePlay={togglePlay}
@@ -4035,7 +4017,7 @@ export default function App(): React.JSX.Element {
             onReveal={
               stemFiles ? () => void window.singz.revealInFolder(stemFiles.vocals) : null
             }
-          />
+          />}
         </>
       ) : (
         <DropScreen
@@ -4051,6 +4033,10 @@ export default function App(): React.JSX.Element {
           onDeleted={handleDeleted}
         />
       )}
+
+      {phase !== 'ready' && failedOpenError && failedOpenPath && <PlaybackFailurePanel error={failedOpenError}
+        onRetry={() => loadPath(failedOpenPath)}
+        onChooseDevice={() => { setSettingsAudioRouteFocus(true); setShowSettings(true) }} />}
 
       {dragDepth > 0 && (
         <div className="drop-overlay">
@@ -4122,6 +4108,7 @@ export default function App(): React.JSX.Element {
         <SettingsModal
           onQuickStart={() => { setShowSettings(false); setQuickStart('tour') }}
           audio={audioPrefs}
+          focusAudioRoute={settingsAudioRouteFocus}
           onChangeOutput={changeOutput}
           onChangeInput={changeInput}
           onMigrateNativeInput={migrateNativeInput}
@@ -4135,7 +4122,7 @@ export default function App(): React.JSX.Element {
           onRetryOutputRoute={reconcileOutput}
           outputStatus={outputStatus}
           micDevice={micDevice}
-          onClose={() => setShowSettings(false)}
+          onClose={() => { setShowSettings(false); setSettingsAudioRouteFocus(false) }}
         />
       )}
 

@@ -5,7 +5,20 @@ const assert = require('node:assert/strict')
  * engine.setOutput after open discards its prepared-ahead graph; waiting for
  * that discarded graph then hangs the driver. UIDs are opaque, including ','. */
 async function selectNativeOutputBeforeOpen(win, uid) {
-  const inventory = await win.evaluate(() => window.singz.audioHostDevices('coreaudio'))
+  // quietLaunch seeds the first-run quick-start flag and reloads the page once when it was missing, so the first
+  // evaluate can land in the context that reload destroys ("Execution context was destroyed"). That reload is a known,
+  // finite event: retry across it instead of failing the whole run on the race.
+  let inventory
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await win.waitForLoadState('domcontentloaded')
+      inventory = await win.evaluate(() => window.singz.audioHostDevices('coreaudio'))
+      break
+    } catch (error) {
+      if (attempt >= 5 || !/Execution context was destroyed|navigation/i.test(String(error))) throw error
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+  }
   assert.ok(inventory.ok, inventory.error)
   const output = inventory.devices.find(device => device.uid === uid && device.outputChannels > 0)
   assert.ok(output, 'E2E_OUTPUT_UID must be an exact audioHostDevices UID without the native: prefix')

@@ -93,7 +93,7 @@ async function reconcileStartupOutput(
   const context = StartupAudioContext.last!
   const enumerateOutputs = vi.fn(async () =>
     savedOutputId && nativeAvailable && context.physicalRoutes.at(-1) === 'none'
-      ? [{ kind: 'audiooutput' as const, deviceId: savedOutputId }]
+      ? [{ kind: 'audiooutput' as const, uid: savedOutputId }]
       : []
   )
   const arbiter = new PlaybackOutputArbiter(savedOutputId, {
@@ -118,7 +118,7 @@ describe('startup output ownership', () => {
   ]
 
   async function engineWith(platform: string, native: { uid: string; label: string; outputChannels: number }[],
-    browser: { kind: string; deviceId: string; label: string }[], policy: { playback?: boolean } = {}) {
+    browser: { kind: string; uid: string; label: string }[], policy: { playback?: boolean } = {}) {
     vi.stubGlobal('AudioContext', StartupAudioContext)
     const enumerateDevices = vi.fn(async () => browser)
     vi.stubGlobal('navigator', { platform, mediaDevices: { enumerateDevices } })
@@ -136,7 +136,7 @@ describe('startup output ownership', () => {
     const { engine } = await engineWith('MacIntel', [{ uid, label: 'Zen', outputChannels: 16 }], [])
     const client = { active: false, recoveryPending: false, preparedAhead: false, retainedPrepared: false,
       discardAhead: vi.fn(async () => { client.preparedAhead = false }) }
-    const prepareAhead = vi.fn(async (_client: unknown, _request: { browserOutputId?: string }) => { client.preparedAhead = true; return true })
+    const prepareAhead = vi.fn(async (_client: unknown, _request: { preferredOutputUid?: string }) => { client.preparedAhead = true; return true })
     const internals = engine as unknown as { nativePlayback: typeof client; ensureNativePlayback(): Promise<unknown> }
     internals.nativePlayback = client
     internals.ensureNativePlayback = async () => ({ client, prepareAhead })
@@ -144,14 +144,14 @@ describe('startup output ownership', () => {
       engine.load([{ id: 'vocals', buffer: { duration: 120 } as AudioBuffer, duration: 120, path: '/vocals.flac' }])
       await vi.advanceTimersByTimeAsync(400)
       expect(client.preparedAhead).toBe(true)
-      await engine.setOutput(`native:${uid}`)
+      await engine.setOutput(`${uid}`)
       expect(client.preparedAhead).toBe(false)
       await vi.advanceTimersByTimeAsync(399)
       expect(client.preparedAhead).toBe(false)
       await vi.advanceTimersByTimeAsync(1)
       expect(client.preparedAhead).toBe(true)
       expect(prepareAhead).toHaveBeenCalledTimes(2)
-      expect(prepareAhead.mock.calls[1][1].browserOutputId).toBe(`native:${uid}`)
+      expect(prepareAhead.mock.calls[1][1].preferredOutputUid).toBe(`${uid}`)
     } finally { engine.setNativeAheadAllowed(false); vi.useRealTimers() }
   })
 
@@ -192,75 +192,43 @@ describe('startup output ownership', () => {
 
   it.each(['MacIntel', 'Win32'])('selecting a native output never needs a Chromium sink while native owns playback (%s)', async (platform) => {
     const all = REAL_LABELS.flatMap(([bare, decorated], i) => [
-      { native: { uid: `uid${i}`, label: bare, outputChannels: 2 }, browser: { kind: 'audiooutput', deviceId: `b${i}`, label: decorated } }])
+      { native: { uid: `uid${i}`, label: bare, outputChannels: 2 }, browser: { kind: 'audiooutput', uid: `b${i}`, label: decorated } }])
     // Even an ambiguous pair and an unmatched label must select cleanly.
     const { engine, enumerateDevices } = await engineWith(platform,
       [...all.map(r => r.native), { uid: 'dup1', label: 'Dup (Built-in)', outputChannels: 2 }, { uid: 'dup2', label: 'Dup (Virtual)', outputChannels: 2 }],
       all.map(r => r.browser))
     for (const uid of ['uid0', 'uid1', 'uid2', 'dup1']) {
-      await engine.setOutput(`native:${uid}`)
-      expect(engine.outputDeviceId).toBe(`native:${uid}`)
+      await engine.setOutput(`${uid}`)
+      expect(engine.outputDeviceId).toBe(`${uid}`)
     }
     expect(StartupAudioContext.last?.sinkId).toEqual({ type: 'none' })
     expect(enumerateDevices).not.toHaveBeenCalled()
   })
 
-  it.each(REAL_LABELS)('fallback playback resolves %s to its decorated Chromium sink', async (bare, decorated) => {
-    const { engine } = await engineWith('MacIntel', [{ uid: 'u', label: bare, outputChannels: 2 }, { uid: 'o', label: 'Other', outputChannels: 2 }],
-      [{ kind: 'audiooutput', deviceId: 'default', label: `Default - ${decorated}` },
-        { kind: 'audiooutput', deviceId: 'sink-1', label: decorated }, { kind: 'audiooutput', deviceId: 'sink-2', label: 'Other (Built-in)' }])
-    await engine.setOutput('native:u')
-    await (engine as unknown as { applyFallbackSink(id: string): Promise<void> }).applyFallbackSink('u')
-    expect(StartupAudioContext.last?.sinkId).toBe('sink-1')
-  })
-
-  it('without native playback the sink is resolved at selection (decorated label) and a missing one rolls back', async () => {
-    const { engine } = await engineWith('Win32', [{ uid: 'u', label: 'NoMachine Audio Adapter', outputChannels: 2 }],
-      [{ kind: 'audiooutput', deviceId: 'b', label: 'NoMachine Audio Adapter (Virtual)' }], { playback: false })
-    await engine.setOutput('native:u')
-    expect(StartupAudioContext.last?.sinkId).toBe('b')
-  })
-
-  it.each([
-    ['no browser row', []],
-    ['an ambiguous browser pair', [{ kind: 'audiooutput', deviceId: 'a', label: 'Interface (Built-in)' }, { kind: 'audiooutput', deviceId: 'b', label: 'Interface (Virtual)' }]]
-  ])('only the fallback path throws on %s; a non-native selection stays usable', async (_name, outputs) => {
-    const { engine } = await engineWith('Win32', [{ uid: 'native-id', label: 'Interface', outputChannels: 2 }], outputs as never)
-    await engine.setOutput('native:native-id')
-    await expect((engine as unknown as { applyFallbackSink(id: string): Promise<void> }).applyFallbackSink('native-id')).rejects.toThrow('uniquely')
-  })
-
-  it('native-side ambiguity rejects the fallback sink (negative control)', async () => {
-    const { engine } = await engineWith('Win32', [{ uid: 'a', label: 'Interface (Built-in)', outputChannels: 2 }, { uid: 'b', label: 'Interface (Virtual)', outputChannels: 2 }],
-      [{ kind: 'audiooutput', deviceId: 'x', label: 'Interface' }], { playback: false })
-    await expect(engine.setOutput('native:a')).rejects.toThrow('uniquely')
-    expect(engine.outputDeviceId).toBe('')
-  })
-
   it('does not make the initial default sink hide a saved native endpoint from inventory', async () => {
-    const outputId = 'native:alsa:sysfs:/sys/devices/platform/usb/5-1:pcm:0'
+    const outputId = 'alsa:sysfs:/sys/devices/platform/usb/5-1:pcm:0'
 
     const { result, context } = await reconcileStartupOutput(outputId, true)
 
     expect(result).toEqual({ kind: 'applied', outputId })
-    expect(context.physicalRoutes).toEqual(['none', 'none'])
+    expect(context.physicalRoutes).toEqual(['none'])
   })
 
-  it('negative control: restores the ordinary browser default after starting detached', async () => {
+  it('selects the native default while keeping Chromium detached', async () => {
     const { result, context, enumerateOutputs } = await reconcileStartupOutput(undefined, false)
 
     expect(result).toEqual({ kind: 'applied', outputId: undefined })
-    expect(context.physicalRoutes).toEqual(['none', 'default'])
+    expect(context.physicalRoutes).toEqual(['none'])
     expect(enumerateOutputs).not.toHaveBeenCalled()
   })
 
-  it('still falls back to the browser default when the saved native endpoint is really missing', async () => {
-    const outputId = 'native:alsa:disconnected'
+  it('reports a missing native endpoint while keeping Chromium detached', async () => {
+    const outputId = 'alsa:disconnected'
 
     const { result, context } = await reconcileStartupOutput(outputId, false)
 
     expect(result).toEqual({ kind: 'missing', outputId })
-    expect(context.physicalRoutes).toEqual(['none', 'default'])
+    expect(context.physicalRoutes).toEqual(['none'])
   })
 })
 

@@ -7,6 +7,7 @@ const assert = require('node:assert/strict')
 const { mkdtempSync, writeFileSync, rmSync } = require('node:fs')
 const { tmpdir } = require('node:os')
 const { join, resolve } = require('node:path')
+const SCALE_CLICK_GAIN = 0.0005 // about -66 dBFS before the system volume: inaudible
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function until(label, read, ready) {
   const deadline = Date.now() + 5000
@@ -61,6 +62,35 @@ async function main() {
       receipts.push({ label, completed: after.previewClicks.completed, routeLatency: after.routeLatency })
     }
     await clickPair('no song')
+    // Master-volume scaling of the idle preview, measured on the real output bus. The click gain is absurdly low
+    // (inaudible even on a loud system volume) and the master is restored to 0 afterwards, so the device stays silent
+    // to a listener while the bus meter (playbackStatus().outputPeak with no song loaded = the shared service meter,
+    // post-master) still reads a real, comparable peak. The meter holds a peak and releases 10x per second, so each
+    // measurement waits out the previous one and takes the maximum over the click's render window.
+    const scalePeak = async master => {
+      assert.equal(addon.setPlaybackMasterGain(0n, master).ok, true)
+      await sleep(1500) // master ramp settled + the previous peak released far below this one
+      let peak = 0
+      const before = BigInt(addon.trainingCueStatus().previewClicks.completed)
+      assert.equal(addon.previewClick(true, SCALE_CLICK_GAIN).ok, true)
+      const deadline = Date.now() + 3000
+      do {
+        peak = Math.max(peak, addon.playbackStatus().outputPeak)
+        if (BigInt(addon.trainingCueStatus().previewClicks.completed) > before && peak > 0) break
+        await sleep(1)
+      } while (Date.now() < deadline)
+      return peak
+    }
+    const scaling = []
+    for (let round = 0; round < 3; round++) {
+      const full = await scalePeak(1), quarter = await scalePeak(.25)
+      assert.ok(full > 1e-5, `master 1.0 preview peak must be measurable (got ${full})`)
+      scaling.push({ full, quarter, ratio: quarter / full })
+    }
+    const ratios = scaling.map(r => r.ratio).sort((a, b) => a - b), median = ratios[1]
+    assert.ok(Math.abs(median - .25) < .02, `preview peak ratio master .25 / 1.0 must be ~0.25, got ${median} (${JSON.stringify(scaling)})`)
+    assert.equal(addon.setPlaybackMasterGain(0n, 0).ok, true) // Back to silent real device callbacks.
+    receipts.push({ label: 'preview master scaling', clickGain: SCALE_CLICK_GAIN, scaling, medianRatio: median })
     const wav = join(scratch, 'silence.wav'); writeFileSync(wav, silentWav())
     const prepared = await addon.preparePlayback({
       capability: addon.playbackStatus().capability, provider,

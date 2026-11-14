@@ -122,7 +122,7 @@ function fixture(initial = nativeStatus('7')) {
     releaseLegacyOutput,
     restoreLegacyOutput,
     client: () => {
-      const client = new DesktopNativePlaybackClient({ releaseLegacyOutput, restoreLegacyOutput }, () => {})
+      const client = new DesktopNativePlaybackClient(() => {})
       disposers.push(() => client.detachPersistentPlayback())
       return client
     },
@@ -469,15 +469,16 @@ describe('retained native renderer attach', () => {
     for (const call of Object.values(h.lifecycle)) expect(call).not.toHaveBeenCalled()
   })
 
-  it('keeps ordinary Desktop Web Audio playback unchanged', async () => {
+  it('blocks ordinary Desktop playback when native cannot prepare', async () => {
     const h = fixture()
-    const engine = h.engine({ playback: false })
+    const engine = h.engine()
     engine.setRetainedProjectIdentity(null)
     engine.load([{ id: 'vocals', buffer: { duration: 10 } as AudioBuffer, duration: 10 }])
-    await engine.play({ countIn: false })
+    await expect(engine.play({ countIn: false })).rejects.toThrow()
     expect(engine.nativeActive).toBe(false)
-    expect(engine.playing).toBe(true)
-    expect(Context.started).toBe(1)
+    expect(engine.playing).toBe(false)
+    expect(engine.playbackError?.failure?.code).toBe('addon-unavailable')
+    expect(Context.started).toBe(0)
     for (const call of Object.values(h.lifecycle)) expect(call).not.toHaveBeenCalled()
   })
 })

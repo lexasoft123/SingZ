@@ -65,7 +65,7 @@ const runtime = (full: boolean): DesktopPlaybackRuntimeCapability => ({
 })
 
 const eligible = {
-  enabled: true,
+
   playbackRate: 1,
   transpose: 0,
   training: null,
@@ -99,7 +99,7 @@ describe('desktop native playback selection', () => {
 
   it('selects separate platform providers only for an exact compatible graph', () => {
     expect(selectDesktopPlaybackBackend('linux', eligible)).toEqual({ backend: 'native', provider: 'alsa' })
-    expect(selectDesktopPlaybackBackend('linux', { ...eligible, requestedProvider: 'wasapi' }).backend).toBe('legacy')
+    expect(selectDesktopPlaybackBackend('linux', { ...eligible, requestedProvider: 'wasapi' }).backend).toBe('rejected')
     expect(selectDesktopPlaybackBackend('darwin', eligible)).toEqual({
       backend: 'native',
       provider: 'coreaudio'
@@ -118,15 +118,14 @@ describe('desktop native playback selection', () => {
   })
 
   it.each([
-    [{ ...eligible, enabled: false }, 'native playback is disabled by policy'],
     [{ ...eligible, runtime: null }, 'native playback runtime capability is unavailable'],
     [{ ...eligible, playbackRate: 0.249 }, 'tempo 0.249 is outside the native range 0.25..4'],
     [{ ...eligible, transpose: 24.1 }, 'transpose 24.1 is outside the native range -24..24 semitones'],
     [{ ...eligible, lanes: [{ id: 'guide', path: '/authorized/guide.mp3' }] },
       'lane guide has unsupported format mp3; runtime formats: wav, flac']
-  ])('stays legacy before ownership for unsupported features', (features, reason) => {
+  ])('rejects unsupported features before ownership', (features, reason) => {
     expect(selectDesktopPlaybackBackend('darwin', features)).toEqual({
-      backend: 'legacy',
+      backend: 'rejected',
       reason,
       failure: expect.objectContaining({ detail: reason })
     })
@@ -175,7 +174,7 @@ describe('desktop native playback selection', () => {
         mediaCodec: { ...runtime(true).mediaCodec, capabilityTag: DESKTOP_PLAYBACK_CODEC_BASE_TAG }
       }
     })).toEqual({
-      backend: 'legacy', reason: 'native playback runtime capability is unavailable',
+      backend: 'rejected', reason: 'native playback runtime capability is unavailable',
       failure: { code: 'addon-unavailable', detail: 'native playback runtime capability is unavailable' }
     })
   })
@@ -408,7 +407,7 @@ describe('desktop native playback facade', () => {
   it('publishes master volume to the idle service without preparing a song', async () => {
     const api = asioPollingApi(async () => status('0'), async () => result('0'))
     vi.stubGlobal('window', { singz: api })
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => {}, restoreLegacyOutput: async () => {} }, () => {})
+    const client = new DesktopNativePlaybackClient(() => {})
     await client.setMasterGain(0.25)
     expect(api.setDesktopPlaybackMasterGain).toHaveBeenCalledExactlyOnceWith('0', 0.25)
     expect(api.prepareDesktopPlayback).not.toHaveBeenCalled()
@@ -454,10 +453,7 @@ describe('desktop native playback facade', () => {
       setDesktopPlaybackMasterGain: vi.fn(async (value) => result(value, 'running'))
     } as unknown as SingzApi
     vi.stubGlobal('window', { singz: api })
-    const release = vi.fn(async () => undefined)
-    const restore = vi.fn(async () => undefined)
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: release, restoreLegacyOutput: restore },
       () => undefined
     )
 
@@ -490,7 +486,7 @@ describe('desktop native playback facade', () => {
         mode: 'windows',
         windows: [{ startProjectFrame: 96_000, endProjectFrame: 192_000 }],
         laneIds: ['vocals'],
-        enabled: true
+
       },
       initialTransport: {
         state: 'playing',
@@ -537,16 +533,13 @@ describe('desktop native playback facade', () => {
         transport: { entrySeconds: 0, playbackRate: 1.1, transposeSemitones: -2 },
         cues: { click: false, countInBars: 0 }
       },
-      training: { mode: 'period', periodFrames: 144_000, laneIds: ['vocals'], enabled: true },
+      training: { mode: 'period', periodFrames: 144_000, laneIds: ['vocals'],  },
       initialTransport: { state: 'playing' }
     })
     expect(prepared[1].lanes[0]).toMatchObject({ gain: 0.4, muted: true, solo: false })
     expect(prepared[1].config.graphDocument).toEqual(prepared[0].config.graphDocument)
-    expect(release).toHaveBeenCalledTimes(1)
-    expect(restore).not.toHaveBeenCalled()
 
     await client.unload()
-    expect(restore).toHaveBeenCalledTimes(1)
   })
 
   it('a second rebuild queued behind the first restores the intended transport, not the snapshot', async () => {
@@ -599,7 +592,6 @@ describe('desktop native playback facade', () => {
     } as unknown as SingzApi
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
     const metronome = { click: false, countInBars: 0, volume: 0, accent: true, grid: false }
@@ -682,7 +674,6 @@ describe('desktop native playback facade', () => {
     } as unknown as SingzApi
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
     const metronome = { click: false, countInBars: 0, volume: 0, accent: true, grid: false }
@@ -803,43 +794,31 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
-  it('clears native route currentness only after browser handback, retaining it through native re-prepare', async () => {
+  it('reprepares and unloads without a browser handback', async () => {
     const h = seamHarness(generation => playing(generation))
-    const notify = vi.fn(async () => ({ ok: true }))
-    h.api.setDesktopPlaybackNativeOutputCurrent = notify
     expect(await h.start()).toBe(true)
     await h.client.pause()
     await h.client.reconfigure({ metronome: { ...h.metronome, click: true } })
     expect(h.calls).toContain('unload:1')
-    expect(notify).not.toHaveBeenCalled()
     await h.client.unload()
-    expect(notify).toHaveBeenCalledExactlyOnceWith(false)
   })
 
-  it('retains the selected native route for an internal native handoff, then clears it on a real song close', async () => {
+  it('retains native routing across an internal handoff and a song close', async () => {
     const h = seamHarness(generation => playing(generation))
-    const notify = vi.fn(async () => ({ ok: true }))
-    h.api.setDesktopPlaybackNativeOutputCurrent = notify
-    expect(await h.start()).toBe(true)
-    await h.client.unload({ retainNativeRoute: true })
-    expect(notify).not.toHaveBeenCalled()
     expect(await h.start()).toBe(true)
     await h.client.unload()
-    expect(notify).toHaveBeenCalledExactlyOnceWith(false)
+    expect(await h.start()).toBe(true)
+    await h.client.unload()
   })
 
-  it('a same-route song close clears native currentness and the next song starts normally', async () => {
+  it('a same-route song close lets the next native song start normally', async () => {
     const h = seamHarness(generation => playing(generation))
-    const notify = vi.fn(async () => ({ ok: true }))
-    h.api.setDesktopPlaybackNativeOutputCurrent = notify
     expect(await h.start()).toBe(true)
     await h.client.unload()
-    expect(notify).toHaveBeenCalledExactlyOnceWith(false)
     expect(await h.start()).toBe(true)
     expect(h.calls).toContain('start:2')
     expect(h.client.transportActive).toBe(true)
     await h.client.unload()
-    expect(notify).toHaveBeenCalledTimes(2)
   })
 
   it('restores the signed song position on a real output move without involving monitoring', async () => {
@@ -976,14 +955,14 @@ describe('desktop native playback facade', () => {
         initialTransport: { state: 'paused', loop: { startProjectFrame: 88200, endProjectFrame: 352800 } } })
       await h.client.unload()
     })
-    it('applies an explicit browser output to the native provider instead of its default', async () => {
+    it('applies an explicit native output UID instead of its default', async () => {
       const h = seamHarness(generation => playing(generation))
       const change = routes(h)
       ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
       await h.start({ provider })
       change()
       vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => [{ kind: 'audiooutput', deviceId: 'origin-scoped-id', label: 'New output' }] } })
-      await h.client.reconfigure({ browserOutputId: 'origin-scoped-id' }, { refreshRoute: true })
+      await h.client.reconfigure({ preferredOutputUid: 'new-output' }, { refreshRoute: true })
       expect(h.prepared.at(-1)).toMatchObject({ outputDeviceUid: 'new-output' })
       await h.client.unload()
     })
@@ -995,13 +974,13 @@ describe('desktop native playback facade', () => {
       change()
       const enumerateDevices = vi.fn(async () => [])
       vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices } })
-      await h.client.reconfigure({ browserOutputId: 'native:new-output' }, { refreshRoute: true })
+      await h.client.reconfigure({ preferredOutputUid: 'new-output' }, { refreshRoute: true })
       expect(h.prepared.at(-1)).toMatchObject({ outputDeviceUid: 'new-output' })
-      await expect(h.client.reconfigure({ browserOutputId: 'native:missing' }, { refreshRoute: true })).rejects.toThrow()
+      await expect(h.client.reconfigure({ preferredOutputUid: 'missing' }, { refreshRoute: true })).rejects.toThrow()
       expect(enumerateDevices).not.toHaveBeenCalled()
       await h.client.unload()
     })
-    it('keeps the old native graph when an explicit output cannot be identified', async () => {
+    it('keeps the old native graph when an explicit native UID is missing', async () => {
       const h = seamHarness(generation => playing(generation))
       routes(h)
       ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
@@ -1010,7 +989,7 @@ describe('desktop native playback facade', () => {
       const old = await (inventory.getMockImplementation() as typeof h.api.audioHostDevices)(provider)
       inventory.mockResolvedValue({ ...old, provider, devices: [old.devices[0], { ...old.devices[0], uid: 'duplicate' }] })
       vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => [{ kind: 'audiooutput', deviceId: 'origin-scoped-id', label: 'Speaker' }] } })
-      await expect(h.client.reconfigure({ browserOutputId: 'origin-scoped-id' }, { refreshRoute: true })).rejects.toThrow('uniquely')
+      await expect(h.client.reconfigure({ preferredOutputUid: 'not-a-native-uid' }, { refreshRoute: true })).rejects.toThrow('Select an available output')
       expect(h.prepared).toHaveLength(1)
       expect(h.calls).not.toContain('stop:1')
       await h.client.unload()
@@ -1569,15 +1548,13 @@ describe('desktop native playback facade', () => {
     expect(pending.pendingSeekIssued).toBe(0)
   })
 
-  it('a graph prepared ahead of Play is opened and started by Play, with no second prepare and the output released only then', async () => {
+  it('opens a prepared native graph at Play without a second prepare', async () => {
     // The phones prepare at open; the desktop prepared at Play, which put
     // the whole decode and graph build inside "Play → advancing" (+0.7-2.8 s
     // over Web Audio on the harness). Nothing is opened ahead of time, so
     // Chromium keeps the output — and the metronome preview keeps sounding —
     // until the singer presses Play.
-    const release = vi.fn(async () => undefined)
     const h = seamHarness((generation) => playing(generation))
-    ;(h.client as unknown as { lease: { releaseLegacyOutput: () => Promise<void> } }).lease.releaseLegacyOutput = release
     const request = {
       provider: 'coreaudio' as const,
       lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
@@ -1597,7 +1574,6 @@ describe('desktop native playback facade', () => {
     expect(await h.client.prepareAhead(request)).toBe(true)
     expect(h.client.preparedAhead).toBe(true)
     expect(h.client.active).toBe(false)
-    expect(release).not.toHaveBeenCalled()
     expect(h.calls).toEqual(['prepare:1'])
     // A second prepare ahead while one stands is declined, not stacked.
     expect(await h.client.prepareAhead(request)).toBe(false)
@@ -1605,7 +1581,6 @@ describe('desktop native playback facade', () => {
     // Play with the same request: open and start the prepared generation.
     expect(await h.client.prepareAndStart(request)).toBe(true)
     expect(h.calls).toEqual(['open:1', 'start:1'])
-    expect(release).toHaveBeenCalledTimes(1)
     expect(h.client.active).toBe(true)
     expect(h.client.preparedAhead).toBe(false)
     expect(h.client.transportActive).toBe(true)
@@ -1813,9 +1788,7 @@ describe('desktop native playback facade', () => {
   })
 
   it('a graph prepared ahead is let go by discardAhead and by unload, restoring nothing', async () => {
-    const restore = vi.fn(async () => undefined)
     const h = seamHarness((generation) => playing(generation))
-    ;(h.client as unknown as { lease: { restoreLegacyOutput: () => Promise<void> } }).lease.restoreLegacyOutput = restore
     const request = {
       provider: 'coreaudio' as const,
       lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
@@ -1845,7 +1818,6 @@ describe('desktop native playback facade', () => {
     expect(h.client.active).toBe(false)
     // Chromium never lost the output: the lease's restore is a no-op here,
     // and the facade did not call for one on the ahead generation's account.
-    expect(restore).not.toHaveBeenCalled()
   })
 
   it.each(['prepare', 'open'] as const)(
@@ -1888,10 +1860,7 @@ describe('desktop native playback facade', () => {
       unloadDesktopPlayback: vi.fn(async () => result('1', 'unloaded', true))
     } as unknown as SingzApi
     vi.stubGlobal('window', { singz: api })
-    const release = vi.fn(async () => undefined)
-    const restore = vi.fn(async () => undefined)
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: release, restoreLegacyOutput: restore },
       () => undefined
     )
 
@@ -1906,16 +1875,13 @@ describe('desktop native playback facade', () => {
       accessMode: 'exclusive',
       outputDeviceUid: 'asio:driver-guid:output-1'
     })
-    expect(release).toHaveBeenCalledOnce()
     expect(api.startDesktopPlayback).not.toHaveBeenCalled()
     expect(api.openDesktopPlayback).toHaveBeenCalledTimes(failureStage === 'open' ? 1 : 0)
     expect(api.unloadDesktopPlayback).toHaveBeenCalledWith('1')
-    expect(restore).not.toHaveBeenCalled()
     expect(client.active).toBe(true)
     expect(client.recoveryPending).toBe(true)
     await client.unload()
     expect(client.active).toBe(false)
-    expect(restore).toHaveBeenCalledOnce()
     }
   )
 
@@ -1927,7 +1893,6 @@ describe('desktop native playback facade', () => {
     'retains renderer recovery ownership after ASIO %s failure without a native claim',
     async (stage, errorCode, failedGeneration) => {
       let prepareCount = 0
-      let rendererLease = false
       const api = {
         desktopPlaybackProviders: vi.fn(async () => [{
           id: 'asio', label: 'ASIO', available: true, errorCode: 'none', detail: 'ASIO ready'
@@ -1965,10 +1930,7 @@ describe('desktop native playback facade', () => {
         unloadDesktopPlayback: vi.fn(async () => result('2', 'unloaded', true))
       } as unknown as SingzApi
       vi.stubGlobal('window', { singz: api })
-      const release = vi.fn(async () => { rendererLease = true })
-      const restore = vi.fn(async () => { rendererLease = false })
       const client = new DesktopNativePlaybackClient(
-        { releaseLegacyOutput: release, restoreLegacyOutput: restore },
         () => undefined
       )
 
@@ -1977,9 +1939,6 @@ describe('desktop native playback facade', () => {
       })
       expect(client.active).toBe(true)
       expect(client.recoveryPending).toBe(true)
-      expect(rendererLease).toBe(true)
-      expect(release).toHaveBeenCalledOnce()
-      expect(restore).not.toHaveBeenCalled()
       expect(api.openDesktopPlayback).not.toHaveBeenCalled()
       expect(api.startDesktopPlayback).not.toHaveBeenCalled()
       expect(api.unloadDesktopPlayback).not.toHaveBeenCalled()
@@ -1993,22 +1952,17 @@ describe('desktop native playback facade', () => {
       await expect(client.prepareAndStart(asioRequest())).resolves.toBe(true)
       expect(client.active).toBe(true)
       expect(client.recoveryPending).toBe(false)
-      expect(rendererLease).toBe(true)
-      expect(release).toHaveBeenCalledOnce()
       expect(api.openDesktopPlayback).toHaveBeenCalledOnce()
       expect(api.startDesktopPlayback).toHaveBeenCalledOnce()
 
       await client.unload()
       expect(client.active).toBe(false)
-      expect(rendererLease).toBe(false)
-      expect(restore).toHaveBeenCalledOnce()
     }
   )
 
   it('retains both ownership flags until incomplete native cleanup recovers', async () => {
     let unloadCount = 0
     let prepareCount = 0
-    let rendererLease = false
     const cleanupFailed: DesktopPlaybackResult = {
       ...result('1', 'quarantined', false),
       ok: false,
@@ -2052,10 +2006,7 @@ describe('desktop native playback facade', () => {
       })
     } as unknown as SingzApi
     vi.stubGlobal('window', { singz: api })
-    const release = vi.fn(async () => { rendererLease = true })
-    const restore = vi.fn(async () => { rendererLease = false })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: release, restoreLegacyOutput: restore },
       () => undefined
     )
 
@@ -2065,8 +2016,6 @@ describe('desktop native playback facade', () => {
     expect(client.active).toBe(true)
     expect(client.recoveryPending).toBe(true)
     expect(client.recoveryMode).toBe('cleanup-required')
-    expect(rendererLease).toBe(true)
-    expect(restore).not.toHaveBeenCalled()
     await expect(client.resume()).rejects.toMatchObject({
       code: 'provider-cleanup-incomplete', provider: 'asio'
     })
@@ -2076,13 +2025,9 @@ describe('desktop native playback facade', () => {
     })
     expect(client.active).toBe(true)
     expect(client.recoveryMode).toBe('cleanup-required')
-    expect(rendererLease).toBe(true)
-    expect(restore).not.toHaveBeenCalled()
     await client.cleanupForRetry()
     expect(client.active).toBe(true)
     expect(client.recoveryMode).toBe('prepare-retry')
-    expect(rendererLease).toBe(true)
-    expect(restore).not.toHaveBeenCalled()
     await expect(client.prepareAndStart(asioRequest())).resolves.toBe(true)
     expect(client.recoveryPending).toBe(false)
     expect(api.prepareDesktopPlayback).toHaveBeenCalledTimes(2)
@@ -2091,8 +2036,6 @@ describe('desktop native playback facade', () => {
     expect(api.resumeDesktopPlayback).not.toHaveBeenCalled()
     await client.unload()
     expect(client.active).toBe(false)
-    expect(rendererLease).toBe(false)
-    expect(restore).toHaveBeenCalledOnce()
   })
 
   it('retains playing diagnostics but deactivates transport before failed cleanup', async () => {
@@ -2127,7 +2070,6 @@ describe('desktop native playback facade', () => {
     } as unknown as SingzApi
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
 
@@ -2168,9 +2110,7 @@ describe('desktop native playback facade', () => {
         api.startDesktopPlayback = vi.fn(async () => { throw new Error('start IPC rejected') })
       }
       vi.stubGlobal('window', { singz: api })
-      const restore = vi.fn(async () => undefined)
       const client = new DesktopNativePlaybackClient(
-        { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: restore },
         () => undefined
       )
 
@@ -2207,7 +2147,6 @@ describe('desktop native playback facade', () => {
         code: 'provider-cleanup-incomplete', provider: 'asio'
       })
       expect(api.resumeDesktopPlayback).not.toHaveBeenCalled()
-      expect(restore).not.toHaveBeenCalled()
       expect(unload).toHaveBeenCalled()
     }
   )
@@ -2223,7 +2162,6 @@ describe('desktop native playback facade', () => {
     )
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
     await client.prepareAndStart(asioRequest())
@@ -2271,7 +2209,6 @@ describe('desktop native playback facade', () => {
     )
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
     await client.prepareAndStart(asioRequest())
@@ -2300,7 +2237,6 @@ describe('desktop native playback facade', () => {
     )
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
     await client.prepareAndStart(asioRequest())
@@ -2334,7 +2270,6 @@ describe('desktop native playback facade', () => {
     )
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
     await client.prepareAndStart(asioRequest())
@@ -2369,7 +2304,6 @@ describe('desktop native playback facade', () => {
     )
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
     await client.prepareAndStart(asioRequest())
@@ -2396,9 +2330,7 @@ describe('desktop native playback facade', () => {
       xruns: failed ? '1' : '0' }), async generation => result(generation, 'unloaded', true))
     vi.stubGlobal('window', { singz: api })
     const changes = vi.fn()
-    const client = new DesktopNativePlaybackClient({
-      releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined
-    }, changes)
+    const client = new DesktopNativePlaybackClient(changes)
     await client.prepareAndStart(asioRequest())
     expect(client.transportActive).toBe(true)
     failed = true
@@ -2430,7 +2362,6 @@ describe('desktop native playback facade', () => {
     vi.stubGlobal('window', { singz: api })
     const changes = vi.fn()
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       changes
     )
 
@@ -2493,7 +2424,6 @@ describe('desktop native playback facade', () => {
     vi.stubGlobal('window', { singz: api })
     const changes = vi.fn()
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       changes
     )
 
@@ -2538,7 +2468,6 @@ describe('desktop native playback facade', () => {
       )
       vi.stubGlobal('window', { singz: api })
       const client = new DesktopNativePlaybackClient(
-        { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
         () => undefined
       )
 
@@ -2599,7 +2528,6 @@ describe('desktop native playback facade', () => {
     vi.stubGlobal('window', { singz: api })
     const changes = vi.fn()
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       changes
     )
 
@@ -2649,7 +2577,6 @@ describe('desktop native playback facade', () => {
     )
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
 
@@ -2670,62 +2597,6 @@ describe('desktop native playback facade', () => {
     expect(api.resumeDesktopPlayback).not.toHaveBeenCalled()
   })
 
-  it('does not clear renderer ownership when Chromium route restoration is incomplete', async () => {
-    let restoreCount = 0
-    let rendererLease = false
-    const api = {
-      desktopPlaybackProviders: vi.fn(async () => [{
-        id: 'asio', label: 'ASIO', available: true, errorCode: 'none', detail: 'ASIO ready'
-      }]),
-      audioHostDevices: vi.fn(async () => ({
-        ok: true, platform: 'win32', provider: 'asio', defaultInputUid: '',
-        defaultOutputUid: 'asio:driver-guid:output-1',
-        devices: [{
-          uid: 'asio:driver-guid:output-1', label: 'ASIO Phones', defaultInput: false,
-          defaultOutput: true, inputChannels: 0, outputChannels: 2, inputChannelLabels: [],
-          outputChannelLabels: ['L', 'R'], nominalSampleRate: 48_000, direction: 'output',
-          accessMode: 'exclusive', transport: 'virtual', monitoringSuitability: 'low-latency',
-          sampleRateRanges: [],
-          bufferFrames: { minimumFrames: 32, maximumFrames: 512, preferredFrames: 64, fundamentalFrames: 1 }
-        }]
-      })),
-      prepareDesktopPlayback: vi.fn(async () => ({
-        ...result('0'), ok: false, errorCode: 'host-failure',
-        error: 'ASIO owner was not created', ownershipRetained: false
-      }))
-    } as unknown as SingzApi
-    vi.stubGlobal('window', { singz: api })
-    const release = vi.fn(async () => { rendererLease = true })
-    const restore = vi.fn(async () => {
-      restoreCount++
-      if (restoreCount === 1) throw new Error('Chromium route is still unconfirmed')
-      rendererLease = false
-    })
-    const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: release, restoreLegacyOutput: restore },
-      () => undefined
-    )
-
-    await expect(client.prepareAndStart(asioRequest())).rejects.toMatchObject({
-      code: 'provider-failure', provider: 'asio'
-    })
-    expect(client.active).toBe(true)
-    expect(rendererLease).toBe(true)
-    await expect(client.unload()).rejects.toMatchObject({
-      code: 'provider-route-restore-incomplete', provider: 'asio'
-    })
-    expect(client.active).toBe(true)
-    expect(client.recoveryPending).toBe(true)
-    expect(rendererLease).toBe(true)
-    await expect(client.prepareAndStart(asioRequest())).rejects.toMatchObject({
-      code: 'provider-recovery-conflict', provider: 'asio'
-    })
-    expect(api.prepareDesktopPlayback).toHaveBeenCalledOnce()
-    await client.unload()
-    expect(client.active).toBe(false)
-    expect(rendererLease).toBe(false)
-    expect(restore).toHaveBeenCalledTimes(2)
-  })
 
   it('keeps the old generation and UI intent when rebuild telemetry is not trustworthy', async () => {
     const api = {
@@ -2752,7 +2623,6 @@ describe('desktop native playback facade', () => {
     } as unknown as SingzApi
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
       () => undefined
     )
     await client.prepareAndStart({
@@ -4123,7 +3993,6 @@ describe('desktop native transport boundaries', () => {
     } as unknown as SingzApi
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient(
-      { releaseLegacyOutput: vi.fn(async () => undefined), restoreLegacyOutput: vi.fn(async () => undefined) },
       () => undefined
     )
     expect(await client.prepareAndStart({
@@ -4275,10 +4144,9 @@ describe('Linux ALSA output ownership', () => {
       defaultOutputUid: '', devices: old.devices.map(device => ({ ...device, uid: 'alsa:loop:pcm:0',
         bufferFrames: { ...device.bufferFrames, minimumFrames: 1024, maximumFrames: 1024, preferredFrames: 1024 } })) }))
     vi.stubGlobal('window', { singz: api })
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined,
-      restoreLegacyOutput: async () => undefined }, () => undefined)
+    const client = new DesktopNativePlaybackClient(() => undefined)
     try {
-      await client.prepareAndStart({ ...asioRequest(), provider: 'alsa', browserOutputId: 'native:alsa:loop:pcm:0' })
+      await client.prepareAndStart({ ...asioRequest(), provider: 'alsa', preferredOutputUid: 'alsa:loop:pcm:0' })
       expect(api.prepareDesktopPlayback).toHaveBeenCalledWith(expect.objectContaining({ bufferFrames: 256 }), expect.any(Array))
     } finally { await client.unload() }
   })
@@ -4298,13 +4166,10 @@ describe('Linux ALSA output ownership', () => {
       const enumerateDevices = vi.fn(() => { throw new Error('Chromium inventory must not be used') })
       vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices } })
       vi.stubGlobal('window', { singz: api })
-      const release = vi.fn(async () => undefined)
-      const client = new DesktopNativePlaybackClient({
-        releaseLegacyOutput: release, restoreLegacyOutput: async () => undefined
-      }, () => undefined)
+      const client = new DesktopNativePlaybackClient(() => undefined)
       const request: DesktopNativePlaybackPrepare = {
         ...asioRequest(), provider: 'alsa',
-        browserOutputId: route === 'ambiguous' ? '' : `native:alsa:${route === 'selected' ? 'loop' : 'gone'}:pcm:0`
+        preferredOutputUid: route === 'ambiguous' ? '' : `alsa:${route === 'selected' ? 'loop' : 'gone'}:pcm:0`
       }
       try {
         if (route === 'selected') {
@@ -4314,7 +4179,6 @@ describe('Linux ALSA output ownership', () => {
           }), expect.any(Array))
         } else {
           await expect(client.prepareAndStart(request)).rejects.toMatchObject({ provider: 'alsa', code: 'provider-failure' })
-          expect(release).not.toHaveBeenCalled()
           expect(api.prepareDesktopPlayback).not.toHaveBeenCalled()
         }
         expect(enumerateDevices).not.toHaveBeenCalled()
@@ -4348,20 +4212,20 @@ describe('ADR 0015 native prepare and route failure details', () => {
     ['provider-failure', 'provider-unavailable'],
     ['teardown-uncertain', 'recovery-required'],
     ['native-audio-busy', 'recovery-required']
-  ] as const)('preserves %s as typed %s through provider wrapping', async (errorCode, code) => {
+  ] as const)('preserves %s through provider wrapping (formerly grouped as %s)', async (errorCode, _category) => {
     const api = asioPollingApi(async () => status('1'), async () => result('1', 'unloaded', true))
     api.prepareDesktopPlayback = vi.fn<SingzApi['prepareDesktopPlayback']>(async () => ({ ...result('0'), ok: false, errorCode, error: 'deliberate admission rejection' }))
     vi.stubGlobal('window', { singz: api })
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined }, () => undefined)
+    const client = new DesktopNativePlaybackClient(() => undefined)
     try {
       await expect(client.prepareAndStart(asioRequest())).rejects.toMatchObject({
-        failure: { code, detail: expect.stringContaining('deliberate admission rejection') }
+        failure: { code: errorCode, detail: expect.stringContaining('deliberate admission rejection') }
       })
-      expect(client.lastFailure?.code).toBe(code)
+      expect(client.lastFailure?.code).toBe(errorCode)
     } finally { await client.unload() }
   })
 
-  it('records the native prepare failure even when the compatibility path returns false', async () => {
+  it('retains the exact native prepare failure before any output opens', async () => {
     const api = asioPollingApi(async () => status('1'), async () => result('1', 'unloaded', true))
     const inventory = await api.audioHostDevices('asio')
     if (!inventory.ok) throw new Error(inventory.error)
@@ -4369,34 +4233,32 @@ describe('ADR 0015 native prepare and route failure details', () => {
     api.audioHostDevices = vi.fn<SingzApi['audioHostDevices']>(async () => ({ ...inventory, provider: 'coreaudio' }))
     api.prepareDesktopPlayback = vi.fn<SingzApi['prepareDesktopPlayback']>(async () => ({ ...result('0'), ok: false, errorCode: 'decode-failure', error: 'lane guide decoder rejected its content' }))
     vi.stubGlobal('window', { singz: api })
-    const restore = vi.fn(async () => undefined)
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined, restoreLegacyOutput: restore }, () => undefined)
-    expect(await client.prepareAndStart({ ...asioRequest(), provider: 'coreaudio' })).toBe(false)
-    expect(client.lastFailure).toMatchObject({ code: 'graph-rejected', detail: expect.stringContaining('lane guide') })
-    expect(restore).toHaveBeenCalledOnce()
+    const client = new DesktopNativePlaybackClient(() => undefined)
+    await expect(client.prepareAndStart({ ...asioRequest(), provider: 'coreaudio' })).rejects.toMatchObject({ failure: { code: 'decode-failure' } })
+    expect(client.lastFailure).toMatchObject({ code: 'decode-failure', detail: expect.stringContaining('lane guide') })
   })
 
   it('names an addon prepare invocation failure even during prepare-ahead', async () => {
     const api = asioPollingApi(async () => status('1'), async () => result('1', 'unloaded', true))
     api.prepareDesktopPlayback = vi.fn<SingzApi['prepareDesktopPlayback']>(async () => { throw new Error('binding disappeared') })
     vi.stubGlobal('window', { singz: api })
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined }, () => undefined)
+    const client = new DesktopNativePlaybackClient(() => undefined)
     expect(await client.prepareAhead(asioRequest())).toBe(false)
     expect(client.lastFailure).toMatchObject({ code: 'addon-unavailable', detail: expect.stringContaining('binding disappeared') })
   })
 
-  it('names an output-open refusal as route-rejected after native cleanup', async () => {
+  it('preserves an output-open host failure after native cleanup', async () => {
     const api = asioPollingApi(async () => status('1'), async () => result('1', 'unloaded', true))
     api.openDesktopPlayback = vi.fn<SingzApi['openDesktopPlayback']>(async () => ({ ...result('1'), ok: false, errorCode: 'host-failure', error: 'device refused 48000 Hz' }))
     vi.stubGlobal('window', { singz: api })
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined }, () => undefined)
+    const client = new DesktopNativePlaybackClient(() => undefined)
     try {
-      await expect(client.prepareAndStart(asioRequest())).rejects.toMatchObject({ failure: { code: 'route-rejected', detail: expect.stringContaining('48000 Hz') } })
+      await expect(client.prepareAndStart(asioRequest())).rejects.toMatchObject({ failure: { code: 'host-failure', detail: expect.stringContaining('48000 Hz') } })
       expect(api.unloadDesktopPlayback).toHaveBeenCalledWith('1')
     } finally { await client.unload() }
   })
 
-  it.each(['provider', 'inventory', 'no-device', 'device-lost'] as const)('names %s route admission without releasing legacy output', async (failure) => {
+  it.each(['provider', 'inventory', 'no-device', 'device-lost'] as const)('names %s native route admission before claiming output', async (failure) => {
     const api = asioPollingApi(async () => status('1'), async () => result('1', 'unloaded', true))
     const inventory = await api.audioHostDevices('asio')
     if (!inventory.ok) throw new Error(inventory.error)
@@ -4405,12 +4267,10 @@ describe('ADR 0015 native prepare and route failure details', () => {
     else if (failure === 'no-device') api.audioHostDevices = vi.fn<SingzApi['audioHostDevices']>(async () => ({ ...inventory, defaultOutputUid: '', devices: [] }))
     else vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => [] } })
     vi.stubGlobal('window', { singz: api })
-    const release = vi.fn(async () => undefined)
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: release, restoreLegacyOutput: async () => undefined }, () => undefined)
-    await expect(client.prepareAndStart({ ...asioRequest(), ...(failure === 'device-lost' ? { browserOutputId: 'disconnected' } : {}) })).rejects.toMatchObject({
-      failure: { code: failure === 'provider' || failure === 'inventory' ? 'provider-unavailable' : failure }
+    const client = new DesktopNativePlaybackClient(() => undefined)
+    await expect(client.prepareAndStart({ ...asioRequest(), ...(failure === 'device-lost' ? { preferredOutputUid: 'disconnected' } : {}) })).rejects.toMatchObject({
+      failure: { code: failure === 'provider' ? 'not-compiled' : failure === 'inventory' ? 'provider-unavailable' : failure }
     })
-    expect(release).not.toHaveBeenCalled()
     expect(api.prepareDesktopPlayback).not.toHaveBeenCalled()
   })
 
@@ -4420,34 +4280,13 @@ describe('ADR 0015 native prepare and route failure details', () => {
     if (!inventory.ok) throw new Error(inventory.error)
     api.audioHostDevices = vi.fn<SingzApi['audioHostDevices']>(async () => ({ ...inventory, devices: inventory.devices.map(device => ({ ...device, nominalSampleRate })) }))
     vi.stubGlobal('window', { singz: api })
-    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined }, () => undefined)
+    const client = new DesktopNativePlaybackClient(() => undefined)
     expect(await client.prepareAhead({ ...asioRequest(), playbackRate: 0.5, transpose: 13.5 })).toBe(false)
     expect(client.lastFailure).toMatchObject({ code: 'graph-rejected', detail: expect.stringContaining('8000..192000 Hz') })
     expect(api.prepareDesktopPlayback).not.toHaveBeenCalled()
   })
 })
 
-describe('native playback disabled by policy', () => {
-  it('declines with a preference code, not a graph failure, and logs once per session', async () => {
-    const mod = await import('../../src/renderer/src/audio/desktop-native-playback')
-    mod.resetDesktopPreferenceLogForTests()
-    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    try {
-      const features = { enabled: false, playbackRate: 1, transpose: 0, training: null, lanes: [], runtime: null }
-      for (let i = 0; i < 3; i++) {
-        expect(mod.selectDesktopPlaybackBackend('darwin', features)).toMatchObject({
-          backend: 'legacy', failure: { code: 'disabled-by-preference' }
-        })
-      }
-      expect(info).toHaveBeenCalledTimes(1)
-      expect(warn).not.toHaveBeenCalled()
-      // negative control: a real graph decline still warns every time
-      mod.selectDesktopPlaybackBackend('darwin', { ...features, enabled: true, runtime: null })
-      expect(warn).toHaveBeenCalled()
-    } finally { info.mockRestore(); warn.mockRestore() }
-  })
-})
 
 
 describe('ADR 0016 transient lane projection', () => {

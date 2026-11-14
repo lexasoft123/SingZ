@@ -109,30 +109,8 @@ it('keeps Desktop renderer cleanup ids unchanged', async () => {
 })
 
 
-it('forwards native output currentness without inventing acknowledgement after a process failure', async () => {
-  const { createRemoteCaptureOwner } = await import('../../src/main/audio-process')
-  const owner = createRemoteCaptureOwner()
-  child.postMessage.mockImplementation(message => {
-    if (message.type !== 'request') return
-    expect(message.target).toBe('owner')
-    expect(message.method).toBe('setPlaybackOutputCurrent')
-    expect(message.args).toEqual([7, false])
-    queueMicrotask(() => child.emit('message', { type: 'reply', epoch: message.epoch, id: message.id,
-      ok: true, value: { ok: true } }))
-  })
-  expect(await owner.setPlaybackOutputCurrent(7, false)).toEqual({ ok: true })
-  child.postMessage.mockImplementation(() => child.emit('exit', 1))
-  expect((await owner.setPlaybackOutputCurrent(7, false)).ok).toBe(false)
-})
-
-
-it('fences a live helper when a saturated queue cannot clear its native-route intent', async () => {
-  const { createRemoteCaptureOwner, desktopAudioProcess } = await import('../../src/main/audio-process')
-  const { AUDIO_RPC_LIMIT } = await import('../../src/main/audio-process-rpc')
-  const owner = createRemoteCaptureOwner()
-  const pending = Array.from({ length: AUDIO_RPC_LIMIT }, () => desktopAudioProcess.call('owner', 'playbackStatus', []).catch(() => null))
-  await new Promise(resolve => setImmediate(resolve))
-  expect((await owner.setPlaybackOutputCurrent(7, false)).ok).toBe(false)
-  expect(child.kill).toHaveBeenCalledOnce()
-  await Promise.all(pending)
+it('refuses the retired browser handback RPC before dispatch', async () => {
+  const { desktopAudioProcess } = await import('../../src/main/audio-process')
+  await expect(desktopAudioProcess.call('owner', 'setPlaybackOutputCurrent', [7, false])).rejects.toThrow('Unknown audio command')
+  expect(child.postMessage).not.toHaveBeenCalled()
 })

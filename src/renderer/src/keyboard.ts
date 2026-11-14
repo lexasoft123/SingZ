@@ -1,6 +1,6 @@
 /** Anything inside a dialog belongs to the dialog: its Start/Stop buttons
  * take Space and its gain sliders take the arrows. */
-export const DIALOG_SELECTOR = '[role="dialog"]'
+export const DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"]'
 
 /** Input types that are pressed rather than typed into: on/off controls,
  * buttons (image is a graphical submit), and the two that open a picker. */

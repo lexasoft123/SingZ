@@ -104,7 +104,7 @@ describe('dedicated audio process control channel', () => {
 
 
 it('allowlists native output intent only through validated ownership', () => {
-  expect(audioMethodAllowed('owner', 'setPlaybackOutputCurrent')).toBe(true)
+  expect(audioMethodAllowed('owner', 'setPlaybackOutputCurrent')).toBe(false)
   expect(audioMethodAllowed('binding', 'setPlaybackOutputCurrent')).toBe(false)
   expect(audioMethodAllowed('owner', 'setPlaybackOutputCurrentUnsafe')).toBe(false)
 })

@@ -1011,12 +1011,6 @@ function registerIpc(): void {
     return captureOwner.unloadPlayback(event.sender.id, playbackGeneration(generation))
   })
 
-  ipcMain.handle('audio-host:playback-output-current', async (event, current: unknown) => {
-    if (typeof current !== 'boolean') return { ok: false, error: 'Invalid native output state' }
-    const result = await captureOwner.setPlaybackOutputCurrent(event.sender.id, current)
-    return result
-  })
-
   ipcMain.handle('stems:reveal', (_e, raw: string) => {
     const full = resolve(String(raw))
     if (isAllowed(full)) shell.showItemInFolder(full)
