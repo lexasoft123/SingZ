@@ -131,6 +131,10 @@ class VoiceMonitorCapture {
   void release(VoiceCaptureUser, bool retainPrepared = false);
   // Discard an idle prepared backend without disturbing any retained user.
   void releasePrepared();
+  // Control transaction with ALL output readers joined. Take capture cannot
+  // pause: its file/timeline must finish before changing the physical period.
+  bool pauseForBufferChange();
+  AudioInputResult resumeAfterBufferChange(uint32_t frames);
   // Waits for any active delivery invocation before replacing its sink.
   void setDeliverySink(AudioInputSink);
   void synchronizeDelivery(const std::function<void()>&);

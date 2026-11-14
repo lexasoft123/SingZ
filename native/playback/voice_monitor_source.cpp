@@ -234,6 +234,7 @@ VoiceMonitorCapture::Impl {
   mutable std::mutex control, backendControl, sinkControl, statusControl;
   std::array<uint32_t, 3> users{};
   AudioInputConfig config;
+  std::vector<AudioInputDevice> inventory;
   AudioInputResult opened;
   AudioInputSink sink;
   std::unique_ptr<AudioInputBackend> backend;
@@ -329,6 +330,7 @@ AudioInputResult VoiceMonitorCapture::retain(VoiceCaptureUser user, const AudioI
   const auto devices = inventory ? *inventory : enumerateAudioInputDevices(&validationError);
   if (!validateAudioInputConfig(config, devices, validationError))
     return AudioInputResult::failure(AudioInputState::Error, validationError, config.channel);
+  s.inventory = devices;
   if (s.backend && (!s.retained || !sameCapture(config, s.config))) s.close(false);
   s.config = config;
   s.finalStats = {};
@@ -392,6 +394,45 @@ void VoiceMonitorCapture::release(VoiceCaptureUser user, bool retainPrepared) {
 void VoiceMonitorCapture::releasePrepared() {
   std::lock_guard lock(impl_->control);
   if (!impl_->total()) impl_->close(false);
+}
+bool VoiceMonitorCapture::pauseForBufferChange() {
+  std::lock_guard lock(impl_->control);
+  if (impl_->users[userIndex(VoiceCaptureUser::Take)]) return false;
+  impl_->close(false);
+  return true;
+}
+AudioInputResult VoiceMonitorCapture::resumeAfterBufferChange(uint32_t frames) {
+  std::array<uint32_t, 3> users;
+  AudioInputConfig config;
+  AudioInputSink sink;
+  std::vector<AudioInputDevice> inventory;
+  {
+    std::lock_guard lock(impl_->control);
+    if (!impl_->total()) return impl_->opened;
+    users = impl_->users; config = impl_->config; inventory = impl_->inventory;
+    { std::lock_guard sinkLock(impl_->sinkControl); sink = impl_->sink; }
+    impl_->users = {};
+  }
+  config.requestedBufferFrames = frames;
+  config.allowSharedDeviceBufferChange = true;
+  config.maximumAcceptableBufferFrames = 0;
+  const auto first = users[0] ? VoiceCaptureUser::Arm : VoiceCaptureUser::Monitor;
+  AudioInputResult result;
+  try { result = retain(first, config, std::move(sink), &inventory); }
+  catch (...) {
+    std::lock_guard lock(impl_->control);
+    impl_->users = users;
+    impl_->fail("could not resume audio input after buffer change");
+    impl_->close(false);
+    throw;
+  }
+  {
+    std::lock_guard lock(impl_->control);
+    // Preserve references even on failure so rollback can reopen the same
+    // owners. The transaction keeps callbacks closed until this succeeds.
+    impl_->users = users;
+  }
+  return result;
 }
 void VoiceMonitorCapture::setDeliverySink(AudioInputSink sink) {
   std::lock_guard lock(impl_->sinkControl); impl_->sink = std::move(sink);

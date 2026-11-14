@@ -6,7 +6,7 @@ export type AudioBufferPreferences = Record<string, number>
 export interface AudioBufferStatus {
   ok: boolean
   pending: boolean
-  reason?: 'unsupported-platform' | 'audio-active'
+  reason?: 'unsupported-platform' | 'take-recording'
   error?: string
   preferences: AudioBufferPreferences
   outputUid: string

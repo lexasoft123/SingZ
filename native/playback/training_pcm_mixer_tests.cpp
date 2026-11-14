@@ -4,6 +4,33 @@
 #include <iostream>
 using namespace singz;
 int main() {
+  {
+    TrainingPcmMixer cues;
+    float pcm[32]{}; float* channels[]{pcm};
+    AudioHostRenderBlock resumed; resumed.output=channels; resumed.outputChannels=1;
+    resumed.frames=resumed.maximumFrames=32; resumed.sampleRate=48000;
+    // One existing short cue survives a whole-second startup outage. A cue
+    // scheduled after the transaction keeps its new wall-time deadline.
+    assert(cues.schedule({std::vector<float>(32,.5f)},1,48000,1001000000ULL,1));
+    cues.prepareForBufferResume(1000000000ULL);
+    assert(cues.schedule({std::vector<float>(32,.25f)},2,48000,2000000000ULL,1));
+    resumed.callbackHostTimeNs=2000000000ULL;
+    cues.render(resumed); assert(pcm[0]==.25f && pcm[31]==.25f);
+    std::fill_n(pcm,32,0); resumed.callbackHostTimeNs+=666667;
+    cues.render(resumed); assert(pcm[0]==0 && pcm[31]==.5f);
+  }
+  {
+    TrainingPcmMixer cue;
+    std::vector<float> ramp(256); for(size_t i=0;i<ramp.size();++i) ramp[i]=i/1024.f;
+    assert(cue.schedule({ramp},1,48000,1000000000ULL,1));
+    float pcm[32]{}; float* channels[]{pcm};
+    AudioHostRenderBlock b; b.output=channels; b.outputChannels=1;
+    b.frames=b.maximumFrames=32; b.sampleRate=48000; b.callbackHostTimeNs=1000000000ULL;
+    cue.render(b); assert(pcm[31]==31/1024.f);
+    cue.prepareForBufferResume(1000666667ULL);
+    std::fill_n(pcm,32,0); b.callbackHostTimeNs=2000000000ULL;
+    cue.render(b); assert(pcm[0]==32/1024.f && pcm[31]==63/1024.f);
+  }
   TrainingPcmMixer mixer;
   assert(!mixer.active());
   float left[256]{}, right[256]{};

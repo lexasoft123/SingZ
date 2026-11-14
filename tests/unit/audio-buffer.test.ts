@@ -7,7 +7,7 @@ import type { DesktopAudioHostDevice, DesktopAudioHostInventoryResult } from '..
 const device = (uid: string, minimumFrames = 16, maximumFrames = 4096, rate = 48000): DesktopAudioHostDevice => ({
   uid, nominalSampleRate: rate, bufferFrames: { minimumFrames, maximumFrames, fundamentalFrames: 1, preferredFrames: 512 }
 } as DesktopAudioHostDevice)
-const status: AudioBufferStatus = { ok: true, pending: true, reason: 'audio-active', preferences: {},
+const status: AudioBufferStatus = { ok: true, pending: true, reason: 'take-recording', preferences: {},
   outputUid: 'out', requestedFrames: 64, obtainedFrames: 128, inputUid: 'in', inputRequestedFrames: 64, inputObtainedFrames: 128 }
 function harness(platform = 'darwin') {
   let saved: unknown = { disconnected: 32 }
@@ -52,6 +52,28 @@ describe('hardware buffer preference', () => {
     h.save.mockImplementationOnce(() => {})
     await expect(h.controller.request({ frames: 64, deviceUids: ['in', 'out'] })).rejects.toThrow('could not be saved')
     expect(h.native).not.toHaveBeenCalled()
+  })
+  it('restores persisted preferences after native rollback or a transport failure', async () => {
+    const h = harness()
+    h.native.mockResolvedValueOnce({ ...status, ok: false, pending: false, error: 'Injected failure', preferences: { disconnected: 32 } })
+    expect(await h.controller.request({ frames: 64, deviceUids: ['in', 'out'] })).toMatchObject({ error: 'Injected failure' })
+    expect(h.saved()).toEqual({ disconnected: 32 })
+    h.native.mockRejectedValueOnce(new Error('Audio process stopped'))
+    await expect(h.controller.request({ frames: 64, deviceUids: ['in', 'out'] })).rejects.toThrow('Audio process stopped')
+    expect(h.saved()).toEqual({ disconnected: 32 })
+  })
+  it('does not rewrite matching rollback preferences on repeated error polls, regardless of key order', async () => {
+    const h = harness()
+    h.save({ out: 128, in: 64, disconnected: 32 })
+    h.save.mockClear()
+    h.native.mockResolvedValue({ ...status, ok: false, pending: false, error: 'Persistent failure',
+      preferences: { disconnected: 32, in: 64, out: 128 } })
+    await h.controller.request(); await h.controller.request(); await h.controller.request()
+    expect(h.save).not.toHaveBeenCalled()
+    h.native.mockResolvedValue({ ...status, ok: false, pending: false, error: 'Persistent failure',
+      preferences: { disconnected: 32, in: 128, out: 128 } })
+    await h.controller.request(); await h.controller.request()
+    expect(h.save).toHaveBeenCalledTimes(1)
   })
   it.each(['win32', 'linux', 'box'])('does not change %s devices and gives a typed reason', async platform => {
     const h = harness(platform)

@@ -1,12 +1,14 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-const mock = vi.hoisted(() => ({ fork: vi.fn() }))
+const mock = vi.hoisted(() => ({ fork: vi.fn(), save: vi.fn() }))
+vi.mock('../../src/main/settings', () => ({ readSettings: () => ({}), writeSettings: mock.save }))
 vi.mock('electron', () => ({ app: { isPackaged: false, getPath: () => '/fake/box-profile' }, utilityProcess: { fork: mock.fork } }))
 vi.mock('../../src/main/log', () => ({ log: vi.fn(), logChunk: vi.fn() }))
 let child: EventEmitter & { postMessage: ReturnType<typeof vi.fn>; kill: ReturnType<typeof vi.fn>; stdout: null; stderr: null }
 beforeEach(() => {
   vi.resetModules()
   mock.fork.mockClear()
+  mock.save.mockClear()
   child = Object.assign(new EventEmitter(), { postMessage: vi.fn(), kill: vi.fn(() => true), stdout: null, stderr: null })
   mock.fork.mockImplementation((_entry: unknown, _args: unknown, options: { env: Record<string, string> }) => {
     queueMicrotask(() => child.emit('message', { type: 'ready', epoch: options.env.SINGZ_AUDIO_EPOCH, pid: 12345 }))
@@ -14,6 +16,18 @@ beforeEach(() => {
   })
 })
 afterEach(() => { child.emit('exit', 1); vi.unstubAllEnvs() })
+
+it('persists a native rollback even when Settings is closed', async () => {
+  const { desktopAudioProcess } = await import('../../src/main/audio-process')
+  const pending = desktopAudioProcess.call('binding', 'inputDevices', []).catch(() => null)
+  const options = mock.fork.mock.calls[0][2] as { env: Record<string, string> }
+  child.emit('message', { type: 'buffer-preferences-restored', epoch: options.env.SINGZ_AUDIO_EPOCH,
+    preferences: { output: 128, input: 128 }, error: 'Injected input failure' })
+  expect(mock.save).toHaveBeenCalledWith({ audioBufferFrames: { output: 128, input: 128 } })
+  expect(child.kill).not.toHaveBeenCalled()
+  child.emit('exit', 1)
+  await pending
+})
 
 it('never acknowledges relay stop when a saturated helper did not receive it', async () => {
   const { createRemoteCaptureOwner, desktopAudioProcess } = await import('../../src/main/audio-process')

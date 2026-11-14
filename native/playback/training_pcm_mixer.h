@@ -29,11 +29,20 @@ struct Voice {
   uint32_t cancellationFrames = 0;
   double sourceCursor = 0;
   bool cursorStarted = false;
+  bool resumeAfterGap = false;
   std::vector<std::vector<float>> planes;
 };
 
  public:
   static constexpr size_t kMaximumBytes = 64 * 1024 * 1024;
+  // Control-only with callbacks joined. The first resumed callback measures
+  // the complete gap (including device startup) and shifts ONLY these voices.
+  void prepareForBufferResume(uint64_t expectedCallbackNs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    resumeExpectedNs_ = expectedCallbackNs;
+    for (auto& voice : voices_)
+      if (voice.state.load(std::memory_order_acquire) != Voice::Finished) voice.resumeAfterGap = true;
+  }
   bool active() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& voice : voices_)
@@ -86,6 +95,7 @@ struct Voice {
       voice.gain.store(std::min(gain, voice.maximumGain), std::memory_order_relaxed);
       voice.cancellationFrames = 0;
       voice.sourceCursor = 0; voice.cursorStarted = false;
+      voice.resumeAfterGap = false;
       voice.cancelled.store(false, std::memory_order_relaxed);
       voice.state.store(Voice::Ready, std::memory_order_release);
       return true;
@@ -113,10 +123,13 @@ bool render(const AudioHostRenderBlock& block) noexcept {
   // latency exactly once when matching captured voice.
   const uint64_t blockNs = block.callbackHostTimeNs;
   if (!blockNs) return true;
+  const uint64_t gap = resumeExpectedNs_ && blockNs > resumeExpectedNs_ ? blockNs - resumeExpectedNs_ : 0;
+  resumeExpectedNs_ = 0;
   for (auto& voice : voices_) {
     uint32_t expected = Voice::Ready;
     voice.state.compare_exchange_strong(expected, Voice::Playing, std::memory_order_acq_rel);
     if (voice.state.load(std::memory_order_acquire) != Voice::Playing) continue;
+    if (voice.resumeAfterGap) { voice.startNs += gap; voice.resumeAfterGap = false; }
     const float gain = voice.gain.load(std::memory_order_relaxed);
     const bool cancelled = voice.cancelled.load(std::memory_order_acquire);
     // Host time anchors onset. After onset, advance by the rendered sample
@@ -156,6 +169,7 @@ bool render(const AudioHostRenderBlock& block) noexcept {
     for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) == Voice::Finished) { voice.planes.clear(); }
   }
   std::array<Voice, 32> voices_;
+  uint64_t resumeExpectedNs_{0}; // Callback-owned; control writes only with callbacks joined.
   std::mutex mutex_;
 };
 }

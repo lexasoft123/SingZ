@@ -62,7 +62,14 @@ export function AudioBufferSettings({ inventory, inputUid, outputUid }: {
       })}</option>)}
     </select>
     <p className="settings-hint">{t('settings.buffer.hint')}</p>
-    {status?.pending && <p className="settings-hint warn" role="status">{t('settings.buffer.pending')}</p>}
+    <p className="settings-hint">{t('settings.buffer.applyHint')}</p>
+    <AudioBufferResult status={status} error={error} />
+  </>
+}
+
+export function AudioBufferResult({ status, error = '' }: { status: AudioBufferStatus | null; error?: string }): React.ReactElement {
+  return <>
+    {status?.pending && status.reason === 'take-recording' && <p className="settings-hint warn" role="status">{t('settings.buffer.pending')}</p>}
     {status?.obtainedFrames ? <p className="settings-hint" role="status">{t('settings.buffer.outputStatus', {
       requested: status.requestedFrames, actual: status.obtainedFrames
     })}</p> : null}

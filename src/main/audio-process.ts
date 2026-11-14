@@ -16,7 +16,7 @@ import {
   type AudioReply
 } from './audio-process-rpc'
 import type { CaptureAnalysisWindow, CaptureDiscontinuity, CaptureTimeValue } from '../shared/types'
-import { readSettings } from './settings'
+import { readSettings, writeSettings } from './settings'
 import { audioBufferPreferences } from '../shared/audio-buffer'
 
 export type AsyncCaptureOwner = {
@@ -104,6 +104,16 @@ class DesktopAudioProcess {
       try {
         if (raw.type === 'reply') {
           rpc.receive(raw as AudioReply)
+          return
+        }
+        if (raw.type === 'buffer-preferences-restored') {
+          const preferences = audioBufferPreferences(raw.preferences)
+          if (!raw.preferences || typeof raw.preferences !== 'object' || Array.isArray(raw.preferences) ||
+              Object.keys(preferences).length !== Object.keys(raw.preferences).length ||
+              typeof raw.error !== 'string' || raw.error.length > 16384)
+            throw new Error('Audio process sent invalid buffer recovery preferences')
+          writeSettings({ audioBufferFrames: preferences })
+          log('dsp', `audio buffer restored · ${raw.error}`, 'error')
           return
         }
         if (raw.type === 'ready') {

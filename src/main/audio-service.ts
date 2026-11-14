@@ -53,17 +53,16 @@ function pumpBufferSettings(): void {
     const telemetry = `output requested ${status.requestedFrames}, obtained ${status.obtainedFrames} frames; ` +
       `input requested ${status.inputRequestedFrames}, obtained ${status.inputObtainedFrames} frames; ` +
       `pending ${status.pending}${status.error ? `; error ${status.error}` : ''}`
-    if (telemetry !== bufferTelemetry) { bufferTelemetry = telemetry; console.info(`Audio buffer · ${telemetry}`) }
+    if (telemetry !== bufferTelemetry) {
+      bufferTelemetry = telemetry; console.info(`Audio buffer · ${telemetry}`)
+      if (status.error) port.postMessage({ type: 'buffer-preferences-restored', epoch, preferences: status.preferences, error: status.error })
+    }
   } catch (error) {
     // A settings error must never prevent a stop/cancel command reaching native.
     const telemetry = `Audio buffer apply failed: ${String(error)}`
     if (telemetry !== bufferTelemetry) { bufferTelemetry = telemetry; console.error(telemetry) }
   }
 }
-// Applying a saved choice waits for all native users to release their routes.
-// Keep this running after Settings closes and before the next opening RPC.
-const bufferTimer = setInterval(pumpBufferSettings, 250)
-bufferTimer.unref()
 let inFlight = 0
 let inFlightBytes = 0
 let closed = false
@@ -141,7 +140,6 @@ port.on('message', async ({ data }) => {
   if (data.type === 'shutdown') {
     closed = true
     clearInterval(timer)
-    clearInterval(bufferTimer)
     for (const job of exportJobs.keys()) cancelExport(job)
     clearInterval(boxPoll)
     try { owner.stop() } finally { boxShutdown?.() }
@@ -173,7 +171,6 @@ port.on('message', async ({ data }) => {
     localeQueue = localized.catch(() => {})
     await localized
     const args = [...request.args]
-    pumpBufferSettings()
     if ((request.target === 'owner' && request.method === 'begin') ||
         (request.target === 'binding' && request.method === 'beginCapture')) {
       const key = args.pop()
@@ -200,6 +197,9 @@ port.on('message', async ({ data }) => {
     } else if (request.target === 'export' && request.method === 'paths') {
       result = await exportPaths(args)
     } else throw new Error('Unknown audio command')
+    // The only pending case is a recording take. Its finish/cancel RPC has
+    // just released the writer, so apply now even with no Settings UI open.
+    pumpBufferSettings()
     reply(result)
   } catch (error) { reply(undefined, String(error)) }
   finally { if (admitted) { --inFlight; inFlightBytes -= bytes } }

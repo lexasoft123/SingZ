@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <functional>
 #include <zcore/device/audio_host.h>
 #include <zcore/device/audio_input.h>
 
@@ -120,8 +121,16 @@ struct ServiceMasterStage {
 class SharedAudioService final {
  public:
   using BufferPreferences = std::map<std::string, uint32_t>;
-  // Control-only. False means a live client still owns the opening policy.
-  bool configureBufferPreferences(const BufferPreferences&, bool captureActive);
+  struct BufferChangeHooks {
+    std::string inputUid;
+    // All service callbacks are joined before these control-only hooks run.
+    std::function<bool()> pauseInput;
+    std::function<std::string(uint32_t)> resumeInput;
+    std::function<void(uint64_t, uint64_t)> prepareCues;
+  };
+  // Reopen the same physical route without replacing its renderers/transport.
+  // A failed change restores the previous policy and owners before returning.
+  AudioHostResult applyBufferPreferences(const BufferPreferences&, const BufferChangeHooks& = {});
   uint32_t requestedBufferFrames(const std::string& uid) const;
   AudioInputConfig inputBufferConfig(AudioInputConfig config) const;
   SharedAudioService();

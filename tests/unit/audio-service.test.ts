@@ -40,6 +40,16 @@ afterEach(() => {
 })
 
 describe('audio helper control dispatcher', () => {
+  it('reports restored preferences to main when a deferred take-only apply fails', async () => {
+    request(1, 'inputDevices', [], 'binding')
+    await vi.advanceTimersByTimeAsync(0)
+    fake.binding.audioBufferSettings.mockReturnValueOnce({ ok: false, pending: false,
+      preferences: { output: 128 }, error: 'Injected input failure' })
+    request(2, 'unloadPlayback', [7, '9'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(port.postMessage).toHaveBeenCalledWith({ type: 'buffer-preferences-restored', epoch: 'service-test',
+      preferences: { output: 128 }, error: 'Injected input failure' })
+  })
   it('still dispatches stop when applying buffer settings throws', async () => {
     request(1, 'inputDevices', [], 'binding')
     await vi.advanceTimersByTimeAsync(0)
@@ -52,7 +62,7 @@ describe('audio helper control dispatcher', () => {
     expect(port.postMessage.mock.calls.map(([message]) => message).find(message => message.id === 2)).toMatchObject({ ok: true })
     report.mockRestore()
   })
-  it('publishes saved buffer policy before the first device call and pumps deferred changes without Settings', async () => {
+  it('publishes saved policy first and applies a take-only pending change after stop without a timer', async () => {
     vi.stubEnv('SINGZ_AUDIO_BUFFER_PREFERENCES', JSON.stringify({ input: 64, output: 128, invalid: 48 }))
     request(1, 'inputDevices', [], 'binding')
     await vi.advanceTimersByTimeAsync(0)
@@ -60,6 +70,9 @@ describe('audio helper control dispatcher', () => {
     expect(fake.binding.audioBufferSettings.mock.invocationCallOrder[0]).toBeLessThan(fake.binding.inputDevices.mock.invocationCallOrder[0])
     fake.binding.audioBufferSettings.mockClear()
     await vi.advanceTimersByTimeAsync(250)
+    expect(fake.binding.audioBufferSettings).not.toHaveBeenCalled()
+    request(2, 'unloadPlayback', [7, '9'])
+    await vi.advanceTimersByTimeAsync(0)
     expect(fake.binding.audioBufferSettings).toHaveBeenCalledWith()
   })
   it('announces its own PID and refuses methods outside the explicit surface', async () => {

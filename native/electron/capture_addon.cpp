@@ -590,9 +590,10 @@ napi_value devices(napi_env env, napi_callback_info) {
   return result;
 }
 
-// Desired preferences can change while a take is active. Publication to the
-// shared service waits until every capture/output client has stopped.
+// Only an active take defers the transaction; every other owner is preserved
+// across the coordinated input/output reopen.
 singz::SharedAudioService::BufferPreferences desiredBuffers;
+singz::SharedAudioService::BufferPreferences appliedBuffers;
 bool bufferApplyNeeded = false;
 std::string bufferApplyError;
 napi_value audioBufferSettingsImpl(napi_env env, napi_callback_info info) {
@@ -625,14 +626,28 @@ napi_value audioBufferSettingsImpl(napi_env env, napi_callback_info info) {
     if (next != desiredBuffers) { desiredBuffers = std::move(next); bufferApplyNeeded = true; bufferApplyError.clear(); }
   }
   auto& capture = singz::sharedVoiceMonitorCapture();
+  if (desiredBuffers == appliedBuffers) bufferApplyNeeded = false;
   const bool capturing = capture.users(singz::VoiceCaptureUser::Arm) || capture.users(singz::VoiceCaptureUser::Monitor) ||
       capture.users(singz::VoiceCaptureUser::Take);
-  if (supported && bufferApplyNeeded && service.configureBufferPreferences(desiredBuffers, capturing || singz::trainingAudioActive())) {
-    capture.releasePrepared(); // An idle cached input must reacquire the new ledger request.
+  if (supported && bufferApplyNeeded && !capture.users(singz::VoiceCaptureUser::Take)) {
+    const auto previousInput = capture.openingResult();
+    singz::SharedAudioService::BufferChangeHooks hooks;
+    hooks.inputUid = previousInput.deviceUid;
+    hooks.pauseInput = [&] { return capture.pauseForBufferChange(); };
+    if (capturing) hooks.resumeInput = [&](uint32_t frames) {
+      const auto result = capture.resumeAfterBufferChange(frames);
+      if (!result.ok) return result.error.empty() ? std::string{"Native capture could not resume"} : result.error;
+      return result.sampleRate == previousInput.sampleRate ? std::string{} : std::string{"Capture sample rate changed during buffer reopen"};
+    };
+    hooks.prepareCues = singz::prepareTrainingCuesForBufferResume;
+    const auto applied = service.applyBufferPreferences(desiredBuffers, hooks);
     bufferApplyNeeded = false;
-    if (!service.activeOutputUid().empty()) {
-      const auto applied = service.ensureOutput();
-      bufferApplyError = applied.ok ? std::string{} : applied.message;
+    bufferApplyError = applied.ok ? std::string{} : applied.message.empty() ? "Audio buffer could not be applied" : applied.message;
+    if (applied.ok) appliedBuffers = desiredBuffers;
+    else desiredBuffers = appliedBuffers;
+    if (capturing && owner.generation) {
+      owner.inputResult = capture.openingResult();
+      owner.sampleRate = owner.inputResult.sampleRate;
     }
   }
   const auto host = service.status();
@@ -644,7 +659,7 @@ napi_value audioBufferSettingsImpl(napi_env env, napi_callback_info info) {
   set(env, result, "ok", boolValue(env, supported && bufferApplyError.empty()));
   set(env, result, "pending", boolValue(env, bufferApplyNeeded));
   if (!supported) set(env, result, "reason", stringValue(env, "unsupported-platform"));
-  else if (bufferApplyNeeded) set(env, result, "reason", stringValue(env, "audio-active"));
+  else if (bufferApplyNeeded) set(env, result, "reason", stringValue(env, "take-recording"));
   if (!bufferApplyError.empty()) set(env, result, "error", stringValue(env, bufferApplyError));
   set(env, result, "preferences", preferences);
   set(env, result, "outputUid", stringValue(env, outputUid));

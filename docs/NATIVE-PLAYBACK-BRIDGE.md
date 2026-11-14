@@ -1355,18 +1355,46 @@ An active capture retains its opening policy when a monitor or take joins.
 No callback allocates or reads preferences. Input devices negotiate when used;
 the idle output reopens immediately when a new preference can be published.
 
-A change during playback (including a prepared/paused song), monitoring,
-recording, microphone capture/preview, or queued cue/take playback is saved but
-deferred. Settings shows an applies-after-stop notice until every owning client
-releases its route. A 250-ms control-plane pump also runs after Settings closes,
-releases idle prepared capture, then reopens the idle output with the saved
-request. Thus a preview cannot pin a larger period for the next monitor/take.
-The setting reports requested and obtained input/output frames separately;
-rounding is visible and application failures are shown.
+A buffer change reopens the output and active input immediately, including
+playing/paused/prepared songs, preview/analysis, monitor and queued cues. The
+control transaction joins the whole service callback before releasing either
+ledger lease, preserves each renderer/gate and capture user/sink, and opens the
+same route at the new period. Song position, transport commands and DSP cursors
+remain in their existing renderer. The service maps the new physical host's
+frame/stream epoch onto the continuous song/cue clock only for this confirmed
+same-format reopen. Physical timestamps/epochs still reach the monitor and
+native diagnostics. Monitor history resets and its existing gain fades back in;
+the common master also fades in over 128 frames. Queued cue onsets move by the
+gap measured at the first resumed callback, including device startup, so short
+notes are not skipped. Cues scheduled after reopening retain their new deadlines;
+playing cues keep their
+sample cursors. A failed open/start restores the old buffer, input and owner
+states and returns status.error. An unsuccessful output rollback stops the
+incompatible song and independently resumes retained capture at the old period.
+Capture failure publishes Error so the monitor stops and Arm reports a failure.
+The service gate and attached training renderer remain ready for a later healthy
+output reopen.
 
-Portable tests exercise the request through a fake host and the real zCore
-ledger, shared monitor joins and deferred publication. Real-device qualification
-still needs obtained size at 32/64/128 frames and measured monitor latency;
+Only a recording take defers a change. Restarting capture creates a new source
+epoch and a real wall-time gap. The current writer closes its input gate when
+capture stops (its device-loss predicate), and its hardware gap padding follows
+wall time while this transaction freezes the song clock. Padding alone therefore
+cannot preserve the take-to-song placement timeline. The take writer is left
+untouched until finish/cancel, whose RPC applies the saved change immediately
+after releasing the Take reference, even if Arm/Monitor/preview remain active.
+The pending UI notice is specific to take recording. There is no 250-ms settings
+pump. Main receives failed deferred-apply recovery preferences even after
+Settings closes, and restores their persisted values. Requested and obtained
+input/output periods remain visible in Settings and change-gated logs.
+
+Portable tests use fake HAL properties with the real zCore ledger: eight owner
+combinations, output-open/input-open/output-start rollback, recording protection,
+queued cue preservation, concurrent output callbacks during six reopens, real
+NativePlaybackSession pause/resume at unity and with transpose, and byte-exact
+protected take PCM with no lost-device or gap receipt.
+Negative controls reintroduce deferral, drop cue delay, lose client clock
+continuity or omit input restart. Real-device qualification still needs obtained
+32/64/128 frames, controlled-glitch behavior and measured monitor latency;
 portable tests do not qualify driver behavior.
 
 ### Voice lane and common monitor after removal (ADR 0016 WP5 / 0017 WP6)

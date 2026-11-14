@@ -240,6 +240,7 @@ bool CommonVoiceMonitor::admit(void* context, const AudioHostInventory& inventor
   self.hostPeriod.store(result.latency.bufferFrames, std::memory_order_release);
   self.outputLeadFrames.store(0, std::memory_order_relaxed);
   self.outputLeadWindow.reset();
+  self.reader = {}; // Capture history and the physical output clock reopened together.
   // The service has drained callbacks before admission: reset the callback-owned
   // envelope so every successful reopen fades in through the existing ramp.
   self.current = self.destination = self.step = 0; self.remaining = 0; // Re-admission ramp.

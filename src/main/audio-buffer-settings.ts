@@ -12,6 +12,14 @@ export class AudioBufferSettingsController {
     native(preferences?: Record<string, number>): Promise<AudioBufferStatus>
   }) {}
 
+  private restorePreferences(value: unknown): void {
+    const next = audioBufferPreferences(value)
+    const saved = audioBufferPreferences(this.deps.read())
+    const entries = Object.entries(next)
+    if (Object.keys(saved).length !== entries.length || entries.some(([uid, frames]) => saved[uid] !== frames))
+      this.deps.save(next)
+  }
+
   async request(change?: unknown): Promise<AudioBufferStatus> {
     const run = this.queue.then(async () => {
       if (this.deps.platform !== 'darwin') return {
@@ -19,7 +27,11 @@ export class AudioBufferSettingsController {
         preferences: audioBufferPreferences(this.deps.read()), outputUid: '',
         requestedFrames: 128, obtainedFrames: 0, inputUid: '', inputRequestedFrames: 128, inputObtainedFrames: 0
       }
-      if (change === undefined) return this.deps.native()
+      if (change === undefined) {
+        const status = await this.deps.native()
+        if (status.error) this.restorePreferences(status.preferences)
+        return status
+      }
       const row = change as { frames?: unknown; deviceUids?: unknown }
       if (!row || !validAudioBufferSize(row.frames) || !Array.isArray(row.deviceUids) ||
           !row.deviceUids.length || row.deviceUids.length > 2 ||
@@ -30,13 +42,21 @@ export class AudioBufferSettingsController {
       const devices = inventory.devices.filter(device => (row.deviceUids as string[]).includes(device.uid))
       if (devices.length !== new Set(row.deviceUids).size || !audioBufferChoices(devices).includes(row.frames))
         throw new Error('The selected buffer is unavailable on the current audio devices')
-      const next = { ...audioBufferPreferences(this.deps.read()),
+      const previous = audioBufferPreferences(this.deps.read())
+      const next = { ...previous,
         ...Object.fromEntries(row.deviceUids.map(uid => [uid, row.frames])) }
       if (Object.keys(next).length > 256) throw new Error('Too many saved audio devices')
       this.deps.save(next)
       if (JSON.stringify(audioBufferPreferences(this.deps.read())) !== JSON.stringify(next))
         throw new Error('The audio buffer preference could not be saved')
-      return this.deps.native(next)
+      try {
+        const status = await this.deps.native(next)
+        if (status.error) this.restorePreferences(status.preferences)
+        return status
+      } catch (error) {
+        this.restorePreferences(previous)
+        throw error
+      }
     })
     this.queue = run.then(() => {}, () => {})
     return run

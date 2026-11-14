@@ -1121,6 +1121,50 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(shared_audio_service_tests PRIVATE SingZ::zcore_device Threads::Threads)
   add_test(NAME shared_audio_service_tests COMMAND shared_audio_service_tests)
 
+  add_executable(audio_buffer_change_tests tests/native/audio_buffer_change_tests.cpp
+    native/playback/shared_audio_service.cpp native/electron/take_writer.cpp)
+  target_compile_features(audio_buffer_change_tests PRIVATE cxx_std_20)
+  target_include_directories(audio_buffer_change_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(audio_buffer_change_tests PRIVATE singz_voice_monitor_client SingZ::native_playback_session)
+  add_test(NAME audio_buffer_change_tests COMMAND audio_buffer_change_tests)
+  foreach(_buffer_mutation IN ITEMS defer cue clock input recovery input_recovery)
+    set(_buffer_source "${_client_service}")
+    if(_buffer_mutation STREQUAL "defer")
+      string(REPLACE "  const auto previous = self.bufferPreferences;"
+        "  if (self.playback.render) return failure(\"negative deferral\");\n  const auto previous = self.bufferPreferences;"
+        _buffer_source "${_buffer_source}")
+    elseif(_buffer_mutation STREQUAL "cue")
+      string(REPLACE "    if (hooks.prepareCues) hooks.prepareCues(elapsed, self.clientClock.nextCallbackNs);" "    (void)elapsed; /* negative: lose queued cue time */"
+        _buffer_source "${_buffer_source}")
+    elseif(_buffer_mutation STREQUAL "clock")
+      string(REPLACE "    self.clientClock.pending = self.clientClock.initialized;" "    self.clientClock.pending = false;"
+        _buffer_source "${_buffer_source}")
+    elseif(_buffer_mutation STREQUAL "input")
+      string(REPLACE "    if (hooks.resumeInput) {" "    if (false && hooks.resumeInput) {"
+        _buffer_source "${_buffer_source}")
+    elseif(_buffer_mutation STREQUAL "recovery")
+      string(REPLACE "    if (accepting[1]) self.training.gate.open();\n    self.callbackGate.open();\n    changed.message"
+        "    /* negative: leave the service and attached training permanently closed */\n    changed.message"
+        _buffer_source "${_buffer_source}")
+    else()
+      string(REPLACE "    // Output failure must not strand retained capture users in Stopped.\n    // Restore input independently; its owner publishes Error on failure.\n    if (hooks.resumeInput) {"
+        "    /* negative: leave retained capture stopped after failed output rollback */\n    if (false && hooks.resumeInput) {"
+        _buffer_source "${_buffer_source}")
+    endif()
+    if(_buffer_source STREQUAL _client_service)
+      message(FATAL_ERROR "Buffer change ${_buffer_mutation} negative control did not hit")
+    endif()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/buffer-negative-${_buffer_mutation}.cpp" "${_buffer_source}")
+    add_executable(audio_buffer_negative_${_buffer_mutation} tests/native/audio_buffer_change_tests.cpp
+      "${CMAKE_CURRENT_BINARY_DIR}/buffer-negative-${_buffer_mutation}.cpp" native/electron/take_writer.cpp)
+    target_compile_features(audio_buffer_negative_${_buffer_mutation} PRIVATE cxx_std_20)
+    target_include_directories(audio_buffer_negative_${_buffer_mutation} PRIVATE "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/native/playback")
+    target_link_libraries(audio_buffer_negative_${_buffer_mutation} PRIVATE singz_voice_monitor_client SingZ::native_playback_session)
+    add_dependencies(audio_buffer_change_tests audio_buffer_negative_${_buffer_mutation})
+    add_test(NAME audio_buffer_negative_${_buffer_mutation} COMMAND audio_buffer_negative_${_buffer_mutation})
+    set_tests_properties(audio_buffer_negative_${_buffer_mutation} PROPERTIES WILL_FAIL TRUE)
+  endforeach()
+
   foreach(_master_variant IN ITEMS tests negative_bypass negative_limiter negative_latency)
     set(_master_source "${SINGZ_REPO_ROOT}/native/playback/shared_audio_service.cpp")
     if(NOT _master_variant STREQUAL "tests")

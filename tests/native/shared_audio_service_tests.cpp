@@ -113,10 +113,7 @@ int main() {
     CHECK(detail::requestMacAudioBuffer(backend->access, inputRequest.requestedBufferFrames,
         16384, inputLease, inputRequest.maximumAcceptableBufferFrames, backend->ledger, false).ok());
     CHECK(backend->access.frames == 128 && service.status().latency.bufferFrames == 128);
-    // Captures (including take/preview) keep their policy until all stop.
-    CHECK(!service.configureBufferPreferences({{"selected", 64}}, true));
-    CHECK(service.requestedBufferFrames("selected") == 128);
-    CHECK(service.configureBufferPreferences({{"selected", 64}}, false));
+    CHECK(service.applyBufferPreferences({{"selected", 64}}).ok);
     CHECK(service.ensureOutput().ok);
     CHECK(backend->lastConfig.requestedBufferFrames == 64);
     CHECK(backend->access.frames == 64);
@@ -125,9 +122,9 @@ int main() {
     AudioHostConfig songConfig; songConfig.requestedBufferFrames = 512;
     CHECK(songClient->open(songConfig, song, nullptr).ok);
     CHECK(backend->lastConfig.requestedBufferFrames == 64); // Never inherit the caller's 512.
-    CHECK(!service.configureBufferPreferences({{"selected", 32}}, false));
+    CHECK(service.applyBufferPreferences({{"selected", 32}}).ok);
     songClient->stop();
-    CHECK(service.configureBufferPreferences({{"selected", 32}, {"alternate", 256}}, false));
+    CHECK(service.applyBufferPreferences({{"selected", 32}, {"alternate", 256}}).ok);
     CHECK(service.ensureOutput().ok);
     CHECK(backend->lastConfig.requestedBufferFrames == 32);
     backend->useLedger = false; // The next route has a different physical device.

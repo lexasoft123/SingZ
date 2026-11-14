@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -46,7 +47,8 @@ AudioHostResult failure(const char* message) {
 
 struct SharedAudioService::Impl {
   explicit Impl(std::unique_ptr<AudioHostBackend> source, bool watch)
-      : backend(std::move(source)), watchDevices(watch) {}
+      : backend(std::move(source)), watchDevices(watch) { callbackGate.open(); }
+  AudioInputCallbackGate callbackGate;
   struct RenderClient {
     AudioInputCallbackGate gate;
     AudioHostRender render{nullptr};
@@ -56,6 +58,33 @@ struct SharedAudioService::Impl {
     std::atomic<uint64_t> frames{0};
   } playback, training, microphone, monitor;
   ServiceMasterStage master;
+  // Song/cue render time belongs to this service, not an AUHAL incarnation.
+  // A period-only reopen pauses that clock and keeps DSP/PCM cursors intact.
+  struct ClientClock {
+    bool initialized{}, pending{}, mapped{};
+    uint64_t endFrame{}, stream{}, route{}, sequence{}, nextCallbackNs{}, physicalFrame{}, logicalFrame{}, physicalStream{}, physicalRoute{}, physicalSequence{}, logicalSequence{};
+    void map(AudioHostRenderBlock& block) noexcept {
+      if (pending && initialized) {
+        physicalFrame = block.outputFrame; logicalFrame = endFrame;
+        physicalStream = block.streamGeneration; physicalRoute = block.routeGeneration;
+        physicalSequence = block.callbackSequence; logicalSequence = sequence + 1;
+        mapped = true; pending = false;
+        block.discontinuity &= ~(AudioHostDiscontinuityStart | AudioHostDiscontinuityClockReanchored | AudioHostDiscontinuityRouteChanged);
+      }
+      if (mapped && (block.streamGeneration != physicalStream || block.routeGeneration != physicalRoute ||
+          block.outputFrame < physicalFrame || block.callbackSequence < physicalSequence)) mapped = false;
+      if (mapped) {
+        block.outputFrame = logicalFrame + (block.outputFrame - physicalFrame);
+        block.streamGeneration = stream; block.routeGeneration = route;
+        block.callbackSequence = logicalSequence + (block.callbackSequence - physicalSequence);
+      }
+      endFrame = block.outputFrame + block.frames;
+      stream = block.streamGeneration; route = block.routeGeneration; initialized = true;
+      sequence = block.callbackSequence;
+      nextCallbackNs = std::isfinite(block.sampleRate) && block.sampleRate >= 8000
+          ? block.callbackHostTimeNs + static_cast<uint64_t>(block.frames * 1e9 / block.sampleRate) : 0;
+    }
+  } clientClock;
   uint64_t monitorGeneration{0};
   MonitorAdmission monitorAdmission{nullptr};
   bool monitorOutputLost{false};
@@ -281,11 +310,15 @@ struct SharedAudioService::Impl {
       if (block.output && block.output[channel])
         std::fill_n(block.output[channel], block.frames, 0.0F);
     self.master.meter.clearSongTargets();
+    AudioInputCallbackScope serviceScope(self.callbackGate);
+    if (!serviceScope) return true; // Controlled reopen: silence without advancing any client clock.
+    auto clientBlock = block;
+    self.clientClock.map(clientBlock);
     // A registered graph meter remains alive through the final bus pass.
     AudioInputCallbackScope playbackScope(self.playback.gate);
     {
       if (playbackScope && self.playback.render &&
-          !self.playback.render(self.playback.context, block)) {
+          !self.playback.render(self.playback.context, clientBlock)) {
         self.playback.failed.store(true, std::memory_order_release);
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
         recordBoxSongFailure(block.callbackHostTimeNs, block.frames);
@@ -299,7 +332,7 @@ struct SharedAudioService::Impl {
     {
       AudioInputCallbackScope scope(self.training.gate);
       if (scope && self.training.render &&
-          !self.training.render(self.training.context, block))
+          !self.training.render(self.training.context, clientBlock))
         self.training.failed.store(true, std::memory_order_release);
     }
     {
@@ -373,6 +406,7 @@ struct SharedAudioService::Impl {
     drain(monitor.gate); // Join the old output generation before opening another.
     outputGeneration.fetch_add(1, std::memory_order_release);
     backend->stop();
+    clientClock = {}; // Ordinary route changes retain their real discontinuity.
     auto result = backend->open(config, render, this);
     if (result.ok) {
       route = std::move(config);
@@ -578,14 +612,97 @@ SharedAudioService::SharedAudioService()
 SharedAudioService::SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider)
     : impl_(std::make_unique<Impl>(std::move(backend), false)) { impl_->provider = std::move(provider); }
 SharedAudioService::~SharedAudioService() { shutdown(); }
-bool SharedAudioService::configureBufferPreferences(const BufferPreferences& preferences, bool captureActive) {
+AudioHostResult SharedAudioService::applyBufferPreferences(const BufferPreferences& preferences,
+    const BufferChangeHooks& hooks) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (impl_->bufferPreferences == preferences) return true;
-  if (captureActive || impl_->playback.render || impl_->monitor.render ||
-      impl_->microphone.render) return false;
-  impl_->bufferPreferences = preferences;
-  // Reopening is performed by ensureOutput after releasing this control lock.
-  return true;
+  auto& self = *impl_;
+  const auto before = self.backend->status();
+  if (self.bufferPreferences == preferences)
+    return {true, AudioHostError::None, before.state, before.format, before.latency, {}};
+  if (self.provider != "coreaudio") return failure("Buffer changes require CoreAudio");
+  const auto previous = self.bufferPreferences;
+  const auto route = self.route;
+  const bool output = !route.outputDeviceUid.empty();
+  const bool running = before.state == AudioHostState::Running;
+  const std::array<bool, 4> accepting{self.playback.gate.accepting(), self.training.gate.accepting(),
+      self.microphone.gate.accepting(), self.monitor.gate.accepting()};
+  auto join = [&] { drain(self.callbackGate); drain(self.playback.gate); drain(self.training.gate); drain(self.microphone.gate); drain(self.monitor.gate); };
+  auto restore = [&] {
+    if (accepting[0]) self.playback.gate.open();
+    if (accepting[1]) self.training.gate.open();
+    if (accepting[2]) self.microphone.gate.open();
+    if (accepting[3]) self.monitor.gate.open();
+    self.callbackGate.open();
+  };
+  join();
+  const auto began = std::chrono::steady_clock::now();
+  bool pauseRefused = false;
+  auto attempt = [&](const BufferPreferences& policy) -> AudioHostResult {
+    if (hooks.pauseInput && !hooks.pauseInput()) { pauseRefused = true; return failure("A voice take is recording"); }
+    if (output) self.backend->stop(); // Both ledger leases are released before either reopens.
+    self.bufferPreferences = policy;
+    auto config = route;
+    config.requestedBufferFrames = self.supportedBuffer(config.outputDeviceUid);
+    auto result = output ? self.backend->open(config, Impl::render, &self)
+                         : AudioHostResult{true, AudioHostError::None, before.state, before.format, before.latency, {}};
+    if (!result.ok) return result;
+    if (output && (result.format.sampleRate != before.format.sampleRate ||
+        result.format.outputChannels != before.format.outputChannels ||
+        result.format.maximumFrames > before.format.maximumFrames))
+      return failure("The audio format changed while applying the buffer size");
+    if (hooks.resumeInput) {
+      const auto error = hooks.resumeInput(self.supportedBuffer(hooks.inputUid));
+      if (!error.empty()) return failure(error.c_str());
+    }
+    if (output && self.monitor.render && self.monitorAdmission &&
+        !self.monitorAdmission(self.monitor.context, self.cached, config, result))
+      return failure("The monitor route could not resume after the buffer change");
+    self.route = config;
+    // AUHAL's physical clock restarts. Keep song/cue DSP time continuous on
+    // this same-format route; the monitor still receives physical timestamps.
+    self.clientClock.pending = self.clientClock.initialized;
+    self.master.current = self.master.destination = self.master.step = 0;
+    self.master.remaining = 0; self.master.initialized = true;
+    const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - began).count());
+    if (hooks.prepareCues) hooks.prepareCues(elapsed, self.clientClock.nextCallbackNs);
+    restore();
+    if (output && running) result = self.backend->start();
+    return result;
+  };
+  auto safely = [&](const BufferPreferences& policy) -> AudioHostResult {
+    try { return attempt(policy); }
+    catch (const std::exception& error) { return failure(error.what()); }
+    catch (...) { return failure("Audio buffer change failed"); }
+  };
+  auto changed = safely(preferences);
+  if (changed.ok) return changed;
+  if (pauseRefused) {
+    self.clientClock.pending = self.clientClock.initialized;
+    restore(); return changed;
+  }
+  join();
+  const auto restored = safely(previous);
+  if (!restored.ok) {
+    join(); self.backend->stop();
+    // Output failure must not strand retained capture users in Stopped.
+    // Restore input independently; its owner publishes Error on failure.
+    if (hooks.resumeInput) {
+      try {
+        const auto inputError = hooks.resumeInput(self.supportedBuffer(hooks.inputUid));
+        if (!inputError.empty()) changed.message += "; input capture could not be restored: " + inputError;
+      } catch (const std::exception& error) {
+        changed.message += "; input capture could not be restored: " + std::string(error.what());
+      } catch (...) { changed.message += "; input capture could not be restored"; }
+    }
+    self.playback.failed.store(true, std::memory_order_release);
+    // The incompatible song stays closed, but a later healthy output
+    // must still admit independent cues whose renderer remains attached.
+    if (accepting[1]) self.training.gate.open();
+    self.callbackGate.open();
+    changed.message += "; previous audio route could not be restored: " + restored.message;
+  }
+  return changed;
 }
 uint32_t SharedAudioService::requestedBufferFrames(const std::string& uid) const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
