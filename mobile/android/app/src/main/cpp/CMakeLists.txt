@@ -187,6 +187,9 @@ target_include_directories(singzcore PRIVATE
 set_target_properties(singzcore PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES)
+# Static native dependencies are implementation details; keep their symbols
+# out of the JNI shared-library ABI, including zCore callback internals.
+target_link_options(singzcore PRIVATE "LINKER:--exclude-libs,ALL")
 # 32-bit ABIs (armeabi-v7a, x86) have 32-bit long — a >2 GB mix would
 # overflow plain fseek/ftell; the engine uses fseeko/ftello throughout.
 target_compile_definitions(singzcore PRIVATE _FILE_OFFSET_BITS=64)

@@ -188,7 +188,7 @@ ready.then(async () => {
   const idleContext = { contextOnly: true, webAudioPlaying: false, browserOutputUid: '', selectedOutputUid: '' }
   const idleAvailability = addon.voiceMonitorAvailability(idleContext)
   if (process.platform === 'darwin') {
-    assert.ok(idleAvailability.available || idleAvailability.reason === 'device-lost')
+    assert.equal(idleAvailability.available, true)
   } else {
     assert.equal(idleAvailability.reason, 'platform')
   }
@@ -203,6 +203,7 @@ ready.then(async () => {
       browserOutputUid: 'smoke:browser-output', selectedOutputUid: 'smoke:monitor-output' })
     assert.equal(missingOutput.available, false)
     assert.equal(missingOutput.reason, 'device-lost')
+    assert.equal(addon.voiceMonitorAvailability(idleContext).available, true)
   }
   const commonRoute = addon.voiceMonitorAvailability(voiceInput)
   if (process.platform === 'darwin') assert.equal(typeof commonRoute.commonOutputName, 'string')
@@ -212,14 +213,18 @@ ready.then(async () => {
     assert.equal(invalid.reason, 'error')
     assert.equal(addon.beginVoiceMonitor({ ...voiceInput, inputChannel, gainDb: 0 }, 11n).ok, false)
   }
-  for (const generation of [0n, -1n, 1, 1.5, Infinity, 2n ** 64n]) {
+  // Zero is the explicit orphan-cleanup sentinel when the caller lost its generation.
+  assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: 0 }, 0n).ok, false)
+  assert.equal(addon.endVoiceMonitor(0n).ok, true)
+  for (const generation of [-1n, 1, 1.5, Infinity, 2n ** 64n]) {
     assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: 0 }, generation).ok, false)
     assert.equal(addon.endVoiceMonitor(generation).ok, false)
   }
   assert.equal(addon.beginVoiceMonitor({ ...voiceInput, gainDb: NaN }, 10n).ok, false)
   assert.equal(addon.setVoiceMonitorGain(Infinity).ok, false)
   assert.equal(addon.setVoiceMonitorGain(0).ok, false)
-  assert.equal(addon.endVoiceMonitor(10n).ok, false)
+  // Ending an already-idle valid generation is idempotent.
+  assert.equal(addon.endVoiceMonitor(10n).ok, true)
   assert.equal(addon.voiceMonitorStatus().running, false)
   // Loading/unloading a peer N-API environment must retain addon-wide hosts.
   const { Worker } = require('node:worker_threads')

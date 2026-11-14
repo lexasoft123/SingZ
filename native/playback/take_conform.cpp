@@ -335,7 +335,8 @@ TakeConformStreamResult render(WavSource &source,WavDestination &destination,con
     const uint64_t leading=std::min<uint64_t>(duration,static_cast<uint64_t>(std::max<int64_t>(0,start)));
     destination.zeros(leading);
     for (uint64_t frame=first;frame<source.frames() && destination.frames()<duration;++frame) {
-      if (frame%(kIoBytes/2)==0) checkpoint(budget);destination.put(source.pcm(frame));
+      if (frame%(kIoBytes/2)==0) checkpoint(budget);
+      destination.put(source.pcm(frame));
     }
     destination.zeros(duration-destination.frames());return result;
   }

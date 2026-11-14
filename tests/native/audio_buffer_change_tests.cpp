@@ -90,7 +90,7 @@ struct Output final : AudioHostBackend {
     b.outputFrame=frame; b.streamGeneration=stream; b.routeGeneration=stream;
     b.callbackSequence=sequence++;
     b.callbackHostTimeNs=b.outputHostTimeNs=ns; b.outputTimestampValid=true;
-    b.discontinuity=first ? AudioHostDiscontinuityStart : 0; first=false;
+    b.discontinuity=first ? static_cast<uint32_t>(AudioHostDiscontinuityStart) : 0u; first=false;
     CHECK(callback(context,b)); frame+=b.frames;
     lastPeak=0; for(uint32_t i=0;i<b.frames;++i) lastPeak=std::max(lastPeak,std::abs(l[i]));
   }

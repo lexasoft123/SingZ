@@ -75,6 +75,9 @@ copyTree(join(src, 'src'), join(dst, 'src'), (name, relative) =>
   /\.(cpp|mm|h|hpp)$/.test(name) &&
   // Desktop selects the separate zcore_audio_export target; this pod carries playback.
   relative !== 'media/audio_export.cpp' &&
+  // The buffer ledger is used only by the macOS device providers; its private
+  // header and those providers are deliberately absent from the iOS pod.
+  relative !== 'device/audio_buffer_ledger.cpp' &&
   !callbackDefinitions.has(`src/${relative}`))
 copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
   (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
