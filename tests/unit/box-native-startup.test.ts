@@ -62,7 +62,10 @@ beforeEach(() => {
   vi.stubGlobal('AudioContext', Context)
   vi.stubGlobal('navigator', { platform: 'Linux aarch64' })
   vi.stubGlobal('window', {
-    singz: { configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })) }
+    singz: {
+      configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })),
+      setDesktopPlaybackMasterGain: vi.fn(async () => ({ ok: true }))
+    }
   })
 })
 afterEach(async () => {

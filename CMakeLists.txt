@@ -440,8 +440,8 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     native/electron/training_audio_session.h
     native/electron/native_audio_ownership.h)
   target_compile_features(singz_capture PRIVATE cxx_std_20)
+  target_include_directories(singz_capture SYSTEM PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
   target_include_directories(singz_capture PRIVATE
-    "${SINGZ_REPO_ROOT}/third_party/native/signalsmith"
     "${SINGZ_NODE_INCLUDE_DIR}"
     # Platform provider headers live under zcore/platform and intentionally
     # remain a private source-tree include for app bindings.
@@ -1602,18 +1602,19 @@ add_library(singz_take_conform STATIC native/playback/take_conform.cpp)
 target_compile_features(singz_take_conform PUBLIC cxx_std_20)
 target_link_libraries(singz_take_conform PUBLIC SingZ::file_path)
 set_target_properties(singz_take_conform PROPERTIES POSITION_INDEPENDENT_CODE YES)
-target_include_directories(singz_take_conform PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
+target_include_directories(singz_take_conform SYSTEM PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
 if(SINGZ_CORE_TESTS)
   add_library(take_conform_v2_reference STATIC tests/native/fixtures/take-conform-v2/take_conform.cpp)
   target_compile_features(take_conform_v2_reference PRIVATE cxx_std_20)
-  target_include_directories(take_conform_v2_reference PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
+  target_include_directories(take_conform_v2_reference SYSTEM PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
   target_link_libraries(take_conform_v2_reference PRIVATE SingZ::zcore_resample)
   foreach(_conform_variant IN ITEMS tests negative_ratio negative_placement negative_latency negative_drift)
     set(_conform_target take_conform_${_conform_variant})
     add_executable(${_conform_target} tests/native/take_conform_tests.cpp native/playback/take_conform.cpp)
     target_compile_features(${_conform_target} PRIVATE cxx_std_20)
     target_link_libraries(${_conform_target} PRIVATE SingZ::file_path take_conform_v2_reference SingZ::zcore_resample Threads::Threads)
-    target_include_directories(${_conform_target} PRIVATE "${SINGZ_REPO_ROOT}" "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
+    target_include_directories(${_conform_target} PRIVATE "${SINGZ_REPO_ROOT}")
+    target_include_directories(${_conform_target} SYSTEM PRIVATE "${SINGZ_REPO_ROOT}/third_party/native/signalsmith")
     target_compile_options(${_conform_target} PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>" "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
     if(NOT _conform_variant STREQUAL "tests")
       string(TOUPPER "${_conform_variant}" _conform_define)

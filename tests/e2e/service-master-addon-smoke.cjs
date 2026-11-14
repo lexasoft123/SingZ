@@ -1,5 +1,6 @@
 // Stable Node-API smoke, with no song, capture or device open. A source-level
 // bridge mock cannot prove that the generation decoder admits the idle sentinel.
+require('../shared/watchdog.cjs').arm('service-master-addon-smoke')
 const assert = require('node:assert/strict')
 const { resolve } = require('node:path')
 

@@ -84,6 +84,7 @@ const signalsmithVendorFiles = [
 
 const nativePlaybackSessionSupportFiles = [
   'playback/native_playback_callback.h',
+  'playback/output_callback_diagnostics.h',
 ]
 
 const zcoreDeviceCallbackFiles = [

@@ -42,7 +42,8 @@ std::wstring windowsFilePath(std::wstring full) {
     const auto end=full.find(L'\\',begin);const auto part=full.substr(begin,end==std::wstring::npos?std::wstring::npos:end-begin);
     if (part==L"..") {if (!parts.empty()) parts.pop_back();}
     else if (!part.empty() && part!=L".") parts.push_back(part);
-    if (end==std::wstring::npos) break;begin=end+1;
+    if (end==std::wstring::npos) break;
+    begin=end+1;
   }
   full=root;
   for (const auto &part:parts) {if (full.back()!=L'\\') full+=L'\\';full+=part;}

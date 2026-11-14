@@ -45,11 +45,16 @@ AudioHostResult failure(const char* message) {
 }
 }
 
-struct SharedAudioService::Impl {
+#if defined(__GNUC__) || defined(__clang__)
+#define SINGZ_SERVICE_LOCAL __attribute__((visibility("hidden")))
+#else
+#define SINGZ_SERVICE_LOCAL
+#endif
+struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
   explicit Impl(std::unique_ptr<AudioHostBackend> source, bool watch)
       : backend(std::move(source)), watchDevices(watch) { callbackGate.open(); }
   AudioInputCallbackGate callbackGate;
-  struct RenderClient {
+  struct SINGZ_SERVICE_LOCAL RenderClient {
     AudioInputCallbackGate gate;
     AudioHostRender render{nullptr};
     void* context{nullptr};
