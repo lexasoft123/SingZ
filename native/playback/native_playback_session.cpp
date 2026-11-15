@@ -1862,7 +1862,8 @@ struct PreparedPlaybackTransport {
       callbackTimePitchBoundaryPrepared = false;
 
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
-    recordBoxSongSlice(block.callbackHostTimeNs +
+    recordBoxSongSlice((block.outputClockMaster && block.outputTimestampValid
+                           ? block.outputHostTimeNs : block.callbackHostTimeNs) +
                            uint64_t(offset) * 1000000000ull / 48000,
                        frames, generation, callbackProjectFrame,
                        callbackProjectFractionQ32, playbackRateQ32,
@@ -8559,8 +8560,8 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       // Never leave the legacy graph-latency projection behind an unavailable
       // routed clock; the Box output path supersedes it entirely.
       result.audibleProjectFrame = projected.available ? projected.projectFrame : 0;
-      result.devicePresentationLatencyFrames = projected.routeDelayFrames;
-      result.totalPresentationLatencyFrames = projected.routeDelayFrames + graphLatency;
+      result.devicePresentationLatencyFrames = projected.presentationLatencyFrames;
+      result.totalPresentationLatencyFrames = projected.presentationLatencyFrames + graphLatency;
       result.presentationLatencyFrames = result.totalPresentationLatencyFrames;
       result.audibleFrames = projected.available &&
           result.renderedFrames > result.totalPresentationLatencyFrames

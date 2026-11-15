@@ -39,7 +39,7 @@ std::array<MissingRecord, kPhysicalSlots> missingHistory;
 std::atomic<uint64_t> missingWritten{0};
 std::atomic<bool> journalCoverageLost{false};
 std::atomic<uint64_t> songWritten{0}, physicalWritten{0}, epoch{1};
-std::atomic<uint64_t> primaryEndpoint{0}, primaryDelay{0};
+std::atomic<uint64_t> primaryEndpoint{0}, primaryDelay{0}, primaryPresentationLatency{0};
 std::atomic<bool> mappingKnown{false}, enabled{false};
 // Static destruction runs in reverse declaration order. If the process exits
 // without shutdownBoxRouting(), ~Control destroys InstrumentedHost instances
@@ -57,23 +57,27 @@ uint64_t controlPolledAt = 0;
 std::string stateRecovery;
 uint64_t selectedGeneration = 0, selectedDocumentRevision = 0;
 std::string selectedPrimary;
-uint64_t selectedDelay = 0;
+uint64_t selectedDelay = 0, selectedPresentationLatency = 0;
 std::optional<loopz::SceneTimingPlan> mappingTiming;
 uint64_t mappingDocumentRevision = 0, mappingActiveGeneration = 0;
 
-class ObservedSongSource final : public loopz::AudioSource {
+class ObservedSongSource final : public loopz::runtime::DeviceClockSource {
  public:
-  explicit ObservedSongSource(std::shared_ptr<loopz::AudioHistory> history) : history_(std::move(history)) {}
+  explicit ObservedSongSource(std::shared_ptr<LoopZSongSource> source) : source_(std::move(source)) {}
+  void selectClockDriver(const void* owner) const noexcept override { source_->selectClockDriver(owner); }
+  bool renderClocked(const void* owner, const AudioHostRenderBlock& block) const noexcept override {
+    return source_->renderClocked(owner, block);
+  }
   uint32_t channels() const noexcept override { return 2; }
   loopz::AudioReadResult read(uint64_t host, double rate, loopz::RoutingOutput output,
                              uint32_t frames, loopz::AudioReadCursor& cursor) const noexcept override {
-    auto result = history_->read(host, rate, output, frames, cursor);
+    auto result = source_->read(host, rate, output, frames, cursor);
     observe(host, rate, frames, result); return result;
   }
   loopz::AudioReadResult readWithFilter(uint64_t host, double rate, loopz::RoutingOutput output,
                              uint32_t frames, loopz::AudioReadCursor& cursor,
                              loopz::ResamplingFilter filter) const noexcept override {
-    auto result = history_->readWithFilter(host, rate, output, frames, cursor, filter);
+    auto result = source_->readWithFilter(host, rate, output, frames, cursor, filter);
     observe(host, rate, frames, result); return result;
   }
  private:
@@ -86,7 +90,7 @@ class ObservedSongSource final : public loopz::AudioSource {
     row.duration.store(rate > 0 ? uint64_t(double(frames) * kNs / rate) : 0, std::memory_order_relaxed);
     box_timing::publish(row.sequence, index);
   }
-  std::shared_ptr<loopz::AudioHistory> history_;
+  std::shared_ptr<LoopZSongSource> source_;
 };
 
 // All inventory callers are serialized on the routing control owner. Discovery
@@ -280,16 +284,19 @@ void refreshMappingUnchecked() {
         for (const auto& endpoint : endpoints) if (endpoint.uid == monitor.deviceSelector) id = endpoint.id;
         if (!id) continue;
         const std::string primary = device.id + "/" + monitor.id + "/" + std::to_string(id);
-        const uint64_t routeDelay = uint64_t(telemetry.historyDelayFrames) + timing.latencyFrames.at(bus);
+        const uint64_t routeDelay = telemetry.deviceClocked ? 0 :
+            uint64_t(telemetry.historyDelayFrames) + timing.latencyFrames.at(bus);
+        const uint64_t presentationLatency = telemetry.deviceClocked ? telemetry.queuedOutputFrames : routeDelay;
         if (selectedGeneration != active || selectedDocumentRevision != view.documentRevision ||
-            selectedPrimary != primary || selectedDelay != routeDelay) {
+            selectedPrimary != primary || selectedDelay != routeDelay || selectedPresentationLatency != presentationLatency) {
           epoch.fetch_add(1, std::memory_order_acq_rel);
           selectedGeneration = active; selectedDocumentRevision = view.documentRevision;
-          selectedPrimary = primary; selectedDelay = routeDelay;
+          selectedPrimary = primary; selectedDelay = routeDelay; selectedPresentationLatency = presentationLatency;
         }
         primaryEndpoint.store(id, std::memory_order_relaxed);
         // H already includes queued output, period, filter and reserve.
         primaryDelay.store(routeDelay, std::memory_order_relaxed);
+        primaryPresentationLatency.store(presentationLatency, std::memory_order_relaxed);
         mappingKnown.store(true, std::memory_order_release);
         return;
       }
@@ -330,7 +337,7 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
             return std::make_unique<AnalysisInput>(std::move(backend));
           });
       nextView = runtime.get();
-      runtime->bindNativeSource("native:singz", std::make_shared<ObservedSongSource>(nextSong->history));
+      runtime->bindNativeSource("native:singz", std::make_shared<ObservedSongSource>(nextSong));
       // Construction restores only an explicit saved document. An absent state
       // file leaves the runtime inactive; no default output/mic route is added.
       return std::make_unique<loopz::runtime::Control>(statePath, std::move(runtime));
@@ -379,7 +386,7 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
     }
     auto nextClock = inventory->clock;
     const auto installed = sharedAudioService().configureProvider(
-        createLoopZSourceBackend(nextSong), "box-loopz");
+        createLoopZSourceBackend(nextSong), "box-loopz", true);
     if (!installed.ok) throw std::runtime_error(installed.message);
     // Nothing below may throw: commit the owner, then publish enablement last.
     song = std::move(nextSong);
@@ -535,6 +542,7 @@ BoxAudibleProjection boxAudibleProjectionAtTimeForTesting(
   const uint64_t wantedEndpoint = primaryEndpoint.load(std::memory_order_relaxed);
   const uint64_t delay = primaryDelay.load(std::memory_order_relaxed);
   result.routeDelayFrames = delay;
+  result.presentationLatencyFrames = primaryPresentationLatency.load(std::memory_order_relaxed);
   const uint64_t physicalEnd = physicalWritten.load(std::memory_order_acquire);
   // Prove there is no unpublished physical boundary in the retained snapshot,
   // including callbacks whose endpoint identity has not yet been published.

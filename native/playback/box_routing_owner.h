@@ -79,7 +79,11 @@ void recordBoxSongFailure(uint64_t hostNs, uint32_t frames) noexcept;
 struct BoxAudibleProjection {
   bool available{false};
   int64_t projectFrame{0};
+  // Readback from presentation-time song journal to the audible content.
   uint64_t routeDelayFrames{0};
+  // Reported callback-to-presentation latency. Direct readback is zero, but
+  // the physical output queue still contributes to end-to-end latency.
+  uint64_t presentationLatencyFrames{0};
 };
 // Serialized CONTROL-OWNER query, alongside request/poll/lifecycle. This reads
 // the current mapping configuration, samples steady_clock and scans bounded

@@ -23,7 +23,10 @@ class SharedAudioService final {
   AudioHostResult ensureOutput();
   // Empty UID explicitly follows subsequent system default changes.
   AudioHostResult configureOutput(const std::string& preferredUid);
-  AudioHostResult configureProvider(std::unique_ptr<AudioHostBackend> backend, const std::string& provider);
+  // replaceExisting is for a fully drained owner reinitialization: the same
+  // provider id can refer to a new source identity after shutdown.
+  AudioHostResult configureProvider(std::unique_ptr<AudioHostBackend> backend, const std::string& provider,
+                                   bool replaceExisting = false);
   AudioHostInventory inventory() const;
   std::vector<AudioInputDevice> inputDevices() const;
   void refreshInventory();

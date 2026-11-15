@@ -1033,6 +1033,14 @@ if(BUILD_TESTING)
 endif()
 
 if(BUILD_TESTING AND SINGZ_BOX_LOOPZ_ROUTING)
+  add_executable(box_song_pull_tests tests/native/box_song_pull_tests.cpp
+    native/playback/loopz_source_backend.cpp)
+  target_compile_features(box_song_pull_tests PRIVATE cxx_std_20)
+  target_include_directories(box_song_pull_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(box_song_pull_tests PRIVATE LoopZ::Runtime Threads::Threads)
+  add_test(NAME box_song_pull_tests COMMAND box_song_pull_tests)
+  set_tests_properties(box_song_pull_tests PROPERTIES TIMEOUT 20)
+
   add_executable(box_song_clock_tests tests/native/box_song_clock_tests.cpp)
   target_compile_features(box_song_clock_tests PRIVATE cxx_std_20)
   target_link_libraries(box_song_clock_tests PRIVATE LoopZ::Runtime Threads::Threads)
