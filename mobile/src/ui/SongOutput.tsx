@@ -4,7 +4,7 @@ import type { PlaybackBackend } from '../playback/backend'
 import { formatSongVolume, songVolumeFromDb, songVolumeToDb } from '../../../src/shared/song-volume'
 import { Bar, C, SpeakerGlyph } from './bits'
 import { KIT } from './tokens'
-import { AnimatedPeakMeter } from './AnimatedPeakMeter'
+import { PeakMeter } from '@singz/ui/native/meter'
 import { t } from '../i18n'
 
 interface Reading { peakDb: number; clipped: boolean; available: boolean }
@@ -62,7 +62,7 @@ export function SongOutputMeterButton({ monitor, gain, onPress }: { monitor: Son
   const reading = useReading(monitor)
   return <Pressable testID="song-output-open" onPress={onPress} hitSlop={{ top: 6, bottom: 6 }} accessibilityRole="button" accessibilityLabel={`${t('phone.player.output.title')}, ${formatSongVolume(gain)}${reading.clipped ? `, ${t('phone.player.output.clip')}` : ''}`} style={s.meterButton}>
     {/* Both the live bar and held brick use peaks, keeping their gap meaningful. */}
-    <AnimatedPeakMeter db={reading.available ? reading.peakDb : -Infinity} peakDb={reading.available ? reading.peakDb : -Infinity} mini clipped={reading.clipped} identity={monitor} enabled={monitor.active} />
+    <PeakMeter db={reading.available ? reading.peakDb : -Infinity} peakDb={reading.available ? reading.peakDb : -Infinity} mini clipped={reading.clipped} identity={monitor} enabled={monitor.active} testID="song-output-mini-meter" />
   </Pressable>
 }
 export function SongOutputControls({ monitor, gain, onGain, onCommit, saveState }: {
@@ -95,7 +95,7 @@ export function SongOutputControls({ monitor, gain, onGain, onCommit, saveState 
           <View style={[s.led, reading.clipped && { backgroundColor: KIT.danger }]} /><Text style={[s.clipText, reading.clipped && { color: KIT.danger }]}>{t('phone.player.output.clip')}</Text>
         </Pressable>
       </View>
-      <AnimatedPeakMeter db={reading.available ? reading.peakDb : -Infinity} peakDb={reading.available ? reading.peakDb : -Infinity} identity={monitor} enabled={monitor.active} />
+      <PeakMeter db={reading.available ? reading.peakDb : -Infinity} peakDb={reading.available ? reading.peakDb : -Infinity} identity={monitor} enabled={monitor.active} testID="song-output-full-meter" />
       <View style={s.meterScale}>{['−60', '−36', '−18', '−6', '0'].map((label, i) => <Text key={label} style={[s.scaleText, { left: `${[0, 40, 70, 90, 100][i]}%`, transform: [{ translateX: i === 0 ? 0 : i === 4 ? -6 : -10 }] }]}>{label}</Text>)}</View>
     </View>
     {reading.clipped && <Text style={s.hint}>{t('phone.player.output.clippedHint')}</Text>}

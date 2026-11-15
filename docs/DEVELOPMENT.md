@@ -18,7 +18,7 @@ retained until ADR 0015 WP3.
 ## Setup
 
 ```bash
-scripts/worktree-setup.sh --desktop-only  # installs deps + review hook, builds/verifies analyzer
+scripts/worktree-setup.sh --desktop-only  # installs deps + review hook, builds/verifies analyzer + capture addon
 scripts/vendor-llama.sh        # llama-server, the lyrics recogniser — once per machine (needs cmake)
 scripts/vendor-crispasr.sh     # crispasr, its word aligner — once per machine (needs cmake)
 scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
@@ -600,8 +600,9 @@ with `reuse_lyrics_from` requires a matching receipt and fails explicitly when
 it cannot validate one, rather than silently rebuilding or blessing new bytes.
 Clear that input to build from the pinned sources in that case.
 Capture publishes immutable generations to local `build/capture-runtime/` and
-packaging snapshots to `build/capture-package/`; build it with
-`npm run capture:addon` when needed.
+packaging snapshots to `build/capture-package/`; bootstrap builds the
+host addon (skip with `SINGZ_SETUP_SKIP_ADDON=1`; rebuild with `npm run capture:addon`).
+On macOS it also adds Homebrew/nvm/fnm paths when node/npm/cmake are missing from PATH.
 
 ### Native build lock (removed)
 
@@ -1300,6 +1301,16 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
   GPU Chromium composites on strong enough for glass (`body.glass`,
   `src/main/glass.ts`). Every blur needs its `body.win:not(.glass)` twin;
   `tests/unit/windows-no-blur.test.ts` enforces it.
+- Fast meter delivery follows actual surface and document visibility; mounted but
+  hidden controls retain only slow state reads. Box hosts push on existing analysis
+  notifications at up to 30 Hz, with one unacknowledged update and one coalesced
+  maximum per client. Old host epochs retain fast reads, issued ahead of the next
+  display frame. The kit can paint on receipt when its 30 fps pixel budget allows.
+  Trace rows identify `delivery: read | push`; for push, `requestMs` is the mapped
+  host read start and clock uncertainty is inherited from read calibration.
+  `hostSendNs` is stamped when the coalesced push leaves its bounded queue. Diagnostic stats must not drain
+  peaks held for the visible meter, and stalled meter queries must leave the
+  transport control queue available.
 - The pitch strip repaints only when position/view/size/transpose/melody/mic
   trail change; idle karaoke must stay at ~0% GPU.
 

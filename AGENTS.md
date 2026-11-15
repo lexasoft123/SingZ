@@ -71,8 +71,9 @@ reboots, credential access or external publication.
 - Provision a fresh checkout before app builds/runs/tests with
   `scripts/worktree-setup.sh` or `scripts/worktree-setup.sh --desktop-only`.
   Re-run after dependency changes; rebuild/verify the analyzer after native
-  analysis changes. Documentation edits and dependency-free tooling checks do
-  not require application setup. Never assume workspace creation ran bootstrap.
+  analysis changes. Setup also builds this checkout's capture addon.
+  Documentation edits and dependency-free tooling checks do not require
+  application setup. Never assume workspace creation ran bootstrap.
 - Keep dependencies, generated sources, build state, and project binaries local.
   Share npm/CocoaPods/compiler caches. Reuse third-party binaries only as local
   snapshots with matching revision, target, producer, and checksum receipts;

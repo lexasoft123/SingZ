@@ -155,7 +155,7 @@ describe('Box microphone hot-plug and render isolation', () => {
     await prepareBoxLocale('en')
     const store = newStore(fakeHost()); store.connect(); await vi.advanceTimersByTimeAsync(0)
     const html = renderToStaticMarkup(createElement(PlayerMicrophoneMeters, { microphones: store }))
-    expect(html).toContain('aria-valuenow="0.25"'); expect(html).toContain('aria-valuenow="0.5"')
+    expect(html.match(/data-mic-status="level"/g)).toHaveLength(2); expect(html.match(/>Singing</g)).toHaveLength(2)
     const app = source('src/renderer/src/box/App.tsx')
     expect(app).not.toMatch(/useSyncExternalStore\(microphones\.subscribe/)
     expect(app).not.toMatch(/microphoneSnapshot=/)

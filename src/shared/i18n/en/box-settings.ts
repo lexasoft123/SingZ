@@ -64,6 +64,7 @@ export const boxSettings = {
   'box.settings.routing.help': "Music and enabled routes keep running while you browse. Microphone monitoring stays on your mixer unless you explicitly configure a software route.",
   'box.settings.routing.refresh': "Refresh",
   'box.settings.routing.statusUnavailable': "Routing status unavailable. Refresh to read the audio host.",
+  'box.settings.routing.revisions': "Saved revision {saved} · Active revision {active}",
   'box.settings.routing.connecting': "Connecting to the audio host…",
   'box.settings.routing.musicChange': "Music → speakers · change output",
   'box.settings.routing.musicNew': "Music → speakers · new route",

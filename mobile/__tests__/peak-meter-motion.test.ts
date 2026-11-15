@@ -1,4 +1,4 @@
-import { emptyPeakMeter, meterBrickFill, meterIndex, meterZone, peakMeterAtRest, stepPeakMeter } from '../src/ui/peak-meter-motion'
+import { emptyPeakMeter, meterBrickFill, meterIndex, meterZone, peakMeterAtRest, stepPeakMeter } from '@singz/ui/meters'
 
 describe('peak-hold meter ballistics', () => {
   it('holds a peak while live level falls and leaves a fading gradient behind it', () => {

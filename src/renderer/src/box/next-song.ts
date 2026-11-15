@@ -14,6 +14,13 @@ export function nextQueued<T extends QueueSong>(items: readonly T[], currentDir:
   return null
 }
 
+/** Songs waiting after the current one: the rows past the current song's place, never counting
+ * rows of the current song itself; every row when the current song is not queued. */
+export function waitingCount(items: readonly QueueSong[], currentDir: string | null): number {
+  const at = currentDir === null ? -1 : items.findIndex(item => item.dir === currentDir)
+  return items.slice(at + 1).filter(item => item.dir !== currentDir).length
+}
+
 /** One rule for the "start another song" actions (Sing, Next; a queue pick always asks): ask whenever a
  * different song is loaded and has not ended (playing or paused), so a paused place is never
  * lost silently. Nothing loaded, or a song that ended, switches without a question. */
@@ -21,13 +28,13 @@ export function switchNeedsConfirmation(hasLoadedSong: boolean, status: Playback
   return hasLoadedSong && status !== 'ended'
 }
 
-export type NextSlot = 'hidden' | 'next' | 'choose'
+export type NextSlot = 'next' | 'disabled'
 
-/** What the Next slot of the player bar offers: the next song, a way to pick one
- * once the song ended with nothing queued, or nothing. */
-export function nextSlot(status: PlaybackStatus, hasNext: boolean): NextSlot {
-  if (hasNext) return 'next'
-  return status === 'ended' ? 'choose' : 'hidden'
+/** What the Next slot of the player bar offers. The button always exists: enabled
+ * when there is a next song, disabled when there is none, in every playback status
+ * (including after the song ended). */
+export function nextSlot(_status: PlaybackStatus, hasNext: boolean): NextSlot {
+  return hasNext ? 'next' : 'disabled'
 }
 
 /** Which player control takes focus when the song ends: Next when there is one,

@@ -18,6 +18,23 @@ if [ "$#" -gt 1 ] || { [ -n "$MODE" ] && [ "$MODE" != "--desktop-only" ]; }; the
   echo "Usage: scripts/worktree-setup.sh [--desktop-only]" >&2
   exit 2
 fi
+# Non-interactive shells (ssh, agents) often lack Homebrew/nvm/fnm on PATH.
+# Append, never prepend, and only when a tool is missing, so tools already
+# found keep winning.
+required_tools_present() {
+  local tool
+  for tool in node npm cmake git python3; do command -v "$tool" >/dev/null 2>&1 || return 1; done
+}
+if [ "$(uname)" = Darwin ] && ! required_tools_present; then
+  for dir in /opt/homebrew/bin /usr/local/bin \
+    "$(ls -d "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/bin 2>/dev/null | sort -V | tail -n 1)" \
+    "${FNM_DIR:-$HOME/Library/Application Support/fnm}/aliases/default/bin"; do
+    if [ -n "$dir" ] && [ -d "$dir" ]; then
+      case ":$PATH:" in *":$dir:"*) ;; *) PATH="$PATH:$dir" ;; esac
+    fi
+  done
+  export PATH
+fi
 # Fail before deleting dependencies or changing provisioning links.
 for tool in node npm cmake git python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: required tool missing: $tool" >&2; exit 1; }
@@ -117,8 +134,8 @@ link() { # link <relpath> — symlink main's copy when the worktree lacks it
 #
 # So the directory is mirrored instead of linked: third-party artifacts are
 # validated local snapshots of main's copies; ours are absent until this worktree builds its
-# own. Only singz-analyze is built below; `npm run capture:addon` publishes
-# immutable artifacts under this checkout's build/capture-runtime instead.
+# own. singz-analyze and the capture addon are built below; the addon is
+# published as immutable artifacts under this checkout's build/capture-runtime.
 # src/main/analyze-provenance.ts is the safety net for what this cannot reach
 # (a packaged app, a hand-copied binary); this is the fix.
 mirror_vendor() {
@@ -388,11 +405,32 @@ if ! analyzer_matches_sources; then
 fi
 echo "  analyzer verified: $EXPECTED_HASH"
 
-if [ "$MODE" = --desktop-only ]; then
-  echo "Worktree ready: desktop dependencies, Git review hook, and host analyzer verified. Mobile was not provisioned."
-elif [ "$(uname)" = Darwin ]; then
-  echo "Worktree ready: desktop/mobile dependencies, Git review hook, host analyzer, and iOS Pods verified."
+# The app and `npm run build` refuse an addon from another checkout, so a
+# ready worktree needs its own. Reuse the repo's match check (it prints
+# "matches this checkout"); SINGZ_FFMPEG_CODECS keeps its documented default
+# (auto) unless the caller sets it. Compile edges stay at four or fewer.
+ADDON="verified"
+if [ "${SINGZ_SETUP_SKIP_ADDON:-}" = 1 ]; then
+  ADDON="skipped (SINGZ_SETUP_SKIP_ADDON=1; run npm run capture:addon before app builds)"
+  echo "  capture addon: skipped (SINGZ_SETUP_SKIP_ADDON=1)"
+elif (cd "$WT" && node scripts/check-capture-addon.cjs 2>/dev/null) | grep -q 'matches this checkout'; then
+  echo "  capture addon: already matches this checkout, reusing"
 else
-  echo "Worktree ready: desktop/mobile dependencies, Git review hook, and host analyzer verified. iOS Pods require macOS."
+  echo "Capture addon for $TARGET (downloads Electron headers on first run):"
+  case "${SINGZ_NATIVE_JOBS:-4}" in [1-4]) ;; *) SINGZ_NATIVE_JOBS=4 ;; esac
+  if ! (cd "$WT" && SINGZ_NATIVE_JOBS="${SINGZ_NATIVE_JOBS:-4}" npm run capture:addon); then
+    echo "FATAL: capture addon build failed. Fix the error above, then rerun: npm run capture:addon" >&2
+    echo "       (or SINGZ_SETUP_SKIP_ADDON=1 scripts/worktree-setup.sh to skip it)." >&2
+    exit 1
+  fi
+  echo "  capture addon built for $TARGET"
 fi
-echo "Optional lyrics engines, splitter packs, and capture addon must be built/validated separately when needed."
+
+if [ "$MODE" = --desktop-only ]; then
+  echo "Worktree ready: desktop dependencies, Git review hook, host analyzer, and capture addon $ADDON. Mobile was not provisioned."
+elif [ "$(uname)" = Darwin ]; then
+  echo "Worktree ready: desktop/mobile dependencies, Git review hook, host analyzer, capture addon $ADDON, and iOS Pods verified."
+else
+  echo "Worktree ready: desktop/mobile dependencies, Git review hook, host analyzer, and capture addon $ADDON. iOS Pods require macOS."
+fi
+echo "Optional lyrics engines and splitter packs must be built/validated separately when needed."

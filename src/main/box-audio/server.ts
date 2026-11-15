@@ -1,9 +1,10 @@
+import { coalesceMeterLevels } from '../../shared/box-meter-push'
 import { createServer, type Socket } from 'node:net'
 import { chmod, lstat, mkdir, unlink } from 'node:fs/promises'
 import { dirname, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { audioMethodAllowed } from '../audio-process-rpc'
-import { BOX_AUDIO_VERSION, BOX_AUDIO_REQUEST_BYTES, BOX_AUDIO_PENDING, boxAudioCounter, boxAudioMeasurementMethod, type BoxAudioCommand, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
+import { BOX_MICROPHONE_LEVEL_TIMEOUT_MS, BOX_AUDIO_VERSION, BOX_AUDIO_REQUEST_BYTES, BOX_AUDIO_PENDING, boxAudioCounter, boxAudioMeasurementMethod, type BoxAudioCommand, type BoxMicrophoneLevels, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
 import type { BoxRetainedProjectDescriptor } from '../../shared/box-contract'
 import { retainedProjectDescriptor } from '../../shared/box-retained-playback'
 import type { DesktopPlaybackLaneConfig, DesktopPlaybackPrepareConfig, DesktopPlaybackResult, DesktopPlaybackStatus } from '../../shared/types'
@@ -14,7 +15,7 @@ export interface BoxAudioHostRuntime {
   binding: Record<string, unknown>
   routingRequest(json: string): string
   routingCapabilities(): unknown
-  microphones?: { snapshot(): Promise<BoxMicrophoneSnapshot>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
+  microphones?: { subscribeLevels?(listener: (value: BoxMicrophoneLevels) => void): () => void; snapshot(): Promise<BoxMicrophoneSnapshot>; levels(): Promise<BoxMicrophoneLevels>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
   shutdown(): void | Promise<void>
 }
 const PUBLIC_OWNER = 1
@@ -60,6 +61,19 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
   let queuedBytes = 0
   let queuedCommands = 0
   let closed = false
+  // Coalesce the actual read until it settles, even when a caller times out.
+  // Meter queries never enter the transport mutation queue.
+  let levelRead: Promise<BoxMicrophoneLevels> | undefined
+  const readMicrophoneLevels = async (): Promise<BoxMicrophoneLevels> => {
+    if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
+    const reading = levelRead ??= Promise.resolve().then(() => runtime.microphones!.levels()).finally(() => { levelRead = undefined })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([reading, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Microphone levels timed out')), BOX_MICROPHONE_LEVEL_TIMEOUT_MS)
+      })])
+    } finally { clearTimeout(timer) }
+  }
   const retainedRecovery = (playback: DesktopPlaybackStatus | null): { recovery?: { generation: string; descriptor: BoxRetainedProjectDescriptor; status: DesktopPlaybackStatus } } => {
     if (!retained) return {}
     try {
@@ -178,6 +192,16 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
       else if (!frameTimer) { frameTimer = setTimeout(() => socket.destroy(), 2000); frameTimer.unref() }
     }
     const send = (value: unknown): void => { if (!socket.destroyed) { const frame = boxAudioEncode(value); if (socket.writableLength + Buffer.byteLength(frame) > 16 * 1024 * 1024) socket.destroy(); else socket.write(frame) } }
+    let stopLevels: (() => void) | undefined
+    let subscription = '', pushId = 0, inFlight = 0
+    let heldLevels: BoxMicrophoneLevels | undefined
+    const flushLevels = (): void => {
+      if (!subscription || inFlight || !heldLevels || socket.destroyed || socket.writableLength) return
+      const value = heldLevels; heldLevels = undefined; inFlight = ++pushId
+      send({ version: 1, type: 'levels', epoch, subscription, sequence: inFlight, value: { ...value, epoch,
+        ...(value.trace ? { trace: { ...value.trace, hostSendNs: process.hrtime.bigint().toString() } } : {}) } })
+    }
+    socket.on('drain', flushLevels)
     send({ version: BOX_AUDIO_VERSION, type: 'ready', epoch })
     const parse = boxAudioLines(BOX_AUDIO_REQUEST_BYTES, raw => {
       const request = raw as BoxAudioCommand
@@ -193,11 +217,27 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
           validatePaths(request.args)
           let result: unknown
           const args = [...request.args]
-          if (request.target === 'owner' && ['begin', 'cancel'].includes(request.method)) {
+          if (request.target === 'service' && request.method === 'subscribeMicrophoneLevels' && args.length === 1 && typeof args[0] === 'string' && args[0].length <= 64) {
+            if (!runtime.microphones?.subscribeLevels) throw new Error('Unknown Box audio command')
+            stopLevels?.(); subscription = args[0]; inFlight = 0; heldLevels = undefined
+            stopLevels = runtime.microphones.subscribeLevels(value => {
+              heldLevels = coalesceMeterLevels(heldLevels, value); flushLevels()
+            })
+            result = { epoch, subscription }
+          } else if (request.target === 'service' && request.method === 'unsubscribeMicrophoneLevels' && args.length === 1) {
+            if (subscription === args[0]) { subscription = ''; stopLevels?.(); stopLevels = undefined; heldLevels = undefined; inFlight = 0 }
+            result = null
+          } else if (request.target === 'service' && request.method === 'ackMicrophoneLevels' && args.length === 2) {
+            if (subscription === args[0] && inFlight === args[1]) { inFlight = 0; flushLevels() }
+            result = null
+          } else if (request.target === 'owner' && ['begin', 'cancel'].includes(request.method)) {
             throw new Error('Microphone analysis is owned by the audio host')
           } else if (request.target === 'service' && request.method === 'microphones' && args.length === 0) {
             if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
             result = { ...await runtime.microphones.snapshot(), epoch }
+          } else if (request.target === 'service' && request.method === 'microphoneLevels' && args.length === 0) {
+            if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
+            result = { ...await readMicrophoneLevels(), epoch }
           } else if (request.target === 'service' && request.method === 'setMicrophoneSelection' && args.length === 1) {
             if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
             const receipt = await runtime.microphones.setSelection(args[0] as BoxMicrophoneSelectionEdit)
@@ -265,11 +305,13 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
         } catch (error) { send({ version: 1, type: 'reply', epoch, id: request.id, ok: false, error: String(error).slice(0, 2000) }) }
         finally { --pending; --queuedCommands; queuedBytes -= bytes }
       }
-      queue = queue.then(execute).catch(() => { socket.destroy() })
+      if (request.target === 'service' && ['microphoneLevels', 'subscribeMicrophoneLevels', 'unsubscribeMicrophoneLevels', 'ackMicrophoneLevels'].includes(request.method)) void execute().catch(() => socket.destroy())
+      else queue = queue.then(execute).catch(() => { socket.destroy() })
     }, frameProgress)
     socket.on('data', chunk => { try { parse(typeof chunk === 'string' ? Buffer.from(chunk) : chunk) } catch { socket.destroy() } })
     socket.on('error', () => {})
     socket.on('close', () => {
+      stopLevels?.(); heldLevels = undefined
       clearTimeout(frameTimer)
       clients.delete(socket)
       for (const [key, pending] of pendingAssociations) if (pending.socket === socket) pendingAssociations.delete(key)

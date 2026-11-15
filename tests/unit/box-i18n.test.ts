@@ -20,10 +20,26 @@ describe('canonical Box dictionaries', () => {
         expect(dictionary[key as keyof typeof english].trim(), `${name} ${key}`).not.toBe('')
         expect(holes(dictionary[key as keyof typeof english]), `${name} ${key}`).toEqual(holes(englishText))
       }
-      expect(Object.keys(dictionary).filter(key => !(key in english) && !/^box\.catalog\.songs_(few|many)$/.test(key))).toEqual([])
+      const unknown = Object.keys(dictionary).filter(key => !(key in english) && (!/_(?:few|many)$/.test(key) || !(`${key.replace(/_(?:few|many)$/, '')}_other` in english)))
+      expect(unknown).toEqual([])
     }
     expect(russian['box.catalog.songs_few']).toContain('{count}')
     expect(russian['box.catalog.songs_many']).toContain('{count}')
+  })
+
+  it('pluralizes draft and saved key offsets in every Box locale', async () => {
+    await prepareBoxLocale('en')
+    expect(tn('box.details.keyOffset', 1, { offset: '+1' })).toBe('+1 semitone')
+    expect(tn('box.details.keyOffset', 2, { offset: '+2' })).toBe('+2 semitones')
+    expect(tn('box.details.appliedOffset', 1, { offset: '+1' })).toBe('Saved transposition: +1 semitone. Original analysis stays unchanged.')
+    await prepareBoxLocale('ru')
+    expect(tn('box.details.keyOffset', 1, { offset: '+1' })).toBe('+1 полутон')
+    expect(tn('box.details.keyOffset', 2, { offset: '+2' })).toBe('+2 полутона')
+    expect(tn('box.details.keyOffset', 5, { offset: '+5' })).toBe('+5 полутонов')
+    expect(tn('box.details.appliedOffset', 2, { offset: '+2' })).toBe('Сохранённая транспозиция: +2 полутона. Исходный анализ не изменён.')
+    await prepareBoxLocale('zh-CN')
+    expect(tn('box.details.keyOffset', 1, { offset: '+1' })).toBe('+1 个半音')
+    expect(tn('box.details.appliedOffset', 1, { offset: '+1' })).toBe('保存的移调：+1 个半音。原始分析保持不变。')
   })
 
   it('falls back to English in memory for unsupported locales without changing saved preferences', async () => {

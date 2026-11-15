@@ -213,9 +213,47 @@ device the old UI analysed (the first interface in inventory order). A fresh hos
 profile therefore opens the machine's first capture device; tests that must stay
 device-free seed an absent input in the host profile. Turning every input channel off is the
 only user-facing off; it releases the private reader and persists. Clients only
-read `service.microphones` and edit the selection by revision. Hardware
+read `service.microphones` and edit the selection by revision. Visible meters
+additionally read `service.microphoneLevels` (levels only; the peak is the loudest
+capture block since the previous level read) on display frames, capped at 30 Hz, and only while a meter is
+subscribed; the full snapshot is then read once a second, or every 2 s with no
+meter on screen. The renderer feeds the UI-kit `PeakMeter` through
+`PeakMeterHandle.push`, so a reading never renders React. An older persistent
+host may lack the level-only command during a UI upgrade: cache that capability
+by host epoch and use fresh full snapshots at 5 Hz until the host changes, without
+reporting a microphone fault. A single level timeout keeps valid readings through
+a prompt retry. Hardware
 microphone monitoring continues independently, and selection/analysis never
-creates an audible microphone route.
+creates an audible microphone route. Box uses the kit bitmap renderer at 30 fps
+with instant rising attack, the existing 110 ms release and unchanged held peak/trail.
+
+For developer latency measurements only, launch **both** the persistent audio host
+and the UI with `SINGZ_BOX_METER_TRACE=1` (restart an already running host to enable
+it there). The flag is off by default. The UI exposes
+`window.__singzBoxMeterTrace.records()` and `.clear()` for CDP, retaining at most
+512 channel readings without a trace timer or PCM. Normal operation creates no
+hook, trace timestamps, provenance copies or procfs reads.
+
+Each record includes the peak-producing block's `sampleHostTimeNs` (first sample),
+`deliveryNs`, analysis time, frame count/rate, timestamp quality, source serial/epoch,
+and queue depths at analysis and the native meter read. Held peaks retain their
+own older block provenance. A producer crossing the consuming read, or a host
+cache overriding the native peak, marks provenance `matched: false`; derived
+capture latency is then null. Host receive/read/send timestamps bracket the native
+read. Renderer request/receive and first changed live-pixel rAF timestamps are
+mapped to that host clock using the measured round-trip midpoint; native and
+renderer clock offsets and their uncertainty bounds remain in the record. These
+are CPU drawing timestamps, not a measured physical display presentation time.
+A repeated level with no changed live pixels has no paint timestamp.
+
+`host.hardware` contains actual negotiated ALSA rate, period/buffer frames and
+milliseconds read from active `/proc/asound/card*/pcm*c/sub*/hw_params` endpoints
+once per capture generation. It is null while loading and empty when unavailable
+(e.g. macOS). It includes card IDs and endpoint names for correlation with the
+selected device; it never labels the requested 256-frame default as an observed
+FLOW 8 period, or guesses which of several active endpoints owns that device.
+Readings also identify the selected device separately. Queue depth is bounded by
+16 blocks; it is not the hardware ALSA buffer depth.
 
 The reusable native API is AudioRuntime::acquireInput(explicitUid, capacity),
 releaseInput(id) and inputStatus(id). A subscription borrows an AudioSource with

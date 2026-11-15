@@ -35,7 +35,7 @@ import type {
   DesktopPlaybackProviderInfo,
   DesktopPlaybackStatus
 } from '../../../shared/types'
-import { Modal } from '@singz/ui'
+import { Modal, PeakMeter } from '@singz/ui'
 import { t } from '../i18n'
 
 export interface SettingsModalProps {
@@ -807,8 +807,6 @@ export default function SettingsModal({
   const previewChannelIndex = preview.device?.channelIndex ?? 0
   const previewChannelCount = preview.device?.channelCount ?? 1
   const shown = sharedWithVoice && voiceLevel ? voiceLevel : preview
-  const levelPct = Math.max(0, Math.min(100, ((shown.dbfs + 72) / 72) * 100))
-  const peakPct = Math.max(0, Math.min(100, ((shown.peak + 72) / 72) * 100))
   const statusCopy = sharedWithVoice
     ? t('settings.mic.sharedWithVoice', { dbfs: Math.round(shown.dbfs) })
     : externalAudioLeaseBlocked
@@ -1032,9 +1030,7 @@ export default function SettingsModal({
 
             <div className="mic-meter-head"><span>{t('settings.mic.levelLabel')}</span><output>{statusCopy}</output></div>
             <div className={`mic-meter${preview.status === 'error' && !sharedWithVoice ? ' error' : ''}`} role="meter" aria-label={t('settings.mic.channelLevelAriaLabel')} aria-valuemin={-72} aria-valuemax={0} aria-valuenow={shown.dbfs} aria-valuetext={statusCopy}>
-              <span className="mic-meter-fill" style={{ width: `${levelPct}%` }} />
-              <span className="mic-meter-peak" style={{ left: `${peakPct}%` }} />
-              <span className="mic-meter-tick tick-48">−48</span><span className="mic-meter-tick tick-24">−24</span><span className="mic-meter-tick tick-12">−12</span><span className="mic-meter-tick tick-0">0</span>
+              <PeakMeter db={shown.dbfs} peakDb={shown.peak} enabled={preview.status !== 'error' || sharedWithVoice} clipped={shown.dbfs >= -1} />
             </div>
             <p className={`mic-preview-status${preview.status === 'error' ? ' warn' : ''}`}>{routeCopy}</p>
             <MicrophoneBackendStatus

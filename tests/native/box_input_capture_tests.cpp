@@ -123,6 +123,7 @@ void scheduleRecoversJitterWithoutReset() {
 void nativeQueuePreservesSamplesAndBounds() {
   BoxInputQueue queue;
   queue.start();
+  CHECK(queue.depth() == 0);
   std::array<float, kFrames> pcm{};
   for (uint32_t f = 0; f < kFrames; ++f) pcm[f] = float(f) / 8192;
   const float* planes[]{pcm.data()};
@@ -134,6 +135,7 @@ void nativeQueuePreservesSamplesAndBounds() {
   const auto before = sparseHeapEvents;
   trackSparseHeap = true;
   for (uint32_t i = 0; i < BoxInputQueue::capacity; ++i) queue.push(bus, 44100);
+  CHECK(queue.depth() == BoxInputQueue::capacity);
   const auto* first = queue.peek();
   CHECK(first && first->rate == 44100 && first->bus.firstNs == bus.firstNs);
   CHECK(std::equal(pcm.begin(), pcm.end(), first->pcm.get()));
@@ -146,7 +148,7 @@ void nativeQueuePreservesSamplesAndBounds() {
   CHECK(queue.peek()->serial == BoxInputQueue::capacity + 2);
   CHECK(queue.peek()->pcm[17] == -1);
   queue.consume();
-  CHECK(!queue.peek());
+  CHECK(!queue.peek() && queue.depth() == 0);
   queue.stop(); queue.start(); queue.push(bus, 48000);
   CHECK(queue.peek()->epoch == 2 && queue.peek()->rate == 48000);
   trackSparseHeap = false;
@@ -277,6 +279,7 @@ struct Hardware {
   std::atomic<unsigned> opens{0}, stops{0}, live{0}, maximumLive{0},
       outputOpens{0};
   std::atomic<bool> supply{true}, offline{false};
+  std::atomic<float> amplitude{0.2f};
 };
 class Host final : public AudioHostBackend {
 public:
@@ -379,7 +382,7 @@ private:
         for (uint32_t sample = 0; sample < kFrames; ++sample) {
           const double time = double(frame + sample) / kRate;
           pcm[0][sample] =
-              float(0.2 * std::sin(2 * 3.141592653589793 * 440 * time));
+              float(hardware_->amplitude.load() * std::sin(2 * 3.141592653589793 * 440 * time));
           pcm[1][sample] =
               float(0.1 * std::sin(2 * 3.141592653589793 * 220 * time));
           for (uint32_t channel = 2; channel < kChannels; ++channel)
@@ -511,7 +514,10 @@ int main() {
             .inputDevices()
             .empty()); // producer is not physical inventory
   CHECK(hardware->opens == 0 && hardware->outputOpens == 0);
-  BoxInputCapture capture;
+  // Keep behavior assertions independent of a heavily loaded runner's 250 ms scheduling window.
+  CHECK(setenv("SINGZ_BOX_METER_TRACE", "1", 1) == 0);
+  BoxInputCapture capture{std::chrono::seconds(2)};
+  CHECK(unsetenv("SINGZ_BOX_METER_TRACE") == 0);
   AudioInputConfig config;
   config.deviceUid = "fixture:microphone";
   config.channel = 1;
@@ -529,6 +535,7 @@ int main() {
            capture.meter().valid;
   });
   const auto levels = capture.meter();
+  CHECK(!levels.trace); // Diagnostics never allocate or consume provenance.
   CHECK(levels.valid && levels.channels == 2 &&
         levels.channelIndices[0] == 0 && levels.channelIndices[1] == 1);
   for (uint32_t channel = 0; channel < levels.channels; ++channel)
@@ -538,6 +545,38 @@ int main() {
   CHECK(levels.peak[1] > 0.08f && levels.peak[1] < 0.12f);
   CHECK(levels.rms[0] > 0.11f && levels.rms[0] < 0.17f);
   CHECK(levels.rms[1] > 0.05f && levels.rms[1] < 0.09f);
+  // Prime the consuming reader, then let a transient finish before it polls.
+  CHECK(capture.meter(true).valid);
+  hardware->amplitude.store(.95f);
+  eventually([&] { return capture.meter().peak[0] > .9f; });
+  hardware->amplitude.store(.01f);
+  eventually([&] { const auto m = capture.meter(); return m.valid && m.peak[0] < .02f; });
+  // Deliberately exceed the production hold window: fixture timing is injectable.
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  // Snapshot/tick/diagnostic observations must never drain the fast reader's peak.
+  for (unsigned reader = 0; reader < 8; ++reader)
+    CHECK(capture.meter().peak[0] < .02f);
+  const auto beforeTransientRead = nowNs();
+  const auto transient = capture.meter(true);
+  CHECK(transient.valid && transient.peak[0] > .9f && transient.peak[0] < .96f);
+  CHECK(transient.trace && transient.trace->points[0].peak == transient.peak[0]);
+  const auto& point = transient.trace->points[0];
+  CHECK(point.sampleHostTimeNs > 0 && point.deliveryNs >= point.sampleHostTimeNs &&
+        point.analysisNs >= point.deliveryNs && point.rate == kRate && point.frames == kFrames &&
+        point.queueDepth <= BoxInputQueue::capacity && transient.trace->queueDepth <= BoxInputQueue::capacity &&
+        beforeTransientRead - point.analysisNs > 300000000 && transient.trace->readNs >= beforeTransientRead);
+  // It is the transient's old block, not the most recent quiet block's timestamp.
+  const auto quiet = capture.meter(true);
+  CHECK(quiet.trace && quiet.trace->points[0].sampleHostTimeNs > point.sampleHostTimeNs);
+  CHECK(quiet.valid && quiet.peak[0] < .02f && quiet.peak[1] > .08f);
+  // A stopped fast reader must not replay an ancient transient on return.
+  hardware->amplitude.store(.95f);
+  eventually([&] { return capture.meter().peak[0] > .9f; });
+  hardware->amplitude.store(.01f);
+  eventually([&] { return capture.meter().peak[0] < .02f; });
+  std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+  CHECK(capture.meter(true).peak[0] < .02f);
+  hardware->amplitude.store(.2f);
   // A private subscription must survive a physical failure: LoopZ reopens
   // underneath the held reader, which publishes no fabricated offline levels.
   const auto opensBeforeLoss = hardware->opens.load();

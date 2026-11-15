@@ -167,12 +167,6 @@
 
 .settings-analysis-controls { padding-top: 12px; border-top: 1px solid var(--sz-line); font-size: var(--box-label-size); }
 .settings-analysis-controls > p { margin: 8px 0; }
-.player-meters > .player-microphone-row { display: contents; }
-.player-microphone-row > span:first-child { font: 11px/16px var(--sz-font-mono); color: var(--sz-dim); }
-.player-microphone-row > small { color: var(--sz-dim); font-size: 10px; line-height: 14px; }
-.player-microphone-level { width: 60px; height: 7px; overflow: hidden; background: var(--sz-line); border-radius: 3px; }
-.player-microphone-level > span { display: block; width: 100%; height: 100%; background: var(--sz-accent); transform-origin: left; }
-
 .settings-global-overrides { flex-shrink: 0; margin: 0 0 14px; padding-bottom: 14px; border-bottom: 1px solid var(--sz-line); }
 .settings-global-overrides h3 { margin: 0; font-size: var(--box-label-size); line-height: var(--box-label-line); }
 .settings-global-overrides p { margin: 6px 0; color: var(--sz-dim); font-size: 15px; line-height: 1.35; }

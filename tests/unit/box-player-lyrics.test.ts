@@ -111,13 +111,13 @@ describe('continuous browser-shaped lyric paint', () => {
 
 describe('approved GPUI band and Box geometry', () => {
   it('places the feather around shaped advances at the approved Box pixel scale', () => {
-    expect(lyricInkGeometry(100, .25).edge).toBeCloseTo(11.4)
-    expect(lyricInkGeometry(100, .75).edge).toBeCloseTo(88.6)
+    expect(lyricInkGeometry(100, .25).edge).toBeCloseTo(10)
+    expect(lyricInkGeometry(100, .75).edge).toBeCloseTo(90)
   })
-  it('scales the 18px band and 7px feather by 68/17.5 and quantizes progress to 1/200', () => {
-    expect(LYRIC_DESKTOP_SCALE).toBeCloseTo(3.8857142857)
-    expect(LYRIC_LIGHT_WIDTH).toBeCloseTo(69.9428571429)
-    expect(LYRIC_FEATHER).toBeCloseTo(27.2)
+  it('scales the 18px band and 7px feather by 75/17.5 (the current-line size on the 1600x900 surface) and quantizes progress to 1/200', () => {
+    expect(LYRIC_DESKTOP_SCALE).toBeCloseTo(4.2857142857)
+    expect(LYRIC_LIGHT_WIDTH).toBeCloseTo(77.1428571429)
+    expect(LYRIC_FEATHER).toBeCloseTo(30)
     expect(lyricInkGeometry(100, .2524)).toEqual(lyricInkGeometry(100, .25))
     expect(lyricInkGeometry(100, .2526)).toEqual(lyricInkGeometry(100, .255))
     expect(lyricInkGeometry(100, 0).edge).toBe(-LYRIC_FEATHER)
@@ -126,8 +126,8 @@ describe('approved GPUI band and Box geometry', () => {
   it('uses twelve midpoint samples of the approved power curve and eight glow opacity levels', () => {
     const slices = lyricBandSlices()
     expect(slices).toHaveLength(12)
-    expect(slices[0].left).toBeCloseTo(-34.9714285714)
-    expect(slices[11].right).toBeCloseTo(34.9714285714)
+    expect(slices[0].left).toBeCloseTo(-38.5714285714)
+    expect(slices[11].right).toBeCloseTo(38.5714285714)
     expect(slices[0].core).toBeCloseTo(.0240562612)
     expect(slices[5].core).toBeCloseTo(.8776415154)
     expect(slices[0].glow).toBe(.125)
@@ -162,9 +162,9 @@ describe('Box lyric track motion', () => {
     expect(lyricScrollShouldSnap(3, 4, true)).toBe(true)
     expect(lyricScrollShouldSnap(3, 3, true)).toBe(true)
   })
-  it('keeps overlapping line identities in a bounded seven-line window', () => {
-    expect(lyricWindow(5, 20)).toEqual([2, 3, 4, 5, 6, 7, 8])
-    expect(lyricWindow(6, 20)).toEqual([3, 4, 5, 6, 7, 8, 9])
+  it('keeps overlapping line identities in a bounded eight-line window (six visible, one hidden each side)', () => {
+    expect(lyricWindow(5, 20)).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    expect(lyricWindow(6, 20)).toEqual([3, 4, 5, 6, 7, 8, 9, 10])
     expect(lyricWindow(0, 2)).toEqual([0, 1])
     expect(lyricWindow(-1, 0)).toEqual([])
   })
@@ -173,6 +173,6 @@ describe('Box lyric track motion', () => {
     const upcoming = html.split('data-lyric-line="1"')[1]
     expect(upcoming).toContain('data-lyric-word="0"')
     expect(upcoming).toContain('class="lyric-ink-base">你好</span>')
-    expect(html).toContain('player-lyrics-track')
+    expect(html).not.toContain('player-lyrics-track')
   })
 })

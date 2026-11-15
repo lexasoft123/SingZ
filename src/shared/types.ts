@@ -594,9 +594,17 @@ export interface CaptureStartResult {
   timestampSource: string
 }
 
+export interface CaptureMeterTracePoint {
+  sampleHostTimeNs: string; deliveryNs: string; analysisNs: string
+  serial: string; epoch: string; frames: number; queueDepth: number
+  quality: number; rate: number; peak: number; matched: boolean
+}
+export interface CaptureMeterTrace {
+  readNs: string; queueDepth: number; points: CaptureMeterTracePoint[]
+}
 export interface CaptureStats {
   /** Native scalar levels from a private LoopZ history reader, never PCM. */
-  microphoneLevels?: { valid: boolean; channels: number; ownershipGeneration: string; channelIndices?: number[]; peak: number[]; rms: number[] }
+  microphoneLevels?: { valid: boolean; channels: number; ownershipGeneration: string; channelIndices?: number[]; peak: number[]; rms: number[]; trace?: CaptureMeterTrace }
   deliveredBlocks: string
   deliveredFrames: string
   overruns: string

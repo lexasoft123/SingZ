@@ -99,6 +99,8 @@ export interface NativeCaptureBinding {
   cancelCapture(generation: bigint): { ok: true; cancelled: boolean }
   captureState(): { state: CaptureStateName; ownershipGeneration: string; error: string }
   captureStats(): CaptureStats
+  /** Host-only consuming read; diagnostics use captureStats. */
+  takeMicrophoneLevels?(): CaptureStats['microphoneLevels']
   audioHostProviders(): DesktopPlaybackProviderInfo[]
   audioHostDevices(provider?: DesktopPlaybackProvider): Omit<DesktopAudioHostInventoryResult, 'platform'>
   /** Resolves when the graph is built. The decode alone is seconds long, so
@@ -2284,6 +2286,12 @@ export class CaptureOwner {
       ownershipGeneration: '',
       error: this.loadError ?? 'Native capture unavailable'
     }
+  }
+
+  takeMicrophoneLevels(): CaptureStats['microphoneLevels'] {
+    const binding = this.native()
+    if (!binding?.takeMicrophoneLevels) throw new Error('Native microphone interval meters unavailable')
+    return binding.takeMicrophoneLevels()
   }
 
   stats(): CaptureStats {

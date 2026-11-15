@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { endedFocusControl, switchNeedsConfirmation, nextQueued, nextSlot, queueAfterAdvance, songLine } from '../../src/renderer/src/box/next-song'
+import { endedFocusControl, switchNeedsConfirmation, nextQueued, nextSlot, queueAfterAdvance, songLine, waitingCount } from '../../src/renderer/src/box/next-song'
 import { moveSpatialFocus } from '../../src/renderer/src/box/focus'
 import { box as en } from '../../src/shared/i18n/en/box'
 
@@ -26,6 +26,24 @@ describe('nextQueued', () => {
   })
 })
 
+describe('waitingCount', () => {
+  const rows = (...dirs: string[]) => dirs.map(dir => ({ dir }))
+  it('counts only songs after the current one (old items.length said 1 for [current])', () => {
+    expect(waitingCount(rows('a'), 'a')).toBe(0)
+    expect(waitingCount(rows('a', 'b', 'c'), 'a')).toBe(2)
+    expect(waitingCount(rows('a', 'b', 'c'), 'b')).toBe(1)
+    expect(waitingCount(rows('a', 'b', 'a'), 'a')).toBe(1)
+  })
+  it('counts every row when the current song is not queued or nothing is loaded', () => {
+    expect(waitingCount(rows('a', 'b'), 'x')).toBe(2)
+    expect(waitingCount(rows('a', 'b'), null)).toBe(2)
+    expect(waitingCount([], null)).toBe(0)
+  })
+  it('agrees with nextQueued', () => {
+    for (const [items, dir] of [[rows('a'), 'a'], [rows('a', 'b'), 'a'], [rows('b'), 'a']] as const) expect(waitingCount(items, dir) > 0).toBe(nextQueued(items, dir) !== null)
+  })
+})
+
 describe('confirmation and slot rules', () => {
   it('confirms mid-song (playing, paused, error) and starts directly once ended', () => {
     expect(switchNeedsConfirmation(true, 'playing')).toBe(true)
@@ -34,12 +52,12 @@ describe('confirmation and slot rules', () => {
     expect(switchNeedsConfirmation(true, 'ended')).toBe(false)
     expect(switchNeedsConfirmation(false, 'paused')).toBe(false) // nothing loaded: nothing to lose
   })
-  it('hides Next without a next song, except at the end where it offers a way to choose', () => {
+  it('always keeps Next: enabled with a next song, disabled without one, in every status', () => {
     expect(nextSlot('playing', true)).toBe('next')
     expect(nextSlot('ended', true)).toBe('next')
-    expect(nextSlot('playing', false)).toBe('hidden')
-    expect(nextSlot('paused', false)).toBe('hidden')
-    expect(nextSlot('ended', false)).toBe('choose')
+    expect(nextSlot('playing', false)).toBe('disabled')
+    expect(nextSlot('paused', false)).toBe('disabled')
+    expect(nextSlot('ended', false)).toBe('disabled')
   })
   it('moves focus to Next at the end only when a next song exists, else to Replay', () => {
     expect(endedFocusControl(true)).toBe('next-song')

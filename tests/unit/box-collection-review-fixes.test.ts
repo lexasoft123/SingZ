@@ -114,9 +114,9 @@ describe('Box collection copy follows the Box locale', () => {
   it('localizes unresolved queue placeholders and controller errors', async () => {
     setLocale('ru')
     const refs: BoxQueueRef[] = [{ kind: 'drive', id: 'gone' }, { kind: 'local', dir: '/gone' }]
-    expect(entriesWithQueueRefs([], refs).map(entry => entry.name)).toEqual(['Недоступный проект Drive', 'Недоступный проект'])
+    expect(entriesWithQueueRefs([], refs).map(entry => entry.name)).toEqual(['Недоступная песня Drive', 'Недоступная песня'])
     const box = controller(api())
-    expect(await box.prepare('local:/missing')).toEqual({ ok: false, error: 'Этого проекта больше нет в коллекции.' })
+    expect(await box.prepare('local:/missing')).toEqual({ ok: false, error: 'Эта песня больше недоступна.' })
   })
 
   it('sends phones the same localized stem names as the TV mixer', async () => {

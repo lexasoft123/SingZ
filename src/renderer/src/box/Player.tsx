@@ -6,10 +6,11 @@ import { playbackStatus } from './playback-status'
 import { nextSlot, songLine } from './next-song'
 import { timeText } from './metadata'
 import { PlayerLyrics } from './PlayerLyrics'
-import { parseSongName } from './song-identity'
+import { BoxNavigation } from './Navigation'
 import type { BoxTransportSnapshot } from './transport'
 import { tSettings, tMicrophone } from './settings-i18n'
-import { microphoneSlotStatus, microphoneStatusKey, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
+import { MicrophoneMeter } from './MicrophoneMeter'
+import type { BoxMicrophones, MicrophoneSnapshot } from './microphones'
 
 export function Player({
   snapshot,
@@ -19,6 +20,8 @@ export function Player({
   onLibrary,
   onMix,
   onQueue,
+  queueCount = 0,
+  onAccount,
   onNext,
   next,
   onSettings,
@@ -34,6 +37,8 @@ export function Player({
   onLibrary: () => void
   onMix: () => void
   onQueue: () => void
+  queueCount?: number
+  onAccount: () => void
   /** Starts the next queued song (App decides whether to confirm). */
   onNext: () => void
   /** Primitive fields only, so the Up next line never re-renders with the playback clock. */
@@ -61,12 +66,22 @@ export function Player({
     aria-label={t('box.player.label')}
   >
     <div className="player-content">
-      {/* Brand and song stay on screen while the controls are hidden. */}
-      <header className="player-header">
-        <div className="box-logo">Sing<span>Z</span><small>Box</small></div>
-        <div className="player-song"><strong>{parseSongName(active.item.name).title}</strong><span>{parseSongName(active.item.name).artist ?? t('box.metadata.artistUnknown')}</span></div>
-        <div className="player-header-actions player-chrome" {...chromeProps}><Button data-control="settings" onClick={onSettings}>{tSettings('box.settings.navigation')}</Button><Button data-control="collection" onClick={onLibrary}>{t('box.navigation.catalog')}</Button></div>
-      </header>
+      {/* The shared top bar: brand and song pill stay on screen while the controls are hidden. */}
+      <BoxNavigation
+        section="player"
+        queueCount={queueCount}
+        currentName={active.item.name}
+        playing={snapshot.playing}
+        status={status}
+        position={snapshot.position}
+        duration={snapshot.duration}
+        chromeHidden={!controlsVisible}
+        onCatalog={onLibrary}
+        onQueue={onQueue}
+        onCurrent={() => {}}
+        onSettings={onSettings}
+        onAccount={onAccount}
+      />
       {active.lyrics.status === 'ready' ? <PlayerLyrics key={active.item.dir} lines={lines} position={snapshot.position} playing={snapshot.playing} rate={snapshot.tempo} /> : <div className="player-no-lyrics">
         <h1>{active.lyrics.status === 'error' ? t('box.player.lyricsError') : t('box.player.noLyrics')}</h1>
         <p>{active.lyrics.status === 'error' ? active.lyrics.error : t('box.player.noLyricsBody')}</p>
@@ -97,6 +112,7 @@ export function Player({
             />
           </div>
           <div className="player-playback" data-remote-up="[data-control='seek']">
+            <Button aria-label={t('box.player.fromStart')} title={t('box.player.fromStart')} data-control="from-start" disabled={!canPlay || !snapshot.playing && status !== 'ended' && snapshot.position <= 0.05} onClick={() => { if (status === 'ended') onToggle(); else onSeek(0) }}><span className="icon-mirror" aria-hidden="true"><Icon name="skip" size={23} /></span></Button>
             <Button aria-label={t('box.player.back5')} data-control="previous" disabled={!canPlay} onClick={() => onSeekBy(-5)}><Icon name="replay" size={23} /></Button>
             <Button className="player-play" variant="primary" aria-label={snapshot.playing ? t('box.player.pause') : status === 'ended' ? t('box.player.replay') : t('box.player.play')} data-control="play" disabled={!canPlay} onClick={onToggle}>
               <Icon name={snapshot.playing ? 'pause' : 'play'} size={27} />
@@ -105,32 +121,27 @@ export function Player({
             {slot === 'next' && next && <Button className="player-next" aria-label={status === 'ended' ? t('box.player.nextLabel', { title: songLine(next.title, next.artist) }) : t('box.player.nextSong')} data-control="next-song" onClick={onNext}>
               <Icon name="skip" size={23} />{status === 'ended' && <span className="player-next-label">{t('box.player.nextLabel', { title: next.title })}</span>}
             </Button>}
-            {slot === 'choose' && <Button className="player-next" data-control="next-song" onClick={onLibrary}><span className="player-next-label">{t('box.player.chooseSong')}</span></Button>}
+            {slot === 'disabled' && <Button className="player-next" aria-label={t('box.player.noNext')} title={t('box.player.noNext')} data-control="next-song" disabled><Icon name="skip" size={23} /></Button>}
           </div>
-          <div className="player-tools" data-remote-up="[data-control='seek']"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button><Button data-control="queue" onClick={onQueue}>{t('box.navigation.queue')}</Button></div>
-          <PlayerMicrophoneMeters microphones={microphones} snapshot={microphoneSnapshot} />
+          <div className="player-tools" data-remote-up="[data-control='seek']"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button></div>
           <span className="player-time player-duration">{timeText(snapshot.duration)}</span>
         </div>
         <div className="player-hints"><span>← → {t('box.hints.move')} <b>↑</b> {t('box.hints.seek')} <b>OK</b> {t('box.hints.select')} <b>Back</b> {t('box.navigation.catalog')}</span>{next && <PlayerUpNext title={next.title} artist={next.artist} />}<span>{snapshot.restartRequired ? `${tSettings('box.settings.restartRequired')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.routingBlocked ? `${tSettings('box.settings.routingPaused')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.saveError ?? snapshot.outputError ?? snapshot.playbackError?.message ?? (status === 'ended' ? t(next ? 'box.player.endedNext' : 'box.player.ended') : status === 'playing' ? t('box.player.hideHint') : t('box.player.paused'))}</span></div>
       </div>
+      {/* Own row at the bottom: meters stay on screen (and live) while the controls hide. */}
+      <div className="player-meter-row"><PlayerMicrophoneMeters microphones={microphones} snapshot={microphoneSnapshot} /></div>
       {!controlsVisible && <button className="player-wake" tabIndex={-1} aria-label={t('box.player.wake')} onClick={onWake} />}
     </div>
   </section>
 }
 
-/** Leaf subscriber: live levels re-render only these meters, never the player. */
-export function PlayerMicrophoneMeters({ microphones, snapshot: snapshotProp }: { microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
-  const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
+/** Leaf: readings are pushed into the kit meters, so they re-render neither the player nor the lyrics. */
+export function PlayerMicrophoneMeters({ microphones, snapshot, visible = true }: { microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot; visible?: boolean }): React.JSX.Element {
   return <div className="player-meters" aria-label={tMicrophone('box.microphones.levels')}>
     {[0, 1].map(channel => {
-      const status = microphoneSlotStatus(snapshot, channel)
-      const level = status.kind === 'level' ? status.level : null
       return <span className="player-microphone-row" key={channel}>
-        <span>{t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')}</span>
-        {level === null ? <small data-mic-status={status.kind}>{t(microphoneStatusKey(status))}</small> : <span className="player-microphone-level" role="meter"
-          aria-label={tMicrophone('box.microphones.channelLevel', { channel: channel + 1 })} aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.min(1, level)}>
-          <span style={{ transform: `scaleX(${Math.min(1, level)})` }} />
-        </span>}
+        <span className="player-microphone-name">{t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')}</span>
+        <MicrophoneMeter source={microphones} snapshot={snapshot} slot={channel} mini visible={visible} />
       </span>
     })}
   </div>

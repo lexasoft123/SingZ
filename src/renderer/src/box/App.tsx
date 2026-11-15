@@ -12,6 +12,7 @@ import { catalogFocusTarget, focusPrimaryNavigation, moveSpatialFocus, pickMixer
 import { LatestOpenIntent } from './open-intent'
 import { Player } from './Player'
 import { BoxMicrophones } from './microphones'
+import { createKeyChanger } from './key-change'
 import { Mixer, type MixerTab } from './Mixer'
 import { Queue } from './Queue'
 import { playbackStatus } from './playback-status'
@@ -41,7 +42,7 @@ import {
 } from './collection/queue'
 import { parseSongName } from './song-identity'
 import { moveQueueRefInView } from './queue-model'
-import { endedFocusControl, switchNeedsConfirmation, nextSwitchMode, nextQueued, queueAfterAdvance } from './next-song'
+import { endedFocusControl, switchNeedsConfirmation, nextSwitchMode, nextQueued, queueAfterAdvance, waitingCount } from './next-song'
 import { resolveCollectionSelection, type CollectionEntry } from './collection/types'
 import { hydrateBoxLocally } from './collection/startup'
 import './collection/collection.css'
@@ -536,6 +537,25 @@ export default function BoxApp(): React.JSX.Element {
     if (!result.ok && !result.cancelled && result.error) setActionError(result.error)
   }, [collection])
 
+  /** Optimistic key while a change is being saved, so quick presses stack instead of reading a stale saved value. */
+  const [keyDraft, setKeyDraft] = useState<{ dir: string; value: number } | null>(null)
+  const selectedDirRef = useRef<string | undefined>(undefined)
+  selectedDirRef.current = selectedEntry?.local?.dir
+  const changeKey = useMemo(() => createKeyChanger<CollectionEntry>({
+    dirOf: entry => entry.local?.dir,
+    save: async (entry, value) => {
+      const settings = collection.getSnapshot().rows[entry.id]?.inspection?.project?.settings
+      if (!entry.local || !settings) return { ok: false, error: t('box.details.error') }
+      return transport.saveSongTranspose(entry.local, settings, value)
+    },
+    refresh: async entry => {
+      if (transport.getSnapshot().active?.item.dir !== entry.local?.dir) await collection.verifyCached(entry.id)
+    },
+    setDraft: setKeyDraft,
+    setError: setActionError,
+    selectedDir: () => selectedDirRef.current
+  }), [collection, transport])
+
   const commitQueue = useCallback(async (refs: BoxQueueRef[]): Promise<boolean> => {
     if (!queueStore.commit(refs)) return false
     phoneProjection.update(refs, true)
@@ -820,7 +840,7 @@ export default function BoxApp(): React.JSX.Element {
       else target = snapshot.routingBlocked ? query('[data-control="settings"]') ?? play : query(preferred) ?? play
     } else {
       const index = Math.max(0, queueItems.findIndex(item => item.dir === queueSelectedDir))
-      target = query(`[data-queue-index="${index}"]`) ?? query('[data-empty-browse]') ?? query('[data-queue-return]')
+      target = query(`[data-queue-index="${index}"]`) ?? query('[data-empty-browse]') ?? query('[data-focus="current-song"]')
     }
     if (route !== 'player') playFocusPending.current = false
     focusTarget.current = target
@@ -955,8 +975,12 @@ export default function BoxApp(): React.JSX.Element {
         </div>}
         {showNavigation && <BoxNavigation
           section={route === 'settings' || route === 'home' ? 'settings' : route === 'account' ? 'account' : route === 'queue' ? 'queue' : 'catalog'}
-          queueCount={queueItems.length}
+          queueCount={waitingCount(queueItems, active?.item.dir ?? null)}
           currentName={active?.item.name ?? null}
+          playing={snapshot.playing}
+          status={playbackStatus(snapshot)}
+          position={snapshot.position}
+          duration={snapshot.duration}
           onCatalog={goCatalog}
           onQueue={goQueue}
           onCurrent={goCurrent}
@@ -984,7 +1008,7 @@ export default function BoxApp(): React.JSX.Element {
           entry={selectedEntry}
           inspection={selectedRow?.inspection}
           metadata={selectedRow?.metadata}
-          transpose={active?.item.dir === selectedEntry.local?.dir ? snapshot.transpose : selectedRow?.inspection?.project?.settings.transpose ?? 0}
+          transpose={keyDraft && keyDraft.dir === selectedEntry.local?.dir ? keyDraft.value : active?.item.dir === selectedEntry.local?.dir ? snapshot.transpose : selectedRow?.inspection?.project?.settings.transpose ?? 0}
           queued={queueHasEntry(collectionSnapshot.entries, queueRefs, selectedEntry)}
           busy={busyDir === selectedEntry.local?.dir || snapshot.loadingName === selectedEntry.name}
           error={snapshot.lastError}
@@ -996,6 +1020,7 @@ export default function BoxApp(): React.JSX.Element {
           onVerify={() => { void prepare(selectedEntry) }}
           onCancelDownload={() => { void collection.cancelDownload() }}
           onToggleQueue={() => toggleQueue(selectedEntry)}
+          onTranspose={semitones => { void changeKey(selectedEntry, semitones) }}
         />}
         {route === 'account' && <Account
           auth={collectionSnapshot.auth}
@@ -1035,16 +1060,12 @@ export default function BoxApp(): React.JSX.Element {
           canApplyOutput={canApplyOutput}
           applyUnavailableReason={applyUnavailableReason}
         />}
-        {route === 'player' && <Player snapshot={snapshot} microphones={microphones} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onNext={requestNext} next={upNext} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} onWake={() => { setControlsVisible(true); noteInput(); setFocusVersion(version => version + 1) }} />}
+        {route === 'player' && <Player snapshot={snapshot} microphones={microphones} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} queueCount={waitingCount(queueItems, active?.item.dir ?? null)} onAccount={() => goAccount()} onNext={requestNext} next={upNext} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} onWake={() => { setControlsVisible(true); noteInput(); setFocusVersion(version => version + 1) }} />}
         {route === 'queue' && <Queue
           items={queueItems}
           rows={queueRows}
           selectedDir={queueSelectedDir}
           active={active}
-          position={snapshot.position}
-          playing={snapshot.playing}
-          status={playbackStatus(snapshot)}
-          canPlay={canPlay}
           onRemember={setQueueSelectedDir}
           onChoose={chooseQueued}
           onMove={(dir, delta) => { void commitQueue(moveQueueViewDir(collectionSnapshot.entries, queueRefs, dir, delta)) }}
@@ -1055,8 +1076,6 @@ export default function BoxApp(): React.JSX.Element {
             setFocusVersion(version => version + 1)
           }}
           onBrowse={goCatalog}
-          onClose={active ? goCurrent : goCatalog}
-          onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }}
         />}
         {route === 'player' && mixOpen && <Mixer microphones={microphones} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} status={playbackStatus(snapshot)} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
         {snapshot.playbackError && route !== 'settings' && <PlaybackFailurePanel error={snapshot.playbackError} fullscreen

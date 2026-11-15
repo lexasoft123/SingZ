@@ -70,8 +70,14 @@ printf '%s\\n' fixture-current-hash > "$root/vendor/$1/singz-analyze.source-hash
   // isolates bootstrap's decision to share or discard a producer's verdict.
   for (const [engine, binary] of [['llama', 'llama-server'], ['crispasr', 'crispasr']])
     writeScript(path.join(root, `scripts/vendor-${engine}.sh`), `#!/bin/sh\n[ "$1" = --check-cache ] || exit 1\n[ -f "$3/vendor/$2/${binary}" ] && [ "$(cat "$3/vendor/$2/${binary}.receipt.json" 2>/dev/null)" = valid ]\n`)
+  writeScript(path.join(root, 'scripts/check-capture-addon.cjs'), `#!/usr/bin/env node
+if (require('fs').existsSync(process.env.ADDON_MATCH_FILE || '/nonexistent')) console.log('capture addon: matches this checkout')
+`)
   writeScript(path.join(bin, 'npm'), `#!/bin/sh
 set -eu
+echo "$* jobs=\${SINGZ_NATIVE_JOBS:-}" >> "${path.join(dir, 'npm.log')}"
+[ "$1" = run ] && [ -z "\${ADDON_FAIL:-}" ] && exit 0
+[ "$1" = run ] && exit 1
 mkdir -p node_modules/electron
 printf '%s\\n' electron > node_modules/electron/path.txt
 `)
@@ -158,4 +164,38 @@ test('desktop setup locks npm, installs hooks, verifies local analyzer, and snap
   result = f.run(['--desktop-only'])
   assert.equal(result.status, 0, result.stderr + result.stdout)
   assert.equal(fs.existsSync(path.join(f.root, 'vendor/obsolete-target')), false)
+})
+
+test('setup builds the capture addon (<=4 jobs), reuses a matching one, and honours the opt-out', shellTests, t => {
+  const f = fixture(t), log = path.join(f.dir, 'npm.log'), calls = () => fs.readFileSync(log, 'utf8').split('\n').filter(l => l.startsWith('run capture:addon'))
+  let result = f.run(['--desktop-only'], { SINGZ_NATIVE_JOBS: '8' })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.deepEqual(calls(), ['run capture:addon jobs=4'])
+  assert.match(result.stdout, /capture addon verified/)
+  const match = path.join(f.dir, 'match')
+  fs.writeFileSync(match, '')
+  result = f.run(['--desktop-only'], { ADDON_MATCH_FILE: match })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.equal(calls().length, 1)
+  assert.match(result.stdout, /already matches this checkout/)
+  result = f.run(['--desktop-only'], { SINGZ_SETUP_SKIP_ADDON: '1' })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.equal(calls().length, 1)
+  assert.match(result.stdout, /capture addon skipped/)
+  result = f.run(['--desktop-only'], { ADDON_FAIL: '1' })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /rerun: npm run capture:addon/)
+})
+
+test('macOS bootstrap finds node via the Darwin PATH fallbacks (nvm fixture) when PATH lacks it', shellTests, t => {
+  const f = fixture(t), isolated = path.join(f.dir, 'min-bin'), nvm = path.join(f.dir, 'nvm/versions/node/v20.0.0/bin')
+  fs.mkdirSync(isolated); fs.mkdirSync(nvm, { recursive: true })
+  for (const name of ['bash', 'dirname', 'git', 'head', 'sed', 'python3', 'ls', 'sort', 'tail', 'grep', 'awk', 'find', 'mkdir', 'rm', 'cp', 'mv', 'ln', 'env', 'cat', 'basename', 'diff', 'chmod', 'tr', 'wc', 'cut', 'printf']) {
+    try { fs.symlinkSync(execFileSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim(), path.join(isolated, name)) } catch {}
+  }
+  for (const name of ['npm', 'cmake', 'uname']) fs.copyFileSync(path.join(f.bin, name), path.join(isolated, name))
+  fs.symlinkSync(execFileSync('/bin/sh', ['-c', 'command -v node'], { encoding: 'utf8' }).trim(), path.join(nvm, 'node'))
+  const env = { PATH: isolated, HOME: f.dir, NVM_DIR: path.join(f.dir, 'nvm') }
+  const result = f.run(['--desktop-only'], env)
+  assert.equal(result.status, 0, result.stderr + result.stdout)
 })

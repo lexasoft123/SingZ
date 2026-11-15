@@ -8,8 +8,9 @@ vi.mock('react', async importOriginal => ({
   useState: (value: unknown) => [value, () => {}],
   useEffect: (effect: () => void | (() => void)) => { hooks.effects.push(effect) }
 }))
-vi.mock('@singz/ui', () => ({ Button: () => null }))
+vi.mock('@singz/ui', () => ({ Button: () => null, PeakMeter: () => null }))
 vi.mock('../../src/renderer/src/model', () => ({ modalCoversApp: () => false }))
+vi.mock('../../src/renderer/src/meter-visibility', () => ({ useMeterVisibility: () => true }))
 vi.mock('../../src/renderer/src/i18n', () => ({ t: (key: string) => key }))
 
 import SongOutput from '../../src/renderer/src/components/SongOutput'

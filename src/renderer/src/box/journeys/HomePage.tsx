@@ -1,5 +1,5 @@
 import type { BoxPhoneState, BoxPlatformSnapshot, BoxStorageSnapshot } from '../../../../shared/box-contract'
-import { type JourneyAudioInventory, audioCounts, audioReadyText, formatBytes, phonesStatus, networkStateLabel, updateStateLabel } from './format'
+import { type JourneyAudioInventory, audioCounts, audioReadyText, phonesStatus, storageStatus, networkStateLabel, updateStateLabel } from './format'
 import { tJourney } from './i18n'
 import type { DriveStatus } from './useInventory'
 import { ErrorNotice, LoadingNotice, PageFrame, SettingRow } from './ui'
@@ -45,7 +45,7 @@ export function HomePage({ audio, platform, drive, phones, storage, loading, err
       />
       <SettingRow
         focus="journey-storage" title={tJourney('journey.home.storage')} help={tJourney('journey.home.storageHelp')}
-        status={storage ? (storage.cacheBytes > 0 ? formatBytes(storage.cacheBytes) : tJourney('journey.storage.none')) : tJourney('journey.unavailable')}
+        status={storageStatus(storage)}
         onOpen={() => onOpen('storage')}
       />
       <SettingRow

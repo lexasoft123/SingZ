@@ -202,6 +202,21 @@ test('all read-only owner queries, routing state and private capture cleanup are
   await client.close()
 })
 
+test('microphone level meter calls are read-only while stopRetained stays a mutation', unixOnly, async t => {
+  const { recorder, connect } = await fixture(t)
+  const client = await connect()
+  const methods = ['microphoneLevels', 'subscribeMicrophoneLevels', 'unsubscribeMicrophoneLevels', 'ackMicrophoneLevels']
+  recorder.start()
+  for (const method of methods) await client.call('service', method)
+  recorder.assertNoMutations()
+  assert.deepEqual(recorder.mutations, [])
+  assert.equal(recorder.observedRequests, methods.length)
+  await client.call('service', 'stopRetained')
+  assert.throws(() => recorder.assertNoMutations(), /stopRetained/)
+  assert.deepEqual(recorder.mutations, [{ target: 'service', method: 'stopRetained' }])
+  await client.close()
+})
+
 test('protected phase covers connection close and reconnect until explicitly stopped', unixOnly, async t => {
   const { recorder, connect } = await fixture(t)
   recorder.start()

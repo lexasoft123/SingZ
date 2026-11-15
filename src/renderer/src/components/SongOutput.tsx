@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button } from '@singz/ui'
+import { Button, PeakMeter, type PeakMeterHandle } from '@singz/ui'
 import type { MultitrackEngine } from '../audio/engine'
 import { formatSongVolume, SONG_VOLUME_MAX_DB, SONG_VOLUME_MIN_DB, songVolumeFromDb, songVolumeToDb } from '../audio/song-volume'
-import { modalCoversApp } from '../model'
+import { useMeterVisibility } from '../meter-visibility'
 import { t } from '../i18n'
 
 function Speaker({ muted = false }: { muted?: boolean }): React.JSX.Element {
@@ -19,27 +19,30 @@ export default function SongOutput({ engine, volume, onVolume }: {
   onVolume: (gain: number) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
+  const meterVisible = useMeterVisibility(true, true)
   const root = useRef<HTMLDivElement>(null)
   const preMute = useRef(1)
   const clipped = useRef(false)
+  const miniMeter = useRef<PeakMeterHandle>(null)
+  const fullMeter = useRef<PeakMeterHandle>(null)
   const previousCount = useRef(0)
   if (volume > 0) preMute.current = volume
 
   useEffect(() => {
+    if (!meterVisible) return
     let held = 0
     const timer = window.setInterval(() => {
       const el = root.current
-      if (!el || modalCoversApp()) return
+      if (!el) return
       const reading = engine.readOutputPeak()
       if (reading.clipped || (reading.clipCount !== undefined && reading.clipCount !== previousCount.current && reading.clipCount > 0)) clipped.current = true
       previousCount.current = reading.clipCount ?? 0
       held = Math.max(reading.peak, held * 0.79)
       const db = songVolumeToDb(held)
-      for (const fill of el.querySelectorAll<HTMLElement>('.output-peak-fill')) {
-        const width = Math.round(Math.max(0, Math.min(1, (db + 60) / 60)) * (fill.parentElement?.clientWidth ?? 0) * devicePixelRatio) / devicePixelRatio
-        const next = `${width}px`
-        if (fill.style.width !== next) fill.style.width = next
-      }
+      // The kit meter owns the ballistics (attack, release, peak hold); feed it the raw reading.
+      const raw = songVolumeToDb(reading.peak)
+      miniMeter.current?.push(raw, raw)
+      fullMeter.current?.push(raw, raw)
       const text = `${held > 0.000001 ? db.toFixed(1) : '−∞'}`
       const label = el.querySelector('.output-peak-value')
       if (label && label.textContent !== text) label.textContent = text
@@ -49,7 +52,7 @@ export default function SongOutput({ engine, volume, onVolume }: {
       if (clip) clip.setAttribute('aria-pressed', String(clipped.current))
     }, 50)
     return () => window.clearInterval(timer)
-  }, [engine])
+  }, [engine, meterVisible])
 
   useEffect(() => {
     if (!open) return
@@ -70,7 +73,7 @@ export default function SongOutput({ engine, volume, onVolume }: {
       title={t('player.transport.volumeAt', { db: formatSongVolume(volume) })} onClick={() => setOpen(!open)}>
       <Speaker muted={volume === 0} />
       <span className="song-output-trigger-value">{formatSongVolume(volume)}</span>
-      <span className="output-mini-track"><span className="output-peak-fill" /></span>
+      <span className="output-mini-track"><PeakMeter ref={miniMeter} db={-Infinity} enabled={meterVisible} mini /></span>
       <span className="output-clip-dot" />
     </Button>
     {open && <div className="train-pop vol-pop song-output-pop" role="dialog" aria-label={t('player.volume.title')}>
@@ -102,7 +105,7 @@ export default function SongOutput({ engine, volume, onVolume }: {
           <button type="button" className="output-clip-reset" aria-pressed="false" title={t('player.volume.peakTitle')}
             onClick={() => { clipped.current = false; previousCount.current = engine.readOutputPeak().clipCount ?? 0; root.current?.classList.remove('has-clip') }}><i />{t('player.volume.clipped')}</button>
         </div>
-        <div className="output-meter-track"><span className="output-peak-fill" /></div>
+        <div className="output-meter-track"><PeakMeter ref={fullMeter} db={-Infinity} enabled={meterVisible} /></div>
         <div className="output-meter-ticks"><span>−60</span><span>−36</span><span>−18</span><span>−6</span><span>0</span></div>
       </div>
       <p className="output-help">{t('player.volume.caption')}</p>
