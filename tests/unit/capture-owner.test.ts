@@ -260,6 +260,12 @@ function fakeBinding(): NativeCaptureBinding & {
     setTrainingCueGain: () => ({ ok: true }),
     trainingCueStatus: () => ({ hostTimeNs: '950000000', outputLatencyMs: 10 }),
     captureRecording: () => ({ ok: true }),
+    recordTake: async () => ({ ok: true }),
+    finishTake: async () => ({ ok: true }),
+    cancelTake: async () => ({ ok: true }),
+    playTake: async () => ({ ok: true }),
+    stopTake: async () => ({ ok: true }),
+    presentationQuery: () => ({ found: false }),
     inputDevices: () => ({
       ok: true,
       devices: [{

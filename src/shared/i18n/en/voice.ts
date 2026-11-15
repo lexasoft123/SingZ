@@ -1,0 +1,88 @@
+/* English strings for the Voice strip (`player.voice.*`) — see ../index.ts.
+ * One name per concept: the strip is "Voice", a recording is a "take", the
+ * source is an "input". Monitoring ("hear yourself live") ships later. */
+export const voice = {
+  'player.voice.name': 'Voice',
+  'player.voice.stripLabel': 'Voice strip',
+
+  // ── controls ──
+  'player.voice.input': 'Input',
+  'player.voice.inputNone': 'No input found',
+  'player.voice.inputPerm': 'Mic access needed',
+  'player.voice.monitorLater': 'Monitoring comes later',
+  'player.voice.mute': 'Mute voice take playback',
+  'player.voice.unmute': 'Unmute voice take playback',
+  'player.voice.muteShort': 'M',
+  'player.voice.solo': 'Solo voice',
+  'player.voice.soloShort': 'S',
+  'player.voice.arm': 'Arm for recording',
+  'player.voice.disarm': 'Disarm recording',
+  'player.voice.level': 'Voice level',
+  'player.voice.record': 'Record (R)',
+  'player.voice.stop': 'Stop recording (R)',
+  'player.voice.recordWhyStarting': 'Record unavailable: starting the take',
+  'player.voice.recordWhyPerm': 'Record unavailable: microphone access needed',
+  'player.voice.recordWhyMissing': 'Record unavailable: no input found',
+  'player.voice.recordWhyError': 'Record unavailable: retry the input first',
+  'player.voice.recordWhyTake': 'Record unavailable: keep or discard the current take first',
+  'player.voice.recordWhyBusy': 'Record unavailable: stop listening first',
+
+  // ── meter ──
+  'player.voice.meter': 'Input level',
+  'player.voice.meterTip': 'Input level {db} dBFS, peak {peak}',
+  'player.voice.meterNone': 'Input level: no signal (input is not live)',
+  'player.voice.meterNoSignal': 'No signal',
+  'player.voice.clipOn': 'Input clipped. Click to reset the clip indicator',
+  'player.voice.clipOff': 'No clipping. Clip indicator',
+
+  // ── status line ──
+  'player.voice.msgArmed': 'Armed. Recording starts at the playhead.',
+  'player.voice.msgRecording': 'Recording over the song',
+  'player.voice.msgReview': 'Keep the take, or discard it to record again.',
+  'player.voice.msgListenAlone': 'Listening to the take alone. The song is muted.',
+  'player.voice.msgListenSong': "Listening with the song at the take's settings ({tempo}% · {transpose})",
+  'player.voice.msgSeekStopped': 'Recording stopped because the song position changed.',
+  'player.voice.permNeeded': 'Microphone access needed to record.',
+  'player.voice.permBtn': 'Allow microphone',
+  'player.voice.inputMissing': 'No microphone found.',
+  'player.voice.inputBtn': 'Check again',
+  'player.voice.errDeviceLost': 'Input unplugged. The first {time} was kept.',
+  'player.voice.errBusy': 'The input is in use by another app. Close it, then retry.',
+  'player.voice.errGeneric': "Recording didn't work. Check the input, then retry.",
+  'player.voice.errNoBridge': 'Recording is not available in this build.',
+  'player.voice.retry': 'Retry',
+
+  // ── take lane ──
+  'player.voice.emptyIdle': 'Your take appears here, at the playhead',
+  'player.voice.emptyArmed': 'Armed. Press Record (R) to start at the playhead',
+  'player.voice.emptyPerm': 'Allow microphone access to record',
+  'player.voice.emptyMissing': 'Connect a microphone to record',
+  'player.voice.takeActions': 'Take actions',
+  'player.voice.keep': 'Keep take',
+  'player.voice.kept': 'Take kept',
+  'player.voice.listen': 'Listen',
+  'player.voice.listenSong': 'Listen with song',
+  'player.voice.stopListening': 'Stop listening',
+  'player.voice.stopListeningSong': 'Stop listening with song',
+  'player.voice.addTrackLater': 'Add to song as track (coming later)',
+  'player.voice.discard': 'Discard take',
+  'player.voice.takeInfo': 'Take {n} · {time}',
+  'player.voice.takeInfoPartial': 'Take {n} · {time} · partial',
+  'player.voice.takeInfoRecovered': 'Take {n} · {time} · recovered',
+  'player.voice.recordingInfo': 'Recording · {time}',
+  'player.voice.tag': 'recorded at {tempo}% · {transpose}',
+  'player.voice.tagChanged': 'recorded at {tempo}% · {transpose} · changed mid-take',
+  'player.voice.tagTitle': 'The take was recorded against the song at these settings.',
+  'player.voice.tagTitleChanged': 'Tempo or transpose changed while recording. The take plays back as sung.',
+
+  // ── announcements (polite live region) ──
+  'player.voice.announceRecording': 'Recording started',
+  'player.voice.announceReview': 'Recording stopped. Keep or discard the take.',
+  'player.voice.announceKept': 'Take kept',
+  'player.voice.announceDiscarded': 'Take discarded',
+  'player.voice.announceArmed': 'Armed',
+  'player.voice.announceDisarmed': 'Disarmed',
+  'player.voice.announceGranted': 'Microphone allowed',
+  'player.voice.announceRetried': 'Input ready again',
+  'player.voice.announceClipReset': 'Clip indicator reset'
+} as const

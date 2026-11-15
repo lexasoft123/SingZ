@@ -79,6 +79,7 @@ import { boxMicrophones, boxRoutingRequest, boxRoutingReconcile, boxPrepareRetai
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
+import { registerVoiceTakes } from './voice-takes-ipc'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -397,6 +398,7 @@ function registerIpc(): void {
   registerBeatsIpc()
   registerAnalyze()
   registerDesktopAudioInput()
+  registerVoiceTakes()
 
   ipcMain.handle(
     'lyrics:get',

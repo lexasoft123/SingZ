@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SingZ · Voice strip prototype</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">Sing<i>Z</i> <small>dev</small></div>
+    <div class="song-title">Wild World</div>
+    <div class="top-right">
+      <span class="proto-hint">Prototype · press <kbd>`</kbd> for states</span>
+      <span class="chip-status"><span class="dot ok"></span>splitter ready</span>
+    </div>
+  </header>
+
+  <main class="mixer" id="mixer" aria-label="Song mixer">
+  <div class="mixer-inner">
+    <div class="ruler-row">
+      <div class="ruler-head"><button class="add-track" type="button" tabindex="-1" aria-hidden="true">+ Add track…</button></div>
+      <div class="ruler" id="ruler" aria-hidden="true"></div>
+    </div>
+    <div id="stems"></div>
+
+    <!-- Voice row -->
+    <section class="voice-row" id="voice" aria-label="Voice strip" data-phase="idle">
+      <div class="voice-controls">
+        <div class="vc-top">
+          <h2 class="lane-name">Voice</h2>
+          <span class="badge" id="latBadge" hidden></span>
+          <button class="ib mon" id="monBtn" type="button" aria-pressed="false"></button>
+        </div>
+        <label class="sr-only" for="inputSel" id="inputLbl">Input</label>
+        <div class="select-wrap"><select id="inputSel" aria-labelledby="inputLbl"></select></div>
+        <div class="vc-btns">
+          <button class="ib arm" id="armBtn" type="button" aria-pressed="false"></button>
+          <button class="chip mute" id="muteBtn" type="button" aria-pressed="false">M</button>
+          <button class="chip solo" id="soloBtn" type="button" aria-pressed="false">S</button>
+          <div class="fader">
+            <input class="vol" id="levelRng" type="range" min="0" max="100" value="80" aria-label="Voice level">
+          </div>
+        </div>
+      </div>
+
+      <div class="vmeter">
+        <button class="clip-led" id="clipLed" type="button"></button>
+        <div class="mwrap">
+          <div class="meter" id="meter" role="meter" aria-label="Input level" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60" aria-valuetext="No signal"></div>
+        </div>
+      </div>
+
+      <div class="voice-tl" id="voiceTl">
+        <div class="lane-head">
+          <span class="note" id="msg" aria-live="polite"></span>
+          <span class="take-info" id="takeInfo" hidden></span>
+          <span class="take-actions" id="takebar" role="group" aria-label="Take actions" hidden>
+            <button class="ib" id="keepBtn" type="button"></button>
+            <button class="ib" id="listenBtn" type="button"></button>
+            <button class="ib" id="listenSongBtn" type="button"></button>
+            <button class="ib" id="addBtn" type="button"></button>
+            <button class="ib danger" id="discardBtn" type="button"></button>
+          </span>
+        </div>
+        <div class="voice-track" id="voiceTrack">
+          <div class="voice-empty" id="voiceEmpty"></div>
+          <div class="clip" id="clip" hidden>
+            <canvas id="clipWave" aria-hidden="true"></canvas>
+            <span class="clip-tag" id="clipTag"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="playhead-layer" aria-hidden="true"><div class="playhead" id="playhead"></div></div>
+  </div>
+  </main>
+
+  <footer class="transport">
+    <button class="icon-btn" id="rewBtn" type="button" aria-label="Back to start">⏮</button>
+    <button class="play" id="playBtn" type="button" aria-label="Play">▶</button>
+    <button class="rec-t" id="recBtn" type="button"><span class="rec-core" aria-hidden="true"></span></button>
+    <span class="rec-time" id="recTime" aria-hidden="true"></span>
+    <div class="time"><span id="timeNow">0:00.0</span><span class="total"> / 3:20</span></div>
+    <div class="spacer"></div>
+    <div class="stepper" role="group" aria-label="Transpose">
+      <button type="button" id="trDn" aria-label="Transpose down one semitone">−</button>
+      <output id="trOut" aria-live="off">0 <small>st</small></output>
+      <button type="button" id="trUp" aria-label="Transpose up one semitone">+</button>
+    </div>
+    <div class="stepper" role="group" aria-label="Tempo">
+      <button type="button" id="tpDn" aria-label="Tempo down 5 percent">−</button>
+      <output id="tpOut" aria-live="off">100 <small>%</small></output>
+      <button type="button" id="tpUp" aria-label="Tempo up 5 percent">+</button>
+    </div>
+    <span class="bpm">77 <small>bpm</small></span>
+  </footer>
+</div>
+
+<aside class="proto-panel" id="proto" role="dialog" aria-label="Prototype state switcher" hidden>
+  <header><strong>Prototype state</strong><button type="button" id="protoClose" aria-label="Close state switcher">✕</button></header>
+  <div class="proto-list" id="protoList"></div>
+  <p>Toggle with <kbd>`</kbd> or <kbd>Alt</kbd>+<kbd>P</kbd>. Real controls drive state too.</p>
+</aside>
+
+<div class="sr-only" id="live" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>

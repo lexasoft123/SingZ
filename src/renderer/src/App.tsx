@@ -120,6 +120,7 @@ import SetupWizard from './components/SetupWizard'
 import TrackStack from './components/TrackStack'
 import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
+import VoiceBoundary from './components/VoiceBoundary'
 import VocalTraining from './components/VocalTrainingRoute'
 import { TrainingProgressMutations } from './training-progress-persistence'
 import { activatableAncestor, blocksSongTransportShortcut } from './keyboard'
@@ -657,6 +658,7 @@ function EngineChip({
 }
 
 const QuickStart = lazy(() => import('./components/QuickStart'))
+const VH = lazy(() => import('./components/VoiceHost'))
 
 export default function App(): React.JSX.Element {
   // Re-render on a language switch; every child App renders follows. Nothing
@@ -4165,6 +4167,11 @@ export default function App(): React.JSX.Element {
                 onRemoveTrack={removeTrack}
                 onRenameTrack={renameTrack}
               />
+              <VoiceBoundary>
+                <Suspense fallback={null}>
+                  <VH e={engine} s={song} p={projectDir} />
+                </Suspense>
+              </VoiceBoundary>
               {karaoke && (
                 <PitchStrip
                   engine={engine}

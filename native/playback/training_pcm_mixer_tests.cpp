@@ -60,5 +60,8 @@ int main() {
   std::fill_n(left,256,0); mixer.render(block);
   assert(std::abs(left[0]-0.89125094f)<0.000001);
   mixer.clearQuiesced();
+  // Takes use streamed storage; short training cues retain their original
+  // duration cap and host-time scheduling semantics.
+  assert(!mixer.schedule({std::vector<float>(8000*121)},500,8000,block.callbackHostTimeNs,1));
   std::cout << "training PCM mixer regressions passed\n";
 }
