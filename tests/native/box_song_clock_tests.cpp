@@ -50,15 +50,25 @@ struct ClockResult {
   Range songHeadroom, busHeadroom;
   double biasFrames{};
   uint64_t periods{};
+  HistoryReadSnapshot songRead{}, busRead{};
 };
 
-ClockResult clocks(double ppm, bool biased) {
+ClockResult clocks(double ppm, bool biased, bool wideBounds = false) {
   // Exactly SourceBackend's normal absolute rational schedule. It does NOT
   // add a truncated period. The 5 us phase offset forces fractional reads.
   const uint64_t songOrigin = origin + 5000;
   uint64_t songFrame = 0, busEnd = 0, sceneWake = origin;
   SampleClockHistory songClock(512), busClock(512);
   RenderSchedule scene({rate, block, block, 4096});
+  HistoryReadObservation songRead, busRead;
+  songRead.bounds(sceneDelay + monitorDelay - queue - block,
+                  sceneDelay + monitorDelay - queue + 3 * block, block);
+  busRead.bounds(monitorDelay - queue, monitorDelay - queue + 3 * block, block);
+  if (wideBounds) {
+    // Negative control: capacity-only bounds hide the injected drift again.
+    songRead.bounds(0, AudioHistory::kDefaultCapacityFrames);
+    busRead.bounds(0, AudioHistory::kDefaultCapacityFrames);
+  }
   ClockResult result;
   const long double deviceRate =
       rate * (1 + static_cast<long double>(ppm) / 1e6L);
@@ -101,12 +111,21 @@ ClockResult clocks(double ppm, bool biased) {
         busClock.locate(busClock.snapshot(), busReadNs, 0, rate, rate);
     const auto busPosition = position(bus);
     result.busHeadroom.add(static_cast<double>(busEnd) - busPosition);
+    busRead.observe(1, busReadNs, busEnd, bus.frame, bus.offset, block, bus.rate,
+                    static_cast<double>(deviceRate), AudioHistory::kDefaultCapacityFrames, block);
     const uint64_t songReadNs = busReadNs - frameNs(sceneDelay, rate);
     const auto song =
         songClock.locate(songClock.snapshot(), songReadNs, 0, rate, rate);
     result.songHeadroom.add(static_cast<double>(songFrame) - position(song));
+    songRead.observe(1, songReadNs, songFrame, song.frame, song.offset, block, song.rate,
+                     static_cast<double>(deviceRate), AudioHistory::kDefaultCapacityFrames, block);
   }
   result.periods = periods;
+  result.songRead = songRead.snapshot(); result.busRead = busRead.snapshot();
+  std::printf("history faults: song=%llu bus=%llu acquisitions=%llu/%llu ratio=%.9f/%.9f\n",
+      static_cast<unsigned long long>(result.songRead.bandExits), static_cast<unsigned long long>(result.busRead.bandExits),
+      static_cast<unsigned long long>(result.songRead.reanchors), static_cast<unsigned long long>(result.busRead.reanchors),
+      result.songRead.ratio, result.busRead.ratio);
   result.biasFrames =
       biased ? static_cast<double>(periods / 3) * rate / 1e9 : 0;
   std::printf("48h clocks ppm=%+.0f bias=%d periods=%llu song headroom=[%.3f, "
@@ -253,14 +272,19 @@ PcmResult pcmWindow(uint32_t hour, double ppm, uint64_t biasNs,
 int main(int argc, char **argv) {
   const bool requireBounded =
       argc == 2 && std::strcmp(argv[1], "--require-bounded-bias") == 0;
-  CHECK(argc == 1 || requireBounded);
+  const bool wideBounds = argc == 2 && std::strcmp(argv[1], "--wide-bounds-negative-control") == 0;
+  CHECK(argc == 1 || requireBounded || wideBounds);
   bool unboundedBias = false;
   for (const double ppm : {-50., 50.}) {
-    const auto clean = clocks(ppm, false);
+    const auto clean = clocks(ppm, false, wideBounds);
     CHECK(clean.songHeadroom.span() < headroomTolerance + 1);
     CHECK(clean.busHeadroom.span() < headroomTolerance + 1);
-    const auto biased = clocks(ppm, true);
+    CHECK(clean.songRead.valid && clean.busRead.valid);
+    CHECK(clean.songRead.bandExits == 0 && clean.busRead.bandExits == 0);
+    const auto biased = clocks(ppm, true, wideBounds);
     CHECK(biased.biasFrames > 518 && biased.biasFrames < 519);
+    CHECK(biased.songRead.bandExits > 0 && biased.busRead.bandExits > 0);
+    CHECK(biased.songRead.outsideBand && biased.busRead.outsideBand);
     CHECK(biased.busHeadroom.span() > clean.busHeadroom.span() + 500);
     CHECK(biased.songHeadroom.span() > clean.songHeadroom.span() + 500);
     unboundedBias |= biased.busHeadroom.minimum <
@@ -289,5 +313,5 @@ int main(int argc, char **argv) {
   }
   std::puts(
       "PASS: unbiased clocks remain bounded; injected bias and 1/2/3-period "
-      "stale-read controls detected. Field failure NOT reproduced.");
+      "stale-read controls detected and surfaced as history faults. Fallback control unchanged; field failure NOT reproduced.");
 }

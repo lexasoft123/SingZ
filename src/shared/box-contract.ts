@@ -194,6 +194,14 @@ export type BoxRoutingMeter = {
   peak: number[]
   rms: number[]
 }
+export type BoxHistoryReadObservation = {
+  valid: boolean; outsideBand: boolean
+  observations: string; bandExits: string; reanchors: string; generationChanges: string
+  windowObservations: string; appendFrames: number
+  headroomFrames: number; minimumFrames: number; maximumFrames: number; meanFrames: number
+  acquisitionFrames: number; lowerBoundFrames: number; upperBoundFrames: number
+  ratio: number; acquisitionErrorFrames: number
+}
 export type BoxRoutingState = {
   version: 1
   inventory: {
@@ -218,8 +226,10 @@ export type BoxRoutingState = {
       metersFresh: boolean
       devices?: { id: string; active: boolean; meter: BoxRoutingMeter; sources: {
         id: string; online: boolean; missingFrames: string; meter: BoxRoutingMeter
+        historyRead?: BoxHistoryReadObservation
       }[] }[]
-      monitors: { device: string; monitor: string; sourceOnline: boolean; meter: { valid: boolean; peak?: number[] } }[]
+      monitors: { device: string; monitor: string; sourceOnline: boolean; meter: { valid: boolean; peak?: number[] }
+        clockDomain?: 'device' | 'history'; historyRead?: BoxHistoryReadObservation }[]
     }
   }
 }

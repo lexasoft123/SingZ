@@ -209,6 +209,8 @@ int main() {
         0); // Neither bridge is audible.
   auto state = runtime.status();
   CHECK(state.monitors.size() == 1 && state.monitors[0].deviceClocked);
+  CHECK(!state.monitors[0].status.read.valid && state.monitors[0].status.read.observations == 0 &&
+        state.monitors[0].status.read.bandExits == 0);
   CHECK(state.monitors[0].historyDelayFrames == 0 &&
         state.monitors[0].filterFutureFrames == 0);
   CHECK(state.devices[0].active && state.devices[0].sources[0].status.online);
