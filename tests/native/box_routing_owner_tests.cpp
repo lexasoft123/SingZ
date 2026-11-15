@@ -288,7 +288,7 @@ void invalidUtf8LabelRegression() {
   CHECK(name == "Caf\xef\xbf\xbd USB");
   shutdownBoxRouting();
 }
-void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true) {
+void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true, bool hardware = false) {
   CHECK(probe->running && probe->callback);
   std::array<float, 256> left{}, right{}; float* out[]{left.data(), right.data()};
   AudioHostRenderBlock block; block.output = out; block.outputChannels = 2;
@@ -296,7 +296,7 @@ void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true) {
   block.callbackHostTimeNs = fixtureNowNs() - 1000000;
   probe->presentationHostNs = block.callbackHostTimeNs;
   block.outputHostTimeNs = block.callbackHostTimeNs; block.outputTimestampValid = timestampValid;
-  block.outputTimestampHardware = false; block.routeGeneration = 1; block.streamGeneration = probe->stream;
+  block.outputTimestampHardware = hardware; block.routeGeneration = 1; block.streamGeneration = probe->stream;
   CHECK(probe->callback(probe->context, block));
 }
 void pollingDoesNotDemandMeterPreview() {
@@ -543,6 +543,17 @@ int main() {
   // Invalid JSON does not replace the active scene or stop its output.
   const auto rejected = loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"edit","request":{}})"));
   CHECK(rejected.at("ok") == false && probe->running);
+  emit(probe, true, true);
+  const auto outputDiagnostics = [] {
+    const auto state=loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"state"})"));
+    for(const auto& endpoint:state.at("snapshot").at("runtime").at("outputs"))
+      if(endpoint.at("id")=="pa") return endpoint.at("audioDiagnostics");
+    std::abort();
+  };
+  CHECK(!outputDiagnostics().contains("servo"));
+  emit(probe, true, false);
+  CHECK(outputDiagnostics().at("servo").at("selectedHz").get<double>()>0);
+
   // Detaching the last song stops only its producer/history, while LoopZ's
   // physical endpoint and independent virtual-source route survive.
   auto client = sharedPlaybackBackend(boxRoutingPlaybackBackend(), "box-loopz");

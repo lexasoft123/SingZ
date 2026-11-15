@@ -1,3 +1,4 @@
+import { captureTapRequest, type BoxCaptureTapRequest, type BoxCaptureTapResult } from '../../shared/box-audio-diagnostics'
 import { realpath } from 'node:fs/promises'
 import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { BoxControllerHub } from './controller'
@@ -19,6 +20,8 @@ type BoxIpcOptions = {
   microphones?: { subscribeLevels?(listener: (value: BoxMicrophoneLevels) => Promise<void>): Promise<() => void> | (() => void); snapshot(): Promise<BoxMicrophoneSnapshot>; levels(): Promise<BoxMicrophoneLevels>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
   audioInputs: () => unknown
   audioHost: () => unknown
+  audioDiagnostics?: () => Promise<unknown>
+  captureTap?: (request: BoxCaptureTapRequest) => Promise<BoxCaptureTapResult>
   cecStatus?: () => BoxCecStatus
   retainedPlaybackSnapshot?: () => Promise<BoxRetainedPlaybackSnapshot>
   stopRetainedPlayback?: (expected: { epoch: string; generation: string }) => Promise<BoxRetainedPlaybackSnapshot>
@@ -168,11 +171,15 @@ export function registerBoxIpc(options: BoxIpcOptions) {
     'box:platform-command': (_event, [value]) => platform.command(value),
     'box:storage-snapshot': () => storage.snapshot(),
     'box:cache-remove': (_event, [value]) => storage.removeCachedProject(value as string),
+    'box:capture-tap': (_event, [request]) => options.captureTap
+      ? retainedResult(() => options.captureTap!(captureTapRequest(request)))
+      : failure('Independent audio diagnostics are unavailable.', 'unavailable'),
     'box:diagnostics': async () => {
       const inventories = await Promise.allSettled([
-        Promise.resolve().then(options.audioInputs), Promise.resolve().then(options.audioHost)
+        Promise.resolve().then(options.audioInputs), Promise.resolve().then(options.audioHost),
+        Promise.resolve().then(() => options.audioDiagnostics?.())
       ])
-      const [inputs, host] = inventories.map(result => result.status === 'fulfilled' ? result.value
+      const [inputs, host, diagnostics] = inventories.map(result => result.status === 'fulfilled' ? result.value
         : { ok: false, error: 'Audio service is unavailable.' })
       return {
         ok: true,
@@ -180,7 +187,7 @@ export function registerBoxIpc(options: BoxIpcOptions) {
           appVersion: options.appVersion,
           platform: process.platform,
           arch: process.arch,
-          audio: { inputs, host },
+          audio: { inputs, host, diagnostics },
           cec: options.cecStatus?.()
         }
       }

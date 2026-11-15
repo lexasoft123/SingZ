@@ -1,4 +1,5 @@
 #pragma once
+#include <loopz/audio_resampler.hpp>
 #include <atomic>
 #include <loopz/audio_history.hpp>
 #include <loopz/runtime/audio_runtime.hpp>
@@ -10,8 +11,8 @@ namespace singz {
 struct LoopZSongSource final : loopz::runtime::DeviceClockSource {
   LoopZSongSource();
   ~LoopZSongSource() override;
-  std::shared_ptr<loopz::AudioHistory> history =
-      std::make_shared<loopz::AudioHistory>(2);
+  std::shared_ptr<loopz::AudioHistory> history = std::make_shared<loopz::AudioHistory>(
+      2, loopz::AudioHistory::kDefaultCapacityFrames, loopz::ResamplingFilter::LinearPhase, true);
   std::atomic<bool> leased{false};
   uint32_t channels() const noexcept override { return 2; }
   loopz::AudioReadResult

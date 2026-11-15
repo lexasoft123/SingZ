@@ -50,6 +50,11 @@ bool boxRoutingInitialized() noexcept;
 // drained shutdown/reinitialization resets this diagnostic.
 bool boxRoutingTimingCoverageLost() noexcept;
 std::string boxRoutingRequest(const std::string& request);
+// Serialized control-owner diagnostics. Start returns immediately; status
+// completes after the bounded off-thread float-WAV writer has closed the input/output files and, on the direct path, the raw song file.
+std::string boxCaptureTapStart(const std::string& request);
+std::string boxCaptureTapStatus();
+std::string boxAudioDiagnostics();
 void pollBoxRouting();
 void shutdownBoxRouting() noexcept;
 std::unique_ptr<AudioHostBackend> boxRoutingPlaybackBackend();

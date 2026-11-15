@@ -22,8 +22,14 @@ const historyRead = (v: unknown): boolean => record(v) && typeof v.valid === 'bo
   ['observations', 'bandExits', 'reanchors', 'generationChanges', 'windowObservations'].every(key => counter(v[key])) &&
   ['headroomFrames', 'minimumFrames', 'maximumFrames', 'meanFrames', 'acquisitionFrames', 'lowerBoundFrames',
     'upperBoundFrames', 'ratio', 'acquisitionErrorFrames'].every(key => typeof v[key] === 'number' && Number.isFinite(v[key]))
+// Optional diagnostic observations must not invalidate the route document or
+// its meters. Native JSON can encode a nonfinite observation as null.
+const observation = (owner: Record<string, any>, key: string, valid: (value: any) => boolean): true => {
+  if (owner[key] !== undefined && !valid(owner[key])) delete owner[key]
+  return true
+}
 const runtimeDevice = (d: any): boolean => record(d) && text(d.id) && typeof d.active === 'boolean' && meter(d.meter) &&
-  list(d.sources, 32, source => record(source) && text(source.id) && typeof source.online === 'boolean' && counter(source.missingFrames) && meter(source.meter) && optional(source.historyRead, historyRead))
+  list(d.sources, 32, source => record(source) && text(source.id) && typeof source.online === 'boolean' && counter(source.missingFrames) && meter(source.meter) && observation(source, 'historyRead', historyRead))
 export function validRoutingState(v: unknown): v is BoxRoutingState {
   if (!record(v) || v.version !== 1 || !record(v.inventory) || !record(v.snapshot)) return false
   const s = v.snapshot
@@ -32,7 +38,7 @@ export function validRoutingState(v: unknown): v is BoxRoutingState {
     record(s.revision) && text(s.revision.epoch) && counter(s.revision.generation) &&
     record(s.restoration) && text(s.restoration.phase) && text(s.restoration.error) && counter(s.restoration.desiredGeneration) && counter(s.restoration.activeGeneration) &&
     record(s.runtime) && typeof s.runtime.metersFresh === 'boolean' && optional(s.runtime.devices, value => list(value, 32, runtimeDevice)) && list(s.runtime.monitors, 1024, m => record(m) && text(m.device) && text(m.monitor) && typeof m.sourceOnline === 'boolean' && record(m.meter) && typeof m.meter.valid === 'boolean' &&
-      optional(m.clockDomain, value => value === 'device' || value === 'history') && optional(m.historyRead, historyRead)) &&
+      observation(m, 'clockDomain', value => value === 'device' || value === 'history') && observation(m, 'historyRead', historyRead)) &&
     (s.document === null || record(s.document) && list(s.document.devices, 32, d =>
       record(d) && text(d.id) && text(d.name) && record(d.routing) && integer(d.routing.outputChannels) &&
       list(d.routing.sources, 32, a => controls(a) && text(a.id) && integer(a.channels) && wires(a.connections)) &&

@@ -39,6 +39,20 @@ napi_value request(napi_env env, napi_callback_info info) {
   catch (const std::exception& ex) { napi_throw_error(env, nullptr, ex.what()); return nullptr; }
   catch (...) { napi_throw_error(env, nullptr, "Box routing request failed"); return nullptr; }
 }
+napi_value captureStart(napi_env env, napi_callback_info info) {
+  std::string bytes; if(!argument(env,info,bytes)) return nullptr;
+  try { return text(env,boxCaptureTapStart(bytes)); }
+  catch(const std::exception& error) { napi_throw_error(env,nullptr,error.what()); return nullptr; }
+  catch(...) { napi_throw_error(env,nullptr,"Diagnostic capture failed"); return nullptr; }
+}
+napi_value captureStatus(napi_env env, napi_callback_info) {
+  try { return text(env,boxCaptureTapStatus()); }
+  catch(...) { napi_throw_error(env,nullptr,"Diagnostic capture status unavailable"); return nullptr; }
+}
+napi_value diagnostics(napi_env env, napi_callback_info) {
+  try { return text(env,boxAudioDiagnostics()); }
+  catch(...) { napi_throw_error(env,nullptr,"Audio diagnostics unavailable"); return nullptr; }
+}
 napi_value poll(napi_env env, napi_callback_info) {
   try { pollBoxRouting(); return empty(env); }
   catch (const std::exception& ex) { napi_throw_error(env, nullptr, ex.what()); return nullptr; }
@@ -63,6 +77,9 @@ napi_value capabilities(napi_env env, napi_callback_info) {
 }
 void defineBoxRoutingExports(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+    {"boxCaptureTapStart", nullptr, captureStart, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"boxCaptureTapStatus", nullptr, captureStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"boxAudioDiagnostics", nullptr, diagnostics, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"boxRoutingInitialize", nullptr, initialize, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"boxRoutingRequest", nullptr, request, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"boxRoutingPoll", nullptr, poll, nullptr, nullptr, nullptr, napi_default, nullptr},

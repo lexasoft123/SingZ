@@ -1,3 +1,4 @@
+import type { BoxCaptureTapRequest, BoxCaptureTapResult } from './box-audio-diagnostics'
 import type { DesktopPlaybackStatus, LyricLine, ProjectGraphPayload, ProjectInfo, ProjectListItem } from './types'
 import type { BoxMicrophoneLevels, BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from './box-audio'
 
@@ -156,6 +157,7 @@ export type BoxAPI = {
   storageSnapshot(): Promise<BoxResult<BoxStorageSnapshot>>
   removeCachedProject(dir: string): Promise<BoxResult<null>>
   diagnostics(): Promise<BoxResult<BoxDiagnostics>>
+  captureTap(request: BoxCaptureTapRequest): Promise<BoxResult<BoxCaptureTapResult>>
   retainedPlaybackSnapshot(): Promise<BoxResult<BoxRetainedPlaybackSnapshot>>
   stopRetainedPlayback(expected: { epoch: string; generation: string }): Promise<BoxResult<BoxRetainedPlaybackSnapshot>>
   restoreRetainedPlayback(expected: { epoch: string; generation: string }): Promise<BoxResult<BoxRetainedPlaybackRestore>>

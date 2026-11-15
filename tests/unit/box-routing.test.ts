@@ -17,7 +17,7 @@ describe('trusted Box routing', () => {
     expect(validRoutingState(bad)).toBe(false)
     expect((await new BoxRoutingService(async () => JSON.stringify(bad)).snapshot()).ok).toBe(false)
   })
-  it('preserves history faults and signed headroom without accepting nonfinite telemetry', async () => {
+  it('preserves routing and valid observations when optional telemetry is invalid', async () => {
     const current = state() as any
     const historyRead = { valid: true, outsideBand: true, observations: '100', bandExits: '2',
       reanchors: '1', generationChanges: '0', windowObservations: '30', appendFrames: 256, headroomFrames: -4,
@@ -29,10 +29,23 @@ describe('trusted Box routing', () => {
     expect(result.ok && result.value.snapshot.runtime.monitors[0].historyRead?.bandExits).toBe('2')
     expect(result.ok && result.value.snapshot.runtime.monitors[0].historyRead?.headroomFrames).toBe(-4)
     historyRead.ratio = Number.NaN
-    expect(validRoutingState(current)).toBe(false)
+    const nonfinite = await new BoxRoutingService(async () => JSON.stringify(current)).snapshot()
+    expect(nonfinite.ok).toBe(true)
+    expect(nonfinite.ok && nonfinite.value.snapshot.runtime.monitors[0]).not.toHaveProperty('historyRead')
+    expect(nonfinite.ok && nonfinite.value.snapshot.runtime.monitors[0].clockDomain).toBe('history')
     historyRead.ratio = 1
     current.snapshot.runtime.monitors[0].clockDomain = 'cpu-guessed'
-    expect(validRoutingState(current)).toBe(false)
+    const badDomain = await new BoxRoutingService(async () => JSON.stringify(current)).snapshot()
+    expect(badDomain.ok).toBe(true)
+    expect(badDomain.ok && badDomain.value.snapshot.runtime.monitors[0]).not.toHaveProperty('clockDomain')
+    expect(badDomain.ok && badDomain.value.snapshot.runtime.monitors[0].historyRead?.ratio).toBe(1)
+    current.snapshot.runtime.devices = [{ id: 'song', active: true,
+      meter: { valid: false, channels: 0, frames: 0, peak: [], rms: [] },
+      sources: [{ id: 'native', online: true, missingFrames: '0', historyRead: { ...historyRead, ratio: null },
+        meter: { valid: false, channels: 0, frames: 0, peak: [], rms: [] } }] }]
+    const badSource = await new BoxRoutingService(async () => JSON.stringify(current)).snapshot()
+    expect(badSource.ok).toBe(true)
+    expect(badSource.ok && badSource.value.snapshot.runtime.devices?.[0].sources[0]).not.toHaveProperty('historyRead')
   })
   it('rejects stale intent and preserves exact uint64 revisions', async () => {
     const current = state(); current.snapshot.revision.generation = '18446744073709551615'

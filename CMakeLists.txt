@@ -809,6 +809,22 @@ if(SINGZ_CORE_TESTS)
       SINGZ_NATIVE_PLAYBACK_QUARANTINED_SWAP=1
       $<TARGET_FILE:native_playback_session_tests>)
 
+  add_executable(diagnostic_capture_tap_tests tests/native/diagnostic_capture_tap_tests.cpp)
+  target_compile_features(diagnostic_capture_tap_tests PRIVATE cxx_std_20)
+  target_include_directories(diagnostic_capture_tap_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(diagnostic_capture_tap_tests PRIVATE SingZ::zcore_device Threads::Threads)
+  add_test(NAME diagnostic_capture_tap_tests COMMAND diagnostic_capture_tap_tests)
+  set_tests_properties(diagnostic_capture_tap_tests PROPERTIES TIMEOUT 10)
+
+  add_executable(audio_energy_benchmark tests/native/audio_energy_benchmark.cpp)
+  target_compile_features(audio_energy_benchmark PRIVATE cxx_std_20)
+  target_link_libraries(audio_energy_benchmark PRIVATE zCore::routing)
+
+  add_executable(audio_uptime_tests tests/native/audio_uptime_tests.cpp)
+  target_compile_features(audio_uptime_tests PRIVATE cxx_std_20)
+  target_link_libraries(audio_uptime_tests PRIVATE zCore::routing)
+  add_test(NAME audio_uptime_tests COMMAND audio_uptime_tests)
+
   add_executable(playback_cue_plan_tests
     ${SINGZ_REPO_ROOT}/tests/native/playback_cue_plan_tests.cpp)
   target_compile_features(playback_cue_plan_tests PRIVATE cxx_std_20)
@@ -1046,6 +1062,32 @@ if(BUILD_TESTING AND SINGZ_BOX_LOOPZ_ROUTING)
   target_link_libraries(box_song_clock_tests PRIVATE LoopZ::Runtime Threads::Threads)
   add_test(NAME box_song_clock_tests COMMAND box_song_clock_tests)
   set_tests_properties(box_song_clock_tests PROPERTIES TIMEOUT 180)
+  add_executable(box_capture_tap_tests
+    tests/native/box_capture_tap_tests.cpp
+    native/playback/box_routing_owner.cpp
+    native/playback/box_input_capture.cpp
+    native/playback/loopz_source_backend.cpp
+    native/playback/shared_audio_service.cpp)
+  target_compile_features(box_capture_tap_tests PRIVATE cxx_std_20)
+  target_compile_definitions(box_capture_tap_tests PRIVATE SINGZ_BOX_LOOPZ_ROUTING=1)
+  target_include_directories(box_capture_tap_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(box_capture_tap_tests PRIVATE LoopZ::Control Threads::Threads)
+  add_test(NAME box_capture_tap_tests COMMAND box_capture_tap_tests)
+  set_tests_properties(box_capture_tap_tests PROPERTIES TIMEOUT 10)
+  add_executable(box_estimated_output_timeline_tests tests/native/estimated_output_timeline_tests.cpp)
+  target_compile_features(box_estimated_output_timeline_tests PRIVATE cxx_std_20)
+  target_link_libraries(box_estimated_output_timeline_tests PRIVATE LoopZ::Core)
+  add_test(NAME box_estimated_output_timeline_tests COMMAND box_estimated_output_timeline_tests)
+  add_executable(audio_history_accumulation_probe tests/native/audio_history_accumulation_probe.cpp)
+  target_compile_features(audio_history_accumulation_probe PRIVATE cxx_std_20)
+  target_link_libraries(audio_history_accumulation_probe PRIVATE LoopZ::Core)
+  add_test(NAME audio_history_accumulation_smoke COMMAND audio_history_accumulation_probe 0.1 50)
+  set_tests_properties(audio_history_accumulation_smoke PROPERTIES TIMEOUT 30)
+  add_executable(audio_accumulation_probe tests/native/audio_accumulation_probe.cpp)
+  target_compile_features(audio_accumulation_probe PRIVATE cxx_std_20)
+  target_link_libraries(audio_accumulation_probe PRIVATE LoopZ::Core)
+  add_test(NAME audio_accumulation_smoke COMMAND audio_accumulation_probe 0.1 0)
+  set_tests_properties(audio_accumulation_smoke PROPERTIES TIMEOUT 30)
 
   add_executable(loopz_source_backend_tests
     tests/native/loopz_source_backend_tests.cpp
