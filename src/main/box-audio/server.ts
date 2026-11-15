@@ -1,3 +1,4 @@
+import { captureTapRequest, type BoxCaptureTapRequest, type BoxCaptureTapResult } from '../../shared/box-audio-diagnostics'
 import { coalesceMeterLevels } from '../../shared/box-meter-push'
 import { createServer, type Socket } from 'node:net'
 import { chmod, lstat, mkdir, unlink } from 'node:fs/promises'
@@ -15,6 +16,9 @@ export interface BoxAudioHostRuntime {
   binding: Record<string, unknown>
   routingRequest(json: string): string
   routingCapabilities(): unknown
+  captureTap?(request: BoxCaptureTapRequest): Promise<BoxCaptureTapResult>
+  captureTapStatus?(id: string): BoxCaptureTapResult
+  audioDiagnostics?(): unknown
   microphones?: { subscribeLevels?(listener: (value: BoxMicrophoneLevels) => void): () => void; snapshot(): Promise<BoxMicrophoneSnapshot>; levels(): Promise<BoxMicrophoneLevels>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
   shutdown(): void | Promise<void>
 }
@@ -267,6 +271,15 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
             const playback = await (runtime.owner.playbackStatus as () => DesktopPlaybackStatus | null).call(runtime.owner)
             if (playback && playback.generation === expected.generation && playback.state !== 'unloaded') throw new Error('The audio host still retains this song.')
             result = { epoch, playback }
+          } else if (request.target === 'service' && request.method === 'captureTap' && args.length === 1) {
+            if (!runtime.captureTap) throw new Error('Diagnostic capture unavailable')
+            result = await runtime.captureTap(captureTapRequest(args[0]))
+          } else if (request.target === 'service' && request.method === 'captureTapStatus' && args.length === 1 && boxAudioCounter(args[0]) && args[0] !== '0') {
+            if (!runtime.captureTapStatus) throw new Error('Diagnostic capture unavailable')
+            result = runtime.captureTapStatus(args[0])
+          } else if (request.target === 'service' && request.method === 'audioDiagnostics' && args.length === 0) {
+            if (!runtime.audioDiagnostics) throw new Error('Audio diagnostics unavailable')
+            result = runtime.audioDiagnostics()
           } else if (request.target === 'routing') {
             if (request.method === 'capabilities' && args.length === 0) result = runtime.routingCapabilities()
             else if (request.method === 'request' && args.length === 1 && typeof args[0] === 'string' && Buffer.byteLength(args[0]) <= BOX_AUDIO_REQUEST_BYTES) result = runtime.routingRequest(args[0])

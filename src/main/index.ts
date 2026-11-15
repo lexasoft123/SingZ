@@ -75,7 +75,7 @@ import { MicrophoneAnalysisSupervisor, disposeWithin } from './box-audio/microph
 import { MicrophoneSelectionStore } from './box-audio/microphone-store'
 import { randomUUID } from 'node:crypto'
 import { BoxCecService, boxCecEnabled } from './box/cec'
-import { boxMicrophones, boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
+import { boxCaptureTap, boxAudioDiagnostics, boxMicrophones, boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
@@ -1086,7 +1086,9 @@ app.whenReady().then(async () => {
     routingReconcile: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRoutingReconcile : undefined,
     cecStatus: () => boxCec!.snapshot(),
     audioInputs: () => captureOwner.devices(),
-    audioHost: () => captureOwner.hostDevices()
+    audioHost: () => captureOwner.hostDevices(),
+    audioDiagnostics: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxAudioDiagnostics : undefined,
+    captureTap: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxCaptureTap : undefined
   })
   createWindow()
 

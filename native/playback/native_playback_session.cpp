@@ -495,6 +495,7 @@ struct PreparedPlaybackTransport {
       NativePlaybackTransportState::Stopped};
   int64_t callbackProjectFrame{0};
   uint32_t callbackProjectFractionQ32{0};
+  uint64_t initialContinuousFrame{0};
   uint64_t callbackContinuousFrame{0};
   bool callbackLoopEnabled{false};
   int64_t callbackLoopStart{0};
@@ -863,7 +864,7 @@ struct PreparedPlaybackTransport {
     callbackState = NativePlaybackTransportState::Stopped;
     callbackProjectFrame = initialProjectFrame;
     callbackProjectFractionQ32 = 0;
-    callbackContinuousFrame = 0;
+    callbackContinuousFrame = initialContinuousFrame;
     landingPending = landingProjectFrame > 0;
     callbackLoopEnabled = false;
     callbackLoopStart = 0;
@@ -879,7 +880,7 @@ struct PreparedPlaybackTransport {
     callbackLoopCount = 0;
     callbackSeekCount = 0;
     callbackDiscontinuities = 0;
-    callbackProjectionAnchorContinuousFrame = 0;
+    callbackProjectionAnchorContinuousFrame = initialContinuousFrame;
     callbackLastBoundary = zdsp::DiscontinuityReason::None;
     callbackTimePitchBoundaryPrepared = false;
     // Both diagnostics describe THIS generation. Left unreset they carry the
@@ -2696,6 +2697,8 @@ struct PreparedPlaybackGraph {
         transposeSemitones(transpose),
         preparedStartProjectFrame(startProjectFrame),
         initialTransport(std::move(initialTransport)), testHooks(hooks) {
+    transport.initialContinuousFrame =
+        hooks == nullptr ? 0 : hooks->initialContinuousFrame;
     (void)rateToQ32(rate, &playbackRateQ32);
     timePitchCorrectionSemitones = static_cast<float>(
         transpose - 12.0 * std::log2(rate));

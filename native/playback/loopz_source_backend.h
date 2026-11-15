@@ -1,5 +1,6 @@
 #pragma once
 #include <loopz/audio_history.hpp>
+#include <loopz/audio_resampler.hpp>
 #include <zcore/device/audio_host.h>
 #include <atomic>
 #include <memory>
@@ -7,7 +8,7 @@
 namespace singz {
 // One producer, arbitrarily many timestamped readers. No PCM crosses JS.
 struct LoopZSongSource {
-  std::shared_ptr<loopz::AudioHistory> history = std::make_shared<loopz::AudioHistory>(2);
+  std::shared_ptr<loopz::AudioHistory> history = std::make_shared<loopz::AudioHistory>(2, loopz::AudioHistory::kDefaultCapacityFrames, loopz::ResamplingFilter::LinearPhase, true);
   std::atomic<bool> leased{false};
 };
 std::unique_ptr<AudioHostBackend> createLoopZSourceBackend(std::shared_ptr<LoopZSongSource> source);

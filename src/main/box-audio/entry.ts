@@ -1,3 +1,4 @@
+import { BoxCaptureTap, type NativeDiagnosticCapture } from './capture-tap'
 import { app } from 'electron'
 import { join } from 'node:path'
 import { CaptureOwner, loadBoxAudioHostBinding, type NativeCaptureBinding } from '../capture'
@@ -8,7 +9,7 @@ import type { BoxAudioHostAuthority } from './profile'
 import { boxRoutingPollTick } from './poll'
 export { boxRoutingPollTick } from './poll'
 
-interface NativeBoxRouting {
+interface NativeBoxRouting extends NativeDiagnosticCapture {
   boxRoutingInitialize(path: string): { ok: boolean; error?: string }
   boxRoutingRequest(json: string): string
   boxRoutingPoll(): void
@@ -34,12 +35,16 @@ export async function runBoxAudioHost(authority: BoxAudioHostAuthority): Promise
   // Acquire the socket before loading/opening native devices, so a second
   // executable cannot create a competing physical owner before it is rejected.
   const owner = new CaptureOwner(undefined, initialize)
+  const captureTap = new BoxCaptureTap(app.getPath('userData'), () => { initialize(); return routing! })
   let microphones: MicrophoneAnalysisSupervisor | undefined
   let poll: ReturnType<typeof setInterval> | undefined
   const host = await startBoxAudioHost(socketPath, {
     owner: owner as unknown as Record<string, unknown>, binding: {},
     routingRequest: json => { initialize(); return routing!.boxRoutingRequest(json) },
     routingCapabilities: () => { initialize(); return routing!.boxRoutingCapabilities() },
+    captureTap: request => captureTap.start(request),
+    captureTapStatus: id => captureTap.status(id),
+    audioDiagnostics: () => { initialize(); return JSON.parse(routing!.boxAudioDiagnostics()) },
     microphones: {
       subscribeLevels: listener => { if (!microphones) throw new Error('Microphone supervisor starting'); return microphones.subscribeLevels(listener) },
       snapshot: async () => { if (!microphones) throw new Error('Microphone supervisor starting'); return microphones.snapshot() },
