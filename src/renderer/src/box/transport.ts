@@ -1,3 +1,4 @@
+import { nativePlaybackFailureCopy, type DesktopNativePlaybackFailure } from '../audio/native-playback-failure'
 import type { BoxMetronomeOverride, BoxRetainedPlaybackRecovery, BoxRetainedPlaybackRestore } from '../../../shared/box-contract'
 import { commandableRetainedPlayback, retainedPlaybackSnapshot } from '../../../shared/box-retained-playback'
 import type {
@@ -32,6 +33,7 @@ export interface BoxEngine {
   load(tracks: EngineTrackInput[], opts: { position?: number; play?: boolean; graphDocument?: ParsedGraphDocument | null }): void
   decode(data: ArrayBuffer): Promise<AudioBuffer>
   play(): Promise<void>
+  retryPlayback?(): Promise<void>
   playAccepted?(): Promise<void>
   pause(): void
   pauseAccepted?(): Promise<void>
@@ -116,6 +118,8 @@ export class BoxTransport {
   private loadingName: string | null = null
   private committing = false
   private lastError: string | null = null
+  private failedOpenItem: ProjectListItem | null = null
+  private openPlaybackError: EnginePlaybackError | null = null
   private generation = 0
   private activeGeneration = 0
   /**
@@ -146,8 +150,6 @@ export class BoxTransport {
   private snapshot: BoxTransportSnapshot
   private readonly saveDelayMs: number
   private readonly restoreTimeoutMs: number
-  private readonly nativePlaybackEnabled?: boolean
-  private browserOutputReconciled = false
   private metronomeOverride: BoxMetronomeOverride = 'song'
   private metronomeRevision = 0
   private metronomePending = 0
@@ -158,16 +160,15 @@ export class BoxTransport {
   constructor(
     private readonly api: SingzApi,
     private readonly engine: BoxEngine,
-    options: { pollMs?: number; saveDelayMs?: number; restoreTimeoutMs?: number; nativePlaybackEnabled?: boolean } = {}
+    options: { pollMs?: number; saveDelayMs?: number; restoreTimeoutMs?: number } = {}
   ) {
     this.saveDelayMs = options.saveDelayMs ?? 600
     this.restoreTimeoutMs = options.restoreTimeoutMs ?? 8000
-    this.nativePlaybackEnabled = options.nativePlaybackEnabled
     this.outputArbiter = new PlaybackOutputArbiter(undefined, {
-      setOutput: async sinkId => {
+      setOutput: async uid => {
         try {
           if (!this.engine.setOutput) throw new Error(tSettings('box.settings.routeUnavailable'))
-          await this.engine.setOutput(sinkId)
+          await this.engine.setOutput(uid)
         } catch (error) {
           const code = typeof error === 'object' && error !== null && 'code' in error
             ? (error as { code?: unknown }).code
@@ -185,12 +186,10 @@ export class BoxTransport {
         if (!inventory.ok) throw new Error(inventory.error)
         return inventory.devices
           .filter(device => device.outputChannels > 0)
-          .map(device => ({ kind: 'audiooutput' as const, deviceId: `native:${device.uid}` }))
+          .map(device => ({ uid: device.uid }))
       },
       commit: outputId => {
-        this.appliedOutputUid = outputId?.startsWith('native:')
-          ? outputId.slice('native:'.length)
-          : null
+        this.appliedOutputUid = outputId ?? null
       }
     })
     this.engine.setLaneReader(async path => this.api.readAudio(path))
@@ -222,7 +221,7 @@ export class BoxTransport {
       masterVolume: this.active ? this.engine.masterVolume : 1,
       transpose: this.active ? this.engine.transpose : 0,
       tempo: this.active ? this.engine.tempo : 1,
-      playbackError: this.active ? this.engine.playbackError : null,
+      playbackError: this.openPlaybackError ?? (this.active ? this.engine.playbackError : null),
       appliedOutputUid: this.appliedOutputUid,
       applyingOutput: this.applyingOutput,
       outputError: this.outputError,
@@ -391,7 +390,7 @@ export class BoxTransport {
       const selected = inventory.devices.find(device => device.uid === rawUid && device.outputChannels > 0)
       if (!selected) throw new Error(tSettings('box.settings.deviceDisconnected'))
       try {
-        return await this.outputArbiter.select(`native:${rawUid}`)
+        return await this.outputArbiter.select(rawUid)
       } catch (error) {
         if (error instanceof PlaybackOutputSelectionError && error.repairRequired) this.engine.pause()
         throw error
@@ -567,7 +566,6 @@ export class BoxTransport {
           this.appliedOutputUid = fresh.descriptor.config.provider === 'alsa'
             ? fresh.descriptor.config.outputDeviceUid
             : this.appliedOutputUid
-          this.browserOutputReconciled = true
           this.routingBlocked = false
           this.restartRequired = false
           this.outputError = null
@@ -586,6 +584,8 @@ export class BoxTransport {
     this.pendingOpen = generation
     this.loadingName = item.name
     this.lastError = null
+    this.openPlaybackError = null
+    this.failedOpenItem = null
     this.publish()
     try {
       if (this.api.boxAudioPersistent === true && this.active === null) {
@@ -622,12 +622,8 @@ export class BoxTransport {
       ]
       const applies = await desktopLaneMeasureApplies(lanes, {
         api: this.api,
-        nativePlaybackEnabled: this.nativePlaybackEnabled
       })
       if (!this.current(generation)) return false
-      if (this.nativePlaybackEnabled === true && !applies) {
-        throw new Error(t('box.nativeRequired'))
-      }
       const graphPromise = import('../audio/desktop-project-graph').then(module =>
         module.loadDesktopProjectGraph(
           () => this.api.readProjectGraph(registration.path),
@@ -637,7 +633,7 @@ export class BoxTransport {
       const lanesPromise = readLanes(
         lanes,
         async path => this.engine.decode(await this.api.readAudio(path)),
-        { api: this.api, applies, nativePlaybackEnabled: this.nativePlaybackEnabled }
+        { api: this.api, applies }
       )
       const [graph, read] = await Promise.all([graphPromise, lanesPromise])
       if (!this.current(generation) || !graph.accepted) return false
@@ -661,14 +657,6 @@ export class BoxTransport {
       if (!this.current(generation)) return false
       return await this.enqueueEngine(async () => {
         if (!this.current(generation)) return
-        // Desktop reconciles its output in the app shell. Box previews need
-        // their own first-open route before Web Audio can leave the silent sink.
-        // Mandatory-native Linux must stay detached for exclusive ALSA probing.
-        if (this.nativePlaybackEnabled !== true && !this.browserOutputReconciled && this.engine.setOutput) {
-          await this.engine.setOutput(this.engine.outputDeviceId ?? '')
-          this.browserOutputReconciled = true
-          if (!this.current(generation)) return
-        }
         this.committing = true
         this.publish()
         try {
@@ -719,6 +707,15 @@ export class BoxTransport {
       this.loadingName = null
       this.committing = false
       this.lastError = error instanceof Error ? error.message : String(error)
+      const failure = (error as { failure?: DesktopNativePlaybackFailure })?.failure
+      if (failure) {
+        this.lastError = nativePlaybackFailureCopy(failure)
+        if (!this.active) {
+          this.failedOpenItem = item
+          this.openPlaybackError = { reason: 'toggle', code: 'playback-failure', provider: null,
+            message: failure.detail, cause: error, failure }
+        }
+      }
       this.publish()
       return false
     } finally {
@@ -737,10 +734,21 @@ export class BoxTransport {
   }
 
   toggle(): void {
+    if (this.engine.playbackError) return
     if (this.metronomeBlocked) return
     if (this.active?.lyrics.status !== 'ready' || this.active.lyrics.lines.length === 0) return
     if (!this.engine.playing && (this.routingBlocked || this.applyingOutput || this.restartRequired || this.metronomeBlocked)) return
     this.engine.toggle()
+  }
+
+  async retryPlayback(): Promise<void> {
+    if (this.failedOpenItem) { await this.open(this.failedOpenItem); return }
+    if (!this.active || this.routingBlocked || this.applyingOutput || this.restartRequired || this.metronomeBlocked) return
+    await this.enqueueEngine(async () => {
+      if (this.engine.retryPlayback) await this.engine.retryPlayback()
+      else await this.engine.play()
+      this.refresh()
+    })
   }
 
   pause(): void {
@@ -777,6 +785,7 @@ export class BoxTransport {
   }
 
   async controllerPlayPause(): Promise<void> {
+    if (this.engine.playbackError) throw new Error('Retry playback from the audio error panel.')
     const active = this.active
     const owner = this.activeGeneration
     if (!active || active.lyrics.status !== 'ready' || active.lyrics.lines.length === 0) {
@@ -812,6 +821,7 @@ export class BoxTransport {
   }
 
   seek(position: number): void {
+    if (this.engine.playbackError) return
     if (this.routingBlocked || this.applyingOutput || this.restartRequired) return
     if (this.active) this.engine.seek(position)
   }

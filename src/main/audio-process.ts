@@ -5,7 +5,7 @@ import { app, utilityProcess, type UtilityProcess } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CaptureOwner, type NativeCaptureBinding } from './capture'
+import { CaptureOwner, verifiedCaptureFingerprintEnv, type NativeCaptureBinding } from './capture'
 import { log, logChunk } from './log'
 import { createBoxAudioClient } from './box-audio/client'
 import {
@@ -16,6 +16,8 @@ import {
   type AudioReply
 } from './audio-process-rpc'
 import type { CaptureAnalysisWindow, CaptureDiscontinuity, CaptureTimeValue } from '../shared/types'
+import { readSettings, writeSettings } from './settings'
+import { audioBufferPreferences } from '../shared/audio-buffer'
 
 export type AsyncCaptureOwner = {
   [K in keyof CaptureOwner]: CaptureOwner[K] extends (...args: infer A) => infer R
@@ -79,7 +81,9 @@ class DesktopAudioProcess {
       serviceName: 'SingZ Audio', stdio: 'pipe', cwd: process.cwd(),
       allowLoadingUnsignedLibraries: true,
       env: { ...process.env, SINGZ_AUDIO_PROCESS: '1', SINGZ_AUDIO_EPOCH: epoch,
+        SINGZ_AUDIO_BUFFER_PREFERENCES: JSON.stringify(audioBufferPreferences(readSettings().audioBufferFrames)),
         SINGZ_AUDIO_PACKAGED: app.isPackaged ? '1' : '0',
+        ...(app.isPackaged ? {} : verifiedCaptureFingerprintEnv()),
         ...(process.env.SINGZ_SURFACE === 'box' ? { SINGZ_AUDIO_BOX_DATA_DIR: app.getPath('userData') } : {}),
         SINGZ_AUDIO_RESOURCES_PATH: process.resourcesPath }
     })
@@ -100,6 +104,16 @@ class DesktopAudioProcess {
       try {
         if (raw.type === 'reply') {
           rpc.receive(raw as AudioReply)
+          return
+        }
+        if (raw.type === 'buffer-preferences-restored') {
+          const preferences = audioBufferPreferences(raw.preferences)
+          if (!raw.preferences || typeof raw.preferences !== 'object' || Array.isArray(raw.preferences) ||
+              Object.keys(preferences).length !== Object.keys(raw.preferences).length ||
+              typeof raw.error !== 'string' || raw.error.length > 16384)
+            throw new Error('Audio process sent invalid buffer recovery preferences')
+          writeSettings({ audioBufferFrames: preferences })
+          log('dsp', `audio buffer restored · ${raw.error}`, 'error')
           return
         }
         if (raw.type === 'ready') {
@@ -239,7 +253,7 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
   stop(): Promise<void>
 } {
   const localBox = process.env.SINGZ_SURFACE === 'box' && !process.env.SINGZ_BOX_AUDIO_SOCKET
-  const rendererMethods = new Set(['beginMonitor', 'endMonitor', 'setMonitorGain', 'configureMicrophoneMix', 'stopMicrophoneMix',
+  const rendererMethods = new Set(['configureMicrophoneMix', 'stopMicrophoneMix',
     'preparePlayback', 'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback', 'seekPlayback',
     'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback'])
   const rendererId = (id: number): number => localBox ? id + 1000 : id

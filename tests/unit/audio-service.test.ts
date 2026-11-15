@@ -1,10 +1,11 @@
 import { EventEmitter } from 'node:events'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fake = vi.hoisted(() => ({
   sink: undefined as undefined | ((value: unknown) => void),
   begin: vi.fn(), stop: vi.fn(), prepare: vi.fn(), unload: vi.fn(),
-  binding: { inputDevices: vi.fn(() => ({ ok: true, devices: [] })),
+  binding: { inputDevices: vi.fn(() => ({ ok: true, devices: [] })), audioBufferSettings: vi.fn(),
     boxRoutingInitialize: vi.fn(() => ({ ok: true })), boxRoutingPoll: vi.fn(), boxRoutingShutdown: vi.fn() }
 }))
 vi.mock('../../src/main/capture', () => ({
@@ -40,6 +41,41 @@ afterEach(() => {
 })
 
 describe('audio helper control dispatcher', () => {
+  it('reports restored preferences to main when a deferred take-only apply fails', async () => {
+    request(1, 'inputDevices', [], 'binding')
+    await vi.advanceTimersByTimeAsync(0)
+    fake.binding.audioBufferSettings.mockReturnValueOnce({ ok: false, pending: false,
+      preferences: { output: 128 }, error: 'Injected input failure' })
+    request(2, 'unloadPlayback', [7, '9'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(port.postMessage).toHaveBeenCalledWith({ type: 'buffer-preferences-restored', epoch: 'service-test',
+      preferences: { output: 128 }, error: 'Injected input failure' })
+  })
+  it('still dispatches stop when applying buffer settings throws', async () => {
+    request(1, 'inputDevices', [], 'binding')
+    await vi.advanceTimersByTimeAsync(0)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fake.binding.audioBufferSettings.mockImplementationOnce(() => { throw new Error('buffer apply failed') })
+    fake.unload.mockReturnValueOnce({ ok: true, cleanupComplete: true })
+    request(2, 'unloadPlayback', [7, '9'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fake.unload).toHaveBeenCalledWith(7, '9')
+    expect(port.postMessage.mock.calls.map(([message]) => message).find(message => message.id === 2)).toMatchObject({ ok: true })
+    report.mockRestore()
+  })
+  it('publishes saved policy first and applies a take-only pending change after stop without a timer', async () => {
+    vi.stubEnv('SINGZ_AUDIO_BUFFER_PREFERENCES', JSON.stringify({ input: 64, output: 128, invalid: 48 }))
+    request(1, 'inputDevices', [], 'binding')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fake.binding.audioBufferSettings).toHaveBeenCalledWith({ input: 64, output: 128 })
+    expect(fake.binding.audioBufferSettings.mock.invocationCallOrder[0]).toBeLessThan(fake.binding.inputDevices.mock.invocationCallOrder[0])
+    fake.binding.audioBufferSettings.mockClear()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(fake.binding.audioBufferSettings).not.toHaveBeenCalled()
+    request(2, 'unloadPlayback', [7, '9'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fake.binding.audioBufferSettings).toHaveBeenCalledWith()
+  })
   it('announces its own PID and refuses methods outside the explicit surface', async () => {
     expect(port.postMessage).toHaveBeenCalledWith({ type: 'ready', epoch: 'service-test', pid: process.pid })
     request(1, 'constructor')
@@ -102,7 +138,7 @@ it('initializes and polls routing only for local Box and shuts it down after the
   await import('../../src/main/audio-service')
   request(1, 'inputDevices', [], 'binding')
   await vi.advanceTimersByTimeAsync(0)
-  expect(fake.binding.boxRoutingInitialize).toHaveBeenCalledWith('/fake/box-profile/routing.json')
+  expect(fake.binding.boxRoutingInitialize).toHaveBeenCalledWith(join('/fake/box-profile', 'routing.json'))
   await vi.advanceTimersByTimeAsync(100)
   expect(fake.binding.boxRoutingPoll).toHaveBeenCalledTimes(4)
   const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)

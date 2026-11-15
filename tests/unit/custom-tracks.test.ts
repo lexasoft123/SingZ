@@ -1,10 +1,18 @@
 import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { detectProject, importProject, renameProject, saveProject } from '../../src/main/projects'
 import { writeSettings } from '../../src/main/settings'
-import type { CustomTrack } from '../../src/shared/types'
+import {
+  DESKTOP_PLAYBACK_CAPABILITY,
+  DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_BASE_MASK,
+  DESKTOP_PLAYBACK_CODEC_BASE_TAG,
+  type CustomTrack
+} from '../../src/shared/types'
+import { readOptionalLanes, type LaneMeasureHost } from '../../src/renderer/src/audio/lane-measure'
+import { UnavailableCustomTracks } from '../../src/renderer/src/unavailable-custom-tracks'
 
 /**
  * Custom tracks: audio files the singer adds as extra lanes. They live in the
@@ -62,6 +70,65 @@ async function gone(path: string): Promise<boolean> {
 async function metaOf(dir: string): Promise<{ settings: { custom?: CustomTrack[] } }> {
   return JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
 }
+
+describe('saving custom tracks rejected by native admission', () => {
+  it.each(['initial load', 'post-split reload'] as const)('%s preserves unreadable track definitions in project.json', async mode => {
+    const root = await makeLibrary()
+    const dir = await makeProject(root, 'Codec test')
+    const definitions = await Promise.all(['m4a', 'ogg', 'aac'].map(async extension => {
+      const file = join(dir, 'stems', `custom-guide-${extension}.${extension}`)
+      await writeFile(file, `recording-${extension}`)
+      return track(`custom-guide-${extension}`, file, `Guide ${extension}`)
+    }))
+    const first = await saveProject(join(dir, 'song.mp3'), 'Codec test', {
+      transpose: 0, tracks: {}, custom: definitions
+    })
+    if (!first.ok) throw new Error('fixture save failed')
+    const opened = await detectProject(first.songPath)
+    const defs = opened!.settings.custom!
+    const host: LaneMeasureHost = {
+      platform: 'darwin',
+      api: {
+        desktopPlaybackCapability: async () => ({
+          available: true, playbackCapability: DESKTOP_PLAYBACK_CAPABILITY,
+          mediaCodec: {
+            abiVersion: 1, formatMask: DESKTOP_PLAYBACK_CODEC_BASE_MASK,
+            dynamicallyLinkedFfmpeg: false, runtimeVersion: '',
+            capabilityTag: DESKTOP_PLAYBACK_CODEC_BASE_TAG, profile: '', target: '',
+            extensions: [...DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS]
+          }
+        }),
+        measureDesktopPlaybackLanes: vi.fn(async () => { throw new Error('No custom format is admitted') })
+      }
+    }
+    const decode = vi.fn(async () => { throw new Error('Chromium playback decode is forbidden') })
+    const optional = await readOptionalLanes(defs.map(c => ({ id: c.id, path: c.file })), decode,
+      host, [{ id: 'vocals', path: join(dir, 'stems', 'vocals.flac') }])
+    expect(optional.superseded).toBe(false)
+    expect(optional.reads.size).toBe(0) // App displays laneMissing and omits these lanes.
+    expect([...optional.errors.keys()]).toEqual(defs.map(c => c.id))
+    expect(decode).not.toHaveBeenCalled()
+
+    const retained = new UnavailableCustomTracks()
+    retained.reset(1)
+    let seq = 1
+    if (mode === 'post-split reload') {
+      retained.advance(seq, seq + 1)
+      ++seq
+    }
+    retained.retain(seq, defs, optional.errors.keys())
+    const playable = defs.filter(c => optional.reads.has(c.id))
+    const saved = await saveProject(first.songPath, 'Codec test', {
+      transpose: 0, tracks: {}, custom: retained.forSave(seq, playable)
+    })
+    expect(saved.ok).toBe(true)
+    expect((await metaOf(dir)).settings.custom).toEqual(definitions.map(c => ({
+      ...c, file: `stems/${c.id}.${c.file.split('.').pop()}`
+    })))
+    expect((await detectProject(first.songPath))?.settings.custom).toEqual(definitions)
+    for (const c of definitions) expect(await readFile(c.file, 'utf8')).toMatch(/^recording-/)
+  })
+})
 
 describe('saving custom tracks', () => {
   it('copies the picked file into stems/ and stores it project-relative', async () => {

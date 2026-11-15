@@ -219,6 +219,9 @@ struct NativePlaybackPrepareConfig {
   uint32_t requestedBufferFrames{0};
   uint32_t maximumFrames{4096};
   float masterGain{1.0F};
+  // Internal host composition flag (not a serialized graph parameter).
+  // Shared service owns app volume; other products retain in-graph control.
+  bool serviceOwnsMasterGain{false};
   // Structural tempo. Sources, transport schedules and reference cues share
   // one prepared Q32 rate; non-unity tempo also inserts the phase-coherent
   // song-bus Signalsmith correction processor. Runtime changes rebuild the
@@ -866,6 +869,8 @@ struct NativePlaybackTestHooks {
   uint64_t timePitchPrimeNs{0};
   // Test-only slow/blocked streaming decoder, called on the staging thread.
   void (*beforeStreamingStageDecode)(void*) noexcept {nullptr};
+  // Deterministic callback progress during off-RT recovery priming.
+  void (*afterReanchorPrime)(void*) noexcept {nullptr};
 };
 
 // Reusable ordinary-thread composition owner. It accepts only already-opened
@@ -1003,11 +1008,6 @@ public:
   // a raw render-timeline query: callers subtract input/output/graph latency
   // once (recordPlacement), and retain discontinuitySerial to stop on seek.
   PlaybackPresentationQuery presentationQuery(uint64_t hostTimeNs) const;
-  // Bounded seqlock/atomic observation for the shared output render callback.
-  // No mutex, host call, allocation, ownership change or shared_ptr copy. Call
-  // after song rendering; stopped/unloaded/unpublished songs return missing.
-  // Latency fields are zero: this is the raw block coordinate for output mix.
-  PlaybackPresentationQuery presentationQueryRealtime(uint64_t hostTimeNs) const noexcept;
   // Lock-free and wait-free from any thread: see NativePlaybackPositionNow.
   // Safe to call at UI rate while a prepare decodes, while stop waits for
   // quiescence, and from a DecodeCancellation callback.

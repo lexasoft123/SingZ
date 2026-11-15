@@ -1,8 +1,7 @@
+import { windowsPathTooLong } from '../../../shared/windows-path'
 import { commandableRetainedPlayback } from '../../../shared/box-retained-playback'
-import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
 import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
 import type {
-  DesktopAudioHostDevice,
   DesktopPlaybackLaneConfig,
   DesktopPlaybackInitialTransportConfig,
   DesktopPlaybackPrepareConfig,
@@ -27,13 +26,18 @@ import {
   DESKTOP_PLAYBACK_CONTRACT_VERSION
 } from '../../../shared/types'
 import type { BeatInfo, MetronomeConfig } from './beat'
+import { audioBufferChoices, DEFAULT_AUDIO_BUFFER_FRAMES, validAudioBufferSize } from '../../../shared/audio-buffer'
+import { NATIVE_PLAYBACK_MIN_RATE, NATIVE_PLAYBACK_MAX_RATE, NATIVE_PLAYBACK_MAX_TRANSPOSE } from './native-playback-limits'
 import {
-  desktopNativePlaybackPreferred,
   desktopStreamLanesPreferred,
   detectedDesktopPlatform
 } from './native-playback-preference'
+import { VOICE_TAKE_LANE_ID, type VoiceTakeLaneState, type VoiceTakeLaneSource, type VoiceTakeLaneControl } from '../../../shared/voice-take'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 import {
+  GRAPH_NODE_TYPES,
+  parseGraphDocument,
+  MAX_NATIVE_GRAPH_PORTS_PER_NODE,
   MAX_NATIVE_GRAPH_NODES,
   projectGraphDocumentForNative,
   synthesizedNativeGraphNodeCount
@@ -44,6 +48,11 @@ import {
 export const POLL_FAST_MS = 50
 export const POLL_STEADY_MS = 200
 export const POLL_BURST_MS = 2000
+
+/** Process master, including idle training/monitoring; never opens output. */
+export async function setDesktopServiceMasterGain(gain: number): Promise<void> {
+  ensure(await window.singz.setDesktopPlaybackMasterGain('0', gain), 'Native service master gain failed')
+}
 /** The cadence right after a start, a resume or a seek while the song plays
  *  (see `edgeAtMs`), until a status shows the transport running with a
  *  current audible frame, and for a seek its receipt as well. The
@@ -83,7 +92,6 @@ export type DesktopNativeTrainingIntent =
   | { mode: 'windows'; windows: { s: number; e: number }[]; stems: string[] }
 
 export interface DesktopNativePlaybackFeatures {
-  enabled: boolean
   playbackRate: number
   transpose: number
   training: DesktopNativeTrainingIntent | null
@@ -92,9 +100,22 @@ export interface DesktopNativePlaybackFeatures {
   requestedProvider?: DesktopPlaybackProvider
 }
 
+export type { DesktopNativePlaybackFailureCode, DesktopNativePlaybackFailure } from './native-playback-failure'
+import { transientNativePrepareFailure, type DesktopNativePlaybackFailureCode, type DesktopNativePlaybackFailure } from './native-playback-failure'
+
 export type DesktopPlaybackBackendDecision =
   | { backend: 'native'; provider: DesktopPlaybackProvider }
-  | { backend: 'legacy'; reason: string }
+  | { backend: 'rejected'; reason: string; failure: DesktopNativePlaybackFailure }
+
+function decline(
+  code: DesktopNativePlaybackFailureCode,
+  detail: string,
+  context: Pick<DesktopNativePlaybackFailure, 'laneId' | 'format'> = {}
+): Extract<DesktopPlaybackBackendDecision, { backend: 'rejected' }> {
+  const failure = { code, detail, ...context }
+  console.warn('Native playback declined: ' + JSON.stringify(failure))
+  return { backend: 'rejected', reason: detail, failure }
+}
 
 function exactExtensions(actual: readonly string[], expected: readonly string[]): boolean {
   return actual.length === expected.length && actual.every((value, index) => value === expected[index])
@@ -103,7 +124,8 @@ function exactExtensions(actual: readonly string[], expected: readonly string[])
 function validRuntime(runtime: DesktopPlaybackRuntimeCapability | null): boolean {
   if (!runtime?.available || runtime.playbackCapability !== DESKTOP_PLAYBACK_CAPABILITY) return false
   const codec = runtime.mediaCodec
-  if (codec.abiVersion !== 1) return false
+  if (!codec || codec.abiVersion !== 1 || !Array.isArray(codec.extensions) ||
+      typeof codec.runtimeVersion !== 'string' || typeof codec.target !== 'string') return false
   const noFfmpeg = !codec.dynamicallyLinkedFfmpeg && codec.runtimeVersion === '' &&
     codec.target === '' && codec.profile === ''
   // An addon from before the native MP3 decoder, and every addon since.
@@ -124,18 +146,16 @@ function validRuntime(runtime: DesktopPlaybackRuntimeCapability | null): boolean
 function extensionOf(path: string): string | null {
   const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   const dot = path.lastIndexOf('.')
-  if (dot <= slash || dot === path.length - 1) return null
+  if (dot <= slash + 1 || dot === path.length - 1) return null
   const extension = path.slice(dot + 1).toLowerCase()
   return /^[a-z0-9]{1,7}$/.test(extension) ? extension : null
 }
 
-/** Exact feature gate. Native is selected before it owns output; unsupported
- * combinations stay on Web Audio rather than attempting a partial graph. */
+/** Exact admission gate before output ownership; every rejection is named. */
 export function selectDesktopPlaybackBackend(
   platform: string,
   features: DesktopNativePlaybackFeatures
 ): DesktopPlaybackBackendDecision {
-  if (!features.enabled) return { backend: 'legacy', reason: 'native playback is off in Settings' }
   const provider = platform === 'darwin'
     ? (features.requestedProvider && features.requestedProvider !== 'coreaudio' ? null : 'coreaudio')
     : platform === 'win32'
@@ -145,23 +165,45 @@ export function selectDesktopPlaybackBackend(
       : platform === 'linux'
         ? (!features.requestedProvider || features.requestedProvider === 'alsa' ? 'alsa' : null)
         : null
-  if (!provider) return { backend: 'legacy', reason: 'no native desktop provider for this platform' }
+  if (!provider) return decline('provider-unavailable',
+    `no native desktop provider for platform ${platform} and requested provider ${features.requestedProvider ?? 'default'}`)
   if (!validRuntime(features.runtime)) {
-    return { backend: 'legacy', reason: 'native playback runtime capability is unavailable' }
+    return decline('addon-unavailable', 'native playback runtime capability is unavailable')
   }
-  if (!Number.isFinite(features.playbackRate) || features.playbackRate < 0.5 ||
-      features.playbackRate > 1.5) {
-    return { backend: 'legacy', reason: 'tempo is outside the desktop control range' }
+  if (!Number.isFinite(features.playbackRate) || features.playbackRate < NATIVE_PLAYBACK_MIN_RATE ||
+      features.playbackRate > NATIVE_PLAYBACK_MAX_RATE) {
+    return decline('graph-rejected',
+      `tempo ${features.playbackRate} is outside the native range ${NATIVE_PLAYBACK_MIN_RATE}..${NATIVE_PLAYBACK_MAX_RATE}`)
   }
-  if (!Number.isInteger(features.transpose) || features.transpose < -12 || features.transpose > 12) {
-    return { backend: 'legacy', reason: 'transpose is outside the desktop control range' }
+  if (!Number.isFinite(features.transpose) || Math.abs(features.transpose) > NATIVE_PLAYBACK_MAX_TRANSPOSE) {
+    return decline('graph-rejected',
+      `transpose ${features.transpose} is outside the native range -${NATIVE_PLAYBACK_MAX_TRANSPOSE}..${NATIVE_PLAYBACK_MAX_TRANSPOSE} semitones`)
   }
-  if (features.lanes.length < 1 || features.lanes.length > 16) {
-    return { backend: 'legacy', reason: 'lane count is outside the native graph bound' }
+  const correction = features.transpose - 12 * Math.log2(features.playbackRate)
+  if (!Number.isFinite(correction) || Math.abs(correction) > 48) {
+    return decline('graph-rejected', `time-pitch correction ${correction} exceeds the native range -48..48 semitones`)
+  }
+  if (features.lanes.length === 0) {
+    return decline('graph-rejected', 'the song is empty: native playback requires at least 1 lane (maximum 16)')
+  }
+  if (features.lanes.length > 16) {
+    return decline('graph-rejected', `the song has ${features.lanes.length} lanes; native playback supports at most 16`)
   }
   const supported = new Set(features.runtime!.mediaCodec.extensions)
-  if (features.lanes.some((lane) => !lane.path || !supported.has(extensionOf(lane.path) ?? ''))) {
-    return { backend: 'legacy', reason: 'a lane needs a format proven by this native runtime' }
+  for (const lane of features.lanes) {
+    if (platform === 'win32' && lane.path && windowsPathTooLong(lane.path)) return decline('graph-rejected', 'path-too-long: lane path exceeds the Windows extended-length limit', { laneId: lane.id })
+    const format = lane.path ? extensionOf(lane.path) : null
+    if (!format || !supported.has(format)) {
+      // File paths are not URLs: do not strip a query and admit a source that
+      // main's path.extname / decoder cannot open. Name only the claimed format,
+      // never potentially sensitive query values.
+      const diagnosticFormat = format ?? (lane.path && /[?#]/.test(lane.path)
+        ? `${extensionOf(lane.path.split(/[?#]/, 1)[0]) ?? 'unknown'} (query/fragment)`
+        : '(missing or invalid extension)')
+      return decline('graph-rejected',
+        `lane ${lane.id} has ${!lane.path ? 'no authorized source path' : `unsupported format ${diagnosticFormat}`}; runtime formats: ${[...supported].join(', ')}`,
+        { laneId: lane.id, format: diagnosticFormat })
+    }
   }
   return { backend: 'native', provider }
 }
@@ -180,7 +222,6 @@ export interface DesktopNativePlaybackPrepare {
   transpose: number
   training: DesktopNativeTrainingIntent | null
   loop: { start: number; end: number } | null
-  browserOutputId?: string
   preferredOutputUid?: string
   preferredOutputChannels?: number[]
   graphDocument?: ParsedGraphDocument
@@ -189,13 +230,10 @@ export interface DesktopNativePlaybackPrepare {
   streamLanes?: boolean
 }
 
-export interface DesktopNativePlaybackLease {
-  releaseLegacyOutput(): Promise<void>
-  restoreLegacyOutput(): Promise<void>
-}
-
 export interface DesktopNativePlaybackStructuralPatch {
-  browserOutputId?: string
+  lanes?: DesktopPlaybackLaneConfig[]
+  graphDocument?: ParsedGraphDocument
+  preferredOutputUid?: string
   beat?: BeatInfo | null
   metronome?: MetronomeConfig
   countIn?: boolean
@@ -212,7 +250,9 @@ export interface DesktopNativeLaneControl {
 }
 
 export interface DesktopNativePlaybackEngineRequest {
-  browserOutputId?: string
+  voiceTake?: VoiceTakeLaneSource & VoiceTakeLaneControl
+  onVoiceTakeState?: (state: VoiceTakeLaneState) => void
+  preferredOutputUid?: string
   lanes: Array<{
     id: string
     path?: string
@@ -237,7 +277,6 @@ export interface DesktopNativePlaybackEngineRequest {
   graphDocument: ParsedGraphDocument | null
   retainedProject?: { dir: string; songPath: string }
   /** Optional in-memory surface policy, absent for ordinary Desktop. */
-  nativePlaybackEnabled?: boolean
   streamLanes?: boolean
 }
 
@@ -246,35 +285,113 @@ function platformProvider(preferred: DesktopPlaybackProvider): DesktopPlaybackPr
   return platform === 'win32' ? preferred : platform === 'linux' ? 'alsa' : 'coreaudio'
 }
 
-/** Renderer-engine adapter kept in this lazy chunk so the ordinary Web Audio
- * entry does not pay for native provider selection or DTO composition. */
-/** The decision and the prepare request for an engine request, or null when
- * this song stays on Web Audio. Shared by the start at Play and the prepare
- * ahead of it, so both answer the same question the same way. */
-export async function decideDesktopNativePlayback(
+export type DesktopNativePlaybackPreparationDecision =
+  | { backend: 'native'; prepare: DesktopNativePlaybackPrepare }
+  | Extract<DesktopPlaybackBackendDecision, { backend: 'rejected' }>
+
+/** Add only to the prepare projection. The source document and engine tracks
+ * remain canonical save/export inputs. No song can be rejected for this lane. */
+export function withVoiceTakeLane(request: DesktopNativePlaybackEngineRequest): {
+  request: DesktopNativePlaybackEngineRequest; state: VoiceTakeLaneState
+} {
+  const voice = request.voiceTake
+  if (!voice) return { request, state: { status: 'idle' } }
+  const omit = (reason: import('../../../shared/voice-take').VoiceTakeLaneOmission) => ({ request: { ...request, voiceTake: undefined }, state: { status: 'omitted', reason } as VoiceTakeLaneState })
+  if (request.lanes.length >= 16) return omit('lane-limit')
+  let graphDocument = request.graphDocument
+  if (!graphDocument) {
+    const correction = request.transpose - 12 * Math.log2(request.playbackRate)
+    if (synthesizedNativeGraphNodeCount({ laneCount: request.lanes.length + 1,
+      trainingLaneCount: request.training?.stems.length ?? 0, hasReference: true,
+      needsTimePitch: Math.abs(correction) > 1e-6 }) > MAX_NATIVE_GRAPH_NODES) return omit('node-limit')
+  } else {
+    if (graphDocument.nodes.length + 3 > MAX_NATIVE_GRAPH_NODES) return omit('node-limit')
+    try {
+      // The complete lane mix feeds the existing song bus (including its time/
+      // pitch node). Refuse ambiguous custom topology rather than bypass FX.
+      const projection = projectGraphDocumentForNative(graphDocument)
+      if (!projection) return omit('graph-incompatible')
+      const byId = new Map(projection.nodes.map(n => [n.id, n]))
+      const mixes = projection.nodes.filter(n => n.type === GRAPH_NODE_TYPES.mix &&
+        projection.connections.some(c => c.to.node === n.id && byId.get(c.from.node)?.binding?.kind === 'project-lane'))
+      if (mixes.length !== 1) return omit('graph-incompatible')
+      const mix = mixes[0], output = mix.ports.outputs[0]
+      if (!output || mix.ports.inputs.length >= MAX_NATIVE_GRAPH_PORTS_PER_NODE) return omit('graph-incompatible')
+      const raw = JSON.parse(JSON.stringify(graphDocument.raw))
+      const rawMix = raw.nodes.find((n: { id: string }) => n.id === mix.id)
+      const input = `lane:${VOICE_TAKE_LANE_ID}`
+      if (rawMix.ports.inputs.some((p: { id: string }) => p.id === input)) return omit('graph-incompatible')
+      rawMix.ports.inputs.push({ id: input, channels: output.channels })
+      let next = projection.nodes.reduce((max, n) => BigInt(n.id) > max ? BigInt(n.id) : max, 0n) + 1n
+      const source = String(next++), map = String(next++), gain = String(next++)
+      const node = (id: string, type: string, execution: string, inputs: unknown[], outputs: unknown[], parameters = {}) =>
+        ({ id, type, typeVersion: 1, execution, unavailable: 'silence', ports: { inputs, outputs }, parameters, binding: { kind: 'project-lane', laneId: VOICE_TAKE_LANE_ID } })
+      // The native channel map uses coefficient 1 per output for any mono
+      // project lane, exactly as it does for a mono stem; gain remains unity.
+      const mono = { id: 'out', channels: 1 }, stereo = { id: 'out', channels: output.channels }
+      raw.nodes.push(node(source, GRAPH_NODE_TYPES.projectLaneSource, 'native', [], [mono]),
+        node(map, GRAPH_NODE_TYPES.channelMap, 'builtin', [{ id: 'in', channels: 1 }], [stereo]),
+        node(gain, GRAPH_NODE_TYPES.gain, 'builtin', [{ id: 'in', channels: output.channels }], [stereo], { gain: 1 }))
+      raw.connections.push({ from: { node: source, port: 'out' }, to: { node: map, port: 'in' } },
+        { from: { node: map, port: 'out' }, to: { node: gain, port: 'in' } },
+        { from: { node: gain, port: 'out' }, to: { node: mix.id, port: input } })
+      graphDocument = parseGraphDocument(JSON.stringify(raw))
+      projectGraphDocumentForNative(graphDocument)
+    } catch { return omit('graph-incompatible') }
+  }
+  return { request: { ...request, graphDocument, voiceTake: undefined, lanes: [...request.lanes,
+    { id: VOICE_TAKE_LANE_ID, path: voice.path, volume: voice.gain,
+      muted: voice.muted || voice.suppressed, solo: voice.solo && !voice.suppressed }] }, state: { status: 'ready' } }
+}
+
+/** Detailed admission result shared by Play and prepare-ahead. WP3 can use the
+ * same failure without reconstructing a reason from a null prepare request. */
+export async function inspectDesktopNativePlayback(
   request: DesktopNativePlaybackEngineRequest
-): Promise<DesktopNativePlaybackPrepare | null> {
+): Promise<DesktopNativePlaybackPreparationDecision> {
+  if (request.voiceTake) {
+    const result = withVoiceTakeLane(request)
+    if (result.state.status !== 'ready') {
+      request.onVoiceTakeState?.(result.state)
+      return inspectDesktopNativePlayback(result.request)
+    }
+    const decision = await inspectDesktopNativePlayback(result.request)
+    if (decision.backend === 'native') request.onVoiceTakeState?.({ status: 'ready' })
+    else {
+      request.onVoiceTakeState?.({ status: 'omitted', reason: 'native-unavailable' })
+      return inspectDesktopNativePlayback({ ...request, voiceTake: undefined })
+    }
+    return decision
+  }
   if (!request.graphDocument) {
     const correction = request.transpose - 12 * Math.log2(request.playbackRate)
+    const trainingLaneCount = request.training?.stems.length ?? 0
+    const needsTimePitch = Number.isFinite(correction) && Math.abs(correction) > 1e-6
     const nodes = synthesizedNativeGraphNodeCount({
       laneCount: request.lanes.length,
-      trainingLaneCount: request.training?.stems.length ?? 0,
-      // Desktop v4 always prepares the cue/reference branch, including a
-      // zero-event plan used by previewClick().
+      trainingLaneCount,
       hasReference: true,
-      needsTimePitch: Number.isFinite(correction) && Math.abs(correction) > 1e-6
+      needsTimePitch
     })
-    if (nodes > MAX_NATIVE_GRAPH_NODES) return null
+    if (nodes > MAX_NATIVE_GRAPH_NODES) return decline('graph-rejected',
+      `native graph exceeds ${MAX_NATIVE_GRAPH_NODES} nodes: total=${nodes}, lanes=${request.lanes.length} (${request.lanes.length * 3} nodes), training stems=${trainingLaneCount} (${trainingLaneCount} nodes), reference=5, time-pitch=${needsTimePitch ? 1 : 0}, mix/master/limiter/output=4`)
+  } else {
+    try {
+      if (!projectGraphDocumentForNative(request.graphDocument)) {
+        return decline('graph-rejected', 'this graph document needs a newer native runtime')
+      }
+    } catch (error) {
+      return decline('graph-rejected', `native graph document rejected: ${String(error)}`)
+    }
   }
   const platform = detectedDesktopPlatform()
   let runtime: DesktopPlaybackRuntimeCapability
   try {
     runtime = await window.singz.desktopPlaybackCapability()
-  } catch {
-    return null
+  } catch (error) {
+    return decline('addon-unavailable', `native playback runtime capability failed: ${String(error)}`)
   }
   const decision = selectDesktopPlaybackBackend(platform, {
-    enabled: desktopNativePlaybackPreferred(platform, request.nativePlaybackEnabled),
     playbackRate: request.playbackRate,
     transpose: request.transpose,
     training: request.training,
@@ -282,57 +399,130 @@ export async function decideDesktopNativePlayback(
     runtime,
     requestedProvider: platform === 'win32' ? request.nativeAudioProvider : platform === 'linux' ? 'alsa' : 'coreaudio'
   })
-  if (decision.backend !== 'native') return null
+  if (decision.backend !== 'native') return decision
   return {
-    provider: decision.provider,
-    browserOutputId: request.browserOutputId,
-    lanes: request.lanes.map((lane) => ({
-      id: lane.id,
-      path: lane.path!,
-      gain: lane.volume,
-      muted: lane.muted,
-      solo: lane.solo
-    })),
-    beat: request.beat,
-    metronome: request.metronome,
-    countIn: request.countIn,
-    positionSeconds: request.positionSeconds,
-    durationSeconds: request.durationSeconds,
-    sampleRate: request.sampleRate,
-    masterGain: request.masterGain,
-    playbackRate: request.playbackRate,
-    transpose: request.transpose,
-    training: request.training,
-    loop: request.loop,
-    streamLanes: request.streamLanes,
-    ...(request.retainedProject ? { retainedProject: { ...request.retainedProject } } : {}),
-    ...(request.graphDocument ? { graphDocument: request.graphDocument } : {})
+    backend: 'native',
+    prepare: {
+      provider: decision.provider,
+      preferredOutputUid: request.preferredOutputUid,
+      lanes: request.lanes.map((lane) => ({
+        id: lane.id,
+        path: lane.path!,
+        gain: lane.volume,
+        muted: lane.muted,
+        solo: lane.solo
+      })),
+      beat: request.beat,
+      metronome: request.metronome,
+      countIn: request.countIn,
+      positionSeconds: request.positionSeconds,
+      durationSeconds: request.durationSeconds,
+      sampleRate: request.sampleRate,
+      masterGain: request.masterGain,
+      playbackRate: request.playbackRate,
+      transpose: request.transpose,
+      training: request.training,
+      loop: request.loop,
+      streamLanes: request.streamLanes,
+      ...(request.retainedProject ? { retainedProject: { ...request.retainedProject } } : {}),
+      ...(request.graphDocument ? { graphDocument: request.graphDocument } : {})
+    }
   }
+}
+
+/** Admission adapter; a null result always carries a named rejection. */
+export async function decideDesktopNativePlayback(
+  request: DesktopNativePlaybackEngineRequest,
+  onDecline?: (failure: DesktopNativePlaybackFailure) => void
+): Promise<DesktopNativePlaybackPrepare | null> {
+  const decision = await inspectDesktopNativePlayback(request)
+  if (decision.backend === 'native') return decision.prepare
+  onDecline?.(decision.failure)
+  return null
 }
 
 export async function tryStartDesktopNativePlayback(
   client: DesktopNativePlaybackClient,
-  request: DesktopNativePlaybackEngineRequest
+  request: DesktopNativePlaybackEngineRequest,
+  onDecline?: (failure: DesktopNativePlaybackFailure) => void
 ): Promise<boolean> {
-  const prepare = await decideDesktopNativePlayback(request)
-  return prepare ? client.prepareAndStart(prepare) : false
+  const prepare = await decideDesktopNativePlayback(request, failure => {
+    client.lastFailure = failure
+    onDecline?.(failure)
+  })
+  if (!prepare) return false
+  const started = await client.prepareAndStart(prepare)
+  if (!started && !transientNativePrepareFailure(client.lastFailure) && request.voiceTake && prepare.lanes.some(lane => lane.id === VOICE_TAKE_LANE_ID) &&
+      !client.active && !client.recoveryPending) {
+    request.onVoiceTakeState?.({ status: 'error', reason: 'prepare-failed' })
+    return tryStartDesktopNativePlayback(client, { ...request, voiceTake: undefined }, onDecline)
+  }
+  if (!started && client.lastFailure) onDecline?.(client.lastFailure)
+  return started
 }
 
-/** Prepare the song's native graph AHEAD of Play, as the phones do at open:
- * the decode and the graph build happen while the singer is still looking
- * at the song, and Play is an open and a start. Nothing is opened here and
- * Chromium keeps the output until Play, so the metronome preview still
- * sounds and the two engines are never active at once. */
+/** Prepare the song's native graph before Play; native preview clicks use
+ * the shared service independently, without opening this song generation. */
 export async function prepareDesktopNativePlaybackAhead(
   client: DesktopNativePlaybackClient,
-  request: DesktopNativePlaybackEngineRequest
+  request: DesktopNativePlaybackEngineRequest,
+  onDecline?: (failure: DesktopNativePlaybackFailure) => void
 ): Promise<boolean> {
-  const prepare = await decideDesktopNativePlayback(request)
-  return prepare ? client.prepareAhead(prepare) : false
+  const prepare = await decideDesktopNativePlayback(request, failure => {
+    client.lastFailure = failure
+    onDecline?.(failure)
+  })
+  if (!prepare) return false
+  const prepared = await client.prepareAhead(prepare)
+  if (!prepared && !transientNativePrepareFailure(client.lastFailure) && request.voiceTake && prepare.lanes.some(lane => lane.id === VOICE_TAKE_LANE_ID) &&
+      !client.active && !client.recoveryPending) {
+    request.onVoiceTakeState?.({ status: 'error', reason: 'prepare-failed' })
+    return prepareDesktopNativePlaybackAhead(client, { ...request, voiceTake: undefined }, onDecline)
+  }
+  if (!prepared && client.lastFailure) onDecline?.(client.lastFailure)
+  return prepared
+}
+
+/** A native admission error with a stable category and copyable diagnostics. */
+export class DesktopNativePlaybackError extends Error {
+  readonly failure: DesktopNativePlaybackFailure
+
+  constructor(readonly code: DesktopNativePlaybackFailureCode, detail: string, cause?: unknown) {
+    super(detail, { cause })
+    this.name = 'DesktopNativePlaybackError'
+    this.failure = { code, detail }
+    console.warn('Native playback declined: ' + JSON.stringify(this.failure))
+  }
+}
+
+function playbackResultFailure(result: DesktopPlaybackResult, action: string): DesktopNativePlaybackFailure {
+  const code: DesktopNativePlaybackFailureCode = result.errorCode !== 'none'
+    ? result.errorCode : result.state === 'quarantined' ? 'recovery-required' : 'prepare-failed'
+  return { code, detail: `${action}: ${result.error || result.errorCode} (${result.errorCode})` }
+}
+
+function playbackFailure(error: unknown): DesktopNativePlaybackFailure {
+  if (error instanceof DesktopNativePlaybackError || error instanceof DesktopNativeProviderError ||
+      error instanceof DesktopNativeRecoveryError) return error.failure
+  return { code: 'graph-rejected', detail: error instanceof Error ? error.message : String(error) }
+}
+
+async function invokeNativePlayback<T>(
+  code: DesktopNativePlaybackFailureCode,
+  action: string,
+  invoke: () => Promise<T>
+): Promise<T> {
+  try { return await invoke() } catch (error) {
+    if (error instanceof DesktopNativePlaybackError) throw error
+    throw new DesktopNativePlaybackError(code, `${action}: ${String(error)}`, error)
+  }
 }
 
 function ensure(result: DesktopPlaybackResult, action: string): DesktopPlaybackResult {
-  if (!result.ok) throw new Error(`${action}: ${result.error || result.errorCode}`)
+  if (!result.ok) {
+    const failure = playbackResultFailure(result, action)
+    throw new DesktopNativePlaybackError(failure.code, failure.detail)
+  }
   return result
 }
 
@@ -341,6 +531,7 @@ function ensure(result: DesktopPlaybackResult, action: string): DesktopPlaybackR
  * to start a different audio backend in the same play request. */
 export class DesktopNativeProviderError extends Error {
   readonly code = 'provider-failure' as const
+  readonly failure: DesktopNativePlaybackFailure
 
   constructor(
     readonly provider: DesktopPlaybackProvider,
@@ -348,6 +539,9 @@ export class DesktopNativeProviderError extends Error {
   ) {
     super(cause instanceof Error ? cause.message : String(cause), { cause })
     this.name = 'DesktopNativeProviderError'
+    this.failure = cause instanceof DesktopNativePlaybackError ? cause.failure
+      : { code: 'provider-unavailable', detail: this.message }
+    console.warn('Native playback declined: ' + JSON.stringify(this.failure))
   }
 }
 
@@ -363,9 +557,11 @@ export type DesktopNativeRecoveryKind =
   | 'route-restore'
 
 /** Stable renderer-side recovery failure. These errors describe ownership
- * management after Chromium released its sink, not a license to choose a
+ * management while native retains ownership, not a license to choose a
  * different provider or start Web Audio. */
 export class DesktopNativeRecoveryError extends Error {
+  readonly failure: DesktopNativePlaybackFailure
+
   constructor(
     readonly provider: DesktopPlaybackProvider,
     readonly code: DesktopNativeRecoveryErrorCode,
@@ -374,19 +570,11 @@ export class DesktopNativeRecoveryError extends Error {
   ) {
     super(message ?? (cause instanceof Error ? cause.message : String(cause)), { cause })
     this.name = 'DesktopNativeRecoveryError'
+    this.failure = { code: 'recovery-required', detail: this.message }
+    console.warn('Native playback declined: ' + JSON.stringify(this.failure))
   }
 }
 
-function outputFor(
-  devices: DesktopAudioHostDevice[],
-  defaultOutputUid: string,
-  preferred?: string
-): DesktopAudioHostDevice | null {
-  const eligible = devices.filter((device) =>
-    device.outputChannels > 0 && (device.direction === 'output' || device.direction === 'duplex'))
-  return eligible.find((device) => device.uid === preferred) ??
-    eligible.find((device) => device.uid === defaultOutputUid) ?? eligible[0] ?? null
-}
 
 interface PreparedRoute {
   outputDeviceUid: string
@@ -442,6 +630,15 @@ function finiteSignedFrame(value: string, label: string): number {
 }
 
 export class DesktopNativePlaybackClient {
+  /** Last failed admission, including failures returned as false for WP3. */
+  lastFailure: DesktopNativePlaybackFailure | null = null
+
+  private recordFailure(failure: DesktopNativePlaybackFailure): false {
+    this.lastFailure = failure
+    console.warn('Native playback declined: ' + JSON.stringify(failure))
+    return false
+  }
+
   private generation = ''
   private ownsOutput = false
   private recoveryProvider: DesktopPlaybackProvider | null = null
@@ -632,7 +829,7 @@ export class DesktopNativePlaybackClient {
     return Math.round(latency * rate)
   }
   /** A generation prepared ahead of Play (see prepareAhead): prepared, never
-   * opened, the output still Chromium's. Play opens and starts it when the
+   * opened; the native service keeps the route. Play opens and starts it when the
    * request it was prepared for is still the request; anything else unloads
    * it and prepares afresh. */
   private ahead: {
@@ -672,6 +869,7 @@ export class DesktopNativePlaybackClient {
     transportGeneration: string
     key: string
     failures: number
+    callbacks: string
   } | null = null
   private reanchorPending = false
   /** An accepted re-anchor is answered by the core with its own
@@ -680,7 +878,6 @@ export class DesktopNativePlaybackClient {
   private reanchorEchoPending = false
 
   constructor(
-    private readonly lease: DesktopNativePlaybackLease,
     private readonly onStateChange: (status: DesktopPlaybackStatus | null) => void
   ) {}
 
@@ -993,7 +1190,7 @@ export class DesktopNativePlaybackClient {
       (state === 'playing' || state === 'pre-roll')
   }
 
-  /** Chromium's sink is still released and recovery owns the next action.
+  /** Recovery owns the next action; no other provider may be started.
    * A retained generation first needs exact cleanup; only a generation-free
    * prepare-retry lease may activate the same provider again. */
   get recoveryPending(): boolean {
@@ -1060,9 +1257,13 @@ export class DesktopNativePlaybackClient {
     try {
       result = await window.singz.unloadDesktopPlayback(generation)
     } catch (error) {
+      this.generation = generation
+      this.ownsOutput = true
       throw this.cleanupRequired(provider, error, fallbackMessage)
     }
     if (!result.ok || !result.cleanupComplete) {
+      this.generation = generation
+      this.ownsOutput = true
       throw this.cleanupRequired(
         provider,
         priorCause ?? (result.error || result.errorCode),
@@ -1073,10 +1274,13 @@ export class DesktopNativePlaybackClient {
 
   async prepareAndStart(request: DesktopNativePlaybackPrepare): Promise<boolean> {
     return this.serialize(async () => {
+      this.lastFailure = null
       try {
         const recovering = this.recoveryPending
         if (this.active && !recovering) {
-          if (!this.isRetainedPrepared()) return false
+          if (!this.isRetainedPrepared()) return this.recordFailure({
+            code: 'graph-rejected', detail: 'native playback already has an active transport'
+          })
           await this.openRetainedPreparedUnlocked()
           return true
         }
@@ -1106,19 +1310,19 @@ export class DesktopNativePlaybackClient {
           try {
             // The system route can change without a Chromium devicechange.
             // Never open a prepared endpoint until its current route matches.
-            const currentRoute = await this.resolveRoute(request)
+            const currentRoute = await this.resolveRoute(request, ahead.route)
             same = !recovering &&
               JSON.stringify(this.configFor(request, currentRoute)) === ahead.signature &&
-              request.positionSeconds === ahead.positionSeconds
+              request.positionSeconds === ahead.positionSeconds &&
+              JSON.stringify(request.lanes) === JSON.stringify(ahead.request.lanes)
           } catch (error) {
-            try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
+            await this.requireUnloadReceipt(ahead.generation, request.provider, 'Native prepared graph cleanup is incomplete.')
             throw error
           }
           if (same) {
-            await this.lease.releaseLegacyOutput()
             this.ownsOutput = true
             const activated = await this.activate(
-              request, ahead.route, request.provider !== 'asio' && request.provider !== 'alsa', undefined, undefined, ahead.generation
+              request, ahead.route, undefined, undefined, ahead.generation
             )
             if (activated) {
               this.recoveryProvider = null
@@ -1128,16 +1332,15 @@ export class DesktopNativePlaybackClient {
             }
             return activated
           }
-          try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
+          await this.requireUnloadReceipt(ahead.generation, request.provider, 'Native prepared graph cleanup is incomplete.')
         }
         const route = await this.resolveRoute(request)
-        // Validate the immutable graph before releasing Chromium's output.
+        // Validate the immutable graph before claiming native output ownership.
         this.configFor(request, route)
         if (!recovering) {
-          await this.lease.releaseLegacyOutput()
           this.ownsOutput = true
         }
-        const activated = await this.activate(request, route, request.provider !== 'asio' && request.provider !== 'alsa')
+        const activated = await this.activate(request, route)
         if (activated) {
           this.recoveryProvider = null
           this.recoveryKind = null
@@ -1146,6 +1349,7 @@ export class DesktopNativePlaybackClient {
         }
         return activated
       } catch (error) {
+        this.recordFailure(playbackFailure(error))
         if ((request.provider === 'asio' || request.provider === 'alsa') &&
             !(error instanceof DesktopNativeProviderError) &&
             !(error instanceof DesktopNativeRecoveryError)) {
@@ -1156,51 +1360,73 @@ export class DesktopNativePlaybackClient {
     })
   }
 
-  private async resolveRoute(request: DesktopNativePlaybackPrepare): Promise<PreparedRoute> {
-    const providers = await window.singz.desktopPlaybackProviders()
+  private async resolveRoute(request: DesktopNativePlaybackPrepare, retainedRoute?: PreparedRoute): Promise<PreparedRoute> {
+    const providers = await invokeNativePlayback('provider-unavailable', 'Native provider inventory failed',
+      () => window.singz.desktopPlaybackProviders())
     const provider = providers.find((row) => row.id === request.provider)
-    if (!provider?.available) throw new Error(provider?.detail ?? 'Native provider is unavailable.')
-    const inventory = await window.singz.audioHostDevices(request.provider)
-    if (!inventory.ok) throw new Error(inventory.error)
+    if (!provider?.available) throw new DesktopNativePlaybackError(provider && provider.errorCode !== 'none' ? provider.errorCode : 'provider-unavailable', provider?.detail ?? 'Native provider is unavailable.')
+    const inventory = await invokeNativePlayback('provider-unavailable', 'Native device inventory failed',
+      () => window.singz.audioHostDevices(request.provider))
+    if (!inventory.ok) throw new DesktopNativePlaybackError('provider-unavailable', inventory.error)
     if (inventory.provider !== request.provider) {
-      throw new Error('Native output inventory belongs to a different provider.')
+      throw new DesktopNativePlaybackError('provider-unavailable', 'Native output inventory belongs to a different provider.')
     }
-    let output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
-    if (request.provider === 'alsa') {
-      const uid = request.browserOutputId?.startsWith('native:')
-        ? request.browserOutputId.slice(7) : request.preferredOutputUid
-      output = uid
-        ? inventory.devices.find(device => device.uid === uid && device.outputChannels > 0) ?? null
-        : inventory.devices.find(device => device.uid === inventory.defaultOutputUid && device.outputChannels > 0) ?? null
-      if (!output) throw new Error('Select an available ALSA output in Settings.')
-    } else if (request.browserOutputId && request.browserOutputId !== 'default') {
-      const browserOutputs = await navigator.mediaDevices.enumerateDevices()
-      const selected = browserOutputs.find(device => device.kind === 'audiooutput' && device.deviceId === request.browserOutputId)
-      if (!selected) throw new Error('The selected output is no longer connected.')
-      output = nativeOutputForBrowserLabel(selected.label, inventory.devices)
-    }
-    if (!output) throw new Error('No native output endpoint is available.')
+    const uid = request.preferredOutputUid || inventory.defaultOutputUid
+    const output = inventory.devices.find(device => device.uid === uid && device.outputChannels > 0)
+    if (!output) throw new DesktopNativePlaybackError(request.preferredOutputUid ? 'device-lost' : 'no-device',
+      'Select an available output in Settings.')
     const outputChannels = request.preferredOutputChannels?.length
       ? [...request.preferredOutputChannels]
       : Array.from({ length: Math.min(2, output.outputChannels) }, (_, index) => index)
+    const sampleRate = Math.round(output.nominalSampleRate || request.sampleRate)
+    const needsTimePitch = Math.abs(request.transpose - 12 * Math.log2(request.playbackRate)) > 1e-6 ||
+      request.graphDocument?.nodes.some(node => node.raw.type === GRAPH_NODE_TYPES.signalsmithTimePitch)
+    if (needsTimePitch && (sampleRate < 8000 || sampleRate > 192000 || outputChannels.length > 8)) {
+      throw new DesktopNativePlaybackError('graph-rejected',
+        `native time-pitch requires sample rate 8000..192000 Hz and at most 8 channels; route has ${sampleRate} Hz and ${outputChannels.length} channels`)
+    }
+    const previous = retainedRoute ?? this.route ?? this.ahead?.route
+    // CoreAudio's process-visible period is mutable telemetry, not route
+    // identity. Retain an existing graph's buffer preference when its actual
+    // endpoint/pair/rate is unchanged; the native capacity lease accepts live
+    // smaller buffers without rebuilding or releasing the graph.
+    const sameCoreAudioRoute = request.provider === 'coreaudio' && previous &&
+      previous.outputDeviceUid === output.uid && previous.sampleRate === sampleRate &&
+      previous.outputChannels.length === outputChannels.length &&
+      previous.outputChannels.every((channel, index) => channel === outputChannels[index])
+    let bufferFrames = Math.max(1, output.bufferFrames.preferredFrames || 512)
+    if (request.provider === 'coreaudio') {
+      if (sameCoreAudioRoute) bufferFrames = previous.bufferFrames
+      else {
+        // Inventory reports the device's current physical period, which can
+        // revert when another route releases its HAL lease. The shared host
+        // opens from the saved per-device policy, default 128, not that value.
+        const settings = typeof window.singz.audioBufferSettings === 'function'
+          ? await invokeNativePlayback('route-rejected', 'Native buffer preferences failed', () => window.singz.audioBufferSettings())
+          : undefined
+        const saved = settings?.preferences[output.uid]
+        const requested = validAudioBufferSize(saved) ? saved : DEFAULT_AUDIO_BUFFER_FRAMES
+        // Mirror the ledger: unsupported requests leave the device period alone.
+        if (audioBufferChoices([output]).includes(requested)) bufferFrames = requested
+      }
+    }
     return {
       outputDeviceUid: output.uid,
       outputChannels,
-      sampleRate: Math.round(output.nominalSampleRate || request.sampleRate),
+      sampleRate,
       // ALSA bufferFrames requests the period, not the ring. Native negotiates
       // the nearest supported period and validates it against its 4096-frame
       // maximum; the ring is sized separately. Ignore cached inventory caps
       // because an active Chromium/preview stream can constrain them to 1024.
       bufferFrames: request.provider === 'alsa'
         ? 256
-        : Math.max(1, output.bufferFrames.preferredFrames || 512)
+        : bufferFrames
     }
   }
 
   /** Prepare `request` now, ahead of Play: decode, graph build, nothing
-   * opened, Chromium keeps the output. False when native is busy, recovering
-   * or the core declines; never throws into the caller — a failed prepare
-   * ahead costs nothing but the head start. */
+   * opened; the native service keeps the route. False when native is busy, recovering
+   * or the core declines; background callers retry transient ownership failures. */
   async prepareAhead(request: DesktopNativePlaybackPrepare): Promise<boolean> {
     return this.serialize(() => this.prepareAheadUnlocked(request))
   }
@@ -1209,16 +1435,21 @@ export class DesktopNativePlaybackClient {
     request: DesktopNativePlaybackPrepare,
     route?: PreparedRoute
   ): Promise<boolean> {
-    if (this.ownsOutput || this.generation || this.ahead || this.recoveryPending) return false
+    this.lastFailure = null
+    if (this.ownsOutput || this.generation || this.ahead || this.recoveryPending) {
+      return this.recordFailure({ code: this.recoveryPending ? 'recovery-required' : 'native-audio-busy',
+        detail: 'native prepare-ahead is busy or awaiting recovery' })
+    }
     try {
       const preparedRoute = route ?? await this.resolveRoute(request)
       const config = this.configFor(request, preparedRoute)
-      const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
+      const prepared = await invokeNativePlayback('addon-unavailable', 'Native graph prepare failed',
+        () => window.singz.prepareDesktopPlayback(config, request.lanes))
       if (!prepared.ok || prepared.generation === '0') {
         if (prepared.generation !== '0' && prepared.ownershipRetained === true) {
-          try { await window.singz.unloadDesktopPlayback(prepared.generation) } catch { /* nothing exists */ }
+          await this.requireUnloadReceipt(prepared.generation, request.provider, 'Native failed prepare cleanup is incomplete.')
         }
-        return false
+        return this.recordFailure(playbackResultFailure(prepared, 'Native graph prepare failed'))
       }
       this.ahead = {
         generation: prepared.generation,
@@ -1228,14 +1459,14 @@ export class DesktopNativePlaybackClient {
         request
       }
       return true
-    } catch {
-      return false
+    } catch (error) {
+      return this.recordFailure(playbackFailure(error))
     }
   }
 
   /** Let a generation prepared ahead go: the song changed, the singer left
    * for monitoring or training, or the request it was prepared for is stale.
-   * Chromium never lost the output, so nothing is restored. */
+   * No browser output participates in this lifetime. */
   async discardAhead(): Promise<void> {
     return this.serialize(() => this.discardAheadUnlocked())
   }
@@ -1261,7 +1492,8 @@ export class DesktopNativePlaybackClient {
       if (this.ahead) {
         const route = await this.resolveRoute(preparedRequest)
         const config = this.configFor(preparedRequest, route)
-        if (JSON.stringify(config) === this.ahead.signature) return true
+        if (JSON.stringify(config) === this.ahead.signature &&
+            JSON.stringify(preparedRequest.lanes) === JSON.stringify(this.ahead.request.lanes)) return true
         await this.discardAheadUnlocked()
         return this.prepareAheadUnlocked(preparedRequest, route)
       }
@@ -1287,7 +1519,7 @@ export class DesktopNativePlaybackClient {
     const ahead = this.ahead
     if (!ahead) return
     this.ahead = null
-    try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
+    await this.requireUnloadReceipt(ahead.generation, ahead.request.provider, 'Native prepared graph cleanup is incomplete.')
   }
 
   /** Convert a retained, never-opened generation back into the ordinary
@@ -1443,7 +1675,6 @@ export class DesktopNativePlaybackClient {
   private async activate(
     request: DesktopNativePlaybackPrepare,
     route: PreparedRoute,
-    allowLegacyFallback: boolean,
     preparedStartProjectFrame?: number,
     initialTransport?: DesktopPlaybackInitialTransportConfig,
     /** A generation already prepared (ahead of Play): open and start it. */
@@ -1451,7 +1682,6 @@ export class DesktopNativePlaybackClient {
   ): Promise<boolean> {
     const config = this.configFor(request, route, preparedStartProjectFrame, initialTransport)
     let generation = ''
-    let started = false
     // Where this generation's count-in lands, read off the same request the
     // prepare was built from — an adopted generation was prepared from an
     // identical config, so the same reading holds for it. Set before the
@@ -1465,7 +1695,8 @@ export class DesktopNativePlaybackClient {
         generation = preparedGeneration
         this.generation = generation
       } else {
-        const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
+        const prepared = await invokeNativePlayback('addon-unavailable', 'Native graph prepare failed',
+          () => window.singz.prepareDesktopPlayback(config, request.lanes))
         generation = prepared.generation !== '0' &&
           (prepared.ok || prepared.ownershipRetained === true)
           ? prepared.generation
@@ -1473,15 +1704,16 @@ export class DesktopNativePlaybackClient {
         if (generation) this.generation = generation
         ensure(prepared, 'Native graph prepare failed')
       }
-      ensure(await window.singz.openDesktopPlayback(generation), 'Native output open failed')
+      ensure(await invokeNativePlayback('route-rejected', 'Native output open failed',
+        () => window.singz.openDesktopPlayback(generation)), 'Native output open failed')
       // The run starts where the prepare put it: a signed frame, or the
       // singer's spot, which is also where a count-in lands. The core counts
       // loop laps from zero for every opened generation.
       const startFrame = preparedStartProjectFrame ??
         Math.round(Math.max(0, request.positionSeconds) * route.sampleRate)
       this.run = { generation, floor: Math.max(0, startFrame) / route.sampleRate, lap: '0' }
-      ensure(await window.singz.startDesktopPlayback(generation), 'Native playback start failed')
-      started = true
+      ensure(await invokeNativePlayback('provider-unavailable', 'Native playback start failed',
+        () => window.singz.startDesktopPlayback(generation)), 'Native playback start failed')
       this.started = true
       this.transportIntent = initialTransport?.state === 'paused' ? 'paused' : 'playing'
       this.edgeAtMs = Date.now()
@@ -1506,33 +1738,13 @@ export class DesktopNativePlaybackClient {
         this.last = null
         this.forgetTransport()
       }
-      // Once rendering started, or when ASIO was explicitly requested, a
-      // provider error is never hidden by acquiring Chromium/WASAPI output in
-      // the same play request. The renderer retains the released-output lease
-      // until an explicit same-provider retry or unload completes recovery.
-      if (started || !allowLegacyFallback) {
-        this.recoveryProvider = request.provider
-        this.recoveryKind = 'prepare-retry'
-        this.onStateChange(this.last)
-        throw error
-      }
-      this.recoveryKind = null
-      try {
-        await this.lease.restoreLegacyOutput()
-      } catch (restoreError) {
-        this.recoveryProvider = request.provider
-        this.recoveryKind = 'route-restore'
-        throw new DesktopNativeRecoveryError(
-          request.provider,
-          'provider-route-restore-incomplete',
-          restoreError
-        )
-      }
-      this.ownsOutput = false
-      this.recoveryProvider = null
-      this.recoveryKind = null
+      // Keep same-provider recovery explicit. Cleanup is proven above before
+      // publishing the failure; no browser output can acquire this route.
+      this.recoveryProvider = request.provider
+      this.recoveryKind = 'prepare-retry'
+      this.recordFailure(playbackFailure(error))
       this.onStateChange(this.last)
-      return false
+      throw error
     }
   }
 
@@ -1542,6 +1754,16 @@ export class DesktopNativePlaybackClient {
   ): Promise<void> {
     return this.serialize(async () => {
       this.assertCommandableGeneration()
+      if (this.ahead) {
+        const ahead = this.ahead, request = { ...ahead.request, ...patch }
+        const route = options.refreshRoute || options.force ? await this.resolveRoute(request) : ahead.route
+        const signature = JSON.stringify(this.configFor(request, route))
+        if (!options.force && signature === ahead.signature && JSON.stringify(request.lanes) === JSON.stringify(ahead.request.lanes)) return
+        await this.discardAheadUnlocked()
+        if (!await this.prepareAheadUnlocked(request, route)) throw new DesktopNativePlaybackError(
+          this.lastFailure?.code ?? 'graph-rejected', this.lastFailure?.detail ?? 'Native take lane preparation failed')
+        return
+      }
       if (!this.generation || !this.request || !this.route) {
         if (this.ownsOutput) throw new Error('Native playback has no rebuildable generation.')
         return
@@ -1557,7 +1779,8 @@ export class DesktopNativePlaybackClient {
       // and a selection drag or the loader's control resets arrive here many
       // times a second with nothing new to say.
       if (!options.force &&
-          JSON.stringify(desired) === JSON.stringify(this.configFor(this.request, this.route))) {
+          JSON.stringify(desired) === JSON.stringify(this.configFor(this.request, this.route)) &&
+          JSON.stringify(request.lanes) === JSON.stringify(this.request.lanes)) {
         this.request = request
         return
       }
@@ -1731,7 +1954,7 @@ export class DesktopNativePlaybackClient {
       this.started = false
       this.last = null
       this.forgetTransport()
-      await this.activate(rebuilt, route, false, preparedStartProjectFrame, initialTransport)
+      await this.activate(rebuilt, route, preparedStartProjectFrame, initialTransport)
       this.route = route
       this.request = rebuilt
     })
@@ -1756,7 +1979,8 @@ export class DesktopNativePlaybackClient {
       ...this.configFor(request, this.route!, Math.max(0, preparedStartProjectFrame), initialTransport),
       swapFromGeneration: oldGeneration
     }
-    const prepared = await window.singz.prepareDesktopPlayback(config, request.lanes)
+    const prepared = await invokeNativePlayback('addon-unavailable', 'Native graph prepare failed',
+        () => window.singz.prepareDesktopPlayback(config, request.lanes))
     if (!prepared.ok || prepared.generation === '0' || prepared.generation === oldGeneration) {
       // Refused. When the CORE refused (InvalidState: not simply running, or
       // another swap in flight) the answer names the candidate, whose claim
@@ -1767,7 +1991,7 @@ export class DesktopNativePlaybackClient {
       // names the running generation is main's own busy guard echoing the
       // live player — unloading THAT would stop the song, and did, once.
       if (prepared.generation !== '0' && prepared.generation !== oldGeneration) {
-        try { await window.singz.unloadDesktopPlayback(prepared.generation) } catch { /* nothing exists */ }
+        await this.requireUnloadReceipt(prepared.generation, request.provider, 'Native failed prepare cleanup is incomplete.')
       }
       return false
     }
@@ -1917,7 +2141,7 @@ export class DesktopNativePlaybackClient {
       this.generation = ''
       this.last = null
       this.forgetTransport()
-      await this.activate(request, this.route, false)
+      await this.activate(request, this.route)
       this.request = request
     })
   }
@@ -2020,8 +2244,10 @@ export class DesktopNativePlaybackClient {
     try {
       // Native open accepts the graph at its prepared start; start then opens
       // the song transport exactly as activate() does for a first open.
-      ensure(await window.singz.openDesktopPlayback(generation), 'Native output open failed')
-      ensure(await window.singz.startDesktopPlayback(generation), 'Native playback start failed')
+      ensure(await invokeNativePlayback('route-rejected', 'Native output open failed',
+        () => window.singz.openDesktopPlayback(generation)), 'Native output open failed')
+      ensure(await invokeNativePlayback('provider-unavailable', 'Native playback start failed',
+        () => window.singz.startDesktopPlayback(generation)), 'Native playback start failed')
       this.started = true
       this.transportIntent = 'playing'
       this.edgeAtMs = Date.now()
@@ -2141,6 +2367,14 @@ export class DesktopNativePlaybackClient {
   ): Promise<DesktopNativeLaneControl> {
     return this.serialize(async () => {
       this.assertCommandableGeneration()
+      if (this.ahead) {
+        const ahead = this.ahead, current = ahead.request.lanes.find(lane => lane.id === id)
+        if (!current) throw new Error('Native playback lane is not part of this generation.')
+        const next = { gain: patch.gain ?? current.gain, muted: patch.muted ?? current.muted, solo: patch.solo ?? current.solo }
+        ensure(await window.singz.setDesktopPlaybackLane(ahead.generation, id, next.gain, next.muted, next.solo), 'Native lane update failed')
+        ahead.request = { ...ahead.request, lanes: ahead.request.lanes.map(lane => lane.id === id ? { ...lane, ...next } : lane) }
+        return next
+      }
       if (!this.generation) {
         if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
         throw new Error('Native playback is not active.')
@@ -2179,6 +2413,7 @@ export class DesktopNativePlaybackClient {
       this.assertCommandableGeneration()
       if (!this.generation) {
         if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
+        await setDesktopServiceMasterGain(gain)
         return
       }
       ensure(
@@ -2220,9 +2455,10 @@ export class DesktopNativePlaybackClient {
       throw new Error('Retained native playback has an invalid timeline.')
     }
     if (!Number.isFinite(status.masterGain) || status.masterGain < 0 || status.masterGain > 1 ||
-        !Number.isFinite(status.playbackRate) || status.playbackRate < 0.5 || status.playbackRate > 1.5 ||
-        !Number.isInteger(status.transposeSemitones) || Math.abs(status.transposeSemitones) > 12) {
-      throw new Error('Retained native playback controls are invalid.')
+        !Number.isFinite(status.playbackRate) || status.playbackRate < NATIVE_PLAYBACK_MIN_RATE ||
+        status.playbackRate > NATIVE_PLAYBACK_MAX_RATE ||
+        !Number.isFinite(status.transposeSemitones) || Math.abs(status.transposeSemitones) > NATIVE_PLAYBACK_MAX_TRANSPOSE) {
+      throw new DesktopNativePlaybackError('graph-rejected', 'Retained native playback controls are invalid (tempo 0.25..4, transpose -24..24).')
     }
     const currentLanes = new Map(status.lanes.map(lane => [lane.id, lane]))
     if (currentLanes.size !== descriptor.lanes.length || status.lanes.length !== descriptor.lanes.length) {
@@ -2295,7 +2531,6 @@ export class DesktopNativePlaybackClient {
       loop: status.loopEnabled ? { start: loopStart / sampleRate, end: loopEnd / sampleRate } : null,
       preferredOutputUid: config.outputDeviceUid,
       preferredOutputChannels: [...config.outputChannels],
-      ...(config.provider === 'alsa' ? { browserOutputId: `native:${config.outputDeviceUid}` } : {}),
       ...(graphDocument ? { graphDocument } : {}),
       retainedProject: { dir: descriptor.project.dir, songPath: descriptor.project.songPath },
       streamLanes: config.streamLanes
@@ -2373,59 +2608,18 @@ export class DesktopNativePlaybackClient {
       const ahead = this.ahead
       if (ahead) {
         this.ahead = null
-        try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
+        await this.requireUnloadReceipt(ahead.generation, ahead.request.provider,
+          'Native prepared graph cleanup remains quarantined.')
       }
-      const generation = this.generation
-      // Cleanup is now the only valid next command. Preserve `last` for
-      // diagnostics if it fails, while ensuring Play/Pause UI cannot mistake
-      // that retained snapshot for a commandable running transport.
       this.started = false
-      if (!generation) {
-        if (this.ownsOutput) {
-          const provider = this.recoveryProvider ?? this.request?.provider ?? 'coreaudio'
-          try {
-            await this.lease.restoreLegacyOutput()
-          } catch (error) {
-            this.recoveryProvider = provider
-            this.recoveryKind = 'route-restore'
-            this.onStateChange(this.last)
-            throw new DesktopNativeRecoveryError(
-              provider,
-              'provider-route-restore-incomplete',
-              error
-            )
-          }
-          this.ownsOutput = false
-          this.recoveryProvider = null
-          this.recoveryKind = null
-          this.request = null
-          this.route = null
-          this.onStateChange(this.last)
-        }
-        return
+      if (this.generation) {
+        await this.requireUnloadReceipt(this.generation,
+          this.request?.provider ?? this.recoveryProvider ?? 'coreaudio',
+          'Native playback cleanup remains quarantined.')
       }
-      const providerForCleanup = this.request?.provider ?? this.recoveryProvider ?? 'coreaudio'
-      await this.requireUnloadReceipt(
-        generation,
-        providerForCleanup,
-        'Native playback cleanup remains quarantined.'
-      )
       this.generation = ''
       this.last = null
       this.forgetTransport()
-      this.recoveryProvider = this.request?.provider ?? this.recoveryProvider
-      this.recoveryKind = 'route-restore'
-      const provider = this.recoveryProvider ?? 'coreaudio'
-      try {
-        await this.lease.restoreLegacyOutput()
-      } catch (error) {
-        this.onStateChange(this.last)
-        throw new DesktopNativeRecoveryError(
-          provider,
-          'provider-route-restore-incomplete',
-          error
-        )
-      }
       this.ownsOutput = false
       this.recoveryProvider = null
       this.recoveryKind = null
@@ -2435,8 +2629,8 @@ export class DesktopNativePlaybackClient {
     })
   }
 
-  /** Resolve a retained/quarantined generation without reacquiring Chromium's
-   * sink. Success deliberately converts cleanup recovery into the narrower
+  /** Resolve a retained/quarantined generation on the same native provider.
+   * Success deliberately converts cleanup recovery into the narrower
    * no-generation same-provider prepare retry consumed by prepareAndStart(). */
   async cleanupForRetry(): Promise<void> {
     return this.serialize(async () => {
@@ -2471,8 +2665,15 @@ export class DesktopNativePlaybackClient {
     const key = `${status.routeGeneration}:${status.streamGeneration}:${status.transportDiscontinuities}`
     const failures = status.adapterRenderFailures
     const previous = this.transportBoundary
-    this.transportBoundary = { generation, transportGeneration: status.transportGeneration, key, failures }
+    this.transportBoundary = { generation, transportGeneration: status.transportGeneration, key, failures, callbacks: status.callbacks }
     if (!previous || previous.generation !== generation) {
+      this.reanchorEchoPending = false
+      return
+    }
+    // Before its first callback a new song can still expose the idle host's
+    // route/stream counters. The first healthy callback establishes its clock;
+    // it is not a route failure requiring re-anchor (and a fallback rebuild).
+    if (previous.callbacks === '0' && failures <= previous.failures) {
       this.reanchorEchoPending = false
       return
     }
@@ -2522,7 +2723,9 @@ export class DesktopNativePlaybackClient {
         this.reanchorEchoPending = false
         return
       }
-      if (key === previous.key) return
+      // A stale recovery plan may be discarded after the source advanced;
+      // it produces no echo. Rising render failures must still be retried.
+      this.reanchorEchoPending = false
     }
     const advancing = status.transportState === 'playing' || status.transportState === 'pre-roll'
     // Seeks and loops are boundaries the session primes for itself.
@@ -2530,6 +2733,12 @@ export class DesktopNativePlaybackClient {
       status.lastTransportBoundary !== 'source-seek' && status.lastTransportBoundary !== 'source-loop'
     const failing = failures > previous.failures && advancing
     if (!boundary && !failing) return
+    // A healthy source keeps its Stretch history across a host sample-clock
+    // gap. Re-priming it adds a reset and can replay the prime's elapsed time.
+    // Failed-render recovery remains authoritative even for this boundary.
+    if (status.lastTransportBoundary === 'sequence-gap' && !failing &&
+        status.routeGeneration === previous.key.split(':')[0] &&
+        status.streamGeneration === previous.key.split(':')[1]) return
     // Nothing is re-anchored while a seam is armed. The command would name
     // the new generation, and the core queues it on the replacement, which
     // has taken no clock yet: it is anchored at the frame the replacement was

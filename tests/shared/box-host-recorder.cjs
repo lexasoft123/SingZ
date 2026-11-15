@@ -10,9 +10,9 @@ const forbiddenOwner = new Set([
   'setPlaybackMasterGain', 'setPlaybackLoop', 'clearPlaybackLoop'
 ])
 const allowedOwner = new Set([
-  'devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus', 'playbackProviders',
+  'devices', 'hostDevices', 'microphoneMixStatus', 'playbackProviders',
   'playbackCapability', 'playbackStatus', 'state', 'stats', 'measurePlaybackLanes',
-  'rendererDetached', 'rendererGone', 'endMonitor'
+  'rendererDetached', 'rendererGone'
 ])
 // Observation-only service calls. Keep in step with boxAudioReadOnly() in
 // src/shared/box-audio.ts (a .cjs file cannot import that TypeScript module).

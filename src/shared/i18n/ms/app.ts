@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "Peranti puter semula yang disimpan tidak disambungkan  menggunakan sistem lalai",
   "app.output.switchDenied": "SingZ tidak dibenarkan untuk menukar peranti puter  masih pada yang sebelumnya",
   "app.output.switchFailed": "Tidak dapat beralih ke peranti itu  masih pada yang sebelumnya",
-  "app.monitor.stopped": "Pemantauan fon kepala berhenti: {message}",
   "app.native.beatNotApplied": "Pembaruan grid beat asli tidak digunakan: {error}",
   "app.native.metronomeNotApplied": "Pembaruan metronome asli tidak digunakan: {error}",
   "app.native.transposeNotApplied": "Pembaruan transpose asli tidak digunakan: {error}",

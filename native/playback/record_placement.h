@@ -14,12 +14,16 @@ struct RecordPlacementInput {
   // latest sample's host time. No long-take history retention is necessary.
   bool hasInitialDiscontinuitySerial{false};
   uint64_t initialDiscontinuitySerial{0};
+  // New consumers distinguish an affine tempo/key seam from a transport fault.
+  bool hasInitialFaultSerial{false};
+  uint64_t initialFaultSerial{0};
 };
 
 struct RecordPlacementResult {
   double startPositionSec{0};
   RecordPlacementFault fault{RecordPlacementFault::None};
   uint64_t alignedHostNs{0}, discontinuitySerial{0};
+  uint64_t faultSerial{0};
 };
 
 // Capture timestamp C reaches the application inputLatency later than singing.

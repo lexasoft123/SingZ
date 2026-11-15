@@ -36,6 +36,13 @@ beforeEach(() => {
 })
 
 describe('the dirty ledger', () => {
+  it('coalesces normalized aliases without losing the latest dirty sequence', () => {
+    const dir = join(root, 'Song')
+    writeSettings({ gdriveDirty: { seq: 7, dirs: { [dir]: 3, [join(root, 'one') + '/../Song']: 7 }, allSeq: 0 } })
+    expect(dirtyDirs()).toEqual([dir])
+    clearDirty(3); expect(dirtyDirs()).toEqual([dir])
+    clearDirty(7); expect(dirtyDirs()).toEqual([])
+  })
   it('starts clean and remembers a marked project', () => {
     expect(isDirty()).toBe(false)
     const dir = project(root, 'Song One')

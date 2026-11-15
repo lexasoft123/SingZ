@@ -23,7 +23,56 @@
  * The window stays visible; it just never comes to the front. Verified against
  * the beat-input measurement: quiet and focused runs produce identical grids.
  */
-module.exports.quietLaunch = async (app) =>
+/**
+ * First-run quick-start welcome (App.tsx reads localStorage 'singz.quick-start.v1' ONCE, at first render). On a
+ * fresh profile its scrim blocks every driver's first click. Runs in MAIN (self-contained: Playwright serializes
+ * it): for every window — present now or created within 15 s — once the app page has loaded, seed the flag in the
+ * app's own origin and reload once when it was missing, resolving after the reloaded page has finished loading so
+ * the driver's first evaluate never lands in a destroyed context. Exported for the unit test.
+ */
+async function seedQuickStartInMain({ BrowserWindow, app: a }, key) {
+  const seedOne = (w) => new Promise((resolve) => {
+    const wc = w.webContents
+    let settled = false
+    const done = () => { if (!settled) { settled = true; resolve() } }
+    const timer = setTimeout(done, 30000)
+    const run = async () => {
+      try {
+        const url = wc.getURL()
+        if (!url || url.startsWith('about:') || url.startsWith('devtools:')) return false
+        const fresh = await wc.executeJavaScript(
+          `(() => { try { if (localStorage.getItem(${JSON.stringify(key)}) === 'seen') return false; localStorage.setItem(${JSON.stringify(key)}, 'seen'); return true } catch { return false } })()`)
+        if (fresh) {
+          wc.once('did-finish-load', () => { clearTimeout(timer); done() })
+          wc.reload()
+        } else { clearTimeout(timer); done() }
+        return true
+      } catch { return false }
+    }
+    // isLoading() can still read true INSIDE did-finish-load, so the event itself is the trigger, never that flag.
+    const attempt = async () => { if (!(await run())) wc.once('did-finish-load', attempt) }
+    if (wc.isLoading()) wc.once('did-finish-load', attempt)
+    else void attempt()
+  })
+  const seen = new Set()
+  const sweep = async () => {
+    const pending = BrowserWindow.getAllWindows().filter((w) => !seen.has(w))
+    for (const w of pending) seen.add(w)
+    await Promise.all(pending.map(seedOne))
+  }
+  const deadline = Date.now() + 15000
+  while (!BrowserWindow.getAllWindows().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50))
+  await sweep()
+}
+module.exports.seedQuickStartInMain = seedQuickStartInMain
+module.exports.QUICK_START_KEY = 'singz.quick-start.v1'
+
+module.exports.quietLaunch = async (app) => {
+  const hidden = await quietLaunchWindows(app)
+  await app.evaluate(seedQuickStartInMain, module.exports.QUICK_START_KEY)
+  return hidden
+}
+const quietLaunchWindows = async (app) =>
   app.evaluate(({ app: a, BrowserWindow }) => {
     // Under SINGZ_E2E_HIDDEN (this evaluates in MAIN, whose env the driver
     // set) the window must stay INVISIBLE: neuter show entirely and hide

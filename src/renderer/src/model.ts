@@ -139,22 +139,15 @@ export function sanitizePitchHeight(raw: unknown): number {
 /** Chosen audio devices; absent = system default. Chromium and the native
  * AudioInput core use unrelated id namespaces, so both identities are kept. */
 export interface AudioPrefs {
+  /** Legacy Chromium sink ID, retained only until migration. */
   outputId?: string
+  nativeOutputUid?: string
   /** Chromium id, used only by Web Audio playback/preview and legacy fallback. */
   inputId?: string
   /** Stable native AudioInput uid, used by vocal training. */
   nativeInputUid?: string
   /** Zero-based hardware input channel. Absent and 0 both mean channel 1. */
   inputChannel?: number
-  /** Opaque OS-HAL output uid for the experimental native monitor. It is not
-   * and must never be compared with Chromium outputId. */
-  nativeMonitorOutputUid?: string
-  /** Zero-based physical output channels for the monitor's ChannelMap. */
-  nativeMonitorOutputChannels?: number[]
-  /** Native monitor gain only; enabled/headphone confirmation never persist. */
-  monitorGainDb?: number
-  /** Experimental portable zcore/zdsp song-output backend. */
-  nativePlayback?: boolean
   /** Explicit native song-output provider. Only Windows persists a choice;
    * other platforms keep their single platform provider. */
   nativeAudioProvider?: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
@@ -168,6 +161,10 @@ export interface AudioPrefs {
 /** Clamp stored audio prefs — ids are opaque non-empty strings, and the
  *  'default' pseudo-id must never persist (it IS the absent state). */
 export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
+  // Fields written by the retired headphone-monitor preview
+  // (nativeMonitorOutputUid, nativeMonitorOutputChannels, monitorGainDb) are
+  // ignored on read and never emitted, so an older build still falls back to
+  // its defaults after a rollback.
   const r = (raw ?? {}) as Record<string, unknown>
   const id = (v: unknown): string | undefined =>
     typeof v === 'string' && v.length > 0 && v !== 'default' && v !== 'communications'
@@ -190,32 +187,19 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     r.inputChannel < 32
       ? r.inputChannel
       : undefined
-  const nativeMonitorOutputChannels = Array.isArray(r.nativeMonitorOutputChannels) &&
-    r.nativeMonitorOutputChannels.length > 0 && r.nativeMonitorOutputChannels.length <= 64 &&
-    r.nativeMonitorOutputChannels.every((channel) =>
-      typeof channel === 'number' && Number.isInteger(channel) && channel >= 0 && channel < 64
-    ) && new Set(r.nativeMonitorOutputChannels).size === r.nativeMonitorOutputChannels.length
-      ? [...r.nativeMonitorOutputChannels] as number[]
-      : undefined
-  const monitorGainDb = typeof r.monitorGainDb === 'number' && Number.isFinite(r.monitorGainDb)
-    ? Math.max(-60, Math.min(0, r.monitorGainDb))
-    : undefined
   const outputId = id(r.outputId)
+  const nativeOutputUid = id(r.nativeOutputUid)
   const inputId = id(r.inputId)
   const savedInputUid = id(r.nativeInputUid)
   const nativeInputUid = savedInputUid ? normalizeAudioInputUid(savedInputUid) : undefined
-  const nativeMonitorOutputUid = id(r.nativeMonitorOutputUid)
   const nativeAudioProvider = r.nativeAudioProvider === 'asio' ? 'asio'
     : r.nativeAudioProvider === 'wasapi' ? 'wasapi' : undefined
   return {
-    ...(outputId ? { outputId } : {}),
+    ...(outputId && !nativeOutputUid ? { outputId } : {}),
+    ...(nativeOutputUid ? { nativeOutputUid } : {}),
     ...(inputId ? { inputId } : {}),
     ...(nativeInputUid ? { nativeInputUid } : {}),
     ...(inputChannel === undefined ? {} : { inputChannel }),
-    ...(nativeMonitorOutputUid ? { nativeMonitorOutputUid } : {}),
-    ...(nativeMonitorOutputChannels ? { nativeMonitorOutputChannels } : {}),
-    ...(monitorGainDb === undefined ? {} : { monitorGainDb }),
-    ...(r.nativePlayback === true ? { nativePlayback: true } : {}),
     ...(nativeAudioProvider ? { nativeAudioProvider } : {}),
     ...(master === undefined ? {} : { master }),
     ...(referenceVolume === undefined ? {} : { referenceVolume }),

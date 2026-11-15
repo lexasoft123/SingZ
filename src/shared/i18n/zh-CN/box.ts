@@ -240,7 +240,6 @@ export const box: Record<keyof typeof english, string> = {
   'box.queue.saveError': '队列更改已显示，但无法保存：{error}',
   'box.details.openGuardFailed': 'SingZ 无法保护此歌曲免受缓存删除，因此未将其打开。请检查存储后重试。',
   'box.account.signOutFailed': '无法完成退出。请重试。',
-  'box.nativeRequired': '此歌曲或音频运行时无法使用原生播放。',
   'box.retained.restoringTitle': '正在恢复上一首歌曲',
   'box.retained.restoringBody': '正在恢复歌曲及其歌词。',
   'box.retained.dialogLabel': '上一首歌曲',

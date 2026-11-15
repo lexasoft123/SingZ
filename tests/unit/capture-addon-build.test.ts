@@ -236,13 +236,11 @@ describe('Electron capture addon build', () => {
     expect(hook).toContain('__pfnDliNotifyHook2 = loadHostBinary')
   })
 
-  it('retires capture and monitoring on renderer crash, navigation and app quit', () => {
+  it('retires capture on renderer crash, navigation and app quit', () => {
     const main = read('src/main/index.ts')
     expect(main).toContain("sender.on('render-process-gone', detached)")
     expect(main).toContain("sender.on('did-start-navigation'")
     expect(main).toContain('if (isMainFrame && !inPlace) detached()')
-    expect(main).toContain("ipcMain.handle('audio-host:monitor-begin'")
-    expect(main).toContain("ipcMain.handle('audio-host:monitor-end'")
     const quitHandler = main.slice(main.indexOf("app.on('before-quit',"), main.indexOf("app.on('window-all-closed',"))
     expect(quitHandler).toMatch(/app\.on\('before-quit',\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/)
     expect(quitHandler).toContain('captureOwner.stop()')
@@ -252,7 +250,6 @@ describe('Electron capture addon build', () => {
     const main = read('src/main/index.ts')
     for (const [channel, invocation, sender] of [
       ["'capture:begin'", 'await captureOwner.begin(', 'e.sender'],
-      ["'audio-host:monitor-begin'", 'await captureOwner.beginMonitor(', 'event.sender'],
       ["'audio-host:microphone-mix-configure'", 'await captureOwner.configureMicrophoneMix(', 'event.sender']
     ]) {
       const start = main.indexOf(channel)

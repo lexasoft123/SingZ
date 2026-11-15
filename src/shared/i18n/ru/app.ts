@@ -95,9 +95,6 @@ export const app: Translation<typeof en> = {
   'app.output.switchDenied': 'SingZ не разрешили переключить устройство — используется прежнее',
   'app.output.switchFailed': 'Не удалось переключить устройство — используется прежнее',
 
-  // {message} is the monitor's own status text
-  'app.monitor.stopped': 'Монитор наушников остановлен: {message}',
-
   // native engine rejected a live control change and the UI rolled back — {error} is the raw error text
   'app.native.beatNotApplied': 'Сетка долей нативного движка отклонена: {error}',
   'app.native.metronomeNotApplied': 'Метроном нативного движка отклонён: {error}',

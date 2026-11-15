@@ -517,8 +517,13 @@ MicrophoneMixStatus MicrophoneMixSession::status() {
       stop();
     }
   }
-  MicrophoneMixStatus result{self.active, self.callbacks.load(), self.missing.load(),
-                             self.failures.load(), self.rate, self.lastError};
+  MicrophoneMixStatus result;
+  result.active = self.active;
+  result.callbacks = self.callbacks.load();
+  result.missingFrames = self.missing.load();
+  result.failures = self.failures.load();
+  result.sampleRate = self.rate;
+  result.error = self.lastError;
   result.captureSafetyFrames = self.captureSafetyFrames;
   result.outputPeriodFrames = self.outputPeriodFrames;
   result.outputBufferFrames = self.outputBufferFrames;

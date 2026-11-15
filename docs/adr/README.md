@@ -11,6 +11,19 @@ playback remains on Web Audio and `react-native-audio-api`:
 6. [Plug-in execution modes](0006-plugin-execution-modes.md)
 7. [Graph persistence and versioning](0007-graph-persistence-and-versioning.md)
 8. [Legacy/native session handoff](0008-legacy-native-session-handoff.md)
+   (dual-path parts superseded on desktop and Box by 0015)
+
+Later decisions:
+
+- [0015: Native-only song playback on desktop and Box](0015-native-only-desktop-playback.md).
+  Desktop and Box no longer play songs through Web Audio; the opening sentence
+  above still describes iOS and Android (`react-native-audio-api`).
+- [0016: The recorded take is a playback lane](0016-take-as-playback-lane.md)
+  (proposed). The take is conformed offline to the song timeline and played as
+  an ordinary lane; the separate listen-back path is removed.
+- [0017: Live monitoring through the common mixer and output](0017-monitoring-through-the-common-mixer.md)
+  (proposed, revision 2). The live voice is a source of the one shared output callback;
+  the second monitor host and the monitor-output picker are removed.
 
 Any incompatible interface or persistence change supersedes the relevant ADR rather
 than silently changing version 1.

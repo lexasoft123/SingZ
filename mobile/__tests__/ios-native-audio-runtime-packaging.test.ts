@@ -79,6 +79,7 @@ describe('iOS native DSP runtime packaging', () => {
 
     expect(sync).toContain('check-native-component-sources.js')
     expect(sync).toContain('callbackDefinitions')
+    expect(sync).toContain("relative !== 'device/audio_buffer_ledger.cpp'")
 
     for (const source of [
       'contracts.cpp',

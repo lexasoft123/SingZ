@@ -1,4 +1,8 @@
 #include "native_playback_session.h"
+#include "shared_audio_service.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
 #include "box_routing_owner.h"
 #endif
@@ -452,6 +456,7 @@ struct PreparedPlaybackTransport {
   // the callback reads a plain pointer. Shared, not borrowed: see the struct.
   std::shared_ptr<PlaybackPositionPublication> positionSink;
   PlaybackPresentationEntry presentationCallback{};
+  uint32_t presentationHostOffsetFrames{0};
   uint64_t generation{0};
   int64_t initialProjectFrame{0};
   bool initialPaused{false};
@@ -462,6 +467,7 @@ struct PreparedPlaybackTransport {
   const zdsp::ScheduledCueEvent *cueEvents{nullptr};
   uint32_t cueEventCount{0};
   double playbackRate{1.0};
+  double presentationTransposeSemitones{0.0};
   uint64_t playbackRateQ32{zdsp::kProjectRateOneQ32};
   zdsp::ProcessorHandle timePitchProcessor{};
   SignalsmithTimePitchLoopPlan initialTimePitchLoopPlan{};
@@ -1295,6 +1301,15 @@ struct PreparedPlaybackTransport {
         deactivateSignalsmithTimePitchLoop(timePitchProcessor);
         break;
       case PlaybackTransportCommandKind::Reanchor:
+        // Priming runs off RT while this source can keep rendering. A plan
+        // for an older position must never rewind a healthy source. A wedged
+        // renderer has not advanced, so its exact prepared recovery still lands.
+        if (command.reanchorPlan.valid() &&
+            (callbackProjectFrame != command.projectFrame ||
+             callbackProjectFractionQ32 != command.projectFractionQ32)) {
+          discardSignalsmithTimePitchReanchor(timePitchProcessor, command.reanchorPlan);
+          break;
+        }
         if (command.reanchorPlan.valid()) {
           callbackProjectFrame = command.projectFrame;
           callbackProjectFractionQ32 = command.projectFractionQ32;
@@ -1866,14 +1881,20 @@ struct PreparedPlaybackTransport {
     // Stage ordinary scalars across transport slices; publish exactly ONCE
     // per hardware callback, even for a one-frame loop. The journal is owned
     // by the session's shared publication, so tempo graph swaps keep history.
-    if (offset == 0) {
+    // The router's incoming subblock keeps the hardware callback timestamp.
+    // Account for its prefix exactly once, or both halves of an interior seam
+    // publish the same host timestamp and the journal sees a clock restart.
+    if (offset == 0 || presentationCallback.generation != generation) {
       presentationCallback = {};
-      presentationCallback.hostTimeNs = block.callbackHostTimeNs;
-      presentationCallback.frames = block.frames;
+      presentationCallback.hostTimeNs = block.callbackHostTimeNs +
+          static_cast<uint64_t>(double(presentationHostOffsetFrames + offset) * 1.e9 / block.sampleRate);
+      presentationHostOffsetFrames = 0;
+      presentationCallback.frames = block.frames - offset;
       presentationCallback.sampleRate = block.sampleRate;
       presentationCallback.projectFrame = static_cast<double>(callbackProjectFrame) +
           static_cast<double>(callbackProjectFractionQ32) / 4294967296.0;
       presentationCallback.rate = advancesProject ? playbackRate : 0.0;
+      presentationCallback.transposeSemitones = presentationTransposeSemitones;
       presentationCallback.generation = generation;
       presentationCallback.continuousFrame = callbackContinuousFrame;
       presentationCallback.seekCount = callbackSeekCount;
@@ -2800,6 +2821,25 @@ struct PreparedPlaybackGraph {
   uint32_t outputChannels{0};
   uint32_t maximumFrames{0};
   float masterGain{1.0F};
+  bool serviceOwnsMasterGain{false};
+  NativePlaybackSession::OutputMeter serviceOutputMeter() const noexcept {
+    return {true, transportGeneration,
+            callback.serviceOutputPeak.load(std::memory_order_relaxed),
+            callback.serviceOutputClippedBlocks.load(std::memory_order_relaxed),
+            callback.serviceOutputRms.load(std::memory_order_relaxed)};
+  }
+  float graphMasterGain() const noexcept {
+    return serviceOwnsMasterGain ? 1.0F : masterGain;
+  }
+  bool bypassGraphOutputLimiter() const noexcept {
+    // App attenuation must precede the one final safety ceiling.
+    return serviceOwnsMasterGain;
+  }
+  zdsp::BuiltinNodeKind graphOutputLimiterKind() const noexcept {
+    // Meter-only processing bypasses the ceiling without silencing telemetry.
+    return bypassGraphOutputLimiter() ? zdsp::BuiltinNodeKind::PeakRms
+                                      : zdsp::BuiltinNodeKind::SafetyLimiter;
+  }
   float masterGraphTrim{1.0F};
   uint64_t masterGainNodeId{0};
   std::shared_ptr<const PlaybackCuePlan> cuePlan;
@@ -2962,7 +3002,7 @@ struct PreparedPlaybackGraph {
                 : lane.gain *
                       lane.graphGainTrim *
                       (lane.trainingSelected ? trainingGain : 1.0F) *
-                      masterGain * masterGraphTrim;
+                      graphMasterGain() * masterGraphTrim;
         if (laneGain == 0.0F)
           continue;
         const uint64_t elapsed = static_cast<uint64_t>(projectFrame);
@@ -3099,7 +3139,7 @@ struct PreparedPlaybackGraph {
     graphContext.hasReference = cuePlan != nullptr;
     graphContext.hasTraining = training.has_value();
     graphContext.needsTimePitch = hasTimePitch;
-    graphContext.masterGain = masterGain;
+    graphContext.masterGain = graphMasterGain();
     graphContext.referenceGain = cuePlan == nullptr ? 0.0F : cuePlan->volume;
     graphContext.lanes.reserve(lanes.size());
     for (const Lane &lane : lanes)
@@ -3444,7 +3484,7 @@ struct PreparedPlaybackGraph {
                      value.binding->kind == "song-master") {
             masterGainNodeId = value.id;
             masterGraphTrim = trim;
-            value0 = masterGain * trim;
+            value0 = graphMasterGain() * trim;
           } else if (value.binding.has_value() &&
                      value.binding->kind == "reference-gain") {
             value0 = (cuePlan == nullptr ? 0.0F : cuePlan->volume) * trim;
@@ -3477,6 +3517,20 @@ struct PreparedPlaybackGraph {
           kind = zdsp::BuiltinNodeKind::SafetyLimiter;
           value0 = static_cast<float>(parameter(value, "ceiling", 1.0));
           flags = zdsp::GraphNodeFlagMayProcessInPlace;
+          // Only the limiter feeding physical output is replaced by the
+          // service ceiling; authored internal limiter effects stay active.
+          if (std::any_of(materialized.graph.connections.begin(),
+                          materialized.graph.connections.end(),
+                          [&](const auto& edge) {
+                            if (edge.sourceNode.value != value.id) return false;
+                            return std::any_of(materialized.graph.nodes.begin(),
+                                               materialized.graph.nodes.end(),
+                                [&](const auto& destination) {
+                                  return destination.document.id == edge.destinationNode.value &&
+                                      destination.kind == NativePlaybackGraphMaterializedKind::PhysicalOutput;
+                                });
+                          }))
+            kind = graphOutputLimiterKind();
           break;
         case NativePlaybackGraphMaterializedKind::PlaceholderBypass:
           kind = zdsp::BuiltinNodeKind::Gain;
@@ -3668,6 +3722,7 @@ struct PreparedPlaybackGraph {
     zdsp::initializeGraphRunner(&runner, &publisher, {}, &parameters, nullptr,
                                 &diagnostics);
     runnerInitialized = true;
+    transport.presentationTransposeSemitones = transposeSemitones;
     transport.initialize(transportGeneration, preparedStartProjectFrame,
                          cuePlan == nullptr ? 0 : cuePlan->landingProjectFrame,
                          initialTransport,
@@ -3916,7 +3971,7 @@ struct PreparedPlaybackGraph {
     addConfig(zdsp::BuiltinNodeKind::Mix, kSongMixNode, outputChannels,
               static_cast<uint32_t>(lanes.size()), 0.0F);
     addConfig(zdsp::BuiltinNodeKind::Gain, kSongGainNode, outputChannels, 1,
-              masterGain);
+              graphMasterGain());
     if (hasReference) {
       addConfig(zdsp::BuiltinNodeKind::ChannelMap, kCueMapNode, 1, 1, 0.0F);
       finalConfigs[2].channelMatrix = cueMatrix.data();
@@ -3927,7 +3982,7 @@ struct PreparedPlaybackGraph {
       addConfig(zdsp::BuiltinNodeKind::Gain, kOutputGainNode, outputChannels, 1,
                 1.0F);
     }
-    addConfig(zdsp::BuiltinNodeKind::SafetyLimiter, kLimiterNode,
+    addConfig(graphOutputLimiterKind(), kLimiterNode,
               outputChannels, 1, kNativePlaybackLimiterCeiling);
 
     std::array<zdsp::ProcessorHandle, 7> finalProcessors{};
@@ -4198,6 +4253,7 @@ struct PreparedPlaybackGraph {
     zdsp::initializeGraphRunner(&runner, &publisher, {}, &parameters, nullptr,
                                 &diagnostics);
     runnerInitialized = true;
+    transport.presentationTransposeSemitones = transposeSemitones;
     transport.initialize(transportGeneration, preparedStartProjectFrame,
                          cuePlan == nullptr ? 0 : cuePlan->landingProjectFrame,
                          initialTransport,
@@ -4272,6 +4328,7 @@ struct PreparedPlaybackGraph {
   }
 
   bool enqueueMaster(float value) noexcept {
+    if (serviceOwnsMasterGain) return true;
     return masterGainNodeId != 0 &&
            enqueueGain({masterGainNodeId}, value * masterGraphTrim);
   }
@@ -5064,6 +5121,7 @@ struct NativePlaybackSession::Impl {
   std::atomic<uint64_t> cancelledThrough{0};
   NativePlaybackState state{NativePlaybackState::Unloaded};
   NativePlaybackPrepareConfig preparedConfig{};
+  bool serviceMasterMeterUsed{false};
   AudioHostStatus lastHost{};
   AudioHostTerminalCause lastTerminal{};
   std::string lastError;
@@ -5262,13 +5320,14 @@ struct NativePlaybackSession::Impl {
                                                context->landingContinuousFrame);
   }
 
-  static void swapLand(void *opaque, uint32_t) noexcept {
+  static void swapLand(void *opaque, uint32_t outgoingFrames) noexcept {
     auto *context = static_cast<PlaybackRenderShared::SwapContext *>(opaque);
     // Exact means the clock is where the anchor was filled for — the
     // prediction proved right — whatever stream frame that happened on.
     const bool exact = context->incoming->adoptClock(
         *context->outgoing, context->exactRequested, context->predictedFrame,
         context->predictedFractionQ32);
+    context->incoming->presentationHostOffsetFrames = outgoingFrames;
     if (context->exactRequested && !exact && context->lateLandings != nullptr)
       context->lateLandings->fetch_add(1u, std::memory_order_relaxed);
   }
@@ -6192,6 +6251,12 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
     return failPreparation(NativePlaybackError::InvalidConfiguration,
                            "Native playback configuration is invalid");
   }
+  AudioHostConfig retainedRoute;
+  retainedRoute.outputDeviceUid=config.outputDeviceUid;retainedRoute.outputChannels=config.outputChannels;
+  retainedRoute.requestedSampleRate=config.requestedSampleRate;retainedRoute.exclusive=config.exclusive;
+  // Allocate the replacement graph for the retained host BEFORE materializing
+  // DSP. Merely accepting a larger host at open would leave graph storage short.
+  config.maximumFrames=std::max(config.maximumFrames,sharedAudioService().retainedPlaybackCapacity(retainedRoute));
   const double timePitchCorrection =
       config.transposeSemitones - 12.0 * std::log2(config.playbackRate);
   const bool needsTimePitch =
@@ -6704,6 +6769,14 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       config.masterGain, config.playbackRate, config.transposeSemitones,
       preparedStartProjectFrame,
       config.initialTransport, generation, impl_->testHooks);
+  prepared->serviceOwnsMasterGain = config.serviceOwnsMasterGain;
+  if (config.serviceOwnsMasterGain) {
+    auto& meter = sharedAudioService().masterMeterState();
+    prepared->callback.serviceMeterPeakTarget = &meter.songPeak;
+    prepared->callback.serviceMeterRmsTarget = &meter.songRms;
+    prepared->callback.serviceMeterClipTarget = &meter.songClips;
+    prepared->callback.serviceMeterResetEpoch = &meter.resetEpoch;
+  }
   prepared->laneDecodeFallback = laneDecodeFallback;
   // Handed over BEFORE prepare(): the source nodes built there point into this
   // group's windows, so the graph must already own it. Starting the feeder
@@ -6839,6 +6912,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       impl_->prepared->router = impl_->router;
       publishPlaybackQuarantineRetainedBytes(impl_->prepared->retainedBytes);
       impl_->preparedConfig = std::move(config);
+      impl_->serviceMasterMeterUsed = impl_->prepared->serviceOwnsMasterGain;
       impl_->state = NativePlaybackState::Prepared;
       // Preparing a new generation has not touched AudioHost. Publish a fresh
       // per-generation baseline rather than the provider's previous stopped
@@ -7100,6 +7174,7 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
       impl_->activeGeneration.store(generation, std::memory_order_release);
       impl_->liveBehindLatest = 0;
       impl_->preparedConfig = std::move(config);
+      impl_->serviceMasterMeterUsed = impl_->prepared->serviceOwnsMasterGain;
       // The stream is this generation's now: every physical-ownership marker
       // names it, so stop and cleanup prove quiescence against the right one.
       impl_->openInvocationGeneration = generation;
@@ -7296,6 +7371,8 @@ NativePlaybackResult NativePlaybackSession::openOutput(
                                  : NativePlaybackError::HostFailure,
                    generation, impl_->state, impl_->lastError);
   }
+  if (impl_->prepared->serviceOwnsMasterGain)
+    sharedAudioService().setMasterGain(impl_->prepared->masterGain);
   impl_->state = NativePlaybackState::OutputOpen;
   impl_->lastHost = impl_->host.status();
   impl_->lastTerminal = {};
@@ -7951,6 +8028,8 @@ NativePlaybackSession::reanchorTransport(uint64_t generation) {
       return failure(NativePlaybackError::GraphFailure, generation, impl_->state,
                      "The playback clock reanchor could not be prepared off RT");
   }
+  if (impl_->testHooks && impl_->testHooks->afterReanchorPrime)
+    impl_->testHooks->afterReanchorPrime(impl_->testHooks->context);
   if (!impl_->prepared->transport.reanchor(
           anchor.projectFrame, anchor.projectFractionQ32, timePitchPlan))
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
@@ -8320,6 +8399,8 @@ NativePlaybackResult NativePlaybackSession::setMasterGain(uint64_t generation,
                    "The bounded playback parameter queue is full");
   }
   impl_->prepared->masterGain = gain;
+  if (impl_->prepared->serviceOwnsMasterGain)
+    sharedAudioService().setMasterGain(gain);
   return impl_->success(generation);
 }
 
@@ -8622,8 +8703,14 @@ NativePlaybackStatus NativePlaybackSession::status() const {
         impl_->prepared->preparedStartProjectFrame;
     result.retainedBytes += impl_->prepared->retainedBytes;
     result.graphArenaBytes = impl_->prepared->graphArenaBytes;
-    result.outputPeak = rendering->callback.outputPeak.load(std::memory_order_relaxed);
-    result.outputClippedBlocks = rendering->callback.outputClippedBlocks.load(std::memory_order_relaxed);
+    if (rendering->serviceOwnsMasterGain) {
+      const auto meter = rendering->serviceOutputMeter();
+      result.outputPeak = meter.peak;
+      result.outputClippedBlocks = meter.clippedBlocks;
+    } else {
+      result.outputPeak = rendering->callback.outputPeak.load(std::memory_order_relaxed);
+      result.outputClippedBlocks = rendering->callback.outputClippedBlocks.load(std::memory_order_relaxed);
+    }
     result.masterGain = impl_->prepared->masterGain;
     result.referenceGain = impl_->prepared->referenceGain;
     result.trainingEnabled = impl_->prepared->trainingEnabled;
@@ -8691,6 +8778,12 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       }
       result.lanes.push_back(std::move(laneStatus));
     }
+  }
+  if (rendering == nullptr && impl_->serviceMasterMeterUsed) {
+    const auto meter = sharedAudioService().outputMeter();
+    result.outputPeak = meter.peak;
+    // No graph means no per-generation clipping window.
+    result.outputClippedBlocks = 0;
   }
   return result;
 }
@@ -8763,32 +8856,6 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
 }
 
 PlaybackPresentationQuery
-NativePlaybackSession::presentationQueryRealtime(uint64_t hostTimeNs) const noexcept {
-  const uint64_t active = impl_->activeGeneration.load(std::memory_order_acquire);
-  if (!active) return {};
-  const uint64_t outgoing = impl_->swapFromGeneration.load(std::memory_order_acquire);
-  const auto publication = impl_->position->sequence.load(std::memory_order_acquire);
-  if (publication & 1u) return {};
-  NativePlaybackPositionNow position;
-  int64_t publishedAt = 0;
-  if (!impl_->position->snapshot(&position, &publishedAt) ||
-      (position.generation != active && (!outgoing || position.generation != outgoing)))
-    return {};
-  if (position.transportState != NativePlaybackTransportState::Playing &&
-      position.transportState != NativePlaybackTransportState::PreRoll &&
-      position.transportState != NativePlaybackTransportState::Paused)
-    return {};
-  const auto result = impl_->position->presentationHistory.query(hostTimeNs);
-  // The journal and position are published together at the end of the song
-  // block. A concurrent reset/swap must miss rather than mix incarnations.
-  if (result.latestGeneration != position.generation ||
-      active != impl_->activeGeneration.load(std::memory_order_acquire) ||
-      publication != impl_->position->sequence.load(std::memory_order_acquire))
-    return {};
-  return result;
-}
-
-PlaybackPresentationQuery
 NativePlaybackSession::presentationQuery(uint64_t hostTimeNs) const {
   // Ordinary audio-process control thread only. The RT writer never takes
   // this lock. It protects graph lifetime while latency is read below.
@@ -8819,6 +8886,12 @@ NativePlaybackSession::OutputMeter NativePlaybackSession::outputMeter() const no
     std::unique_lock<std::mutex> lock(impl_->mutex, std::try_to_lock);
     if (!lock.owns_lock()) return {};
     const auto *graph = impl_->renderingGraph();
+    if (graph != nullptr && graph->serviceOwnsMasterGain)
+      return graph->serviceOutputMeter();
+    if (graph == nullptr && impl_->serviceMasterMeterUsed) {
+      const auto meter = sharedAudioService().outputMeter();
+      return {true, 0, meter.peak, 0, meter.rms};
+    }
     if (graph == nullptr || graph->callback.outputLimiter.state == nullptr) return {};
     return {true, graph->transportGeneration,
             graph->callback.outputPeak.load(std::memory_order_relaxed),

@@ -22,6 +22,7 @@ const { assertOpenedProject, clickLibrarySong, libraryName } = require('./librar
 const { holdProjects } = require('./project-hold.cjs');
 const { renameSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs');
 const { tmpdir, homedir } = require('node:os');
 
 const PROJECT = process.env.E2E_PROJECT ?? 'Wanted Dead Or Alive';
@@ -58,7 +59,7 @@ const MMS = join(
       args: [APP],
       // silent, and never touch the real Drive; hooks, because
       // assertOpenedProject reads the opened lanes off __test
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
+      env: { ...process.env, ...scratchProfileEnv({ projectsRoot: ROOT }), SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
     });
     await quietLaunch(app); // measurement runs must not steal the singer's focus
     const win = await app.firstWindow();

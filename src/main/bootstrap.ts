@@ -8,6 +8,7 @@ import {
 } from '../shared/product-identity'
 import { requestedRendererSurface } from './launch-surface'
 import { configureBoxAudioHostProfile } from './box-audio/profile'
+import { migrateDesktopProfile } from './desktop-profile'
 
 function packagedProductIdentity(): ProductIdentity {
   try {
@@ -18,7 +19,8 @@ function packagedProductIdentity(): ProductIdentity {
   }
 }
 
-function configureProductIdentity(argv: readonly string[], env: NodeJS.ProcessEnv): ProductIdentity {
+function configureProductIdentity(argv: readonly string[], env: NodeJS.ProcessEnv): string[] {
+  const warnings: string[] = []
   const product = requestedRendererSurface(argv, env, packagedProductIdentity())
   const identity = PRODUCT_IDENTITIES[product]
   if (product === 'box') {
@@ -33,10 +35,15 @@ function configureProductIdentity(argv: readonly string[], env: NodeJS.ProcessEn
     mkdirSync(userData, { recursive: true, mode: 0o700 })
     app.setPath('userData', userData)
     app.setPath('sessionData', userData)
-  } else if (env.SINGZ_USERDATA_DIR) {
-    app.setPath('userData', resolve(env.SINGZ_USERDATA_DIR))
+  } else {
+    const userData = env.SINGZ_USERDATA_DIR
+      ? resolve(env.SINGZ_USERDATA_DIR)
+      : migrateDesktopProfile(app.getPath('appData'), { warn: message => warnings.push(message) })
+    mkdirSync(userData, { recursive: true, mode: 0o700 })
+    app.setPath('userData', userData)
+    app.setPath('sessionData', userData)
   }
-  return product
+  return warnings
 }
 
 export async function bootstrap(): Promise<void> {
@@ -57,7 +64,12 @@ export async function bootstrap(): Promise<void> {
     })
     return
   }
-  configureProductIdentity(process.argv, process.env)
+  const warnings = configureProductIdentity(process.argv, process.env)
+  if (warnings.length) {
+    // Log only AFTER selecting userData: logging opens files in that directory.
+    const { log } = await import('./log')
+    for (const warning of warnings) log('profile', warning, 'warn')
+  }
   await import('./index')
 }
 

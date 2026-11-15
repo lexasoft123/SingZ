@@ -2,9 +2,13 @@
 // test exports or environment switches are introduced.
 #include <node_api.h>
 static void installFakeInput();
+static napi_value addOwnershipFixtureExports(napi_env, napi_value);
 #undef NAPI_MODULE
-#define NAPI_MODULE(modname, regfunc) NAPI_MODULE_INIT() { installFakeInput(); return regfunc(env, exports); }
-#include "native/electron/capture_addon.cpp"
+#define NAPI_MODULE(modname, regfunc) NAPI_MODULE_INIT() { installFakeInput(); return addOwnershipFixtureExports(env, regfunc(env, exports)); }
+#ifndef SINGZ_CAPTURE_ADDON_SOURCE
+#define SINGZ_CAPTURE_ADDON_SOURCE "native/electron/capture_addon.cpp"
+#endif
+#include SINGZ_CAPTURE_ADDON_SOURCE
 #include <zcore/device/audio_input_backend.h>
 #include <zcore/device/audio_host_fake.h>
 
@@ -41,6 +45,36 @@ std::unique_ptr<singz::AudioInputBackend> fakeInput() { return std::make_unique<
 }
 static void installFakeInput() {
   singz::setAudioInputBackendForTests(fakeInput, {});
+  (void)singz::sharedVoiceMonitorCapture(fakeInput);
   const auto result = singz::sharedAudioService().configureProvider(singz::createFakeAudioHostBackend(), "latency-fixture");
   if (!result.ok) throw std::runtime_error("could not install latency fixture output");
+}
+
+// Test-only probes use the real addon-wide arbitration object; production
+// exposes none of these methods.
+static napi_value fixtureOwnership(napi_env env, napi_callback_info) {
+  const auto held = nativeAudioOwnership.snapshot();
+  return stringValue(env, held.kind == singz::NativeAudioOwnerKind::Capture
+      ? std::to_string(held.generation) : "0");
+}
+static napi_value fixtureCanAcquire(napi_env env, napi_callback_info) {
+  constexpr uint64_t otherGeneration = 987654321;
+  const bool acquired = nativeAudioOwnership.acquire(singz::NativeAudioOwnerKind::Capture,
+      otherGeneration) == singz::NativeAudioAcquireResult::Acquired;
+  if (acquired) nativeAudioOwnership.release(singz::NativeAudioOwnerKind::Capture, otherGeneration);
+  return boolValue(env, acquired);
+}
+static napi_value fixtureForceCleanup(napi_env env, napi_callback_info) {
+  std::lock_guard<std::mutex> lock(owner.mutex);
+  stopLocked(owner.generation, true);
+  return undefined(env);
+}
+static napi_value addOwnershipFixtureExports(napi_env env, napi_value exports) {
+  const napi_property_descriptor properties[] = {
+    {"fixtureCaptureOwnership", nullptr, fixtureOwnership, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"fixtureCanAcquireCapture", nullptr, fixtureCanAcquire, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"fixtureForceCaptureCleanup", nullptr, fixtureForceCleanup, nullptr, nullptr, nullptr, napi_default, nullptr},
+  };
+  napi_define_properties(env, exports, std::size(properties), properties);
+  return exports;
 }

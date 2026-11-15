@@ -229,8 +229,8 @@ compile error.
 
 ### The desktop: a different contract
 
-Seventeen addon exports, fifteen with an IPC channel and a preload method, two
-with neither.
+Nineteen addon exports: sixteen have an IPC channel and preload method, one
+is internal to main, and two are dormant.
 
 | export | IPC channel | preload |
 |---|---|---|
@@ -246,7 +246,9 @@ with neither.
 | `reanchorPlayback` | `audio-host:playback-reanchor` | `reanchorDesktopPlayback` |
 | `setPlaybackLane` | `audio-host:playback-lane` | `setDesktopPlaybackLane` |
 | `setPlaybackMasterGain` | `audio-host:playback-master` | `setDesktopPlaybackMasterGain` |
+| `previewClick` | `audio-host:preview-click` | `previewDesktopClick` |
 | `playbackStatus` | `audio-host:playback-status` | `desktopPlaybackStatus` |
+| `presentationQuery` | **none (internal)** | **none** |
 | `unloadPlayback` | `audio-host:playback-unload` | `unloadDesktopPlayback` |
 | `unloadPlaybackRetainingLanes` | **none** | **none** |
 | `playbackLanePeaks` | **none** | **none** |
@@ -277,9 +279,40 @@ served from main-process state, which `src/main/capture.ts` assembles by
 calling `audioHostProviders` and `playbackStatus`.
 
 Absent on the desktop entirely: `session`, `configureOutputSession`,
-`previewClick`, and any training toggle. The desktop's transport is per-command
+and any training toggle. The desktop's transport is per-command
 rather than one `transport(command)` call, and its `mediaCodec` block is
 assembled in TypeScript (`capture.ts`) rather than read from the addon.
+
+### Desktop idle click preview and training route latency (ADR 0015 WP1b)
+
+Desktop `previewClick(accent, gain)` is a shared-service client, independent of
+song generation. Accent is boolean and gain is the metronome's linear 0..4
+client level. It opens the selected common output when idle and renders while
+a song is paused, without advancing that song or changing the host's buffer
+policy. Sixteen queued/active 55-ms one-shots are the total bound; overflow
+returns `queue-full`. Invalid input returns `invalid-configuration`; output
+failure returns `output-unavailable`. The renderer returns a typed failure and
+never falls back to Chromium after a native refusal. The temporary legacy
+preview remains only when the native entry and native owner are both absent.
+
+`PreviewClickMixer` prepares ordinary/accent PCM at 48 kHz using the timbres
+in §10 and interpolates it at the current output rate. Queue and voices have
+fixed storage; the callback neither allocates nor locks. Its client level is
+applied before the shared service master ramp and final ceiling, so app volume
+is applied once. `trainingCueStatus().previewClicks` publishes decimal-string
+enqueued/started/completed counters and numeric pending count independently of
+song lifetime. The hardware driver is `tests/e2e/idle-click-preview-smoke.cjs`.
+
+`trainingCueStatus().routeLatency` is an immutable ADR 0004 snapshot projected
+from one native host status, or null when no live output exists. It carries
+interface version, V1 struct size, route generation, platform-reported provenance, confidence, flags,
+measurement time, automatic/render/external/user-trim nanoseconds and the
+native-composed `graphToAudibleNs`; all 64-bit values cross as decimal strings.
+Native uses `composeRouteLatency` with `AutomaticComplete`, so explanatory
+components are never added twice. Scheduling requires a snapshot and returns
+that same object with its cue receipt. Training's audible deadlines use only
+`graphToAudibleNs / 1e9`, including any already-composed signed trim; no
+Chromium `outputLatency` or `baseLatency` participates.
 
 ## 4. What goes down
 
@@ -309,6 +342,44 @@ once a sample rate is fixed.
 | `swapFromGeneration` | generation | the generation this prepare replaces as a seam on its running stream; `0`/absent = a fresh start. One more positional JNI argument on Android; a config key on the desktop | no |
 | `streamLanes` | bool | play the lanes straight out of their FLAC instead of decoding first (`config.streamLanes` in the core); absent = decode. A `parseBool` on iOS, a `jboolean` on Android, an optional bool config key on the desktop — the desktop bridge did not accept it until 0.21.1, which is why the desktop decoded six lanes for seconds on a Play the graph prepared ahead could not serve. The desktop sends it by default on macOS and Windows (`desktopStreamLanesPreferred`); Windows joined once the streaming source's `readAt` became a positioned `ReadFile` — the prepare dups a second descriptor per lane for the waveform pass, and seek+read on the shared file position was a race between the two threads | no |
 | `graphDocument` | — | `{format: 1, engine: "singz-dsp", nodes, connections}` | no |
+
+Desktop `setPlaybackMasterGain(0, gain)` updates the process-wide shared-service
+master even without a song and never opens a device. Positive generations keep
+the song ownership and stale-generation checks, update its reported master value,
+and publish that value to the same service master. Main applies `SINGZ_MUTE` to
+both forms. The desktop bridge sets the internal `serviceOwnsMasterGain` prepare
+flag: the graph's app gain stays unity and its final output limiter uses
+meter-only processing, so app attenuation happens before the safety ceiling. Graph-authored trim and internal
+limiter effects stay active. Other products retain their in-graph gain and
+output limiter. The service's -1 dBFS ceiling is final for every service-owned
+master, including custom documents whose output limiter authors a higher
+ceiling (such as 1.0); that final authored ceiling is replaced by the service's.
+Training PCM carries only its reference/client level, with no second app-volume
+factor. After song, training and microphone clients sum, the service applies a
+128-frame linear master ramp followed by an in-place -1 dBFS hard ceiling.
+For service-owned masters, `outputPeak`, `outputClippedBlocks` and output RMS
+come from this final shared bus, including cues and microphone clients: peak
+and RMS are post-ceiling (peak caps at -1 dBFS), and a callback counts as clipped
+only if its post-gain signal is `> ceiling`; equality is not clipping (the old
+graph detection used `>=`). Peak keeps the existing 20 dB/s release. Polling
+never consumes the saturating clip count; each graph starts a fresh count on
+its first rendered block (including a swap landing), while pause, seek and
+reopening that same graph retain it. Preparing a candidate does not reset the
+active meter. The final pass publishes only into the graph admitted in that
+callback, whose gate remains held through publication. Confirmed stop freezes
+that graph's count; subsequent idle callbacks cannot alter it, and reopening
+the same graph resumes counting without importing intervening idle clips.
+With no graph, the per-generation status/getter and desktop RPC
+keep the idle service peak/RMS but report zero clipped blocks. The service's
+lifetime total remains internal diagnostics and never enters the song clip
+indicator. Non-service products retain their graph meter.
+This stage has no lookahead, storage delay or effect on graph/output latency,
+callback timestamps, presentation history or take placement. The legacy second
+monitor host remains outside this stage until the common-host migration lands.
+The device-free Node-API regression can be run against a current addon with
+`node tests/e2e/service-master-addon-smoke.cjs <path-to-singz-capture.node>`;
+it proves both zero generation encodings reach the service and invalid values
+and stale positive generations remain refused.
 
 `playback.transport` is `{entrySeconds, durationSeconds, playbackRate,
 transposeSemitones, countInAnchorSeconds?}` — seconds, a ratio, semitones, and
@@ -937,8 +1008,10 @@ silently.
 The catch is that **both legacy engines** restate three of them by hand, and
 those copies do not move when the core does. The click synthesis appears
 verbatim in `src/renderer/src/audio/engine.ts` (`makeClickBuffers`, ~:787-799)
-and again in `mobile/src/engine.ts` (`ensureClickAudio`, ~:699-720) — three
-definitions of one timbre. The gridless count-in constants
+and again in `mobile/src/engine.ts` (`ensureClickAudio`, ~:699-720) — two
+legacy copies of the native timbre. The shared-service idle preview has its own
+fixed PCM table, compared directly with the canonical cue plan by
+`preview_click_tests`. The gridless count-in constants
 (`SEC_COUNT_TICKS`, `SEC_COUNT_PERIOD`) are in both files too, and both
 engines compute the training parity themselves. Change a click constant in the
 core and both legacy metronomes keep the old timbre — a difference a singer
@@ -1076,7 +1149,11 @@ unnoticed, and each is a candidate for its own change — none should be
 6. **The iOS schema checks fewer duplicates than Android's** — no duplicate
    lane id, no duplicate graph node id. Both are caught by the core, so this
    is an error-message difference, not a safety one.
-7. **`unloadPlaybackRetainingLanes` and `playbackLanePeaks` are dormant on the
+7. **`presentationQuery` is desktop-internal**, synchronous and live: main's
+   voice-take adapter calls it through the audio-process binding RPC. Its
+   manifest entry has `internal: true` and null `ipc`/`preload`; raw host-time
+   queries are not exposed to the renderer. Mobile method sets are unchanged.
+   **`unloadPlaybackRetainingLanes` and `playbackLanePeaks` are dormant on the
    desktop** — exported, never called.
 8. **Scalar bounds are restated two to four times** — in TypeScript, in each
    bridge schema, and in the core. The agreement fixture pins the values in
@@ -1086,7 +1163,7 @@ unnoticed, and each is a candidate for its own change — none should be
    desktop as a hardcoded `true`, the core from whether a cue plan exists.
 10. **Both legacy engines restate the click and the gridless count-in** —
     `src/renderer/src/audio/engine.ts` and `mobile/src/engine.ts`. One timbre,
-    three definitions, and nothing compares them.
+    with neither legacy copy compared against the canonical native plan.
 11. **The training parity is computed in seconds by both TypeScript engines**
     and in frames by the core, so the two can disagree by one block at a
     period boundary.
@@ -1143,3 +1220,232 @@ unnoticed, and each is a candidate for its own change — none should be
    worse than no pin, because it reads as coverage. For native tests, delete
    the object file first — a stale binary passes a test whose source you just
    changed.
+
+### Offline voice-take conform (ADR 0016)
+
+The desktop capture addon additionally exports `conformTake(inputPath,
+outputPath, request, jobId)` (four arguments, asynchronous) and
+`cancelTakeConform(jobId)` (one argument, synchronous, cooperative). They are
+control-plane binding RPCs used by `src/main/voice-take-conform.ts`, never render
+callbacks or renderer-facing file APIs. Native work runs on a libuv worker in
+SingZ Audio, with at most four pending jobs, an eight-minute work deadline and a ten-minute
+conform RPC deadline. A newer
+request for the same song cancels and drains the previous job before rendering.
+
+The portable `native/playback/take_conform` API accepts canonical PCM16 mono WAV
+and a strictly increasing take/project anchor map (both coordinates at the raw
+take rate), recorded pitch settings, ordered effects, placement, song duration
+(at output rate), and output rate. It produces a PCM16 mono lane at tempo-1
+project time. Each anchor interval is stretched by delta-project/delta-take;
+settings changes update the continuous processor for pitch compensation. The first pitch slot is
+fused into the stretch pass to avoid another phase-vocoder stage. `pitch-follow` applies
+`-recordedTranspose + manualOffsetSemitones` when enabled. Bypass leaves that
+slot inactive; the song bus still applies its ordinary
+`currentTranspose - 12*log2(currentTempo)` to every lane. `preserveFormants` uses the pinned Signalsmith backend's formant compensation
+(`setFormantFactor(1, true)`) in the offline pass. Current
+transport settings are never part of the conform cache key.
+
+Offline processing uses the same pinned Signalsmith 1.3.2 backend, cheaper
+preset, seed and tonality limit as `signalsmith_time_pitch.cpp`; it does not
+instantiate its equal-frame-count real-time ProcessorHandle. Blocks have
+unequal input/output counts. One instance retains phase across every anchor and
+settings change. Its input cursor follows
+`inverse(projectOutputFrame + outputLatency) + inputLatency`, including warm-up
+and zero-padded drain. At 48 kHz the latencies are 2400 input and 4320 output
+frames. Zero-pitch drift within 0.001 of unity uses direct interpolation; exact
+identity remains sample-equal. All other audio, including sparse impulses, goes
+through Signalsmith. Quiet input is normalised with gain restored at output;
+a fixed sub-PCM floor prevents the backend silence shortcut from dropping its
+clock. Output-rate conversion reproduces the pinned zCore polyphase coefficients,
+priming and delay, caching at most 1 MiB of coefficient phases. It never allocates a
+rate-pair-sized coefficient table.
+
+`conformTakeFile` reads the raw WAV in bounded blocks (one peak scan, then the
+render pass) and progressively writes a fresh temporary WAV. Only two 64 KiB
+input pages, a 64 KiB output buffer, DSP state and bounded converter scratch
+remain resident. No take-sized PCM is held. The WAV header is patched and the
+file synced before returning; cancellation, truncation or a changed source
+removes the temporary file. Failures carry `errorCode` (`take-too-long`,
+`memory-budget`, `path-too-long`, `conform-error`, or `cancelled`) and a diagnostic `detail`;
+`memory-budget` denotes file-size/cache admission, not a resident-PCM budget.
+The main wrapper preserves these as `ConformTakeError.code` and `.detail`. Input is limited to four hours and ordinary RIFF
+size bounds. Cache version `take-conform-3` shortens file names without changing PCM:
+frozen committed-v2 fixture comparisons still require byte-identical WAV output. Placement inserts silence or
+trims a negative head and never exceeds the song duration.
+
+The main wrapper validates ids and paths, reads asynchronously, and caches in a
+`.conform` subdirectory beside the take, hidden from orphan-WAV recovery. SHA-256 covers raw file identity (device/inode/size/nanosecond timestamps),
+anchors, recorded settings, ordered effects, placement, song duration, rate and
+algorithm version. Rendering uses a unique temporary file and rename; cancelled,
+failed or changed-source work is never published. Per-song cache bounds are eight
+lane entries and 8 GiB of disk storage; Windows files held by a playing lane remain charged to that
+budget until the next prune can unlink them. Space for a replacement is reserved
+before rendering; a full cache fails explicitly. Stale variants and deleted-take files are reclaimed
+on the next conform or explicit `invalidate`. Version 3 normally uses a
+16-hex key prefix plus `.wav` (20 characters), with the complete SHA-256 key,
+version and owning take id in a bounded adjacent `.json` record. A hit requires
+the full key; a prefix collision extends to 32/48/64 hex characters without
+overwriting a different lane. Both files count against the disk quota. Temporary
+WAV names contain only a 32-hex job id plus `.tmp` (36 characters); metadata
+uses the job id plus `.json.tmp`. Both are synced before rename, and a missing
+or malformed metadata record cannot produce a cache hit. Legacy long-named v2
+files are ignored and reclaimed by eviction (busy/pinned files remain charged).
+
+On Windows, main normalises drive/UNC/relative paths and uses the extended-length
+`\\?\` / `\\?\UNC\` namespace for every file operation, including publication
+and the final lane path returned to playback. The native conform API likewise
+normalises before namespacing and uses wide file APIs; it does not depend on the
+host long-path registry setting. The native session already opens the returned
+namespaced path with `_wopen`. Paths exceeding filesystem/component or binding UTF-8 limits
+return typed `path-too-long` with diagnostic detail through IPC. See Microsoft's
+[Windows path limits](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation).
+
+Take deletion/move callers may
+call `invalidate` for immediate reclamation. Cached PCM never crosses RPC.
+
+### Shared voice capture publication (ADR 0017 WP1)
+
+`sharedVoiceMonitorCapture()` owns the Desktop input backend used by ordinary
+capture. `VoiceMonitorCapture::retain`/`retainExisting` and `release` count arm,
+take and monitor users independently. Matching users share one physical open;
+a different retained route is refused. Releasing one user never stops another.
+The monitor client can retain `Monitor` with no delivery sink, independently of
+a take or song. The Box capture adapter keeps its existing path.
+
+The backend callback sends the original mono samples, first-sample timestamp,
+callback timestamp, quality and optional hardware `sourcePosition` to the
+preallocated take-delivery ring, then independently publishes the monitor
+`AudioHistory`. A full delivery ring still permits history publication. Neither
+publication allocates, locks, wakes a thread or calls the OS. Rejected monitor
+blocks/frames and delivery overruns have separate counters. The delivery thread
+polls at 1 ms; take writing and analysis remain delivery-thread consumers.
+Arm detach replaces the analysis sink behind a delivery barrier; an active take
+retains its capture and take-only sink until finish/cancel. Capture opening does
+not request microphone permission; Speaker-on must use the existing main mic
+access gesture before retaining the monitor.
+
+The service client borrows `capture.source()` and owns a `VoiceMonitorReader`
+per serial output callback. `source.render(block, mono, capacity, queueFrames,
+reader)` reads at output presentation time minus the explicit source-frame
+queue, using the measured output clock and slices of at most 256 frames. Zero
+queue selects the current floor; smaller explicit queues are rejected as counted
+silence. Missing history is counted zero output, never a host failure. The caller
+adds this mono signal through the monitor gain/ramp leaf to the common service.
+The source does not depend on a song graph, and starting it does not open output.
+
+The floor is `max(lookback, ceil(2*outputPeriod*sourceRate/outputRate)+256,
+inputPeriod+jitterMargin)` in source frames. The reader derives FIR lookback
+from the rate ratio; the default jitter margin is 128 source frames. The opening
+input period is retained and raised when a larger capture block is observed;
+providers omitting that metadata establish an observed period on the first
+block. A provider concealing extra buffering still needs route qualification.
+Only this monitor history opts into `SampleClockPhaseConfig{2,8}`. Raw delivery
+and take timestamps are unchanged; transport frame counts never substitute for
+an authoritative hardware position. Source statistics are cumulative, and
+control must join capture before `prepare`/`stop`; output readers may continue
+reading counted silence while capture is stopped.
+
+### Desktop stem paths and finite-burst seam evidence
+
+Stem paths remain ordinary drive/UNC paths in project identity, save metadata,
+custom-track comparisons, media authorization and the sync dirty ledger. Main
+normalises both ordinary and namespaced representations to the same key. Only
+Node/native IO gets the Windows extended namespace. Measurement and prepare use
+the same wide descriptor opener; streaming and decoded lanes subsequently own
+that descriptor, so neither decoder nor feeder reopens a narrow filename.
+The analyzer likewise converts Windows command-line arguments to UTF-8 and
+normalises WAV/FLAC/f32/control paths at its file boundary. No long-path registry
+opt-in is needed. A 300-character-directory fixture exercises measurement and
+decode; a forced legacy MAX_PATH opener is rejected by its negative control.
+`path-too-long` denotes the 32767 UTF-16-unit extended limit, while an invalid
+component is `invalid-path`; a 32-KiB UTF-8 byte count is not a path limit.
+
+The ADR 0016 48-kHz fixture has 20-ms, 1-kHz tapered bursts at take 1, 3.9,
+4.1 and 7 seconds around a 1x-to-0.5x seam at 4 seconds. With the pinned cheaper
+Signalsmith preset, measured energy-centroid errors are -0.0106, -0.0106,
++2.3454 and +0.3541 ms. Impulses at the same centres have zero peak displacement
+and at most 0.0049 ms energy-centroid error. Thus a common latency-offset change
+would move already-aligned impulses; the finite tone-envelope response differs
+from the source clock. The portable fixture and UI driver use a 3-ms centroid
+bound for these bursts, still rejecting a 5-ms displaced expectation. This is a
+fixture-specific envelope bound, not an arbitrary-audio timing guarantee. The
+1-ms impulse-alignment requirement remains. PCM output and take-conform-3 cache
+semantics are unchanged.
+
+
+### Desktop hardware buffer preference
+
+Settings > Audio has one CoreAudio buffer selector, initially 128 frames. Its
+16–4096 power-of-two choices intersect the connected output and input ranges
+(and their fundamental frame alignment). Labels show one buffer at the current
+device rates; they do not estimate total monitoring latency. Preferences live in
+settings.json by native device UID and survive disconnect/reconnect. Unavailable
+saved sizes remain visible; unknown ranges keep device negotiation unchanged.
+Windows/WASAPI and Linux/ALSA do not expose this CoreAudio-only control.
+
+The audio utility process publishes one opening policy to SharedAudioService.
+The silent base host, song host, preview/analysis input, shared monitor input,
+and take capture/playback all use that policy through zCore's buffer ledger.
+An active capture retains its opening policy when a monitor or take joins.
+No callback allocates or reads preferences. Input devices negotiate when used;
+the idle output reopens immediately when a new preference can be published.
+
+A buffer change reopens the output and active input immediately, including
+playing/paused/prepared songs, preview/analysis, monitor and queued cues. The
+control transaction joins the whole service callback before releasing either
+ledger lease, preserves each renderer/gate and capture user/sink, and opens the
+same route at the new period. Song position, transport commands and DSP cursors
+remain in their existing renderer. The service maps the new physical host's
+frame/stream epoch onto the continuous song/cue clock only for this confirmed
+same-format reopen. Physical timestamps/epochs still reach the monitor and
+native diagnostics. Monitor history resets and its existing gain fades back in;
+the common master also fades in over 128 frames. Queued cue onsets move by the
+gap measured at the first resumed callback, including device startup, so short
+notes are not skipped. Cues scheduled after reopening retain their new deadlines;
+playing cues keep their
+sample cursors. A failed open/start restores the old buffer, input and owner
+states and returns status.error. An unsuccessful output rollback stops the
+incompatible song and independently resumes retained capture at the old period.
+Capture failure publishes Error so the monitor stops and Arm reports a failure.
+The service gate and attached training renderer remain ready for a later healthy
+output reopen.
+
+Only a recording take defers a change. Restarting capture creates a new source
+epoch and a real wall-time gap. The current writer closes its input gate when
+capture stops (its device-loss predicate), and its hardware gap padding follows
+wall time while this transaction freezes the song clock. Padding alone therefore
+cannot preserve the take-to-song placement timeline. The take writer is left
+untouched until finish/cancel, whose RPC applies the saved change immediately
+after releasing the Take reference, even if Arm/Monitor/preview remain active.
+The pending UI notice is specific to take recording. There is no 250-ms settings
+pump. Main receives failed deferred-apply recovery preferences even after
+Settings closes, and restores their persisted values. Requested and obtained
+input/output periods remain visible in Settings and change-gated logs.
+
+Portable tests use fake HAL properties with the real zCore ledger: eight owner
+combinations, output-open/input-open/output-start rollback, recording protection,
+queued cue preservation, concurrent output callbacks during six reopens, real
+NativePlaybackSession pause/resume at unity and with transpose, and byte-exact
+protected take PCM with no lost-device or gap receipt.
+Negative controls reintroduce deferral, drop cue delay, lose client clock
+continuity or omit input restart. Real-device qualification still needs obtained
+32/64/128 frames, controlled-glitch behavior and measured monitor latency;
+portable tests do not qualify driver behavior.
+
+### Voice lane and common monitor after removal (ADR 0016 WP5 / 0017 WP6)
+
+Takes play only as the transient `voice:take` lane under normal transport.
+The standalone take replay exports, IPC and preload methods are removed, along
+with the training mixer's file reader, presentation-provider hook and callback-only
+session query. The control-thread presentation query used for recording remains. Training
+cues retain their existing shared-output callback and cancellation semantics.
+
+The monitor is `CommonVoiceMonitor`, fed by shared capture history and added
+before the common master gain and limiter. There is no second output host,
+monitor output selector/candidate list or monitor-driven song buffer retune.
+Main/preload monitor requests carry input, gain and on/off only (plus the
+existing common-output context publication); state carries `commonOutputName`
+for route display. Native diagnostics retain input/output UIDs, channel map,
+stream generations, periods, history counters and callback timing counters.
+The common monitor's source, client, clock and waveform tests and mutation
+controls remain mandatory in all three native presets.

@@ -22,7 +22,9 @@ RecordPlacementResult recordPlacement(const PlaybackPresentationHistory &history
   result.alignedHostNs = input.firstSampleHostNs - static_cast<uint64_t>(delayNs);
   const auto point = history.query(result.alignedHostNs);
   result.discontinuitySerial = point.discontinuitySerial;
-  if (point.nonAffine || (point.found && input.hasInitialDiscontinuitySerial &&
+  result.faultSerial = point.faultSerial;
+  if (point.nonAffine || (point.found && input.hasInitialFaultSerial && point.faultSerial != input.initialFaultSerial) ||
+      (point.found && !input.hasInitialFaultSerial && input.hasInitialDiscontinuitySerial &&
                          point.discontinuitySerial != input.initialDiscontinuitySerial)) {
     result.fault = RecordPlacementFault::SeekDuringTake;
   } else if (!point.found) {

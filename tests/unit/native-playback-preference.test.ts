@@ -1,44 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { sanitizeAudioPrefs } from '../../src/renderer/src/model'
 import {
-  DESKTOP_NATIVE_PLAYBACK_KEY,
   DESKTOP_STREAM_LANES_KEY,
-  desktopNativePlaybackPreferred,
   desktopStreamLanesPreferred,
   detectedDesktopPlatform
 } from '../../src/renderer/src/audio/native-playback-preference'
 
-/* The one place the desktop's native default is decided (2026-09-06: native on
- * macOS, Web Audio elsewhere), read identically by the engine's prepare-ahead,
- * the facade's backend choice and the settings state at first run. A stored
- * choice wins on every platform; only the singer who never touched the switch
- * gets the platform default. */
 describe('desktop native playback preference', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  const storage = (value: string | null) => ({
-    getItem: (key: string) => (key === DESKTOP_NATIVE_PLAYBACK_KEY ? value : null)
-  })
-
-  it.each(['darwin', 'win32', 'other'] as const)('keeps a stored choice on %s', (platform) => {
-    vi.stubGlobal('localStorage', storage('1'))
-    expect(desktopNativePlaybackPreferred(platform)).toBe(true)
-    vi.stubGlobal('localStorage', storage('0'))
-    expect(desktopNativePlaybackPreferred(platform)).toBe(false)
-  })
-
-  it('defaults to native on the two platforms whose session harness has run', () => {
-    vi.stubGlobal('localStorage', storage(null))
-    expect(desktopNativePlaybackPreferred('darwin')).toBe(true)
-    expect(desktopNativePlaybackPreferred('win32')).toBe(true)
-    // Linux has never run the session harness; it stays on Web Audio.
-    expect(desktopNativePlaybackPreferred('other')).toBe(false)
-  })
-
-  it('treats a missing localStorage as no stored choice', () => {
-    vi.stubGlobal('localStorage', undefined)
-    expect(desktopNativePlaybackPreferred('darwin')).toBe(true)
-    expect(desktopNativePlaybackPreferred('win32')).toBe(true)
-    expect(desktopNativePlaybackPreferred('other')).toBe(false)
+  it('drops both legacy AudioPrefs toggle values', () => {
+    expect(sanitizeAudioPrefs({ nativePlayback: true })).toEqual({})
+    expect(sanitizeAudioPrefs({ nativePlayback: false })).toEqual({})
   })
 
   it('names the platform the way the backend selector does', () => {

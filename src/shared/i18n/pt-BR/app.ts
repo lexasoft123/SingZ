@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "Dispositivo de reprodução salvo desconectado — usando o padrão do sistema",
   "app.output.switchDenied": "O SingZ não podia mudar o dispositivo de reprodução — ainda no anterior.",
   "app.output.switchFailed": "Não foi possível mudar para aquele dispositivo — ainda está no anterior.",
-  "app.monitor.stopped": "Monitoramento do fone de ouvido desativado: {message}",
   "app.native.beatNotApplied": "A atualização nativa da grade de ritmo não foi aplicada: {error}",
   "app.native.metronomeNotApplied": "A atualização nativa do metrônomo não foi aplicada: {error}",
   "app.native.transposeNotApplied": "A atualização nativa de transposição não foi aplicada: {error}",

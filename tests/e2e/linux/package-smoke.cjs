@@ -40,9 +40,9 @@ async function mix() { return page.evaluate(() => Object.fromEntries(__test.trac
 async function lane(id) { const index = await page.evaluate(id => __test.tracks.findIndex(t => t.id === id), id); assert.ok(index >= 0, id); return page.locator('.lane-controls').nth(index) }
 async function close() { if (!app) return; await app.close(); app = null; page = null }
 async function launch(offline = false) {
-  const env = { ...process.env, XDG_CONFIG_HOME: path.join(scratch, 'config'), SINGZ_MUTE: hasSilentLoopback ? '' : '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en', LANGUAGE: 'en', LANG: 'C.UTF-8', SINGZ_GDRIVE_CONFIG: JSON.stringify(drive.config) }
+  const env = { ...process.env, SINGZ_USERDATA_DIR: profile, XDG_CONFIG_HOME: path.join(scratch, 'config'), SINGZ_MUTE: hasSilentLoopback ? '' : '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1', SINGZ_LANG: 'en', LANGUAGE: 'en', LANG: 'C.UTF-8', SINGZ_GDRIVE_CONFIG: JSON.stringify(drive.config) }
   for (const key of ['SINGZ_PACK_DIR', 'SINGZ_MODELS_DIR', 'PYTHONPATH', 'PYTHONHOME']) delete env[key]
-  app = await _electron.launch({ executablePath: executable, chromiumSandbox: true, args: ['--mute-audio', '--ozone-platform=' + ozone, '--user-data-dir=' + profile], env, timeout: 60000 })
+  app = await _electron.launch({ executablePath: executable, chromiumSandbox: true, args: ['--mute-audio', '--ozone-platform=' + ozone], env, timeout: 60000 })
   await app.evaluate(({ app, session }, { base, offline }) => {
     global.__network = []; global.__originalFetch = global.fetch
     global.fetch = async (url, init) => {
@@ -249,56 +249,6 @@ async function run() {
     await page.waitForFunction(before => __test.engine.position > before + 0.2 && !__test.engine.playbackError, result.forcedTerminal.position)
     await nativeHealth(); await pause()
     record('real ALSA underrun stops stale Playing telemetry; explicit Play cleans up and resumes')
-  })
-  if (native) await step('headphone monitor handoff, gain, channel switch and playback reacquisition', 120, async () => {
-    assert.ok(route.output.uid.includes('snd_aloop'))
-    const card = process.env.SINGZ_E2E_ALSA_CARD || 'SingZLoop'
-    assert.match(card, /^[A-Za-z0-9_-]+$/)
-    const signal = Buffer.alloc(48000 * 100 * 8)
-    for (let n = 0; n < 48000 * 100; n++) { signal.writeFloatLE(0.04 * Math.sin(2 * Math.PI * 220 * n / 48000), n * 8); signal.writeFloatLE(0.04 * Math.sin(2 * Math.PI * 330 * n / 48000), n * 8 + 4) }
-    const args = ['-D', `hw:${card},1,0`, '-t', 'raw', '-f', 'FLOAT_LE', '-c', '2', '-r', '48000', '--period-size=512', '--buffer-size=2048']
-    const chunks = []; let retained = 0, received = 0, feedError = '', tapError = ''
-    result.monitorIO = { feedError: '', tapError: '' }
-    const startTap = () => {
-      chunks.length = 0; retained = 0
-      // Open the peer capture only after the monitor owns/runs its output.
-      // ALSA loopback tears the old peer down during the song/monitor handoff.
-      tap = spawn('arecord', [...args, '-d', '100'], { stdio: ['ignore', 'pipe', 'pipe'] })
-      tap.stdout.on('data', b => { chunks.push(b); retained += b.length; received += b.length; while (retained > 48000 * 8 * 3 && chunks.length > 1) retained -= chunks.shift().length })
-      tap.stderr.on('data', b => { tapError += b; result.monitorIO.tapError = tapError })
-    }
-    const stopTap = async () => {
-      if (!tap) return
-      const tapProcess = tap; tap = null
-      if (tapProcess.exitCode !== null || tapProcess.signalCode !== null) return
-      await new Promise(resolve => { tapProcess.once('close', resolve); tapProcess.kill('SIGTERM') })
-    }
-    generator = spawn('aplay', args, { stdio: ['pipe', 'ignore', 'pipe'] }); generator.stderr.on('data', b => { feedError += b; result.monitorIO.feedError = feedError }); generator.stdin.on('error', () => {}); generator.stdin.end(signal)
-    const stats = () => {
-      const bytes = Buffer.concat(chunks), count = Math.min(24000, Math.floor(bytes.length / 8)), start = bytes.length - count * 8
-      assert.ok(count > 2000, `monitor output tap has PCM: ${tapError}; feed: ${feedError}`)
-      let squares = [0, 0]; const tones = []
-      for (let i = 0; i < count; i++) for (let c = 0; c < 2; c++) { const v = bytes.readFloatLE(start + i * 8 + c * 4); assert.ok(Number.isFinite(v)); squares[c] += v * v }
-      for (const frequency of [220, 330]) { let re = 0, im = 0; for (let i = 0; i < count; i++) { const v = bytes.readFloatLE(start + i * 8); re += v * Math.cos(2 * Math.PI * frequency * i / 48000); im += v * Math.sin(2 * Math.PI * frequency * i / 48000) } tones.push(Math.hypot(re, im) * 2 / count) }
-      return { rms: squares.map(n => Math.sqrt(n / count)), tones, received }
-    }
-    await page.locator('[data-guide="settings"]').click()
-    await page.locator('#settings-input').selectOption(route.output.uid); await page.locator('#settings-input-channel').selectOption('0'); await page.locator('#monitor-output').selectOption(route.output.uid)
-    await page.keyboard.press('Escape'); await page.evaluate(() => __test.engine.seek(1)); await clickPlay()
-    await page.locator('[data-guide="settings"]').click(); await page.locator('.monitor-headphones-check input').check(); await page.getByRole('button', { name: 'Start monitoring', exact: true }).click()
-    await page.waitForFunction(async () => { const s = await window.singz.monitorStatus(); return s.active && s.enabled }, null, { timeout: 20000 })
-    assert.equal(await page.evaluate(() => __test.engine.nativeActive || __test.engine.playing), false, 'monitor retires song graph')
-    startTap()
-    await page.locator('#monitor-gain').fill('-6'); await sleep(900); const loud = stats(); for (const rms of loud.rms) assert.ok(Math.abs(rms - 0.04 / Math.sqrt(2) * Math.pow(10, -6 / 20)) < 0.003); assert.ok(loud.tones[0] > loud.tones[1] * 10)
-    await page.locator('#monitor-gain').fill('-18'); await sleep(900); const quiet = stats(); for (let c = 0; c < 2; c++) assert.ok(Math.abs(quiet.rms[c] / loud.rms[c] - Math.pow(10, -12 / 20)) < 0.03)
-    const status = await page.evaluate(() => window.singz.monitorStatus()); assert.equal(status.active, true); assert.equal(status.enabled, true); assert.equal(status.state, 'running'); assert.equal(status.xruns, '0'); assert.ok(BigInt(status.callbacks) > 0n); assert.equal(status.adapterRenderFailures, 0); assert.equal(status.terminalRenderFailures, 0)
-    await stopTap(); await page.getByRole('button', { name: 'Stop monitoring', exact: true }).click(); await page.waitForFunction(async () => !(await window.singz.monitorStatus()).active)
-    await page.locator('#settings-input-channel').selectOption('1'); await page.locator('.monitor-headphones-check input').check(); await page.getByRole('button', { name: 'Start monitoring', exact: true }).click(); await page.waitForFunction(async () => (await window.singz.monitorStatus()).active); startTap(); await sleep(900)
-    const channelTwo = stats(); assert.ok(channelTwo.tones[1] > channelTwo.tones[0] * 10)
-    await stopTap(); await page.getByRole('button', { name: 'Stop monitoring', exact: true }).click(); await page.waitForFunction(async () => !(await window.singz.monitorStatus()).active); assert.equal(await page.evaluate(() => __test.playing), false)
-    await shot('monitor-stopped'); await page.keyboard.press('Escape'); await page.evaluate(() => __test.engine.seek(1)); await clickPlay(); await page.waitForFunction(() => __test.engine.nativeActive && __test.engine.position > 1.2); await pause()
-    generator.stdin.destroy(); generator.kill('SIGTERM'); generator = null; await stopTap()
-    result.monitor = { loud, quiet, channelTwo, status, feedError, tapError }; record('monitor handoff, -6/-18dB gain ratio, 220/330Hz channel selection and song output reacquisition')
   })
   await step('cold restart offline preserves six downloaded stems, lyrics and non-default mix', 120, async () => {
     const oldPid = app.process().pid; await close(); await launch(true); assert.notEqual(app.process().pid, oldPid)

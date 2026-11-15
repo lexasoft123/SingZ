@@ -1,3 +1,4 @@
+import { nativeRouteLatency } from '../shared/native-route-latency'
 import { app } from 'electron'
 import { EventEmitter } from 'node:events'
 import type { WebContents } from 'electron'
@@ -97,7 +98,7 @@ describe('persistent desktop microphone lifecycle', () => {
       cancelCapture: vi.fn(() => ({ ok: true, cancelled: true })),
       captureState: () => ({ state: 'running', error: '' }),
       scheduleTrainingCue: vi.fn((_config: unknown, _generation: unknown) => ({ ok: true, startHostTimeNs: '1000000000', durationMs: 100 })),
-      trainingCueStatus: () => ({ hostTimeNs: '950000000', outputLatencyMs: 20 }),
+      trainingCueStatus: () => ({ hostTimeNs: '950000000', outputLatencyMs: 20, routeLatency: nativeRouteLatency('20000000') }),
       setTrainingCueGain: vi.fn((_generation: unknown, _gain: unknown) => ({ ok: true })),
       cancelTrainingCues: vi.fn(() => ({ ok: true }))
     }
@@ -182,13 +183,21 @@ describe('persistent desktop microphone lifecycle', () => {
     expect(binding.beginCapture).not.toHaveBeenCalled()
   })
 
+  it('cancels a scheduled cue when the native route snapshot is unavailable', async () => {
+    const { input, binding } = fixture()
+    vi.spyOn(binding, 'trainingCueStatus').mockReturnValue({ hostTimeNs: '950000000', outputLatencyMs: 999, routeLatency: null } as never)
+    const result = await input.cue({ generation: '1', channels: [new Float32Array(480)], sampleRate: 48000, startDelayMs: 50, gain: 1 })
+    expect(result).toMatchObject({ ok: false, error: 'The native training route has no latency snapshot.' })
+    expect(binding.cancelTrainingCues).toHaveBeenCalledWith(1n)
+  })
+
   it('rejects oversized IPC generations and mutes every native cue under SINGZ_MUTE', async () => {
     const { input, binding } = fixture()
     const config = { generation: '1', channels: [new Float32Array(480)], sampleRate: 48000, startDelayMs: 50, gain: 1 }
     expect((await input.cue({ ...config, generation: String(1n << 64n) })).ok).toBe(false)
     expect(binding.scheduleTrainingCue).not.toHaveBeenCalled()
     vi.stubEnv('SINGZ_MUTE', '1')
-    expect(await input.cue(config)).toMatchObject({ ok: true, startsAfterMs: 50, durationMs: 100, outputLatencyMs: 20 })
+    expect(await input.cue(config)).toMatchObject({ ok: true, startsAfterMs: 50, durationMs: 100, outputLatencyMs: 20, routeLatency: nativeRouteLatency('20000000') })
     expect(binding.scheduleTrainingCue.mock.calls[0][0]).toMatchObject({ gain: 0 })
     await input.setCueGain('1', 2)
     expect(binding.setTrainingCueGain).toHaveBeenCalledWith(1n, 0)

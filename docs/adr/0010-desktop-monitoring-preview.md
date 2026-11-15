@@ -1,7 +1,6 @@
 # ADR 0010: Guarded desktop monitoring preview
 
-Status: implemented; native path and app-shell persistence hardware-verified
-on macOS
+Status: Superseded by ADR 0014 (live voice monitoring)
 Date: 2026-08-29
 
 ## Decision

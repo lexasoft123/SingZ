@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "อุปกรณ์เล่นที่บันทึกไม่ได้เชื่อมต่อ  โดยใช้ระบบตามปกติ",
   "app.output.switchDenied": "SingZ ไม่อนุญาตให้เปลี่ยนเครื่องเล่น  ยังคงติดต่อเครื่องก่อนหน้านี้",
   "app.output.switchFailed": "ไม่สามารถเปลี่ยนเครื่องนั้นได้  ยังคงติดต่อเครื่องก่อนหน้านี้",
-  "app.monitor.stopped": "การติดตามหูฟังหยุด: {message}",
   "app.native.beatNotApplied": "การปรับปรุงระบบบีท-กริดพื้นฐานไม่ได้ใช้: {error}",
   "app.native.metronomeNotApplied": "การปรับปรุงเมโทรโนมพื้นฐานไม่ได้ใช้: {error}",
   "app.native.transposeNotApplied": "การปรับปรุงการแปลงพื้นฐานไม่ได้ใช้: {error}",

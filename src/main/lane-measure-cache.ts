@@ -11,6 +11,7 @@ import {
   type FileHandle
 } from 'node:fs/promises'
 import { join } from 'node:path'
+import { canonicalFilePath, nativeFilePath, FilePathError } from './file-path'
 import { performance } from 'node:perf_hooks'
 import {
   BUCKETS as WAVEFORM_BUCKETS,
@@ -129,9 +130,10 @@ function requestRefusal(request: DesktopPlaybackLaneMeasureRequest): string | nu
     if (!lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
         lane.id.length < 1 || Buffer.byteLength(lane.id, 'utf8') > 96 || lane.id.includes('\0') ||
         typeof lane.path !== 'string' || lane.path.length < 1 ||
-        Buffer.byteLength(lane.path, 'utf8') > 32768 || lane.path.includes('\0')) {
+        Buffer.byteLength(lane.path, 'utf8') > 131068 || lane.path.includes('\0')) {
       return 'Native lane measure lanes failed schema validation'
     }
+    if (lane.path.length >= 32767) return 'path-too-long'
     if (ids.has(lane.id)) return 'Native lane measure lanes must have distinct ids'
     ids.add(lane.id)
   }
@@ -175,8 +177,8 @@ function cacheableMeasurement(
 
 async function sourceSnapshot(path: string): Promise<SourceSnapshot | null> {
   try {
-    const canonicalPath = await realpath(path)
-    const info = await stat(canonicalPath, { bigint: true })
+    const canonicalPath = canonicalFilePath(await realpath(nativeFilePath(path)))
+    const info = await stat(nativeFilePath(canonicalPath), { bigint: true })
     return {
       canonicalPath,
       size: info.size,
@@ -372,7 +374,7 @@ export class LaneMeasureCache {
   private pruneChain: Promise<void> = Promise.resolve()
   private readonly waveformSeeds = new Map<string, WaveformSeedRecord>()
 
-  constructor(private readonly options: LaneMeasureCacheOptions) {}
+  constructor(private readonly options: LaneMeasureCacheOptions) { this.options = { ...options, cacheDir: nativeFilePath(options.cacheDir) } }
 
   async waveformSeedForPath(path: string): Promise<DesktopPlaybackLaneWaveformSeed | null> {
     const source = await sourceSnapshot(path)
@@ -396,7 +398,7 @@ export class LaneMeasureCache {
     return Promise.all(lanes.map(async lane => {
       const clean: DesktopPlaybackLaneConfig = {
         id: lane.id,
-        path: lane.path,
+        path: nativeFilePath(lane.path),
         gain: lane.gain,
         muted: lane.muted,
         solo: lane.solo
@@ -462,12 +464,12 @@ export class LaneMeasureCache {
         let native: DesktopPlaybackLaneMeasureResult
         try {
           native = await this.options.measure({
-            lanes: pending.map(({ lane }) => ({ id: lane.id, path: lane.path })),
+            lanes: pending.map(({ lane }) => ({ id: lane.id, path: nativeFilePath(lane.path) })),
             ...policy
           })
         } catch (error) {
           if (epoch !== this.epoch) return cancelledResult(request)
-          return { ok: false, error: String(error), lanes: [] }
+          return { ok: false, error: error instanceof FilePathError ? error.code : String(error), lanes: [] }
         }
         if (epoch !== this.epoch) return cancelledResult(request)
         if (!native || typeof native !== 'object' || typeof native.ok !== 'boolean' ||
@@ -522,7 +524,7 @@ export class LaneMeasureCache {
       }
     } catch (error) {
       if (epoch !== this.epoch) return cancelledResult(request)
-      return { ok: false, error: String(error), lanes: [] }
+      return { ok: false, error: error instanceof FilePathError ? error.code : String(error), lanes: [] }
     } finally {
       try {
         this.options.onBatch?.({

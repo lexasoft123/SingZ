@@ -2,10 +2,10 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, type Me
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import { canonicalFilePath, nativeFilePath, FilePathError } from './file-path'
 import { pathToFileURL } from 'node:url'
 import type {
   CaptureStartConfig,
-  DesktopMonitorConfig,
   DesktopPlaybackLaneMeasureRequest,
   DesktopPlaybackLaneMeasureResult,
   DesktopPlaybackPrepareConfig,
@@ -76,10 +76,15 @@ import { MicrophoneSelectionStore } from './box-audio/microphone-store'
 import { randomUUID } from 'node:crypto'
 import { BoxCecService, boxCecEnabled } from './box/cec'
 import { boxMicrophones, boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
-import { failedPlayback, playbackCodecSupportsPath } from './capture'
-import { createRemoteCaptureOwner } from './audio-process'
+import { checkCaptureAddonProvenance, failedPlayback, playbackCodecSupportsPath } from './capture'
+import { enforceAddonStartupGate } from './addon-startup-gate'
+import { createRemoteCaptureOwner, remoteCaptureBinding } from './audio-process'
+import { AudioBufferSettingsController } from './audio-buffer-settings'
+import { audioBufferPreferences, type AudioBufferStatus } from '../shared/audio-buffer'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
 import { registerVoiceTakes } from './voice-takes-ipc'
+import { registerVoiceMonitor } from './voice-monitor-ipc'
+import type { VoiceMonitorStore } from './voice-monitor'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -398,7 +403,10 @@ function registerIpc(): void {
   registerBeatsIpc()
   registerAnalyze()
   registerDesktopAudioInput()
-  registerVoiceTakes()
+  let monitorTakeStore: ReturnType<typeof registerVoiceTakes> | undefined
+  voiceMonitor = registerVoiceMonitor(undefined, undefined, async () => { await monitorTakeStore?.releaseMonitorInput() }, undefined,
+    () => monitorTakeStore?.monitorInputCleanup() ?? (async () => undefined))
+  monitorTakeStore = registerVoiceTakes(voiceMonitor)
 
   ipcMain.handle(
     'lyrics:get',
@@ -784,22 +792,26 @@ function registerIpc(): void {
         ? provider
         : undefined
     ))
-  ipcMain.handle('audio-host:monitor-begin', async (event, raw: unknown) => {
-    bindNativeAudioCleanup(event.sender)
-    const result = await captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
-    return result
-  })
-  ipcMain.handle(
-    'audio-host:monitor-gain',
-    (event, generation: unknown, gainDb: unknown, enabled: unknown) => {
-      if (
-        typeof generation !== 'string' || typeof gainDb !== 'number' ||
-        typeof enabled !== 'boolean'
-      ) return captureOwner.setMonitorGain(event.sender.id, '', Number.NaN, false)
-      return captureOwner.setMonitorGain(event.sender.id, generation, gainDb, enabled)
+  const audioBuffers = new AudioBufferSettingsController({
+    platform: process.env.SINGZ_SURFACE === 'box' ? 'box' : process.platform,
+    read: () => readSettings().audioBufferFrames,
+    save: audioBufferFrames => writeSettings({ audioBufferFrames }),
+    inventory: () => captureOwner.hostDevices('coreaudio'),
+    native: async preferences => {
+      const method = remoteCaptureBinding().audioBufferSettings
+      if (!method) throw new Error('Audio buffer settings are unavailable in this build')
+      return preferences === undefined ? await method() : await method(preferences)
     }
-  )
-
+  })
+  ipcMain.handle('audio-host:buffer-settings', async (_event, change: unknown): Promise<AudioBufferStatus> => {
+    try { return await audioBuffers.request(change) } catch (e) {
+      return {
+        ok: false, pending: false, error: e instanceof Error ? e.message : String(e),
+        preferences: audioBufferPreferences(readSettings().audioBufferFrames),
+        outputUid: '', requestedFrames: 0, obtainedFrames: 0, inputUid: '', inputRequestedFrames: 0, inputObtainedFrames: 0
+      }
+    }
+  })
   ipcMain.handle('audio-host:microphone-mix-configure', async (event, config: unknown) => {
     bindNativeAudioCleanup(event.sender)
     const result = await captureOwner.configureMicrophoneMix(event.sender.id, config)
@@ -807,11 +819,6 @@ function registerIpc(): void {
   })
   ipcMain.handle('audio-host:microphone-mix-stop', event => captureOwner.stopMicrophoneMix(event.sender.id))
   ipcMain.handle('audio-host:microphone-mix-status', () => captureOwner.microphoneMixStatus())
-
-  ipcMain.handle('audio-host:monitor-status', () => captureOwner.monitorStatus())
-  ipcMain.handle('audio-host:monitor-end', (event, generation: unknown) =>
-    captureOwner.endMonitor(event.sender.id, typeof generation === 'string' ? generation : '')
-  )
 
   ipcMain.handle('audio-host:playback-providers', () => captureOwner.playbackProviders())
   ipcMain.handle('audio-host:playback-capability', () => captureOwner.playbackCapability())
@@ -848,7 +855,10 @@ function registerIpc(): void {
           latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
         }
       }
-      const authorized = lanes.map((lane) => ({ ...lane, path: resolve(lane.path) }))
+      try { for (const lane of lanes) nativeFilePath(lane.path) } catch (error) {
+        return failedPlayback(error instanceof Error ? error.message : String(error), error instanceof FilePathError && error.code === 'path-too-long' ? 'path-too-long' : 'invalid-configuration')
+      }
+      const authorized = lanes.map((lane) => ({ ...lane, path: canonicalFilePath(lane.path) }))
       const callerIsCurrent = bindNativeAudioCleanup(event.sender)
       const codecCapability = await captureOwner.playbackCapability()
       if (!callerIsCurrent())
@@ -880,6 +890,8 @@ function registerIpc(): void {
         : authorized
       if (!callerIsCurrent())
         return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
+      await voiceMonitor?.songChanged(JSON.stringify(authorized.map(lane => lane.path).sort()))
+      if (!callerIsCurrent()) return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
       // Lifecycle is already bound and fenced across capability discovery and seed lookup.
       const persistentBox = process.env.SINGZ_SURFACE === 'box' && Boolean(process.env.SINGZ_BOX_AUDIO_SOCKET)
       const result = persistentBox
@@ -942,6 +954,12 @@ function registerIpc(): void {
       playbackGeneration(generation),
       typeof gain === 'number' ? gain : Number.NaN
     ))
+  ipcMain.handle('audio-host:preview-click', async (_event, accent: unknown, gain: unknown): Promise<import('../shared/types').DesktopPreviewClickResult> => {
+    if (typeof accent !== 'boolean' || typeof gain !== 'number' || !Number.isFinite(gain) || gain < 0 || gain > 4)
+      return { ok: false, errorCode: 'invalid-configuration', error: 'Invalid preview click configuration' }
+    try { return await remoteCaptureBinding().previewClick(accent, process.env.SINGZ_MUTE === '1' ? 0 : gain) }
+    catch (error) { return { ok: false, errorCode: 'output-unavailable', error: String(error) } }
+  })
   ipcMain.handle('audio-host:playback-status', () => captureOwner.playbackStatus())
   // The open's lane measure. Same gate as prepare — every path registered
   // and of a format the runtime reads — and the same silence on refusal: the
@@ -966,14 +984,14 @@ function registerIpc(): void {
           !lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
           lane.id.length < 1 || Buffer.byteLength(lane.id, 'utf8') > 96 || lane.id.includes('\0') ||
           typeof lane.path !== 'string' || lane.path.length < 1 ||
-          Buffer.byteLength(lane.path, 'utf8') > 32768 || lane.path.includes('\0'))
+          Buffer.byteLength(lane.path, 'utf8') > 131068 || lane.path.includes('\0'))
       ) {
         return refused('a measure request failed schema validation')
       }
       if (new Set(request.lanes.map(lane => lane.id)).size !== request.lanes.length) {
         return refused('a measure request has duplicate lane ids')
       }
-      const lanes = request.lanes.map((lane) => ({ id: lane.id, path: resolve(lane.path) }))
+      const lanes = request.lanes.map((lane) => ({ id: lane.id, path: canonicalFilePath(lane.path) }))
       const codecCapability = await captureOwner.playbackCapability()
       const unauthorized = lanes.find((lane) =>
         !isAllowed(lane.path) || !codecCapability.available ||
@@ -987,7 +1005,7 @@ function registerIpc(): void {
       })
     }
   )
-  ipcMain.handle('audio-host:playback-unload', (event, generation: unknown) => {
+  ipcMain.handle('audio-host:playback-unload', async (event, generation: unknown) => {
     // Logged by the owner, which also sees the unloads that come back ok
     // WITHOUT a cleanup receipt — the case worth a line.
     return captureOwner.unloadPlayback(event.sender.id, playbackGeneration(generation))
@@ -1029,6 +1047,17 @@ app.whenReady().then(async () => {
     `SingZ ${app.isPackaged ? app.getVersion() : 'dev'} on ${process.platform}-${process.arch}` +
       ` — electron ${process.versions.electron}`
   )
+  // Native playback is the only desktop path (ADR 0015): an addon built from
+  // another checkout must stop startup, before any window or IPC exists.
+  if (requestedRendererSurface(process.argv) === 'desktop' && !enforceAddonStartupGate({
+    check: checkCaptureAddonProvenance,
+    app,
+    dialog,
+    env: process.env,
+    log: (message, level) => log('app', message, level),
+    stderr: (message) => process.stderr.write(message),
+    target: `${process.platform}-${process.arch}`
+  })) return
   registerWhatsNew()
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
@@ -1109,6 +1138,7 @@ app.whenReady().then(async () => {
   })
 })
 
+let voiceMonitor: VoiceMonitorStore | undefined
 let audioQuitPending = false
 let audioQuitComplete = false
 app.on('before-quit', event => {
@@ -1144,6 +1174,7 @@ app.on('before-quit', event => {
     if (finishing) return
     finishing = true
     try { await disposeWithin(localBoxMicrophones, 3000) } catch (error) { log('mic', `Microphone shutdown failed · ${String(error)}`, 'warn') }
+    await disposeWithin(voiceMonitor, 2000)
     await captureOwner.stop()
     await boxCec?.dispose()
     audioQuitComplete = true

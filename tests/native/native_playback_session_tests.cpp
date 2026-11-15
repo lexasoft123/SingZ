@@ -1,5 +1,6 @@
 #include <native/playback/native_playback_callback.h>
 #include <native/playback/native_playback_session.h>
+#include <native/playback/shared_audio_service.h>
 #include <native/playback/signalsmith_time_pitch.h>
 #include <zcore/media/flac_io.h>
 #include <zcore/media/wav.h>
@@ -23,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -328,6 +330,11 @@ public:
     return {true, singz::AudioHostError::None, state, format, latency, {}};
   }
 
+  singz::AudioHostResult setBufferFrames(uint32_t frames,uint32_t maximum=0) override {
+    if(maximum && frames>maximum)return {false,singz::AudioHostError::InvalidConfiguration,state,format,latency,{}};
+    format.nominalBufferFrames=latency.bufferFrames=frames;
+    return {true,singz::AudioHostError::None,state,format,latency,{}};
+  }
   singz::AudioHostResult start() override {
     ++starts;
     if (failStart) {
@@ -613,6 +620,31 @@ graphSnapshot(const singz::NativePlaybackStatus &status) {
         status.latencyCompensatedEdgeCount);
   CHECK(status.graphSnapshot->outputLatencyFrames == status.graphLatencyFrames);
   return *status.graphSnapshot;
+}
+
+// A mono recording and a mono stem traverse the same channel matrix. Assert
+// absolute per-channel gain too: equal but jointly attenuated lanes is a bug.
+void monoStemAndVoiceTakeHaveIdenticalChannelLevels() {
+  const std::string wav=writeWav("mono-lane-parity.wav",1,std::vector<float>(4096,1.0F));
+  std::array<std::array<float,2>,2> levels{};
+  const char *ids[]{"stem","voice:take"};
+  for(size_t index=0;index<2;++index) {
+    auto backend=std::make_unique<ManualOutputBackend>();auto *fake=backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    auto request=config();request.masterGain=0.25F;
+    std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane(ids[index],wav));
+    CHECK(session.prepare(std::move(request),std::move(lanes),1).ok);
+    CHECK(session.openOutput(1).ok && session.start(1).ok);
+    CHECK(fake->drive(128));
+    for(size_t frame=0;frame<128;++frame) {
+      CHECK(near(fake->left[frame],pcm16(1.0F)*0.25F,0.000001F));
+      CHECK(near(fake->right[frame],pcm16(1.0F)*0.25F,0.000001F));
+    }
+    levels[index]={fake->left[127],fake->right[127]};
+    CHECK(session.unload(1).ok);
+  }
+  CHECK(levels[0]==levels[1]);
+  std::remove(wav.c_str());
 }
 
 void outputMeterSeparatesStereoEnergyFromPeaks() {
@@ -6055,6 +6087,102 @@ void aLoopArmedAheadOfTheEarIsNotHeardYet() {
    now (twoSeeksRacedAgainstTheCallbackNeverWedge, and the processor-level
    perCommandSeekPlans), so priming failure — refused at the command — is
    again the only way the arm can fail. */
+void heldSongCapacitySurvivesSmallerGraphRequest() {
+#if defined(__APPLE__)
+  auto physical=std::make_unique<ManualOutputBackend>();auto* fake=physical.get();
+  fake->actualMaximumFrames=4096;fake->actualNominalBufferFrames=512;
+  auto& service=singz::sharedAudioService();
+  CHECK(service.configureProvider(std::make_unique<ManualOutputBackend>(),"held-test-setup").ok);
+  CHECK(service.configureProvider(std::move(physical),"coreaudio").ok);
+  const auto path=writeWav("held-song-capacity.wav",1,std::vector<float>(20000,.1f));
+  auto host=service.playbackBackend(std::make_unique<ManualOutputBackend>(),"coreaudio");
+  singz::NativePlaybackSession session(std::move(host));
+  auto request=config();request.maximumFrames=4096;request.requestedBufferFrames=512;
+  std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane("song",path));
+  const auto first=session.prepare(request,std::move(lanes),701);
+  if(!first.ok)std::fprintf(stderr,"held initial prepare: %s\n",first.message.c_str());
+  CHECK(first.ok);
+  const auto firstOpen=session.openOutput(701);
+  if(!firstOpen.ok)std::fprintf(stderr,"held initial open: %s\n",firstOpen.message.c_str());
+  CHECK(firstOpen.ok);CHECK(session.start(701).ok);
+  fake->setPresentationLatency(0,512,0);
+  service.setVoiceMonitorRenderer([](void*,const singz::AudioHostRenderBlock&) noexcept { return true; },nullptr);
+  CHECK(service.status().latency.bufferFrames==512);
+  const auto opens=fake->opens,stops=fake->stops;
+  CHECK(session.unload(701).ok);request.maximumFrames=2048;
+  lanes.clear();lanes.push_back(lane("song",path));
+  const auto prepared=session.prepare(request,std::move(lanes),702);
+  CHECK(prepared.ok && prepared.format.maximumFrames==4096);
+  CHECK(session.openOutput(702).ok && session.start(702).ok && fake->drive(32));
+  CHECK(fake->opens==opens && fake->stops==stops && service.status().latency.bufferFrames==512);
+  CHECK(session.status().renderedProjectFrame==32 && session.status().adapterRenderFailures==0);
+  CHECK(session.unload(702).ok);CHECK(service.setPlaybackOutputCurrent(false));
+  service.clearVoiceMonitorRenderer();service.shutdown();std::remove(path.c_str());
+#endif
+}
+void callbackPeriodChangesKeepTheSourceContinuous() {
+  std::vector<float> pcm(100000);
+  for(size_t i=0;i<pcm.size();++i)pcm[i]=.1f+static_cast<float>(i%997)*.0003f;
+  const auto path=writeWav("changing-callback-period.wav",1,pcm);
+  auto backend=std::make_unique<ManualOutputBackend>();auto* fake=backend.get();
+  singz::NativePlaybackSession session(std::move(backend));auto request=config();
+  std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane("song",path));
+  CHECK(session.prepare(std::move(request),std::move(lanes),301).ok);
+  CHECK(session.openOutput(301).ok && session.start(301).ok);
+  CHECK(fake->drive(512));const auto baseline=session.status();uint64_t delivered=512;
+  fake->captureOutput=true;
+  for(unsigned cycle=0;cycle<50;++cycle) {
+    for(const uint32_t frames:{32u,32u,32u,32u,512u}) {
+      fake->setPresentationLatency(0,frames,0);
+      CHECK(fake->drive(frames));delivered+=frames;
+      const auto now=session.status();
+      CHECK(now.generation==301 && now.renderedProjectFrame==static_cast<int64_t>(delivered));
+      CHECK(now.continuousFrame==delivered && now.host.discontinuities==baseline.host.discontinuities);
+      CHECK(now.transportDiscontinuities==baseline.transportDiscontinuities && now.adapterRenderFailures==0);
+    }
+  }
+  fake->captureOutput=false;
+  for(size_t i=0;i<fake->outputTrace.size();++i)CHECK(near(fake->outputTrace[i],pcm16(pcm[i+512])));
+  std::printf("period seam: 50 cycles, delivered=%llu project=%lld hostDiscDelta=0 transportDiscDelta=0\n",
+    static_cast<unsigned long long>(delivered),static_cast<long long>(session.status().renderedProjectFrame));
+  CHECK(session.unload(301).ok);std::remove(path.c_str());
+}
+void aStaleReanchorNeverRewindsTheSource() {
+  const auto path=writeWav("stale-reanchor.wav",1,std::vector<float>(50000,.1f));
+  auto backend=std::make_unique<ManualOutputBackend>();auto* fake=backend.get();
+  singz::NativePlaybackTestHooks hooks{};hooks.context=fake;
+  hooks.afterReanchorPrime=[](void* context) noexcept {
+    auto* output=static_cast<ManualOutputBackend*>(context);
+    for(int i=0;i<3;++i)CHECK(output->drive(512));
+  };
+  singz::NativePlaybackSession session(std::move(backend),&hooks);auto request=config();
+  request.playbackRate=.75;request.transposeSemitones=2;
+  std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane("song",path));
+  CHECK(session.prepare(std::move(request),std::move(lanes),302).ok);
+  CHECK(session.openOutput(302).ok && session.start(302).ok && fake->drive(512));
+  CHECK(fake->drive(32,singz::AudioHostDiscontinuitySequenceGap));
+  const auto before=session.status();CHECK(before.renderedProjectFrame==408);
+  CHECK(session.reanchorTransport(302).ok); // three512 callbacks while priming
+  const auto primed=session.status();CHECK(primed.renderedProjectFrame==1560);
+  CHECK(fake->drive(32));const auto after=session.status();
+  std::printf("reanchor seam: before=%lld duringPrime=%lld after=%lld expected1584; tdisc=%llu->%llu; old after432 lost1152 project frames (32ms output at rate0.75)\n",
+    static_cast<long long>(before.renderedProjectFrame),static_cast<long long>(primed.renderedProjectFrame),
+    static_cast<long long>(after.renderedProjectFrame),static_cast<unsigned long long>(before.transportDiscontinuities),
+    static_cast<unsigned long long>(after.transportDiscontinuities));
+  std::fflush(stdout);
+  CHECK(after.renderedProjectFrame==1584 && after.continuousFrame==2112);
+  CHECK(after.transportDiscontinuities==before.transportDiscontinuities && after.adapterRenderFailures==0);
+  // A stationary recovery still consumes its exact plan; pause/resume and seek
+  // remain source commands, and are covered through their normal API below.
+  hooks.afterReanchorPrime=nullptr;
+  CHECK(session.reanchorTransport(302).ok && fake->drive(32));
+  CHECK(session.status().transportDiscontinuities==after.transportDiscontinuities+1);
+  CHECK(session.pause(302).ok && fake->drive(32));const auto paused=session.status().renderedProjectFrame;
+  CHECK(fake->drive(32) && session.status().renderedProjectFrame==paused);
+  CHECK(session.resume(302).ok && fake->drive(32) && session.status().renderedProjectFrame==paused+24);
+  CHECK(session.seek(302,400).ok && fake->drive(32) && session.status().renderedProjectFrame==424);
+  CHECK(session.unload(302).ok);std::remove(path.c_str());
+}
 void hostBoundariesWithoutSourceMovementKeepRendering() {
   const std::string wav = writeWav("host-boundary-no-source-move.wav", 1,
                                    std::vector<float>(50000, 0.1F));
@@ -8141,9 +8269,282 @@ void portableGraphDocumentMaterializesActualTopology() {
             .ok());
 }
 
+void serviceMasterPinsOnlyTheAppGainAndPreservesTiming() {
+  const std::string wav = writeWav("service-master.wav", 1, std::vector<float>(65536, 0.125F));
+  for (double rate : {1.0, 1.25}) {
+    uint64_t expectedGraphLatency = 0, expectedPresentation = 0;
+    int64_t expectedAudible = 0;
+    for (bool serviceMaster : {false, true}) {
+      auto backend = std::make_unique<ManualOutputBackend>();
+      auto* fake = backend.get();
+      singz::NativePlaybackSession session(std::move(backend));
+      auto request = config(); request.masterGain = 0.25F;
+      request.serviceOwnsMasterGain = serviceMaster; request.playbackRate = rate;
+      std::vector<singz::NativePlaybackLaneSource> lanes;
+      lanes.push_back(lane("song", wav));
+      CHECK(session.prepare(std::move(request), std::move(lanes), 1).ok);
+      CHECK(session.openOutput(1).ok && session.start(1).ok);
+      for (unsigned i = 0; i < 24; ++i) CHECK(fake->drive(256));
+      const auto status = session.status();
+      if (rate == 1.0) CHECK(near(fake->left[255], pcm16(0.125F) * (serviceMaster ? 1.0F : 0.25F), 1e-6F));
+      CHECK(status.masterGain == 0.25F);
+      if (!serviceMaster) {
+        expectedGraphLatency = status.graphLatencyFrames;
+        expectedPresentation = status.presentationLatencyFrames;
+        expectedAudible = status.audibleProjectFrame;
+      } else {
+        CHECK(status.graphLatencyFrames == expectedGraphLatency);
+        CHECK(status.presentationLatencyFrames == expectedPresentation);
+        CHECK(status.audibleProjectFrame == expectedAudible);
+      }
+      CHECK(session.setMasterGain(1, 2.0F).ok);
+      CHECK(fake->drive(256));
+      if (rate == 1.0) CHECK(near(fake->left[255], pcm16(0.125F) * (serviceMaster ? 1.0F : 2.0F), 1e-6F));
+      CHECK(session.status().masterGain == 2.0F);
+      CHECK(session.unload(1).ok);
+    }
+  }
+  std::remove(wav.c_str());
+}
+
+void songVolumeIsAppliedOnceThroughTheSharedService() {
+  auto physical = std::make_unique<ManualOutputBackend>();
+  auto* fake = physical.get();
+  auto& service = singz::sharedAudioService();
+  CHECK(service.configureProvider(std::move(physical), "service-master-test").ok);
+  const std::string wav = writeWav("service-master-integration.wav", 1, std::vector<float>(4096, 0.125F));
+  auto host = service.playbackBackend(std::make_unique<ManualOutputBackend>(), "service-master-test");
+  singz::NativePlaybackSession session(std::move(host));
+  uint64_t generation = 0;
+  for (float gain : {0.25F, 1.0F, 2.0F}) {
+    auto request = config(); request.masterGain = gain; request.serviceOwnsMasterGain = true;
+    std::vector<singz::NativePlaybackLaneSource> lanes; lanes.push_back(lane("song", wav));
+    CHECK(session.prepare(std::move(request), std::move(lanes), ++generation).ok);
+    CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+    CHECK(fake->drive(256));
+    for (unsigned frame = 128; frame < 256; ++frame) {
+      CHECK(near(fake->left[frame], pcm16(0.125F) * gain, 1e-6F));
+      CHECK(fake->left[frame] == fake->right[frame]);
+    }
+    CHECK(session.setMasterGain(generation, 0.5F).ok && fake->drive(256));
+    CHECK(near(fake->left[255], pcm16(0.125F) * 0.5F, 1e-6F));
+    CHECK(session.unload(generation).ok);
+  }
+  CHECK(service.setMasterGain(1));
+  std::remove(wav.c_str());
+}
+
+void hotSongIsLimitedAfterTheServiceMaster() {
+  const std::string wav = writeWav("hot-service-master.wav", 1, std::vector<float>(4096, 0.95F));
+  unsigned route = 0;
+  const auto render = [&](bool serviceMaster, float gain,
+                          std::optional<float> authoredCeiling = {},
+                          unsigned laneCount = 1) {
+    auto physical = std::make_unique<ManualOutputBackend>();
+    auto* fake = physical.get();
+    std::unique_ptr<singz::AudioHostBackend> host;
+    if (serviceMaster) {
+      auto& service = singz::sharedAudioService();
+      const std::string provider = "hot-master-" + std::to_string(++route);
+      CHECK(service.configureProvider(std::move(physical), provider).ok);
+      host = service.playbackBackend(std::make_unique<ManualOutputBackend>(), provider);
+    } else {
+      host = std::move(physical);
+    }
+    singz::NativePlaybackSession session(std::move(host));
+    auto request = config();
+    request.masterGain = gain; request.serviceOwnsMasterGain = serviceMaster;
+    std::vector<singz::NativePlaybackLaneSource> lanes;
+    singz::NativePlaybackGraphContext context;
+    context.outputChannels = 2;
+    for (unsigned i = 0; i < laneCount; ++i) {
+      const std::string name = "hot-" + std::to_string(i);
+      lanes.push_back(lane(name.c_str(), wav));
+      context.lanes.push_back({name, 1, false});
+    }
+    if (authoredCeiling) {
+      auto document = singz::synthesizeNativePlaybackGraphDocument(context);
+      // The synthesized output limiter is immediately before physical output.
+      document.nodes[document.nodes.size() - 2].parameters = {{"ceiling", *authoredCeiling}};
+      request.graphDocument = std::move(document);
+    }
+    CHECK(session.prepare(std::move(request), std::move(lanes), 1).ok);
+    CHECK(session.openOutput(1).ok && session.start(1).ok && fake->drive(256));
+    // The service meter must remain available after graph-ceiling bypass.
+    CHECK(session.outputMeter().available && session.outputMeter().peak > 0.4F);
+    std::array<float, 128> output{};
+    std::copy_n(fake->left.begin() + 128, output.size(), output.begin());
+    CHECK(session.unload(1).ok);
+    return output;
+  };
+  const auto reduced = render(true, 0.5F);
+  CHECK(near(reduced[0], pcm16(0.95F) * 0.5F, 1e-6F) && "hot master attenuation");
+  for (float sample : reduced) CHECK(near(sample, 0.475F, 2e-5F));
+  CHECK(reduced == render(false, 0.5F));
+  // Unity is bit-identical even when the raw song exceeds the old ceiling.
+  CHECK(render(true, 1.0F) == render(false, 1.0F));
+  // A sum above unity must also survive until attenuation (not clamp at 1).
+  CHECK(render(true, 0.25F, {}, 2) == reduced);
+  // The service ceiling is final, including documents authoring 0 dBFS.
+  const auto authoredUnity = render(true, 1.0F, 1.0F);
+  for (float sample : authoredUnity) CHECK(sample == singz::kServiceMasterCeiling);
+  CHECK(render(true, 0.5F, 1.0F) == reduced);
+  const auto nonServiceAuthored = render(false, 1.0F, 1.0F);
+  for (float sample : nonServiceAuthored) CHECK(sample == pcm16(0.95F));
+  CHECK(singz::sharedAudioService().setMasterGain(1));
+  std::remove(wav.c_str());
+}
+
+void serviceMasterMeterReportsDeviceOutput() {
+  const auto hot = writeWav("service-meter-hot.wav", 1, std::vector<float>(4096, 0.95F));
+  const auto quiet = writeWav("service-meter-quiet.wav", 1, std::vector<float>(4096, 0.4F));
+  unsigned route = 0;
+  for (const auto& [gain, path, expected, clips] : {
+           std::tuple{0.5F, hot, pcm16(0.95F) * 0.5F, 0u},
+           std::tuple{4.0F, quiet, singz::kServiceMasterCeiling, 1u},
+           std::tuple{1.0F, quiet, pcm16(0.4F), 0u},
+           std::tuple{1.0F, hot, singz::kServiceMasterCeiling, 1u}}) {
+    auto physical = std::make_unique<ManualOutputBackend>(); auto* fake = physical.get();
+    auto& service = singz::sharedAudioService();
+    const std::string provider = "service-meter-" + std::to_string(++route);
+    CHECK(service.configureProvider(std::move(physical), provider).ok);
+    CHECK(service.setMasterGain(gain) && service.ensureOutput().ok);
+    CHECK(fake->drive(256)); // Settle the volume ramp while the bus is silent.
+    auto host = service.playbackBackend(std::make_unique<ManualOutputBackend>(), provider);
+    singz::NativePlaybackSession session(std::move(host));
+    const auto prepare = [&](uint64_t generation) {
+      auto request = config(); request.masterGain = gain; request.serviceOwnsMasterGain = true;
+      std::vector<singz::NativePlaybackLaneSource> lanes; lanes.push_back(lane("song", path));
+      CHECK(session.prepare(std::move(request), std::move(lanes), generation).ok);
+      CHECK(session.status().outputPeak == 0 && session.status().outputClippedBlocks == 0);
+      CHECK(session.outputMeter().clippedBlocks == 0);
+      CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+    };
+    prepare(1);
+    CHECK(fake->drive(256));
+    const auto meter = session.outputMeter(); const auto status = session.status();
+    CHECK(meter.available && near(meter.peak, expected, 1e-6F) && "service output meter peak");
+    CHECK(meter.clippedBlocks == clips && "service output meter clip count");
+    CHECK(status.outputPeak == meter.peak && status.outputClippedBlocks == clips);
+    CHECK(near(meter.rms, expected, 1e-6F));
+    CHECK(session.pause(1).ok && session.resume(1).ok);
+    CHECK(session.status().outputClippedBlocks == clips); // Observations/transport never consume/reset.
+    CHECK(session.outputMeter().clippedBlocks == clips);
+    CHECK(fake->drive(256));
+    CHECK(session.status().outputClippedBlocks == 2 * clips);
+    uint64_t generation = 1;
+    if (clips) {
+      auto replacement = config(); replacement.masterGain = gain;
+      replacement.serviceOwnsMasterGain = true; replacement.swapFromGeneration = 1;
+      replacement.preparedStartProjectFrame = 512;
+      std::vector<singz::NativePlaybackLaneSource> lanes; lanes.push_back(lane("song", path));
+      CHECK(session.prepare(std::move(replacement), std::move(lanes), 2).ok);
+      CHECK(session.status().outputClippedBlocks == 2); // Armed candidate did not reset the old meter.
+      CHECK(fake->drive(256));
+      CHECK(session.status().outputClippedBlocks == 1); // Reset belongs to the first incoming block.
+      generation = 2;
+    }
+    CHECK(session.unload(generation).ok);
+    CHECK(session.outputMeter().available && session.outputMeter().generation == 0);
+    CHECK(session.status().outputPeak == service.outputMeter().peak);
+    prepare(++generation); // A new graph starts a new counter, despite the live shared bus.
+    CHECK(fake->drive(256));
+    CHECK(session.status().outputClippedBlocks == clips);
+    // Publications retain the graph counter's uint32 saturation semantics.
+    auto* graphClips = service.masterMeterState().songClips.load(std::memory_order_relaxed);
+    CHECK(graphClips != nullptr);
+    graphClips->store(UINT32_MAX, std::memory_order_relaxed);
+    CHECK(session.status().outputClippedBlocks == UINT32_MAX);
+    CHECK(session.outputMeter().clippedBlocks == UINT32_MAX);
+    CHECK(fake->drive(256) && session.status().outputClippedBlocks == UINT32_MAX);
+    CHECK(session.unload(generation).ok);
+    const auto idle = [](void*, const singz::AudioHostRenderBlock& block) noexcept {
+      for (uint32_t channel = 0; channel < block.outputChannels; ++channel)
+        for (uint32_t frame = 0; frame < block.frames; ++frame)
+          block.output[channel][frame] += 0.4F;
+      return true;
+    };
+    service.setTrainingRenderer(idle, nullptr);
+    CHECK(service.ensureOutput().ok && fake->drive(256));
+    CHECK(near(session.outputMeter().peak, service.outputMeter().peak, 1e-6F));
+    CHECK(session.status().outputClippedBlocks == 0);
+    CHECK(session.outputMeter().clippedBlocks == 0);
+    service.clearTrainingRenderer();
+  }
+  CHECK(singz::sharedAudioService().setMasterGain(1));
+  std::remove(hot.c_str()); std::remove(quiet.c_str());
+}
+
+void idleMeterDoesNotCarryClipsIntoTheNextSong() {
+  const auto hot = writeWav("idle-clips-hot.wav", 1, std::vector<float>(4096, 0.95F));
+  const auto clean = writeWav("idle-clips-clean.wav", 1, std::vector<float>(4096, 0.4F));
+  auto physical = std::make_unique<ManualOutputBackend>(); auto* fake = physical.get();
+  auto& service = singz::sharedAudioService();
+  CHECK(service.configureProvider(std::move(physical), "idle-clip-window").ok);
+  CHECK(service.setMasterGain(1) && service.ensureOutput().ok && fake->drive(256));
+  auto host = service.playbackBackend(std::make_unique<ManualOutputBackend>(), "idle-clip-window");
+  singz::NativePlaybackSession session(std::move(host));
+  const auto start = [&](uint64_t generation, const std::string& path) {
+    auto request = config(); request.serviceOwnsMasterGain = true;
+    std::vector<singz::NativePlaybackLaneSource> lanes; lanes.push_back(lane("song", path));
+    CHECK(session.prepare(std::move(request), std::move(lanes), generation).ok);
+    CHECK(session.status().outputClippedBlocks == 0);
+    CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+  };
+  const auto idle = [&] {
+    CHECK(session.status().outputClippedBlocks == 0 && "song clip window ended");
+    CHECK(session.outputMeter().clippedBlocks == 0);
+    CHECK(session.status().outputPeak == service.outputMeter().peak);
+  };
+  start(1, hot);
+  for (unsigned i = 0; i < 3; ++i) CHECK(fake->drive(256));
+  CHECK(session.status().outputClippedBlocks == 3);
+  CHECK(session.unload(1).ok); idle();
+  start(2, clean); CHECK(fake->drive(256));
+  CHECK(session.status().outputClippedBlocks == 0);
+  CHECK(session.stop(2).ok && session.status().outputClippedBlocks == 0);
+  const auto training = [](void*, const singz::AudioHostRenderBlock& block) noexcept {
+    for (uint32_t channel = 0; channel < block.outputChannels; ++channel)
+      for (uint32_t frame = 0; frame < block.frames; ++frame) block.output[channel][frame] += 0.95F;
+    return true;
+  };
+  const auto before = service.outputMeter().clippedBlocks;
+  service.setTrainingRenderer(training, nullptr);
+  CHECK(service.ensureOutput().ok && fake->drive(256));
+  CHECK(session.status().outputClippedBlocks == 0 && "stopped song clip window frozen");
+  CHECK(session.outputMeter().clippedBlocks == 0);
+  CHECK(session.unload(2).ok); idle();
+  CHECK(service.outputMeter().clippedBlocks == before + 1); idle();
+  service.clearTrainingRenderer();
+  start(3, clean); CHECK(fake->drive(256));
+  CHECK(session.status().outputClippedBlocks == 0);
+  CHECK(session.unload(3).ok); idle();
+  std::remove(hot.c_str()); std::remove(clean.c_str());
+}
+
 } // namespace
 
 int main() {
+  if (std::getenv("SINGZ_SERVICE_MASTER_IDLE_REGRESSION_ONLY")) {
+    idleMeterDoesNotCarryClipsIntoTheNextSong(); return 0;
+  }
+  if (std::getenv("SINGZ_SERVICE_MASTER_METER_REGRESSION_ONLY")) {
+    serviceMasterMeterReportsDeviceOutput(); return 0;
+  }
+  if (std::getenv("SINGZ_SERVICE_MASTER_HOT_REGRESSION_ONLY")) {
+    hotSongIsLimitedAfterTheServiceMaster(); return 0;
+  }
+  if (std::getenv("SINGZ_SERVICE_MASTER_REGRESSION_ONLY")) {
+    serviceMasterPinsOnlyTheAppGainAndPreservesTiming(); songVolumeIsAppliedOnceThroughTheSharedService(); return 0;
+  }
+  if(std::getenv("SINGZ_MONO_PARITY_REGRESSION_ONLY")){monoStemAndVoiceTakeHaveIdenticalChannelLevels();return 0;}
+  monoStemAndVoiceTakeHaveIdenticalChannelLevels();
+  if(std::getenv("SINGZ_HELD_CAPACITY_REGRESSION_ONLY")){heldSongCapacitySurvivesSmallerGraphRequest();return 0;}
+
+  if(std::getenv("SINGZ_REANCHOR_REGRESSION_ONLY")) {
+    callbackPeriodChangesKeepTheSourceContinuous();aStaleReanchorNeverRewindsTheSource();return 0;
+  }
+
   decodedSeekThenStopKeepsItsTimePitchBoundaryPrepared();
   streamingSeekReturnsBeforeDecoder();
   outputMeterSeparatesStereoEnergyFromPeaks();
@@ -8164,6 +8565,14 @@ int main() {
     std::puts("native playback quarantined swap tests: ok");
     return 0;
   }
+  serviceMasterMeterReportsDeviceOutput();
+  idleMeterDoesNotCarryClipsIntoTheNextSong();
+  hotSongIsLimitedAfterTheServiceMaster();
+  serviceMasterPinsOnlyTheAppGainAndPreservesTiming();
+  songVolumeIsAppliedOnceThroughTheSharedService();
+  heldSongCapacitySurvivesSmallerGraphRequest();
+  callbackPeriodChangesKeepTheSourceContinuous();
+  aStaleReanchorNeverRewindsTheSource();
   mixerEditsWithoutCallbacksKeepTheLatestValues();
   compositionAndLifetime();
   streamedLanesPlayTheSameAudioAsDecodedOnes();

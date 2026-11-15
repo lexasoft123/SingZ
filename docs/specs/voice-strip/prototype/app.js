@@ -4,13 +4,17 @@
 
 /* ---- strings (one object, for later i18n) ---- */
 const STR = {
-  muteAria: 'Mute voice take playback', unmuteAria: 'Unmute voice take playback',
+  muteAria: 'Mute the take', unmuteAria: 'Unmute the take', noTake: 'No playable take',
   monOnAria: 'Monitoring on. Click to turn off', monOffAria: 'Monitor my voice (monitoring is off)',
   monOffTitle: 'Monitor my voice (off)', monOnTitle: 'Monitoring on. Click to turn off',
-  soloAria: 'Solo voice', armAria: 'Arm for recording', disarmAria: 'Arm for recording',
+  soloAria: 'Solo the take (monitor is not affected)', armAria: 'Arm for recording', disarmAria: 'Arm for recording',
   recordTitle: 'Record (R)', stopTitle: 'Stop recording (R)',
   recWhy: { perm: 'Record unavailable: microphone access needed', missing: 'Record unavailable: no input found', error: 'Record unavailable: retry the input first', take: 'Record unavailable: keep or discard the current take first' },
-  voiceLevel: 'Voice level',
+  voiceLevel: 'Take playback level',
+  pitchChip: (sh) => `Pitch follow ${sh} st`, pitchOff: 'Pitch follow off', pitchHelp: 'The voice follows the song key. Click to bypass.', pitchOffHelp: 'Pitch follow is bypassed. Click to turn it on.',
+  voiceShifted: 'Voice shifted', playsWithSong: 'Plays with the song', preparing: 'Preparing take for playback', retry: 'Retry', listenOld: 'Listen back (old)',
+  laneErr: { 'take-too-long': 'Take is too long to prepare', 'memory-budget': 'Not enough memory to prepare the take', 'graph-budget': 'Too many tracks for take playback', 'conform-error': 'Take preparation failed', cancelled: 'Take preparation was cancelled' },
+  monitorLevel: 'Monitor level',
   inputGroupNone: 'No input found', inputPerm: 'Mic access needed',
   msgMonitoring: 'Monitoring on',
   msgArmed: 'Armed. Recording starts at the playhead.',
@@ -47,7 +51,7 @@ const STR = {
     monOn: 'Monitoring on', monOff: 'Monitoring off', granted: 'Microphone allowed', found: 'Input found',
     retried: 'Input reconnected', armed: 'Armed', disarmed: 'Disarmed',
   },
-  states: ['idle', 'input-missing', 'permission-needed', 'armed', 'recording', 'take-review', 'playing-take',
+  states: ['pitch-shifted', 'lane-conforming', 'lane-take-too-long', 'lane-memory-budget', 'lane-graph-budget', 'lane-conform-error', 'lane-cancelled', 'idle', 'input-missing', 'permission-needed', 'armed', 'recording', 'take-review', 'playing-take',
     'monitoring-on', 'monitoring-unavailable-latency', 'monitoring-unavailable-route', 'error-recoverable'],
 };
 const INPUTS = [
@@ -66,7 +70,7 @@ const VOICE = '#5be3b0';
 /* ---- state ---- */
 const S = {
   perm: 'granted', inputMissing: false, phase: 'idle', listen: null, // 'alone' | 'song'
-  avail: 'ok', muted: true, takeMute: false, solo: false, level: 80, input: 'scar:1', error: null, take: null, takeN: 0,
+  avail: 'ok', muted: true, takeMute: false, solo: false, lane: 'ready', pitchOn: true, level: 80, monLevel: 50, input: 'scar:1', error: null, take: null, takeN: 0,
 };
 const song = { pos: 0, playing: false, tempo: 100, trans: 0 };
 const stems = STEMS.map((s) => ({ ...s, mute: false, solo: false, level: 80 }));
@@ -77,7 +81,8 @@ const SV = (b) => `<svg viewBox="0 0 16 16" aria-hidden="true">${b}</svg>`;
 const ST = 'fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"';
 const ICON = {
   rec: SV('<circle cx="8" cy="8" r="4.2" fill="currentColor"/>'),
-  phones: SV(`<path ${ST} d="M3 10.5V8a5 5 0 0 1 10 0v2.5"/><rect x="1.8" y="9.5" width="3.2" height="5" rx="1.2" fill="currentColor"/><rect x="11" y="9.5" width="3.2" height="5" rx="1.2" fill="currentColor"/>`),
+  gear: SV(`<circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path ${ST} d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2"/>`),
+  speaker: SV(`<path d="M2 6h2.6L8 3v10L4.6 10H2z" fill="currentColor"/><path ${ST} d="M10.4 5.8a3.2 3.2 0 0 1 0 4.4M12.2 4a5.6 5.6 0 0 1 0 8"/>`),
   check: SV(`<path ${ST} d="M3 8.5l3.2 3.2L13 4.5"/>`),
   play: SV('<path d="M4.5 3v10l8-5z" fill="currentColor"/>'),
   playSong: SV('<path d="M2.5 3.5v9l6-4.5z" fill="currentColor"/><rect x="10.2" y="6.5" width="1.6" height="5" rx=".6" fill="currentColor"/><rect x="13" y="4" width="1.6" height="8" rx=".6" fill="currentColor"/>'),
@@ -94,6 +99,8 @@ const sgn = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${-n}` : '0');
 const rng = (seed) => () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
 const announce = (t) => { $('live').textContent = ''; setTimeout(() => { $('live').textContent = t; }, 30); };
 const monitoring = () => S.avail === 'ok' && !S.muted;
+// Record is one press, like Play: only a real blocker (mic, input, error) disables it. A take in review is kept and a playing take stops.
+const canPressRecord = () => S.perm === 'granted' && !S.inputMissing && !S.error;
 const canRecord = () => S.perm === 'granted' && !S.inputMissing && !S.error && (S.phase === 'idle' || S.phase === 'armed');
 const makePeaks = (n, seed, base = 0.5) => {
   const r = rng(seed); const out = []; let env = 0.4;
@@ -177,7 +184,9 @@ function seekFrom(e, el) {
   const r = el.getBoundingClientRect(); song.pos = Math.max(0, Math.min(LEN, ((e.clientX - r.left) / r.width) * LEN)); render();
 }
 function startRecording() {
-  if (!canRecord()) return; setClip(false); // idle: transport Record arms Voice and records in one go
+  if (!canPressRecord()) return; setClip(false); // one press: arms the input if needed and records
+  if (S.listen) { S.listen = null; song.playing = false; }
+  if (S.take) S.take.kept = true; // the previous take stays on disk
   S.take = { n: S.takeN + 1, start: song.pos, span: 0, real: 0, tempo: song.tempo, trans: song.trans, changed: false, kept: false, partial: false, peaks: [] };
   S.phase = 'recording'; song.playing = true; announce(STR.announce.recording); render();
 }
@@ -211,17 +220,20 @@ function render() {
   // monitor / mute / solo / arm / level
   const mon = $('monBtn'); const unav = S.avail !== 'ok'; const on = monitoring();
   mon.classList.toggle('active', on); mon.setAttribute('aria-pressed', on); mon.setAttribute('aria-disabled', unav);
-  setBtn(mon, unav ? (S.avail === 'latency' ? STR.latencyUnavailable : STR.routeUnavailable) : on ? STR.monOnTitle : STR.monOffTitle, 'phones');
+  setBtn(mon, unav ? (S.avail === 'latency' ? STR.latencyUnavailable : STR.routeUnavailable) : on ? STR.monOnTitle : STR.monOffTitle, 'speaker');
   if (!unav) mon.setAttribute('aria-label', on ? STR.monOnAria : STR.monOffAria);
-  const mt = $('muteBtn'); mt.classList.toggle('active', S.takeMute); mt.setAttribute('aria-pressed', S.takeMute); setBtn(mt, S.takeMute ? STR.unmuteAria : STR.muteAria);
-  $('soloBtn').classList.toggle('active', S.solo); $('soloBtn').setAttribute('aria-pressed', S.solo); setBtn($('soloBtn'), STR.soloAria);
+  const playable = !!S.take && !rec && S.lane === 'ready';
+  const mt = $('muteBtn'); mt.setAttribute('aria-disabled', String(!playable)); $('soloBtn').setAttribute('aria-disabled', String(!playable));
+  const mt0 = mt; mt.classList.toggle('active', S.takeMute); mt.setAttribute('aria-pressed', S.takeMute); setBtn(mt, S.takeMute ? STR.unmuteAria : STR.muteAria);
+  $('soloBtn').classList.toggle('active', S.solo); $('soloBtn').setAttribute('aria-pressed', S.solo); setBtn($('soloBtn'), STR.soloAria); if (!playable) { mt0.title = STR.noTake; $('soloBtn').title = STR.noTake; }
   const ab = $('armBtn'); ab.classList.toggle('active', armed || rec); ab.setAttribute('aria-pressed', armed || rec); setBtn(ab, armed ? STR.disarmAria : STR.armAria, 'rec');
   ab.disabled = !(canRecord());
   if (ab.disabled) ab.title = rec ? 'Recording. Stop first to change arm' : (S.perm !== 'granted' ? STR.recWhy.perm : S.inputMissing ? STR.recWhy.missing : S.error ? STR.recWhy.error : STR.recWhy.take);
-  $('levelRng').value = S.level; $('levelRng').setAttribute('aria-label', STR.voiceLevel);
+  // The fader edits the monitor level while the speaker is on, the take playback level otherwise.
+  $('levelRng').value = on ? S.monLevel : S.level; $('levelRng').setAttribute('aria-label', on ? STR.monitorLevel : STR.voiceLevel); $('levelRng').title = on ? STR.monitorLevel : STR.voiceLevel;
   // transport record
-  const rb = $('recBtn'); rb.disabled = !(canRecord() || rec); rb.classList.toggle('armed', armed); rb.classList.toggle('recording', rec);
-  const why = S.perm !== 'granted' ? STR.recWhy.perm : S.inputMissing ? STR.recWhy.missing : S.error ? STR.recWhy.error : (rv || pl) ? STR.recWhy.take : '';
+  const rb = $('recBtn'); rb.disabled = !(canPressRecord() || rec); rb.classList.toggle('armed', armed); rb.classList.toggle('recording', rec);
+  const why = S.perm !== 'granted' ? STR.recWhy.perm : S.inputMissing ? STR.recWhy.missing : S.error ? STR.recWhy.error : '';
   setBtn(rb, rec ? STR.stopTitle : rb.disabled ? why : STR.recordTitle); rb.setAttribute('aria-pressed', rec);
   $('recTime').textContent = rec ? fmt(S.take.real) : '';
   // latency badge
@@ -238,9 +250,18 @@ function render() {
   empty.textContent = S.perm !== 'granted' ? STR.emptyPerm : S.inputMissing ? STR.emptyMissing : armed ? STR.emptyArmed : STR.emptyIdle;
   if (t) {
     clip.classList.toggle('recording', rec); clip.classList.toggle('partial', t.partial); clip.classList.toggle('playing', pl);
-    const tag = $('clipTag'); tag.textContent = STR.tag(t.tempo, sgn(t.trans), t.changed); tag.classList.toggle('changed', t.changed || t.tempo !== 100 || t.trans !== 0);
+    clip.classList.toggle('selected', !!t.selected && !rec); clip.setAttribute('aria-selected', String(!!t.selected && !rec));
+    const shift = S.pitchOn ? song.trans - t.trans : 0;
+    const tag = $('clipTag'); tag.textContent = STR.tag(t.tempo, sgn(t.trans), t.changed) + (Math.abs(shift) > 3 ? ` · ${STR.voiceShifted}` : ''); tag.classList.toggle('changed', t.changed || t.tempo !== 100 || t.trans !== 0);
     tag.title = t.changed ? STR.tagTitleChanged : STR.tagTitle; placeClip(); drawClip();
   }
+  // lane state, pitch follow chip, retry (WP4)
+  const shiftNow = S.take && S.pitchOn ? song.trans - S.take.trans : 0; const chip = $('pitchChip');
+  chip.hidden = !t || rec; chip.textContent = S.pitchOn ? STR.pitchChip(sgn(shiftNow)) : STR.pitchOff; chip.title = S.pitchOn ? STR.pitchHelp : STR.pitchOffHelp;
+  chip.setAttribute('aria-pressed', String(S.pitchOn)); chip.classList.toggle('dim', !S.pitchOn || shiftNow === 0);
+  const ls = $('laneState'); const bad = S.lane !== 'ready' && S.lane !== 'conforming'; ls.hidden = !t || rec;
+  ls.textContent = S.lane === 'conforming' ? STR.preparing : bad ? STR.laneErr[S.lane] : STR.playsWithSong; ls.classList.toggle('bad', bad); ls.title = ls.textContent;
+  $('retryBtn').hidden = !t || rec || !bad; $('prep').hidden = !t || rec || S.lane !== 'conforming';
   // take actions (icon buttons in the lane header)
   const tb = $('takebar'); tb.hidden = !t || rec; $('takeInfo').hidden = !t;
   if (t) {
@@ -332,13 +353,53 @@ $('rewBtn').onclick = () => { if (S.phase === 'recording') return; song.pos = 0;
 $('tpDn').onclick = () => bump('tempo', -5); $('tpUp').onclick = () => bump('tempo', 5);
 $('trDn').onclick = () => bump('trans', -1); $('trUp').onclick = () => bump('trans', 1);
 ruler.onclick = (e) => seekFrom(e, ruler);
+// The take clip: click selects (not while recording), drag or arrows move it within [0, song length - take span],
+// Esc cancels a drag or deselects, Delete removes it. Only the clip captures the click; empty lane still seeks.
+const clipEl = $('clip');
+let dragMove = null;
+function moveTakeTo(start) { const t = S.take; if (!t) return; t.start = Math.max(0, Math.min(LEN - t.span, start)); render(); }
+clipEl.addEventListener('pointerdown', (e) => {
+  const t = S.take; if (!t || S.phase === 'recording') return; e.stopPropagation(); t.selected = true;
+  const w = $('voiceTrack').clientWidth; dragMove = { x0: e.clientX, s0: t.start, pps: w / LEN, moved: false, orig: t.start };
+  clipEl.setPointerCapture(e.pointerId); render();
+});
+clipEl.addEventListener('pointermove', (e) => { const d = dragMove; if (!d) return; if (!d.moved && Math.abs(e.clientX - d.x0) < 3) return; d.moved = true; moveTakeTo(d.s0 + (e.clientX - d.x0) / d.pps); });
+clipEl.addEventListener('pointerup', () => { dragMove = null; });
+clipEl.addEventListener('keydown', (e) => {
+  const t = S.take; if (!t || S.phase === 'recording') return;
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t.selected = !t.selected; render(); }
+  else if (t.selected && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); discard(); }
+  else if (t.selected && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); moveTakeTo(t.start + (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1 : 0.1)); }
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !S.take || !S.take.selected) return;
+  if (dragMove) { moveTakeTo(dragMove.orig); dragMove = null; } else { S.take.selected = false; render(); }
+}, true);
+document.addEventListener('pointerdown', (e) => { if (S.take && S.take.selected && !e.target.closest('.clip, #takebar')) { S.take.selected = false; render(); } }, true);
 $('voiceTrack').onclick = (e) => { if (e.target.closest('.clip')) return; seekFrom(e, $('voiceTrack')); };
 $('monBtn').onclick = () => { if (S.avail !== 'ok') return; S.muted = !S.muted; announce(S.muted ? STR.announce.monOff : STR.announce.monOn); render(); };
-$('muteBtn').onclick = () => { S.takeMute = !S.takeMute; render(); };
+$('muteBtn').onclick = () => { if (S.lane === 'ready' && S.take && S.phase !== 'recording') { S.takeMute = !S.takeMute; render(); } };
+$('pitchChip').onclick = () => { S.pitchOn = !S.pitchOn; render(); };
+$('retryBtn').onclick = () => { S.lane = 'conforming'; render(); $('laneState').focus(); setTimeout(() => { S.lane = 'ready'; render(); }, 900); };
 $('soloBtn').onclick = () => { S.solo = !S.solo; render(); };
+// Track settings popup: Esc and Done close it and focus returns to the gear.
+const setModal = $('setModal');
+setBtn($('gearBtn'), 'Track settings', 'gear');
+const openSettings = () => { setModal.hidden = false; $('gearBtn').setAttribute('aria-expanded', 'true'); $('setMon').focus(); updateSettings(); };
+const closeSettings = () => { setModal.hidden = true; $('gearBtn').setAttribute('aria-expanded', 'false'); $('gearBtn').focus(); };
+function updateSettings() {
+  $('setMon').value = S.monLevel; $('setMonOut').textContent = `${Math.round(S.monLevel * 0.72 - 60)} dB`;
+  $('setTake').value = S.level; $('setTakeOut').textContent = `${S.level}%`;
+  $('setRoute').textContent = monitoring() ? 'Route: Scarlett 2i2 · buffer 32 frames · estimated delay ≈ 5 ms' : 'Output: Scarlett 2i2 (Settings › Audio route)';
+}
+$('gearBtn').onclick = openSettings; $('setDone').onclick = closeSettings;
+setModal.onclick = (e) => { if (e.target === setModal) closeSettings(); };
+$('setMon').oninput = (e) => { S.monLevel = +e.target.value; render(); updateSettings(); };
+$('setTake').oninput = (e) => { S.level = +e.target.value; render(); updateSettings(); };
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !setModal.hidden) { e.stopPropagation(); closeSettings(); } }, true);
 $('armBtn').onclick = () => { if (!canRecord()) return; S.phase = S.phase === 'armed' ? 'idle' : 'armed'; if (S.phase === 'armed') setClip(false); announce(S.phase === 'armed' ? STR.announce.armed : STR.announce.disarmed); render(); };
 $('clipLed').onclick = () => { setClip(false); announce('Clip indicator reset'); };
-$('levelRng').oninput = (e) => { S.level = +e.target.value; };
+$('levelRng').oninput = (e) => { if (monitoring()) S.monLevel = +e.target.value; else S.level = +e.target.value; };
 sel.onchange = () => { S.input = sel.value; };
 $('recBtn').onclick = () => (S.phase === 'recording' ? stopRecording() : startRecording());
 $('keepBtn').onclick = () => { S.take.kept = true; announce(STR.announce.kept); render(); };
@@ -350,7 +411,7 @@ $('addBtn').onclick = addAsTrack; $('discardBtn').onclick = discard;
 const proto = $('proto'), list = $('protoList'); let current = 'idle'; let opener = null;
 STR.states.forEach((id) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = id; b.dataset.state = id; b.setAttribute('aria-pressed', 'false'); b.onclick = () => forceState(id); list.append(b); });
 function reset() {
-  Object.assign(S, { takeMute: false, perm: 'granted', inputMissing: false, phase: 'idle', listen: null, avail: 'ok', muted: true, error: null, take: null });
+  Object.assign(S, { lane: 'ready', pitchOn: true, takeMute: false, perm: 'granted', inputMissing: false, phase: 'idle', listen: null, avail: 'ok', muted: true, error: null, take: null });
   Object.assign(song, { pos: 12, playing: false, tempo: 100, trans: 0 });
 }
 const sampleTake = (o) => ({ n: 1, start: 30, span: 34, real: 34, tempo: 100, trans: 0, changed: false, kept: false, partial: false, peaks: makePeaks(220, 5, 0.5), ...o });
@@ -367,6 +428,9 @@ function forceState(id) {
     case 'monitoring-unavailable-latency': S.avail = 'latency'; song.playing = true; song.pos = 24; break;
     case 'monitoring-unavailable-route': S.avail = 'route'; song.playing = true; song.pos = 24; break;
     case 'error-recoverable': S.error = true; S.phase = 'review'; S.take = sampleTake({ real: 12, span: 12, partial: true }); song.pos = 42; break;
+    case 'pitch-shifted': song.trans = 5; S.take = sampleTake({ trans: 1 }); S.phase = 'review'; break;
+    case 'lane-conforming': case 'lane-take-too-long': case 'lane-memory-budget': case 'lane-graph-budget': case 'lane-conform-error': case 'lane-cancelled':
+      S.take = sampleTake({}); S.phase = 'review'; S.lane = id === 'lane-conforming' ? 'conforming' : id.slice(5); break;
     default: break;
   }
   sel.dataset.k = ''; render(); markProto();

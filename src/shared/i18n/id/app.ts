@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "Perangkat pemutaran yang disimpan tidak terhubung  menggunakan sistem default",
   "app.output.switchDenied": "SingZ tidak diizinkan untuk mengganti perangkat puter  masih pada yang sebelumnya",
   "app.output.switchFailed": "Tidak bisa beralih ke perangkat itu  masih pada yang sebelumnya",
-  "app.monitor.stopped": "Pemantauan headphone berhenti: {message}",
   "app.native.beatNotApplied": "Update beat-grid asli tidak diterapkan: {error}",
   "app.native.metronomeNotApplied": "Metronome update asli tidak diterapkan: {error}",
   "app.native.transposeNotApplied": "Update transpose asli tidak diterapkan: {error}",

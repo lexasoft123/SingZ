@@ -54,7 +54,7 @@ const SONG_PJ = join(SONG_DIR, 'project.json')
 // A library named explicitly (a staged one, on the field laptop) is opened
 // through a throwaway profile whose settings name it — the harness's way —
 // since the app otherwise lists whatever library its own profile points at.
-const PROFILE = process.env.E2E_PROJECTS_ROOT ? join(tmpdir(), `space-focus-userdata-${process.pid}`) : null
+const PROFILE = join(tmpdir(), `space-focus-userdata-${process.pid}`) // always isolated: the default profile is the singer's real SingZ one
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -94,7 +94,7 @@ async function spaceToggles(win) {
   const songName = libraryName(SONG_DIR)
   const fail = []
   let inconclusive = null
-  if (PROFILE) {
+  {
     mkdirSync(PROFILE, { recursive: true })
     writeFileSync(join(PROFILE, 'settings.json'), JSON.stringify({ projectsRoot: ROOT }, null, 2))
   }
@@ -109,7 +109,7 @@ async function spaceToggles(win) {
       SINGZ_E2E_HIDDEN: '1',
       SINGZ_NO_SYNC: '1',
       SINGZ_E2E_HOOKS: '1',
-      ...(PROFILE ? { SINGZ_USERDATA_DIR: PROFILE } : {})
+      SINGZ_USERDATA_DIR: PROFILE
     }
   })
   await quietLaunch(app) // measurement runs must not steal the singer's focus
