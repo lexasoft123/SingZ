@@ -171,8 +171,8 @@ describe('PR #152 TV fix 6: queue row actions are reachable and announced', () =
   })
   const render = (count: number): string => renderToStaticMarkup(createElement(Queue, {
     items: Array.from({ length: count }, (_, index) => ({ dir: `/s${index}`, name: `Band - Song ${index}`, songPath: '', hasStems: false })) as never,
-    rows: {}, selectedDir: count ? '/s0' : null, active: null, position: 0, playing: false, status: 'idle' as never,
-    onRemember: () => {}, onChoose: () => {}, onMove: () => {}, onRemove: () => {}, onBrowse: () => {}, onClose: () => {}, onToggle: () => {}
+    rows: {}, selectedDir: count ? '/s0' : null, active: null,
+    onRemember: () => {}, onChoose: () => {}, onMove: () => {}, onRemove: () => {}, onBrowse: () => {}
   }))
   it.each([['en', 'Actions'], ['ru', 'Действия'], ['zh-CN', '操作']] as const)('the list declares the hand-over and the footer says "→ %s"', async (locale, word) => {
     await prepareBoxLocale(locale)

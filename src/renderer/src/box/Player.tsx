@@ -6,7 +6,7 @@ import { playbackStatus } from './playback-status'
 import { nextSlot, songLine } from './next-song'
 import { timeText } from './metadata'
 import { PlayerLyrics } from './PlayerLyrics'
-import { parseSongName } from './song-identity'
+import { BoxNavigation } from './Navigation'
 import type { BoxTransportSnapshot } from './transport'
 import { tSettings, tMicrophone } from './settings-i18n'
 import { MicrophoneMeter } from './MicrophoneMeter'
@@ -20,6 +20,8 @@ export function Player({
   onLibrary,
   onMix,
   onQueue,
+  queueCount = 0,
+  onAccount,
   onNext,
   next,
   onSettings,
@@ -35,6 +37,8 @@ export function Player({
   onLibrary: () => void
   onMix: () => void
   onQueue: () => void
+  queueCount?: number
+  onAccount: () => void
   /** Starts the next queued song (App decides whether to confirm). */
   onNext: () => void
   /** Primitive fields only, so the Up next line never re-renders with the playback clock. */
@@ -62,12 +66,22 @@ export function Player({
     aria-label={t('box.player.label')}
   >
     <div className="player-content">
-      {/* Brand and song stay on screen while the controls are hidden. */}
-      <header className="player-header">
-        <div className="box-logo">Sing<span>Z</span><small>Box</small></div>
-        <div className="player-song"><strong>{parseSongName(active.item.name).title}</strong><span>{parseSongName(active.item.name).artist ?? t('box.metadata.artistUnknown')}</span></div>
-        <div className="player-header-actions player-chrome" {...chromeProps}><Button data-control="settings" onClick={onSettings}>{tSettings('box.settings.navigation')}</Button><Button data-control="collection" onClick={onLibrary}>{t('box.navigation.catalog')}</Button></div>
-      </header>
+      {/* The shared top bar: brand and song pill stay on screen while the controls are hidden. */}
+      <BoxNavigation
+        section="player"
+        queueCount={queueCount}
+        currentName={active.item.name}
+        playing={snapshot.playing}
+        status={status}
+        position={snapshot.position}
+        duration={snapshot.duration}
+        chromeHidden={!controlsVisible}
+        onCatalog={onLibrary}
+        onQueue={onQueue}
+        onCurrent={() => {}}
+        onSettings={onSettings}
+        onAccount={onAccount}
+      />
       {active.lyrics.status === 'ready' ? <PlayerLyrics key={active.item.dir} lines={lines} position={snapshot.position} playing={snapshot.playing} rate={snapshot.tempo} /> : <div className="player-no-lyrics">
         <h1>{active.lyrics.status === 'error' ? t('box.player.lyricsError') : t('box.player.noLyrics')}</h1>
         <p>{active.lyrics.status === 'error' ? active.lyrics.error : t('box.player.noLyricsBody')}</p>
@@ -109,7 +123,7 @@ export function Player({
             </Button>}
             {slot === 'disabled' && <Button className="player-next" aria-label={t('box.player.noNext')} title={t('box.player.noNext')} data-control="next-song" disabled><Icon name="skip" size={23} /></Button>}
           </div>
-          <div className="player-tools" data-remote-up="[data-control='seek']"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button><Button data-control="queue" onClick={onQueue}>{t('box.navigation.queue')}</Button></div>
+          <div className="player-tools" data-remote-up="[data-control='seek']"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button></div>
           <span className="player-time player-duration">{timeText(snapshot.duration)}</span>
         </div>
         <div className="player-hints"><span>← → {t('box.hints.move')} <b>↑</b> {t('box.hints.seek')} <b>OK</b> {t('box.hints.select')} <b>Back</b> {t('box.navigation.catalog')}</span>{next && <PlayerUpNext title={next.title} artist={next.artist} />}<span>{snapshot.restartRequired ? `${tSettings('box.settings.restartRequired')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.routingBlocked ? `${tSettings('box.settings.routingPaused')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.saveError ?? snapshot.outputError ?? snapshot.playbackError?.message ?? (status === 'ended' ? t(next ? 'box.player.endedNext' : 'box.player.ended') : status === 'playing' ? t('box.player.hideHint') : t('box.player.paused'))}</span></div>

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { endedFocusControl, switchNeedsConfirmation, nextQueued, nextSlot, queueAfterAdvance, songLine } from '../../src/renderer/src/box/next-song'
+import { endedFocusControl, switchNeedsConfirmation, nextQueued, nextSlot, queueAfterAdvance, songLine, waitingCount } from '../../src/renderer/src/box/next-song'
 import { moveSpatialFocus } from '../../src/renderer/src/box/focus'
 import { box as en } from '../../src/shared/i18n/en/box'
 
@@ -23,6 +23,24 @@ describe('nextQueued', () => {
     expect(nextQueued(q('a', 'a', 'b'), 'a')?.dir).toBe('b')
     expect(nextQueued(q('a', 'a'), 'a')).toBeNull()
     expect(nextQueued(q('b', 'a', 'c', 'a'), 'a')?.dir).toBe('c')
+  })
+})
+
+describe('waitingCount', () => {
+  const rows = (...dirs: string[]) => dirs.map(dir => ({ dir }))
+  it('counts only songs after the current one (old items.length said 1 for [current])', () => {
+    expect(waitingCount(rows('a'), 'a')).toBe(0)
+    expect(waitingCount(rows('a', 'b', 'c'), 'a')).toBe(2)
+    expect(waitingCount(rows('a', 'b', 'c'), 'b')).toBe(1)
+    expect(waitingCount(rows('a', 'b', 'a'), 'a')).toBe(1)
+  })
+  it('counts every row when the current song is not queued or nothing is loaded', () => {
+    expect(waitingCount(rows('a', 'b'), 'x')).toBe(2)
+    expect(waitingCount(rows('a', 'b'), null)).toBe(2)
+    expect(waitingCount([], null)).toBe(0)
+  })
+  it('agrees with nextQueued', () => {
+    for (const [items, dir] of [[rows('a'), 'a'], [rows('a', 'b'), 'a'], [rows('b'), 'a']] as const) expect(waitingCount(items, dir) > 0).toBe(nextQueued(items, dir) !== null)
   })
 })
 
