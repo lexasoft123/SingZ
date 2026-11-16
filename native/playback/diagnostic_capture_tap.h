@@ -17,7 +17,11 @@ namespace singz {
 // One bounded recording, independent single writers for song, raw input and final
 // output. Control configures/reaps; callbacks only copy to preallocated storage.
 // The object remains alive until both platform producers have been drained.
-class DiagnosticCaptureTap {
+class
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+DiagnosticCaptureTap {
 public:
   struct Result {
     bool active=false, complete=false, ok=false;
