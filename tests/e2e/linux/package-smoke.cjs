@@ -1,7 +1,7 @@
 'use strict'
 /** Installed Linux qualification. Run inside Xvfb or a Wayland compositor.
  * Hardware assertions require an explicitly named snd_aloop endpoint. A hosted
- * runner without cards reports browser mode; it never claims native audio.
+ * runner without a loopback cable skips audio; it never claims native audio.
  */
 const watchdog = require('../../shared/watchdog.cjs').arm('linux-package', { totalMinutes: 35, idleMinutes: 12 })
 const assert = require('node:assert/strict')
@@ -18,8 +18,6 @@ const packageVersion = require(path.join(projectRoot, 'package.json')).version
 const evidence = path.resolve(process.env.SINGZ_E2E_RESULTS || path.join(projectRoot, 'build/native/linux-package-e2e'))
 const executable = path.resolve(process.env.SINGZ_E2E_PACKAGED || '/opt/SingZ/singz')
 const requireLoopback = process.env.SINGZ_E2E_REQUIRE_LOOPBACK === '1'
-const forceBrowser = process.env.SINGZ_E2E_AUDIO === 'browser'
-assert.ok(!process.env.SINGZ_E2E_AUDIO || forceBrowser, 'SINGZ_E2E_AUDIO supports only an explicit browser override')
 const ozone = process.env.SINGZ_E2E_OZONE || (process.env.WAYLAND_DISPLAY ? 'wayland' : 'x11')
 fs.mkdirSync(evidence, { recursive: true })
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-linux-e2e-'))
@@ -28,7 +26,7 @@ const profile = path.join(scratch, 'profile'), library = path.join(scratch, 'lib
 // a kernel loopback module, and chooseRoute selects its verified virtual UID.
 const hasSilentLoopback = fs.existsSync('/proc/asound/modules') && /\bsnd_aloop\b/.test(fs.readFileSync('/proc/asound/modules', 'utf8'))
 fs.mkdirSync(profile); fs.mkdirSync(library)
-const result = { started: new Date().toISOString(), executable, ozone, requireLoopback, forceBrowser, checks: [], screenshots: [] }
+const result = { started: new Date().toISOString(), executable, ozone, requireLoopback, checks: [], screenshots: [] }
 let app, page, drive, generator, tap
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const document = dir => JSON.parse(fs.readFileSync(path.join(dir, 'project.json'), 'utf8'))
@@ -68,13 +66,11 @@ async function dismissWelcome() {
   await welcome.getByRole('button', { name: 'Maybe later', exact: true }).click()
   await welcome.waitFor({ state: 'detached' })
 }
-async function chooseRoute(native, inventory) {
+async function chooseRoute(inventory) {
   await page.locator('[data-guide="settings"]').click()
-  await page.getByLabel('Use native DSP playback', { exact: true }).setChecked(native)
-  if (native) {
-    await page.locator('#settings-output').selectOption('native:' + inventory.output.uid)
-    await page.locator('#settings-input').selectOption(inventory.input.uid)
-  } else await page.locator('#settings-output').selectOption('')
+  // Desktop playback is native-only; Settings stores opaque UIDs without a prefix.
+  await page.locator('#settings-output').selectOption(inventory?.output.uid || '')
+  if (inventory?.input) await page.locator('#settings-input').selectOption(inventory.input.uid)
   await page.keyboard.press('Escape'); await page.waitForSelector('.settings-card', { state: 'detached' })
 }
 async function clickPlay() {
@@ -135,16 +131,16 @@ async function run() {
       await app.evaluate(({ BrowserWindow }, bounds) => BrowserWindow.getAllWindows()[0].setBounds(bounds), wanted)
       await page.waitForFunction(async () => (await window.singz.modelsStatus()).find(m => m.id === 'gpu-splitter')?.present, null, { timeout: 180000 })
       await dismissWelcome()
-      await page.locator('[data-guide="settings"]').click(); await page.getByLabel('Use native DSP playback', { exact: true }).check(); await page.keyboard.press('Escape')
+      await chooseRoute()
       result.x11BoundsBefore = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds())
       assert.equal(result.x11BoundsBefore.width, wanted.width)
       await shot('x11-startup')
       await close(); await launch()
-      await page.locator('[data-guide="settings"]').click(); assert.equal(await page.getByLabel('Use native DSP playback', { exact: true }).isChecked(), true); await page.keyboard.press('Escape')
+      await page.locator('[data-guide="settings"]').click(); assert.equal(await page.locator('#settings-output').inputValue(), ''); await page.keyboard.press('Escape')
       result.x11BoundsAfter = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds())
       assert.equal(result.x11BoundsAfter.width, result.x11BoundsBefore.width)
       assert.equal(result.x11BoundsAfter.height, result.x11BoundsBefore.height)
-      record('X11 installed desktop launches and restores window bounds and saved preference')
+      record('X11 installed desktop launches and restores window bounds and default native output preference')
     })
     result.passed = true
     return
@@ -160,10 +156,11 @@ async function run() {
   })
   const inventory = await page.evaluate(() => window.singz.audioHostDevices('alsa')); assert.equal(inventory.ok, true)
   const route = { output: inventory.devices.find(d => d.uid.includes('snd_aloop') && d.uid.endsWith(':pcm:0')), input: inventory.devices.find(d => d.uid.includes('snd_aloop') && d.uid.endsWith(':pcm:1')) }
-  const native = !forceBrowser && Boolean(route.output && route.input)
+  const native = Boolean(route.output && route.input)
   if (requireLoopback) assert.ok(native, 'SINGZ_E2E_REQUIRE_LOOPBACK requires a named snd_aloop playback/capture cable')
-  result.audioMode = native ? 'native-alsa-loopback' : forceBrowser ? 'browser-forced' : 'browser-no-native-device'; result.inventory = inventory
-  await chooseRoute(native, route)
+  result.audioMode = native ? 'native-alsa-loopback' : 'not-exercised-no-loopback'; result.inventory = inventory
+  if (native) await chooseRoute(route)
+  else record('SKIP audio playback, capture and underrun checks: no named snd_aloop cable; native ALSA enumerates hardware cards only')
   await step('normal local import, real bundled split, FLAC save', 600, async () => {
     const input = path.join(scratch, 'Linux package local split.wav'); fs.writeFileSync(input, wav(4, 220, 330, true))
     await page.locator('input[type=file]').first().setInputFiles(input); await ready(3)
@@ -202,7 +199,7 @@ async function run() {
     assert.ok(drive.state.refreshRequests.length > 0, 'short-lived grant must refresh with TV client'); assert.deepEqual(drive.state.writes, [])
     record('phone approval, TV-client refresh and cancellable verified reader download')
   })
-  await step('native/browser playback, lyrics, transport and non-default stem mix', 150, async () => {
+  if (native) await step('native playback, capture and lyric timing', 150, async () => {
     await karaoke(); await page.evaluate(() => { __test.engine.seek(0.5) })
     if (native) assert.ok(route.output.uid.includes('snd_aloop'))
     await clickPlay()
@@ -213,11 +210,15 @@ async function run() {
     result.lyrics = await lyricsWhilePlaying(JSON.parse(fs.readFileSync(path.join(result.downloadedProject, 'lyrics.json'))).lines)
     if (native) { result.nativeStatus = await nativeHealth(); result.capture = await page.evaluate(() => window.__frames); assert.ok(result.capture.some(f => f.rms > 0.001)); await page.evaluate(async () => { await __test.trainingMic.stopAndWait(); window.__off() }) }
     await pause(); await shot('playing-lyrics')
+  })
+  await step('non-default stem mix persists through the normal project API', 60, async () => {
     const guitar = await lane('guitar'); await guitar.locator('.vol').fill('0.63'); await guitar.locator('.solo').click()
     const drums = await lane('drums'); await drums.locator('.mute').click()
     await page.waitForFunction(() => __test.tracks.find(t => t.id === 'guitar').volume === 0.63 && __test.tracks.find(t => t.id === 'guitar').solo && __test.tracks.find(t => t.id === 'drums').muted)
     result.savedMix = await mix(); assert.equal(result.savedMix.guitar.volume, 0.63); assert.equal(result.savedMix.guitar.solo, true)
     await save(); assert.deepEqual(document(result.downloadedProject).settings.tracks, result.savedMix)
+  })
+  if (native) await step('native transport loop, tempo, transpose and end', 90, async () => {
     await page.evaluate(async () => { await __test.engine.setTranspose(2); await __test.engine.setTempo(1.1); await __test.engine.setRegion({ start: 1, end: 2 }, true); __test.engine.seek(1) })
     await clickPlay(); await page.waitForFunction(() => __test.engine.position > 1.15, null, { timeout: 20000 }); await sleep(1800)
     if (native) { const s = await nativeHealth(); assert.ok(Number(s.loopCount) > 0, 'native loop wraps'); assert.equal(s.transposeSemitones, 2); assert.ok(Math.abs(s.playbackRate - 1.1) < 0.001) }
@@ -254,9 +255,9 @@ async function run() {
     const oldPid = app.process().pid; await close(); await launch(true); assert.notEqual(app.process().pid, oldPid)
     await openCatalog(source.doc.name); assert.deepEqual(await mix(), result.savedMix)
     assert.ok(!fs.existsSync(path.join(result.downloadedProject, source.doc.songFile))); await karaoke()
-    await page.evaluate(() => __test.engine.seek(0.5)); await clickPlay()
-    result.offlineLyrics = await lyricsWhilePlaying(JSON.parse(fs.readFileSync(path.join(result.downloadedProject, 'lyrics.json'))).lines)
     if (native) {
+      await page.evaluate(() => __test.engine.seek(0.5)); await clickPlay()
+      result.offlineLyrics = await lyricsWhilePlaying(JSON.parse(fs.readFileSync(path.join(result.downloadedProject, 'lyrics.json'))).lines)
       result.offlineNativeStatus = await nativeHealth()
       const prepared = await page.evaluate(() => window.singz.desktopPlaybackStatus())
       for (const l of prepared.lanes) {
@@ -265,8 +266,9 @@ async function run() {
         assert.ok(Math.abs(l.gain - result.savedMix[l.id].volume) < 1e-6, `${l.id} native float32 gain`)
       }
     }
-    await pause(); assert.deepEqual(document(result.downloadedProject).settings.tracks, result.savedMix)
-    await shot('cold-offline-restored'); record(native ? 'offline cold process restart preserves non-default mix in UI and native graph' : 'offline cold process restart preserves non-default mix in UI and browser transport')
+    if (native) await pause()
+    assert.deepEqual(document(result.downloadedProject).settings.tracks, result.savedMix)
+    await shot('cold-offline-restored'); record(native ? 'offline cold process restart preserves non-default mix in UI and native graph' : 'offline cold process restart restores stems, lyrics and non-default mix; audio skipped without loopback')
   })
   result.drive = { deviceRequests: drive.state.deviceRequests, refreshRequests: drive.state.refreshRequests.length, mutations: drive.state.writes }
   assert.deepEqual(drive.state.writes, []); result.passed = true

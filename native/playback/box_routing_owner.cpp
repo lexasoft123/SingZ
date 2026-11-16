@@ -1,3 +1,7 @@
+#include "diagnostic_capture_tap.h"
+#include <loopz/audio_diagnostics_json.hpp>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "box_input_queue.h"
 #include "box_routing_owner.h"
 #include "box_timing_journal.h"
@@ -21,6 +25,24 @@ namespace singz {
 namespace {
 constexpr uint64_t kNs = 1000000000;
 constexpr size_t kTimelineSlots = 65536, kPhysicalSlots = 4096;
+// Hardware-certified timestamps bypass the estimated-rate servo. Omit its
+// fields rather than reporting zeros that could be mistaken for measurements.
+void omitInactiveServoTelemetry(loopz::JSON& response) {
+  if(!response.is_object() || !response.contains("snapshot")) return;
+  auto& snapshot=response["snapshot"];
+  if(!snapshot.is_object() || !snapshot.contains("runtime")) return;
+  auto& runtime=snapshot["runtime"];
+  if(!runtime.is_object() || !runtime.contains("outputs") || !runtime["outputs"].is_array()) return;
+  for(auto& endpoint:runtime["outputs"]) {
+    if(!endpoint.is_object() || !endpoint.contains("audioDiagnostics")) continue;
+    auto& diagnostics=endpoint["audioDiagnostics"];
+    if(!diagnostics.is_object() || !diagnostics.contains("servo") || !diagnostics["servo"].is_object()) continue;
+    const auto& servo=diagnostics["servo"];
+    if((servo.contains("selectedHz") && servo["selectedHz"].is_number() && servo["selectedHz"].get<double>()<=0) ||
+       (servo.contains("basePeriodNs") && servo["basePeriodNs"].is_number() && servo["basePeriodNs"].get<double>()<=0))
+      diagnostics.erase("servo");
+  }
+}
 struct SongRecord {
   std::atomic<uint64_t> sequence{0}, host{0}, generation{0}, seek{0}, rate{0};
   std::atomic<int64_t> frame{0};
@@ -39,7 +61,7 @@ std::array<MissingRecord, kPhysicalSlots> missingHistory;
 std::atomic<uint64_t> missingWritten{0};
 std::atomic<bool> journalCoverageLost{false};
 std::atomic<uint64_t> songWritten{0}, physicalWritten{0}, epoch{1};
-std::atomic<uint64_t> primaryEndpoint{0}, primaryDelay{0};
+std::atomic<uint64_t> primaryEndpoint{0}, primaryDelay{0}, primaryPresentationLatency{0};
 std::atomic<bool> mappingKnown{false}, enabled{false};
 // Static destruction runs in reverse declaration order. If the process exits
 // without shutdownBoxRouting(), ~Control destroys InstrumentedHost instances
@@ -49,6 +71,8 @@ uint64_t endpointSerial = 0;
 struct Endpoint { uint64_t id; std::string uid; };
 std::vector<Endpoint> endpoints;
 std::shared_ptr<LoopZSongSource> song;
+DiagnosticCaptureTap diagnosticCapture;
+uint64_t diagnosticCaptureSerial=0, diagnosticInputLease=0;
 std::unique_ptr<loopz::runtime::Control> control;
 loopz::runtime::AudioRuntime* runtimeView = nullptr;
 std::function<uint64_t()> controlClock;
@@ -57,23 +81,29 @@ uint64_t controlPolledAt = 0;
 std::string stateRecovery;
 uint64_t selectedGeneration = 0, selectedDocumentRevision = 0;
 std::string selectedPrimary;
-uint64_t selectedDelay = 0;
+uint64_t selectedDelay = 0, selectedPresentationLatency = 0;
 std::optional<loopz::SceneTimingPlan> mappingTiming;
 uint64_t mappingDocumentRevision = 0, mappingActiveGeneration = 0;
 
-class ObservedSongSource final : public loopz::AudioSource {
+class ObservedSongSource final : public loopz::runtime::DeviceClockSource {
  public:
-  explicit ObservedSongSource(std::shared_ptr<loopz::AudioHistory> history) : history_(std::move(history)) {}
+  explicit ObservedSongSource(std::shared_ptr<LoopZSongSource> source) : source_(std::move(source)) {}
+  void selectClockDriver(const void* owner) const noexcept override { source_->selectClockDriver(owner); }
+  bool renderClocked(const void* owner, const AudioHostRenderBlock& block) const noexcept override {
+    const bool rendered = source_->renderClocked(owner, block);
+    if (rendered) diagnosticCapture.song(block);
+    return rendered;
+  }
   uint32_t channels() const noexcept override { return 2; }
   loopz::AudioReadResult read(uint64_t host, double rate, loopz::RoutingOutput output,
                              uint32_t frames, loopz::AudioReadCursor& cursor) const noexcept override {
-    auto result = history_->read(host, rate, output, frames, cursor);
+    auto result = source_->read(host, rate, output, frames, cursor);
     observe(host, rate, frames, result); return result;
   }
   loopz::AudioReadResult readWithFilter(uint64_t host, double rate, loopz::RoutingOutput output,
                              uint32_t frames, loopz::AudioReadCursor& cursor,
                              loopz::ResamplingFilter filter) const noexcept override {
-    auto result = history_->readWithFilter(host, rate, output, frames, cursor, filter);
+    auto result = source_->readWithFilter(host, rate, output, frames, cursor, filter);
     observe(host, rate, frames, result); return result;
   }
  private:
@@ -86,7 +116,7 @@ class ObservedSongSource final : public loopz::AudioSource {
     row.duration.store(rate > 0 ? uint64_t(double(frames) * kNs / rate) : 0, std::memory_order_relaxed);
     box_timing::publish(row.sequence, index);
   }
-  std::shared_ptr<loopz::AudioHistory> history_;
+  std::shared_ptr<LoopZSongSource> source_;
 };
 
 // All inventory callers are serialized on the routing control owner. Discovery
@@ -148,6 +178,7 @@ class InstrumentedHost final : public AudioHostBackend {
     // concurrently; every slot has a unique reserved sequence.
     const uint64_t callbackEpoch = epoch.load(std::memory_order_acquire);
     const bool rendered = self.callback_(self.context_, block);
+    diagnosticCapture.output(self.id_, block);
     const bool coherent = callbackEpoch == epoch.load(std::memory_order_acquire);
     const uint64_t index = physicalWritten.fetch_add(1, std::memory_order_relaxed);
     auto& row = physical[index % kPhysicalSlots];
@@ -205,6 +236,7 @@ class AnalysisInput final : public AudioInputBackend {
     // samples, result or lifecycle, including when its queue is full.
     const bool result = self.push_(self.context_, block);
     self.queue_->push(block, self.rate_);
+    diagnosticCapture.input(self.queue_.get(), block, self.rate_);
     return result;
   }
   std::unique_ptr<AudioInputBackend> backend_;
@@ -280,16 +312,19 @@ void refreshMappingUnchecked() {
         for (const auto& endpoint : endpoints) if (endpoint.uid == monitor.deviceSelector) id = endpoint.id;
         if (!id) continue;
         const std::string primary = device.id + "/" + monitor.id + "/" + std::to_string(id);
-        const uint64_t routeDelay = uint64_t(telemetry.historyDelayFrames) + timing.latencyFrames.at(bus);
+        const uint64_t routeDelay = telemetry.deviceClocked ? 0 :
+            uint64_t(telemetry.historyDelayFrames) + timing.latencyFrames.at(bus);
+        const uint64_t presentationLatency = telemetry.deviceClocked ? telemetry.queuedOutputFrames : routeDelay;
         if (selectedGeneration != active || selectedDocumentRevision != view.documentRevision ||
-            selectedPrimary != primary || selectedDelay != routeDelay) {
+            selectedPrimary != primary || selectedDelay != routeDelay || selectedPresentationLatency != presentationLatency) {
           epoch.fetch_add(1, std::memory_order_acq_rel);
           selectedGeneration = active; selectedDocumentRevision = view.documentRevision;
-          selectedPrimary = primary; selectedDelay = routeDelay;
+          selectedPrimary = primary; selectedDelay = routeDelay; selectedPresentationLatency = presentationLatency;
         }
         primaryEndpoint.store(id, std::memory_order_relaxed);
         // H already includes queued output, period, filter and reserve.
         primaryDelay.store(routeDelay, std::memory_order_relaxed);
+        primaryPresentationLatency.store(presentationLatency, std::memory_order_relaxed);
         mappingKnown.store(true, std::memory_order_release);
         return;
       }
@@ -330,7 +365,7 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
             return std::make_unique<AnalysisInput>(std::move(backend));
           });
       nextView = runtime.get();
-      runtime->bindNativeSource("native:singz", std::make_shared<ObservedSongSource>(nextSong->history));
+      runtime->bindNativeSource("native:singz", std::make_shared<ObservedSongSource>(nextSong));
       // Construction restores only an explicit saved document. An absent state
       // file leaves the runtime inactive; no default output/mic route is added.
       return std::make_unique<loopz::runtime::Control>(statePath, std::move(runtime));
@@ -379,7 +414,7 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
     }
     auto nextClock = inventory->clock;
     const auto installed = sharedAudioService().configureProvider(
-        createLoopZSourceBackend(nextSong), "box-loopz");
+        createLoopZSourceBackend(nextSong), "box-loopz", true);
     if (!installed.ok) throw std::runtime_error(installed.message);
     // Nothing below may throw: commit the owner, then publish enablement last.
     song = std::move(nextSong);
@@ -438,9 +473,80 @@ void releaseBoxInputTap(uint64_t id) noexcept {
   if (runtimeView) (void)runtimeView->releaseInput(id);
 }
 
+namespace {
+loopz::JSON captureSnapshot() {
+  const auto status=diagnosticCapture.status();
+  if(status.complete && diagnosticInputLease && runtimeView) {
+    runtimeView->releaseInput(diagnosticInputLease); diagnosticInputLease=0;
+  }
+  return {{"id",std::to_string(status.id)}, {"active",status.active}, {"complete",status.complete},
+          {"ok",status.ok}, {"error",status.error}, {"outputPath",status.outputPath}, {"inputPath",status.inputPath},
+          {"songPath",status.songPath}, {"songFrames",std::to_string(status.songFrames)},
+          {"firstSongHostNs",std::to_string(status.firstSongHostNs)},
+          {"songDiscontinuities",std::to_string(status.songDiscontinuities)},
+          {"sampleRate",48000}, {"outputFrames",std::to_string(status.outputFrames)},
+          {"inputFrames",std::to_string(status.inputFrames)}, {"targetFrames",std::to_string(status.targetFrames)},
+          {"firstOutputHostNs",std::to_string(status.firstOutputHostNs)},
+          {"firstInputHostNs",std::to_string(status.firstInputHostNs)},
+          {"outputDiscontinuities",std::to_string(status.outputDiscontinuities)},
+          {"inputDiscontinuities",std::to_string(status.inputDiscontinuities)}};
+}
+}
+std::string boxCaptureTapStatus() { return captureSnapshot().dump(); }
+std::string boxCaptureTapStart(const std::string& request) {
+  if(!runtimeView) throw std::runtime_error("Box routing is not initialized");
+  (void)captureSnapshot();
+  if(diagnosticInputLease) throw std::runtime_error("A diagnostic capture is already active");
+  const auto value=loopz::parseControlJSON(request,16384);
+  if(!value.is_object() || value.size()!=3 || !value.contains("seconds") || !value["seconds"].is_number() ||
+      !value.contains("input") || !value["input"].is_object() || value["input"].size()!=2 ||
+      !value["input"].contains("uid") || !value["input"]["uid"].is_string() ||
+      !value["input"].contains("channel") || !value["input"]["channel"].is_number_unsigned() ||
+      !value.contains("directory") || !value["directory"].is_string())
+    throw std::invalid_argument("Invalid diagnostic capture request");
+  const double seconds=value["seconds"].get<double>();
+  const auto uid=value["input"]["uid"].get<std::string>();
+  const auto channel=value["input"]["channel"].get<uint64_t>();
+  const auto directory=value["directory"].get<std::string>();
+  struct stat st{};
+  if(!std::isfinite(seconds) || seconds<=0 || seconds>30 || uid.empty() || uid.size()>4096 ||
+      uid.find('\0')!=std::string::npos || channel>=64 || directory.find('\0')!=std::string::npos ||
+      !std::filesystem::path(directory).is_absolute() || ::lstat(directory.c_str(),&st)!=0 ||
+      !S_ISDIR(st.st_mode) || st.st_uid!=::getuid() || (st.st_mode&077)!=0)
+    throw std::invalid_argument("Invalid private diagnostic capture directory or bounds");
+  const auto endpoint=primaryEndpoint.load(std::memory_order_acquire);
+  if(!endpoint || !mappingKnown.load(std::memory_order_acquire))
+    throw std::runtime_error("No active primary output for diagnostic capture");
+  auto lease=runtimeView->acquireInput(uid,uint32_t(channel+1));
+  try {
+    const auto status=runtimeView->inputStatus(lease.id);
+    if(!status || !status->connected || status->audio.format.sampleRate!=48000 || !nativeInputs.contains(uid))
+      throw std::runtime_error("Diagnostic input must be an active 48 kHz capture");
+    diagnosticCapture.start(++diagnosticCaptureSerial,seconds,endpoint,nativeInputs.at(uid).get(),uint32_t(channel),directory,
+                            song && song->deviceClocked());
+    diagnosticInputLease=lease.id;
+  } catch(...) { runtimeView->releaseInput(lease.id); throw; }
+  return captureSnapshot().dump();
+}
+std::string boxAudioDiagnostics() {
+  loopz::JSON result={{"captureTap",captureSnapshot()},
+      {"limiter",{{"kind","memoryless-hard-clip"},{"persistentGainEnvelope",false}}}};
+  if(song) {
+    const auto history=song->history->readDiagnostics();
+    result["songHistory"]=loopz::historyDiagnosticsJSON(history);
+    result["stages"]["songMixOut"]=loopz::energyJSON(history.inputEnergy);
+  }
+  if(control) {
+    result["routing"]=control->request({{"version",1},{"operation","state"}});
+    omitInactiveServoTelemetry(result["routing"]);
+  }
+  return result.dump(-1,' ',false,loopz::JSON::error_handler_t::replace);
+}
+
 std::string boxRoutingRequest(const std::string& request) {
   if (!control) throw std::runtime_error("Box routing is not initialized");
   auto response = control->request(loopz::parseControlJSON(request));
+  omitInactiveServoTelemetry(response);
   refreshMapping();
   // Snapshots embed host-provided device and channel labels verbatim. A USB
   // product string need not be UTF-8; replace invalid bytes instead of failing
@@ -449,6 +555,7 @@ std::string boxRoutingRequest(const std::string& request) {
 }
 void pollBoxRouting() {
   if (!control) return;
+  if(diagnosticInputLease) (void)captureSnapshot();
   const auto view = control->routeView();
   const bool pending = view.desired && view.desiredGeneration != view.activeGeneration;
   const uint64_t now = controlClock();
@@ -461,6 +568,11 @@ void pollBoxRouting() {
   refreshMapping();
 }
 void shutdownBoxRouting() noexcept {
+  diagnosticCapture.cancel();
+  if(diagnosticInputLease && runtimeView) {
+    try { runtimeView->releaseInput(diagnosticInputLease); } catch(...) {}
+    diagnosticInputLease=0;
+  }
   // Host must drain shared song renderers before this final process shutdown.
   enabled.store(false, std::memory_order_release);
   mappingKnown.store(false, std::memory_order_release);
@@ -535,6 +647,7 @@ BoxAudibleProjection boxAudibleProjectionAtTimeForTesting(
   const uint64_t wantedEndpoint = primaryEndpoint.load(std::memory_order_relaxed);
   const uint64_t delay = primaryDelay.load(std::memory_order_relaxed);
   result.routeDelayFrames = delay;
+  result.presentationLatencyFrames = primaryPresentationLatency.load(std::memory_order_relaxed);
   const uint64_t physicalEnd = physicalWritten.load(std::memory_order_acquire);
   // Prove there is no unpublished physical boundary in the retained snapshot,
   // including callbacks whose endpoint identity has not yet been published.

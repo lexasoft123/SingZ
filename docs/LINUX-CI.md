@@ -21,8 +21,8 @@ maps the host machine (`x86_64`/`aarch64`) to the SingZ target arch
 2. `SINGZ_CI_STAGE=installed-test` installs the package on the runner host
    and tests `/opt/SingZ/singz`. It loads the installed native addon and
    runs the desktop app under headless Wayland and X11, exercising bundled
-   splitter extraction, local splitting, project save/open, playback,
-   lyrics, and mixer controls.
+   splitter extraction, local splitting, project save/open, lyrics, and
+   mixer controls. Playback requires the loopback device described below.
 
 The container builds Debian-baseline binaries; each runner installs the
 matching-architecture package and executes it natively, so the glibc floor
@@ -31,16 +31,19 @@ pass.
 
 ## Audio testing
 
-Hosted runners use a private PulseAudio null sink and
-`SINGZ_E2E_AUDIO=browser`, so playback has a running audio clock without a
-physical sound device. This verifies the packaged desktop path; native ALSA
-signal routing requires a Linux host with `snd-aloop`.
+Desktop song playback is native-only. Hosted runners keep a private PulseAudio
+null sink for Chromium's audio context, but the native ALSA provider enumerates
+kernel hardware cards, so that sink cannot supply a native playback endpoint.
+Without a named `snd_aloop` cable, the packaged-app harness logs `SKIP` for
+playback, timed lyrics, capture and underrun checks. Import, splitting, Drive
+download, mixer controls and offline project reopening still run.
 
-For native loopback testing, build the package and follow
+For native loopback qualification, build the package and follow
 [the Linux development instructions](../tools/dev/linux/README.md#alsa-loopback-testing).
-The packaged-app harness accepts `SINGZ_E2E_REQUIRE_LOOPBACK=1` to require
-its named virtual playback/capture device. Leave `SINGZ_E2E_AUDIO` unset
-for that mode. Automated audio tests use virtual devices and remain silent.
+Qualification hosts set `SINGZ_E2E_REQUIRE_LOOPBACK=1` to require the named
+virtual playback/capture cable and fail if it is missing. These runs exercise
+native playback, lyric timing, capture and underrun recovery. Automated audio
+tests use virtual devices and remain silent.
 
 ## Caches and artifacts
 

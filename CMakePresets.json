@@ -123,7 +123,7 @@
       "name": "linux-alsa",
       "configurePreset": "linux-alsa",
       "jobs": 4,
-      "targets": ["audio_host_linux_tests", "shared_audio_service_tests", "singz-audio-host"]
+      "targets": ["audio_host_linux_tests", "shared_audio_service_tests", "audio_uptime_tests", "diagnostic_capture_tap_tests", "singz-audio-host"]
     },
     {
       "name": "host-debug",
@@ -143,7 +143,7 @@
         "mp3_decoder_tests", "streaming_lane_feeder_tests", "lane_measure_tests", "native_audio_ownership_tests", "audio_input_latency_tests", "native_playback_session_tests", "native_playback_contract_tests",
         "voice_monitor_source_tests", "voice_monitor_client_tests", "voice_monitor_client_clock_tests", "voice_monitor_waveform_tests", "training_pcm_mixer_tests",
         "service_master_tests", "shared_audio_service_tests", "preview_click_tests", "preview_click_negative_render", "audio_buffer_change_tests", "singz_check_service_master_realtime",
-        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
+        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift", "audio_uptime_tests", "diagnostic_capture_tap_tests"]
     },
     {
       "name": "zdsp-asan-ubsan",
@@ -153,7 +153,7 @@
         "mp3_decoder_tests", "streaming_lane_feeder_tests", "lane_measure_tests", "native_audio_ownership_tests", "audio_input_latency_tests", "native_playback_session_tests", "native_playback_contract_tests",
         "voice_monitor_source_tests", "voice_monitor_client_tests", "voice_monitor_client_clock_tests", "voice_monitor_waveform_tests", "training_pcm_mixer_tests",
         "service_master_tests", "shared_audio_service_tests", "preview_click_tests", "preview_click_negative_render", "audio_buffer_change_tests", "singz_check_service_master_realtime",
-        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
+        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift", "audio_uptime_tests", "diagnostic_capture_tap_tests"]
     },
     {
       "name": "zdsp-tsan",
@@ -163,7 +163,7 @@
         "mp3_decoder_tests", "streaming_lane_feeder_tests", "lane_measure_tests", "native_audio_ownership_tests", "audio_input_latency_tests", "native_playback_session_tests", "native_playback_contract_tests",
         "voice_monitor_source_tests", "voice_monitor_client_tests", "voice_monitor_client_clock_tests", "voice_monitor_waveform_tests", "training_pcm_mixer_tests",
         "service_master_tests", "shared_audio_service_tests", "preview_click_tests", "preview_click_negative_render", "audio_buffer_change_tests", "singz_check_service_master_realtime",
-        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift"]
+        "playback_presentation_history_tests", "record_placement_tests", "file_path_tests", "file_path_negative_legacy", "take_conform_tests", "take_conform_negative_ratio", "take_conform_negative_placement", "take_conform_negative_latency", "take_conform_negative_drift", "audio_uptime_tests", "diagnostic_capture_tap_tests"]
     },
     {
       "name": "monitor-spike",
@@ -200,7 +200,7 @@
     {
       "name": "linux-alsa",
       "configurePreset": "linux-alsa",
-      "filter": { "include": { "name": "^(audio_host_linux_tests|shared_audio_service_tests)$" } },
+      "filter": { "include": { "name": "^(audio_host_linux_tests|shared_audio_service_tests|audio_uptime_tests|diagnostic_capture_tap_tests)$" } },
       "output": { "outputOnFailure": true }
     },
     {
@@ -216,19 +216,19 @@
     {
       "name": "zdsp-release-strict",
       "configurePreset": "zdsp-release-strict",
-      "filter": { "include": { "name": "^(audio_buffer_.*|file_path_.*|service_master_.*|shared_audio_service_tests|preview_click_.*|training_pcm_mixer_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests|realtime_source_policy)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
+      "filter": { "include": { "name": "^(audio_uptime_tests|diagnostic_capture_tap_tests|audio_buffer_.*|file_path_.*|service_master_.*|shared_audio_service_tests|preview_click_.*|training_pcm_mixer_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests|realtime_source_policy)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
       "output": { "outputOnFailure": true }
     },
     {
       "name": "zdsp-asan-ubsan",
       "configurePreset": "zdsp-asan-ubsan",
-      "filter": { "include": { "name": "^(audio_buffer_.*|file_path_.*|service_master_.*|shared_audio_service_tests|preview_click_.*|training_pcm_mixer_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
+      "filter": { "include": { "name": "^(audio_uptime_tests|diagnostic_capture_tap_tests|audio_buffer_.*|file_path_.*|service_master_.*|shared_audio_service_tests|preview_click_.*|training_pcm_mixer_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
       "output": { "outputOnFailure": true }
     },
     {
       "name": "zdsp-tsan",
       "configurePreset": "zdsp-tsan",
-      "filter": { "include": { "name": "^(audio_buffer_.*|file_path_.*|service_master_.*|shared_audio_service_tests|preview_click_.*|training_pcm_mixer_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
+      "filter": { "include": { "name": "^(audio_uptime_tests|diagnostic_capture_tap_tests|audio_buffer_.*|file_path_.*|service_master_.*|shared_audio_service_tests|preview_click_.*|training_pcm_mixer_tests|take_conform_.*|native_playback_mono_.*|playback_presentation_history_tests|record_placement_tests|voice_monitor_.*|zdsp_(graph_tests|analysis_tests)|prepared_audio_tests|mp3_decoder_tests|streaming_lane_feeder_tests|lane_measure_tests|audio_input_latency_tests|native_(audio_ownership|playback_(session|contract|stale_retirement_failure|provider_dispose_failure))_tests|playback_realtime_(source_policy|policy_negative))$" } },
       "output": { "outputOnFailure": true }
     },
     {

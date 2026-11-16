@@ -327,7 +327,8 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
           !self.playback.render(self.playback.context, clientBlock)) {
         self.playback.failed.store(true, std::memory_order_release);
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
-        recordBoxSongFailure(block.callbackHostTimeNs, block.frames);
+        recordBoxSongFailure(block.outputClockMaster && block.outputTimestampValid
+            ? block.outputHostTimeNs : block.callbackHostTimeNs, block.frames);
 #endif
       }
       if (playbackScope) {
@@ -747,14 +748,14 @@ AudioHostResult SharedAudioService::configureOutput(const std::string& preferred
   return result;
 }
 AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostBackend> backend,
-                                                    const std::string& provider) {
+                                                    const std::string& provider, bool replaceExisting) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   const std::string effectiveProvider =
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
       boxRoutingInitialized() ? "box-loopz" :
 #endif
       provider;
-  if (impl_->provider == effectiveProvider) {
+  if (impl_->provider == effectiveProvider && !replaceExisting) {
     const auto status = impl_->backend->status();
     return {true,AudioHostError::None,status.state,status.format,status.latency,{}};
   }

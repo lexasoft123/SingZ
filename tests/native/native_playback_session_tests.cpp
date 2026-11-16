@@ -486,6 +486,11 @@ public:
     return ok;
   }
 
+  void seedUptime(uint64_t frame) noexcept {
+    renderedFrames = frame;
+    callbacks = frame / 256;
+  }
+
   void setTerminal(singz::AudioHostTerminalReason reason) noexcept {
     terminalCause.publish(reason, singz::AudioHostTerminalProducer::Provider);
     state = reason == singz::AudioHostTerminalReason::MediaServicesLost
@@ -620,6 +625,60 @@ graphSnapshot(const singz::NativePlaybackStatus &status) {
         status.latencyCompensatedEdgeCount);
   CHECK(status.graphSnapshot->outputLatencyFrames == status.graphLatencyFrames);
   return *status.graphSnapshot;
+}
+
+// Identical project audio must not depend on how long the output host has run.
+// Exercise both host and transport frame domains, across 2^32 and at the field
+// counter. A nonperiodic stereo signal exposes quantized/duplicated samples.
+void playbackIsIndependentOfHostUptime() {
+  std::vector<float> pcm(16384 * 2);
+  for (size_t frame = 0; frame < pcm.size() / 2; ++frame) {
+    pcm[2 * frame] = 0.3F * std::sin(double(frame) * 0.173);
+    pcm[2 * frame + 1] = 0.2F * std::cos(double(frame) * 0.117);
+  }
+  const auto wav = writeWav("uptime.wav", 2, pcm);
+  const auto render = [&](uint64_t origin) {
+    auto backend = std::make_unique<ManualOutputBackend>();
+    auto *fake = backend.get();
+    fake->seedUptime(origin);
+    singz::NativePlaybackTestHooks hooks;
+    hooks.initialContinuousFrame = origin;
+    singz::NativePlaybackSession session(std::move(backend), &hooks);
+    std::vector<singz::NativePlaybackLaneSource> lanes;
+    lanes.push_back(lane("song", wav));
+    CHECK(session.prepare(config(), std::move(lanes), 1).ok);
+    CHECK(session.openOutput(1).ok && session.start(1).ok);
+    std::vector<float> result;
+    uint64_t elapsed = 0;
+    const auto block = [&](uint32_t frames) {
+      CHECK(fake->drive(frames));
+      result.insert(result.end(), fake->left.begin(), fake->left.begin() + frames);
+      result.insert(result.end(), fake->right.begin(), fake->right.begin() + frames);
+      elapsed += frames;
+      const auto status = session.status();
+      CHECK(status.continuousFrame == origin + elapsed);
+      CHECK(status.host.renderFailures == 0);
+    };
+    for (unsigned index = 0; index < 16; ++index) block(256);
+    CHECK(session.pause(1).ok);
+    block(256);
+    CHECK(session.resume(1).ok);
+    block(256);
+    CHECK(session.seek(1, 768).ok);
+    block(127);
+    CHECK(session.setLoop(1, 512, 1536).ok);
+    for (unsigned index = 0; index < 12; ++index) block(256);
+    CHECK(session.status().loopCount > 0);
+    CHECK(session.unload(1).ok);
+    return result;
+  };
+  const auto reference = render(0);
+  for (uint64_t origin : {uint64_t{3000000000}, uint64_t{4071732224},
+                          (uint64_t{1} << 32) - 512,
+                          (uint64_t{1} << 32) + 257})
+    CHECK(render(origin) == reference);
+  std::remove(wav.c_str());
+  std::puts("Playback uptime: 4 large offsets, stereo output bit-identical");
 }
 
 // A mono recording and a mono stem traverse the same channel matrix. Assert
@@ -8525,6 +8584,7 @@ void idleMeterDoesNotCarryClipsIntoTheNextSong() {
 } // namespace
 
 int main() {
+  playbackIsIndependentOfHostUptime();
   if (std::getenv("SINGZ_SERVICE_MASTER_IDLE_REGRESSION_ONLY")) {
     idleMeterDoesNotCarryClipsIntoTheNextSong(); return 0;
   }

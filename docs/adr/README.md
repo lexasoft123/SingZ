@@ -25,5 +25,7 @@ Later decisions:
   (proposed, revision 2). The live voice is a source of the one shared output callback;
   the second monitor host and the monitor-output picker are removed.
 
+- [0018: Box song clock domain](0018-box-song-clock-domain.md). The eligible song-only route renders on the physical device callback; other routes retain history reads.
+
 Any incompatible interface or persistence change supersedes the relevant ADR rather
 than silently changing version 1.

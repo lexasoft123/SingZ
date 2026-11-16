@@ -1,3 +1,5 @@
+import type { BoxCaptureTapRequest, BoxCaptureTapResult } from '../shared/box-audio-diagnostics'
+import { recordBoxCaptureTap } from './box-audio/capture-tap'
 import type { BoxMicrophoneLevels, BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from '../shared/box-audio'
 import { retainedPlaybackSnapshot } from '../shared/box-retained-playback'
 import type { BoxRetainedPlaybackSnapshot } from '../shared/box-contract'
@@ -320,6 +322,16 @@ export function boxRoutingCapabilities(): Promise<unknown> {
 export function boxRoutingReconcile(): Promise<unknown> {
   requireBoxAudioSocket()
   return boxAudioProcess!.call('service', 'reconcile', [])
+}
+
+/** One explicit recording mutation, then observation-only polling; never replay. */
+export async function boxCaptureTap(value: BoxCaptureTapRequest): Promise<BoxCaptureTapResult> {
+  requireBoxAudioSocket()
+  return recordBoxCaptureTap(boxAudioProcess!, value)
+}
+export function boxAudioDiagnostics(): Promise<unknown> {
+  requireBoxAudioSocket()
+  return boxAudioProcess!.call('service', 'audioDiagnostics', [])
 }
 
 /** Explicit retained-session recovery reads are separate from active-player polling. */

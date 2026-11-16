@@ -869,6 +869,9 @@ struct NativePlaybackTestHooks {
   uint64_t timePitchPrimeNs{0};
   // Test-only slow/blocked streaming decoder, called on the staging thread.
   void (*beforeStreamingStageDecode)(void*) noexcept {nullptr};
+  // Seed the monotonic transport domain for accelerated uptime tests. Read
+  // only during preparation; production hooks are null and start at zero.
+  uint64_t initialContinuousFrame{0};
   // Deterministic callback progress during off-RT recovery priming.
   void (*afterReanchorPrime)(void*) noexcept {nullptr};
 };

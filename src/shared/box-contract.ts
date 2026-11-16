@@ -1,3 +1,4 @@
+import type { BoxCaptureTapRequest, BoxCaptureTapResult } from './box-audio-diagnostics'
 import type { DesktopPlaybackStatus, LyricLine, ProjectGraphPayload, ProjectInfo, ProjectListItem } from './types'
 import type { BoxMicrophoneLevels, BoxMicrophoneSelectionEdit, BoxMicrophoneSelectionResult, BoxMicrophoneSnapshot } from './box-audio'
 
@@ -156,6 +157,7 @@ export type BoxAPI = {
   storageSnapshot(): Promise<BoxResult<BoxStorageSnapshot>>
   removeCachedProject(dir: string): Promise<BoxResult<null>>
   diagnostics(): Promise<BoxResult<BoxDiagnostics>>
+  captureTap(request: BoxCaptureTapRequest): Promise<BoxResult<BoxCaptureTapResult>>
   retainedPlaybackSnapshot(): Promise<BoxResult<BoxRetainedPlaybackSnapshot>>
   stopRetainedPlayback(expected: { epoch: string; generation: string }): Promise<BoxResult<BoxRetainedPlaybackSnapshot>>
   restoreRetainedPlayback(expected: { epoch: string; generation: string }): Promise<BoxResult<BoxRetainedPlaybackRestore>>
@@ -194,6 +196,14 @@ export type BoxRoutingMeter = {
   peak: number[]
   rms: number[]
 }
+export type BoxHistoryReadObservation = {
+  valid: boolean; outsideBand: boolean
+  observations: string; bandExits: string; reanchors: string; generationChanges: string
+  windowObservations: string; appendFrames: number
+  headroomFrames: number; minimumFrames: number; maximumFrames: number; meanFrames: number
+  acquisitionFrames: number; lowerBoundFrames: number; upperBoundFrames: number
+  ratio: number; acquisitionErrorFrames: number
+}
 export type BoxRoutingState = {
   version: 1
   inventory: {
@@ -218,8 +228,10 @@ export type BoxRoutingState = {
       metersFresh: boolean
       devices?: { id: string; active: boolean; meter: BoxRoutingMeter; sources: {
         id: string; online: boolean; missingFrames: string; meter: BoxRoutingMeter
+        historyRead?: BoxHistoryReadObservation
       }[] }[]
-      monitors: { device: string; monitor: string; sourceOnline: boolean; meter: { valid: boolean; peak?: number[] } }[]
+      monitors: { device: string; monitor: string; sourceOnline: boolean; meter: { valid: boolean; peak?: number[] }
+        clockDomain?: 'device' | 'history'; historyRead?: BoxHistoryReadObservation }[]
     }
   }
 }

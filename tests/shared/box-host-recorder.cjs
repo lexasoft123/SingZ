@@ -18,7 +18,7 @@ const allowedOwner = new Set([
 // src/shared/box-audio.ts (a .cjs file cannot import that TypeScript module).
 const allowedService = new Set([
   'reconcile', 'microphones', 'microphoneLevels', 'subscribeMicrophoneLevels',
-  'unsubscribeMicrophoneLevels', 'ackMicrophoneLevels'
+  'unsubscribeMicrophoneLevels', 'ackMicrophoneLevels', 'captureTapStatus', 'audioDiagnostics'
 ])
 
 async function startBoxHostRecorder({ socketPath, realSocketPath, maxFrameBytes = REQUEST_FRAME_BYTES, maxRecords = 64 }) {

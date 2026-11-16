@@ -23,6 +23,7 @@ const box: BoxAPI = {
   storageSnapshot: () => ipcRenderer.invoke('box:storage-snapshot'),
   removeCachedProject: (dir) => ipcRenderer.invoke('box:cache-remove', dir),
   diagnostics: () => ipcRenderer.invoke('box:diagnostics'),
+  captureTap: request => ipcRenderer.invoke('box:capture-tap', request),
   retainedPlaybackSnapshot: () => ipcRenderer.invoke('box:retained-playback-snapshot'),
   stopRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-stop', expected),
   restoreRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-restore', expected),

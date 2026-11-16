@@ -503,6 +503,7 @@ struct PreparedPlaybackTransport {
       NativePlaybackTransportState::Stopped};
   int64_t callbackProjectFrame{0};
   uint32_t callbackProjectFractionQ32{0};
+  uint64_t initialContinuousFrame{0};
   uint64_t callbackContinuousFrame{0};
   bool callbackLoopEnabled{false};
   int64_t callbackLoopStart{0};
@@ -871,7 +872,7 @@ struct PreparedPlaybackTransport {
     callbackState = NativePlaybackTransportState::Stopped;
     callbackProjectFrame = initialProjectFrame;
     callbackProjectFractionQ32 = 0;
-    callbackContinuousFrame = 0;
+    callbackContinuousFrame = initialContinuousFrame;
     landingPending = landingProjectFrame > 0;
     callbackLoopEnabled = false;
     callbackLoopStart = 0;
@@ -887,7 +888,7 @@ struct PreparedPlaybackTransport {
     callbackLoopCount = 0;
     callbackSeekCount = 0;
     callbackDiscontinuities = 0;
-    callbackProjectionAnchorContinuousFrame = 0;
+    callbackProjectionAnchorContinuousFrame = initialContinuousFrame;
     callbackLastBoundary = zdsp::DiscontinuityReason::None;
     callbackTimePitchBoundaryPrepared = false;
     // Both diagnostics describe THIS generation. Left unreset they carry the
@@ -1914,7 +1915,8 @@ struct PreparedPlaybackTransport {
     }
 
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
-    recordBoxSongSlice(block.callbackHostTimeNs +
+    recordBoxSongSlice((block.outputClockMaster && block.outputTimestampValid
+                           ? block.outputHostTimeNs : block.callbackHostTimeNs) +
                            uint64_t(offset) * 1000000000ull / 48000,
                        frames, generation, callbackProjectFrame,
                        callbackProjectFractionQ32, playbackRateQ32,
@@ -2748,6 +2750,8 @@ struct PreparedPlaybackGraph {
         transposeSemitones(transpose),
         preparedStartProjectFrame(startProjectFrame),
         initialTransport(std::move(initialTransport)), testHooks(hooks) {
+    transport.initialContinuousFrame =
+        hooks == nullptr ? 0 : hooks->initialContinuousFrame;
     (void)rateToQ32(rate, &playbackRateQ32);
     timePitchCorrectionSemitones = static_cast<float>(
         transpose - 12.0 * std::log2(rate));
@@ -8671,8 +8675,8 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       // Never leave the legacy graph-latency projection behind an unavailable
       // routed clock; the Box output path supersedes it entirely.
       result.audibleProjectFrame = projected.available ? projected.projectFrame : 0;
-      result.devicePresentationLatencyFrames = projected.routeDelayFrames;
-      result.totalPresentationLatencyFrames = projected.routeDelayFrames + graphLatency;
+      result.devicePresentationLatencyFrames = projected.presentationLatencyFrames;
+      result.totalPresentationLatencyFrames = projected.presentationLatencyFrames + graphLatency;
       result.presentationLatencyFrames = result.totalPresentationLatencyFrames;
       result.audibleFrames = projected.available &&
           result.renderedFrames > result.totalPresentationLatencyFrames

@@ -288,7 +288,7 @@ void invalidUtf8LabelRegression() {
   CHECK(name == "Caf\xef\xbf\xbd USB");
   shutdownBoxRouting();
 }
-void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true) {
+void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true, bool hardware = false) {
   CHECK(probe->running && probe->callback);
   std::array<float, 256> left{}, right{}; float* out[]{left.data(), right.data()};
   AudioHostRenderBlock block; block.output = out; block.outputChannels = 2;
@@ -296,7 +296,7 @@ void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true) {
   block.callbackHostTimeNs = fixtureNowNs() - 1000000;
   probe->presentationHostNs = block.callbackHostTimeNs;
   block.outputHostTimeNs = block.callbackHostTimeNs; block.outputTimestampValid = timestampValid;
-  block.outputTimestampHardware = false; block.routeGeneration = 1; block.streamGeneration = probe->stream;
+  block.outputTimestampHardware = hardware; block.routeGeneration = 1; block.streamGeneration = probe->stream;
   CHECK(probe->callback(probe->context, block));
 }
 void pollingDoesNotDemandMeterPreview() {
@@ -354,6 +354,65 @@ void pollingDoesNotDemandMeterPreview() {
   CHECK(probes->empty()); // No physical output was created for a meter preview.
   shutdownBoxRouting();
   unlink(path.c_str());
+}
+void directProjectionRegression() {
+  const auto path = std::string("/tmp/box-direct-project-") + std::to_string(getpid()) + ".json";
+  loopz::VirtualDeviceDefinition bus; bus.id = "song"; bus.name = "Song";
+  loopz::SourceRouting source; source.id = "native"; source.channels = 2;
+  source.connections = {{0, 0, 1}, {1, 1, 1}}; bus.routing.sources.push_back(source);
+  bus.bindings.push_back({"native", loopz::SourceKind::Application, "native:singz", true});
+  loopz::MonitorDefinition monitor; monitor.id = "main"; monitor.deviceSelector = "pa";
+  monitor.connections = {{0, 0, 1}, {1, 1, 1}}; bus.monitors.push_back(monitor);
+  loopz::RouteDocument document; document.devices.push_back(bus);
+  std::ofstream(path) << loopz::JSON{{"version", 1}, {"generation", "1"}, {"document", loopz::encodeDocument(document)}};
+  auto probe = std::make_shared<Probe>();
+  auto probes = std::make_shared<FakeHost::Probes>(); (*probes)["pa"] = probe;
+  auto song = std::make_shared<LoopZSongSource>();
+  probe->queue = 1024;
+  std::string error;
+  CHECK(initializeBoxRoutingWithHost(path, error, [probes] { return std::make_unique<FakeHost>(probes); }, song));
+  CHECK(song->deviceClocked());
+  struct Renderer {
+    uint64_t first{0}, seek{7}; bool fail{false};
+    static bool render(void* context, const AudioHostRenderBlock& block) noexcept {
+      auto& self = *static_cast<Renderer*>(context);
+      CHECK(block.outputClockMaster && block.outputTimestampValid);
+      self.first = block.outputFrame;
+      recordBoxSongSlice(block.outputHostTimeNs, block.frames, 77,
+          1000 + static_cast<int64_t>(block.outputFrame), 0, 1ull << 32, 1, self.seek);
+      return !self.fail;
+    }
+  } renderer;
+  auto client = sharedPlaybackBackend(boxRoutingPlaybackBackend(), "box-loopz");
+  AudioHostConfig config; config.outputDeviceUid = "pa"; config.outputChannels = {0, 1}; config.requestedSampleRate = 48000;
+  CHECK(client->open(config, Renderer::render, &renderer).ok && client->start().ok);
+  fixtureClockNs = 5000000000;
+  auto emitDirect = [&] {
+    std::array<float, 256> left{}, right{}; float* planes[]{left.data(), right.data()};
+    AudioHostRenderBlock block; block.output = planes; block.outputChannels = 2;
+    block.frames = block.maximumFrames = 256; block.sampleRate = 48000;
+    block.clockDomain = 777; block.routeGeneration = block.streamGeneration = 1;
+    // Presentation is a whole queue ahead of callback time. Projection must
+    // use presentation time and subtract native graph latency exactly once.
+    block.outputHostTimeNs = fixtureClockNs - 1000000;
+    block.callbackHostTimeNs = block.outputHostTimeNs - 1024ull * 1000000000 / 48000;
+    block.outputTimestampValid = block.outputClockMaster = true;
+    CHECK(probe->callback(probe->context, block));
+  };
+  emitDirect();
+  const auto snapshot = loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"state"})"));
+  CHECK(snapshot["snapshot"]["runtime"]["monitors"][0]["clockDomain"] == "device");
+  CHECK(snapshot["snapshot"]["runtime"]["monitors"][0]["historyBudgetFrames"] == 0);
+  fixtureClockNs += 5333334; emitDirect();
+  const auto audible = boxAudibleProjectionAtTimeForTesting(77, 7, 16, fixtureClockNs);
+  CHECK(audible.available && audible.routeDelayFrames == 0 && audible.presentationLatencyFrames == 1024);
+  CHECK(audible.projectFrame == 1000 + static_cast<int64_t>(renderer.first) + 32);
+  CHECK(!boxAudibleProjectionAtTimeForTesting(77, 8, 16, fixtureClockNs).available);
+  CHECK(song->history->status().lastHostNs == fixtureClockNs - 1000000);
+  renderer.fail = true;
+  fixtureClockNs += 5333334; emitDirect();
+  CHECK(!boxAudibleProjectionAtTimeForTesting(77, 7, 16, fixtureClockNs).available);
+  client->stop(); shutdownBoxRouting(); fixtureClockNs = 0; unlink(path.c_str());
 }
 int main() {
   singz::box_timing::runJournalRegression();
@@ -484,6 +543,17 @@ int main() {
   // Invalid JSON does not replace the active scene or stop its output.
   const auto rejected = loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"edit","request":{}})"));
   CHECK(rejected.at("ok") == false && probe->running);
+  emit(probe, true, true);
+  const auto outputDiagnostics = [] {
+    const auto state=loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"state"})"));
+    for(const auto& endpoint:state.at("snapshot").at("runtime").at("outputs"))
+      if(endpoint.at("id")=="pa") return endpoint.at("audioDiagnostics");
+    std::abort();
+  };
+  CHECK(!outputDiagnostics().contains("servo"));
+  emit(probe, true, false);
+  CHECK(outputDiagnostics().at("servo").at("selectedHz").get<double>()>0);
+
   // Detaching the last song stops only its producer/history, while LoopZ's
   // physical endpoint and independent virtual-source route survive.
   auto client = sharedPlaybackBackend(boxRoutingPlaybackBackend(), "box-loopz");
@@ -536,6 +606,7 @@ int main() {
   // SharedAudioService retains its provider backend after shutdown. Run the
   // discovery-only lifecycle fixture last so its separate synthetic source
   // cannot replace the history identity assumed by the playback fixture.
+  directProjectionRegression();
   pollingDoesNotDemandMeterPreview();
   inventoryCacheRegression();
   controlPollThrottleRegression();
