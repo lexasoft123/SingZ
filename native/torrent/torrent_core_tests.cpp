@@ -135,9 +135,13 @@ int main() {
     require(singz_torrent_test_unselected_bytes(owned.string().c_str(), 0) == 0,
             "unselected song downloaded");
     auto exported = owned / "imports" / "12345-0" / "first.flac";
-    std::ifstream file(exported, std::ios::binary);
-    std::string actual((std::istreambuf_iterator<char>(file)), {});
-    require(actual == first, "exported bytes differ from selected song");
+    {
+      // Close before the engine removes the import: Windows cannot delete a
+      // file another handle still has open.
+      std::ifstream file(exported, std::ios::binary);
+      std::string actual((std::istreambuf_iterator<char>(file)), {});
+      require(actual == first, "exported bytes differ from selected song");
+    }
     auto consumed = call(owned, "consume");
     require(consumed.find("first.flac") != std::string::npos, "handoff failed");
     require(fs::exists(exported), "handoff deleted import source too early");
