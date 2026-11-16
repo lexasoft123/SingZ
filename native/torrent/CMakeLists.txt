@@ -37,7 +37,16 @@ if(SINGZ_TORRENT_NODE_INCLUDE)
  if(APPLE)
   target_link_options(singz_torrent_addon PRIVATE "-undefined" "dynamic_lookup")
  elseif(WIN32)
-  target_link_libraries(singz_torrent_addon PRIVATE "${SINGZ_TORRENT_NODE_LIBRARY}")
+  # Electron's node.lib imports N-API from node.exe although the shipping host
+  # is electron.exe. Without this delay-load hook the addon fails to load and
+  # kills the process (the capture addon uses the same contract).
+  target_sources(singz_torrent_addon PRIVATE
+   "${CMAKE_CURRENT_SOURCE_DIR}/../electron/win_delay_load_hook.cc")
+  target_compile_definitions(singz_torrent_addon PRIVATE
+   WIN32_LEAN_AND_MEAN NOMINMAX HOST_BINARY=\"node.exe\")
+  target_link_options(singz_torrent_addon PRIVATE "/DELAYLOAD:node.exe")
+  target_link_libraries(singz_torrent_addon PRIVATE
+   "${SINGZ_TORRENT_NODE_LIBRARY}" delayimp)
  endif()
 endif()
 
