@@ -14,6 +14,7 @@ require('../shared/watchdog.cjs').arm('win-smoke')
 
 const path = require('node:path')
 const { _electron } = require('playwright-core')
+const { scratchProfileEnv } = require('../shared/scratch-profile.cjs')
 
 const results = []
 const check = (cond, msg) => {
@@ -30,14 +31,16 @@ const feed = process.env.E2E_FEED_URL ?? null
 
 // SINGZ_LANG: this leg finds buttons by their English text, and a machine
 // set to Russian or Chinese would otherwise launch the app in that language.
+// One scratch profile for the whole run (never the machine's real SingZ profile); launches within the run share it.
+const profileEnv = scratchProfileEnv({ label: 'win-smoke' })
 const launch = (env = {}) =>
   _electron.launch(
     packaged
-      ? { executablePath: packaged, args: [], env: { ...process.env, SINGZ_MUTE: '1', SINGZ_LANG: 'en', ...env } }
+      ? { executablePath: packaged, args: [], env: { ...process.env, SINGZ_MUTE: '1', SINGZ_LANG: 'en', ...profileEnv, ...env } }
       : {
           args: [path.resolve('out/main/index.js')],
           executablePath: require('electron'),
-          env: { ...process.env, SINGZ_MUTE: '1', SINGZ_LANG: 'en', ...env }
+          env: { ...process.env, SINGZ_MUTE: '1', SINGZ_LANG: 'en', ...profileEnv, ...env }
         }
   )
 

@@ -1,0 +1,24 @@
+.playback-failure {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 20px 28px;
+  border-top: 1px solid var(--line);
+  background: var(--panel, var(--sz-panel, #202126));
+  color: var(--text, var(--sz-text, #f4f2ee));
+  flex-shrink: 0;
+}
+.playback-failure-copy { flex: 1; min-width: 0; }
+.playback-failure h2 { margin: 0 0 8px; font-size: 18px; }
+.playback-failure p { margin: 0 0 8px; line-height: 1.5; }
+.playback-failure summary { cursor: pointer; font-size: 12px; color: var(--dim, var(--sz-dim)); }
+.playback-failure pre { user-select: text; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow: auto; font-size: 12px; }
+.playback-failure-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.playback-failure button:focus-visible, .playback-failure summary:focus-visible { outline: 2px solid var(--accent, #f4aa62); outline-offset: 4px; }
+.playback-failure-fullscreen { position: absolute; inset: 0; z-index: 30; flex-direction: column; justify-content: center; padding: 8vw; border: 0; }
+.playback-failure-fullscreen .playback-failure-copy { flex: 0; width: min(720px, 100%); }
+.playback-failure-fullscreen h2 { font-size: clamp(24px, 3vw, 42px); }
+.playback-failure-fullscreen .pill { min-height: 48px; padding: 10px 24px; font-size: 18px; }
+.playback-failure-fullscreen summary { font-size: 16px; }
+.playback-failure-fullscreen p { font-size: clamp(18px, 2vw, 28px); }
+@media (max-width: 720px) { .playback-failure { flex-direction: column; align-items: stretch; gap: 12px; } }

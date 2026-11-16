@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { nativeOutputForBrowserLabel } from '../../src/shared/output-device-policy'
+import { nativeOutputForBrowserLabel, outputLabelKey } from '../../src/shared/output-device-policy'
 const device = (uid: string, label: string, outputChannels = 2) => ({ uid, label, outputChannels })
 describe('shared native output selection', () => {
   it.each(['Speakers (Realtek High Definition Audio)', 'USB Audio', 'MacBook Pro Speakers'])('matches native endpoint %s', label => {
@@ -12,5 +12,23 @@ describe('shared native output selection', () => {
     expect(() => nativeOutputForBrowserLabel('USB', [device('a', 'USB'), device('b', 'USB')])).toThrow('uniquely')
     expect(() => nativeOutputForBrowserLabel('USB', [device('input', 'USB', 0)])).toThrow('uniquely')
     expect(() => nativeOutputForBrowserLabel('', [device('one', '')])).toThrow('uniquely')
+  })
+})
+
+describe('outputLabelKey', () => {
+  it.each([
+    ['NoMachine Audio Adapter (Virtual)', 'nomachine audio adapter'],
+    ['Zen Quadro SC Playback (23e5:a2f9)', 'zen quadro sc playback'],
+    ['MacBook Pro Speakers (Built-in)', 'macbook pro speakers'],
+    ['Default - MacBook  Pro Speakers', 'macbook pro speakers'],
+    ['Speakers (Realtek High Definition Audio)', 'speakers']
+  ])('%s', (label, key) => expect(outputLabelKey(label)).toBe(key))
+  it('does not prefix-match and leaves undecorated names alone', () => {
+    expect(outputLabelKey('USB Audio')).not.toBe(outputLabelKey('USB Audio CODEC'))
+    expect(outputLabelKey('USB Audio')).toBe('usb audio')
+  })
+  it('matches decorated browser labels to bare native names, but not an ambiguous pair', () => {
+    expect(nativeOutputForBrowserLabel('Zen Quadro SC Playback (23e5:a2f9)', [device('z', 'Zen Quadro SC Playback')]).uid).toBe('z')
+    expect(() => nativeOutputForBrowserLabel('X', [device('a', 'X (Built-in)'), device('b', 'X (Virtual)')])).toThrow('uniquely')
   })
 })

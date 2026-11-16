@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "सिस्टम डिफ़ॉल्ट का उपयोग करके सहेजे गए प्लेबैक डिवाइस कनेक्ट नहीं",
   "app.output.switchDenied": "SingZ प्लेबैक उपकरणों को स्विच करने की अनुमति नहीं थी  अभी भी पिछले एक पर",
   "app.output.switchFailed": "उस डिवाइस पर स्विच नहीं कर सका  अभी भी पिछले एक पर",
-  "app.monitor.stopped": "हेडफोन निगरानी बंद: {message}",
   "app.native.beatNotApplied": "देशी बीट-ग्रिड अपडेट लागू नहीं किया गयाः {error}",
   "app.native.metronomeNotApplied": "मूल मेट्रोनोम अद्यतन लागू नहीं किया गयाः {error}",
   "app.native.transposeNotApplied": "देशी ट्रांसपोस अद्यतन लागू नहीं किया गया: {error}",

@@ -1,4 +1,7 @@
+import { nativeLaneMeasureFixture } from '../shared/native-lane-measure-fixture'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+beforeEach(() => { vi.stubGlobal('navigator', { platform: 'Linux aarch64' }) })
 import { createHash } from 'node:crypto'
 import { MultitrackEngine } from '../../src/renderer/src/audio/engine'
 import { BoxTransport } from '../../src/renderer/src/box/transport'
@@ -144,6 +147,7 @@ function fixture() {
   }
   const dto = restore('7')
   const api = {
+    ...nativeLaneMeasureFixture(),
     boxAudioPersistent: true,
     box: {
       restoreRetainedPlayback: vi.fn(async () => ({
@@ -169,8 +173,8 @@ function fixture() {
     setCurrent(next: DesktopPlaybackStatus) { current = next }
   } as unknown as SingzApi & { setCurrent(next: DesktopPlaybackStatus): void }
   vi.stubGlobal('window', { singz: api })
-  const engine = new MultitrackEngine({ playback: true, requireNative: true })
-  const transport = new BoxTransport(api, engine, { pollMs: 0, saveDelayMs: 600000, nativePlaybackEnabled: true })
+  const engine = new MultitrackEngine({   })
+  const transport = new BoxTransport(api, engine, { pollMs: 0, saveDelayMs: 600000,  })
   transports.push(transport)
   return { api, engine, transport, lifecycle, dto }
 }
@@ -499,11 +503,12 @@ describe('BoxTransport retained restore', () => {
       }
     })
     Object.assign(h.api, {
+      ...nativeLaneMeasureFixture(),
       readProjectGraph: vi.fn(async () => ({ ok: true, graph: null })),
       getCachedLyrics: vi.fn(async () => ({ ok: true, cached: true, source: 'edited', lines: lyrics }))
     })
-    const ordinary = new MultitrackEngine({ playback: false })
-    const ordinaryTransport = new BoxTransport(h.api, ordinary, { pollMs: 0, nativePlaybackEnabled: false })
+    const ordinary = new MultitrackEngine({  })
+    const ordinaryTransport = new BoxTransport(h.api, ordinary, { pollMs: 0,  })
     transports.push(ordinaryTransport)
     const events: string[] = []
     const identify = ordinary.setRetainedProjectIdentity.bind(ordinary)

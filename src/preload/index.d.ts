@@ -1,8 +1,9 @@
 import type { SingzApi } from '../shared/types'
+import type { VoiceTakeApi } from './index'
 
 declare global {
   interface Window {
-    singz: SingzApi
+    singz: SingzApi & { voiceTakes: VoiceTakeApi }
   }
 }
 

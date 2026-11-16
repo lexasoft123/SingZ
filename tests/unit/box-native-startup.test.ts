@@ -1,3 +1,4 @@
+import { nativeLaneMeasureFixture } from '../shared/native-lane-measure-fixture'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MultitrackEngine } from '../../src/renderer/src/audio/engine'
 import { PlaybackOutputArbiter } from '../../src/renderer/src/audio/output-routing'
@@ -56,13 +57,16 @@ class Context {
 
 const cleanup: Array<() => Promise<void>> = []
 const flowUid = 'alsa:usb:FLOW8:pcm:0'
-const flowOutput = `native:${flowUid}`
+const flowOutput = `${flowUid}`
 
 beforeEach(() => {
   vi.stubGlobal('AudioContext', Context)
   vi.stubGlobal('navigator', { platform: 'Linux aarch64' })
   vi.stubGlobal('window', {
-    singz: { configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })) }
+    singz: {
+      configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })),
+      setDesktopPlaybackMasterGain: vi.fn(async () => ({ ok: true }))
+    }
   })
 })
 afterEach(async () => {
@@ -87,7 +91,7 @@ describe('mandatory native Box startup ownership', () => {
 
     await expect(transport.applyOutput(flowUid)).resolves.toBeUndefined()
     expect(audioHostDevices).toHaveBeenCalledWith('alsa')
-    expect(context.routes).toEqual([{ type: 'none' }, { type: 'none' }])
+    expect(context.routes).toEqual([{ type: 'none' }])
     expect(transport.getSnapshot().appliedOutputUid).toBe(flowUid)
     expect(transport.getSnapshot().playing).toBe(false)
   })
@@ -99,14 +103,14 @@ describe('mandatory native Box startup ownership', () => {
     const arbiter = new PlaybackOutputArbiter(flowOutput, {
       setOutput: id => engine.setOutput(id),
       enumerateOutputs: async () => typeof context.sinkId === 'object'
-        ? [{ kind: 'audiooutput', deviceId: flowOutput }] : [],
+        ? [{ kind: 'audiooutput', uid: flowOutput }] : [],
       commit: vi.fn()
     })
     await expect(arbiter.reconcile()).resolves.toEqual({ kind: 'applied', outputId: flowOutput })
-    expect(context.routes).toEqual([{ type: 'none' }, { type: 'none' }])
+    expect(context.routes).toEqual([{ type: 'none' }])
   })
 
-  it.each([undefined, { playback: true }, boxNativePlaybackPolicy('darwin')])(
+  it.each([undefined, {}, boxNativePlaybackPolicy('darwin')])(
     'also starts detached before ordinary Desktop or preview output reconciliation (%j)', policy => {
       const engine = new MultitrackEngine(policy)
       cleanup.push(() => engine.teardown())
@@ -127,6 +131,7 @@ function previewFixture(): { item: ProjectListItem; api: SingzApi } {
     hasLyrics: true, inLibrary: true
   }
   const api = {
+    ...nativeLaneMeasureFixture(),
     registerSource: async () => ({ ok: true, path: item.songPath, name: item.name, size: 1, project }),
     getCachedLyrics: async () => ({ ok: true, cached: true, source: 'edited',
       lines: [{ start: 0, end: 2, text: 'A lyric', words: [{ w: 'A lyric', s: 0, e: 2 }] }] }),
@@ -148,7 +153,7 @@ describe('Box first-open output reconciliation', () => {
     const engine = new MultitrackEngine(boxNativePlaybackPolicy('linux'))
     engine.setNativeAheadAllowed(false)
     const context = Context.last
-    const transport = new BoxTransport(api, engine, { pollMs: 0, nativePlaybackEnabled: true })
+    const transport = new BoxTransport(api, engine, { pollMs: 0,  })
     cleanup.push(() => transport.teardown())
 
     expect(await transport.open(item)).toBe(true)
@@ -157,22 +162,23 @@ describe('Box first-open output reconciliation', () => {
     expect(transport.getSnapshot().playing).toBe(false)
   })
 
-  it('attaches the default output before disabled-native preview starts Web Audio samples', async () => {
+  it('blocks a preview with unavailable native playback and leaves Chromium detached', async () => {
     vi.stubGlobal('navigator', { platform: 'MacIntel' })
     const { item, api } = previewFixture()
-    const engine = new MultitrackEngine({ playback: false })
+    const engine = new MultitrackEngine({  })
     engine.setNativeAheadAllowed(false)
     const context = Context.last
-    const transport = new BoxTransport(api, engine, { pollMs: 0, nativePlaybackEnabled: false })
+    const transport = new BoxTransport(api, engine, { pollMs: 0,  })
     cleanup.push(() => transport.teardown())
     expect(context.routes).toEqual([{ type: 'none' }])
 
     expect(await transport.open(item)).toBe(true)
     expect(transport.getSnapshot().playing).toBe(false)
-    await transport.controllerPlayPause()
-    expect(context.startedSinks).toEqual([''])
-    expect(transport.getSnapshot().playing).toBe(true)
+    await expect(transport.controllerPlayPause()).rejects.toThrow()
+    expect(context.startedSinks).toEqual([])
+    expect(transport.getSnapshot().playbackError?.failure?.code).toBe('addon-unavailable')
+    expect(transport.getSnapshot().playing).toBe(false)
     await transport.open(item)
-    expect(context.routes).toEqual([{ type: 'none' }, ''])
+    expect(context.routes).toEqual([{ type: 'none' }])
   })
 })

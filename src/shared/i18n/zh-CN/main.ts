@@ -167,19 +167,9 @@ export const main: Translation<typeof en> = {
   'main.error.nativeAudioHostInvalidInventory': '原生音频主机返回的设备清单无效。',
   'main.error.nativeAudioHostInventoryFailed': '原生音频主机清单获取失败：{message}',
   'main.error.nativeCaptureUnavailable': '原生录音不可用',
-  'main.error.monitorGenerationExhausted': '原生返听的世代编号已用尽。',
-  'main.error.monitorFailedToStart': '原生耳机返听启动失败：{message}',
-  'main.error.monitorInvalidResponse': '原生耳机返听返回了无效响应。',
-  'main.error.monitorGenerationInactive': '该耳机返听世代已不再有效。',
-  'main.error.monitorGainInvalidResponse': '原生耳机增益返回了无效响应。',
-  'main.error.monitorGainFailed': '原生耳机增益调整失败：{message}',
-  'main.error.monitorInvalidStopResponse': '原生耳机返听返回了无效的停止响应。',
-  'main.error.monitorFailedToStop': '原生耳机返听停止失败：{message}',
   'main.error.nativePlaybackUnavailable': '原生播放不可用',
   'main.error.invalidMicOwnershipGeneration': '麦克风归属世代编号无效。',
   'main.error.nativeMicSupportUnavailable': '原生麦克风支持不可用：{message}',
-  'main.error.monitorFailedGeneric': '原生耳机返听失败。',
-  'main.error.monitorEndActiveFirst': '请先结束当前的耳机返听，再开始新的一次。',
 
   // ── source registration (drag/drop, file picker) ──
   // {ext} is a file extension (e.g. ".txt") or the fallback "that file"

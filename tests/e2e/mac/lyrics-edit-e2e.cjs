@@ -39,6 +39,7 @@ const { assertOpenedProject, libraryName } = require('./library-song.cjs');
 const { holdProjects, scratchClone } = require('./project-hold.cjs');
 const { readFileSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs');
 const { tmpdir, homedir } = require('node:os');
 
 const PROJECT = process.env.E2E_PROJECT ?? 'Nothing Else Matters';
@@ -70,7 +71,7 @@ const MARKER = 'edited by the harness tonight';
       executablePath: require('electron'),
       args: [APP],
       // hooks: assertOpenedProject reads the opened lanes off __test
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
+      env: { ...process.env, ...scratchProfileEnv({ projectsRoot: ROOT }), SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
     });
     await quietLaunch(app);
     const win = await app.firstWindow();

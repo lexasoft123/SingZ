@@ -69,32 +69,17 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-describe('accepted playback across native and Web Audio generations', () => {
-  it('accepts real Web Audio scheduling and retains end-of-song callback ownership', async () => {
-    const { engine, context, tryStart } = song()
-    await expect(engine.playAccepted()).resolves.toBeUndefined()
-    expect(tryStart).toHaveBeenCalledOnce()
-    expect(engine.playing).toBe(true)
-    expect(context.sources).toHaveLength(1)
-    context.sources[0].onended!()
-    expect(engine.playing).toBe(false)
-    expect(engine.position).toBe(engine.duration)
-  })
+describe('accepted native playback generations', () => {
+  it('accepts native scheduling without browser sources', async () => {
+ const {engine,context,tryStart}=song(vi.fn(async()=>true)); await expect(engine.playAccepted()).resolves.toBeUndefined(); expect(tryStart).toHaveBeenCalledOnce(); expect(engine.playing).toBe(true); expect(context.sources).toHaveLength(0)
+ })
 
-  it('ignores an old source callback after pause and a newer Web Audio play', async () => {
-    const { engine, context } = song()
-    await engine.playAccepted()
-    const staleEnd = context.sources[0].onended!
-    await engine.pauseAccepted()
-    await engine.playAccepted()
-    staleEnd()
-    expect(engine.playing).toBe(true)
-    context.sources[1].onended!()
-    expect(engine.playing).toBe(false)
-  })
+  it('accepts another native play after pausing without browser callbacks', async () => {
+ const {engine,context}=song(vi.fn(async()=>true)); await engine.playAccepted(); await engine.pauseAccepted(); await engine.playAccepted(); expect(engine.playing).toBe(true); expect(context.sources).toHaveLength(0)
+ })
 
   for (const native of [false, true]) {
-    it(`rejects a superseded ${native ? 'native' : 'fallback'} start before scheduling`, async () => {
+    it(`rejects a superseded ${native ? 'native' : 'refused native'} start before scheduling`, async () => {
       const receipt = deferred<boolean>()
       const { engine, context, tryStart } = song(vi.fn(() => receipt.promise))
       const accepted = engine.playAccepted()
@@ -107,16 +92,7 @@ describe('accepted playback across native and Web Audio generations', () => {
     })
   }
 
-  it('rejects Web Audio playback superseded while restoring released samples', async () => {
-    const { engine, context } = song()
-    const buffers = deferred<boolean>()
-    const restore = vi.spyOn(engine, 'ensureLaneBuffers').mockImplementation(() => buffers.promise)
-    const accepted = engine.playAccepted()
-    await vi.waitFor(() => expect(restore).toHaveBeenCalledOnce())
-    engine.pause()
-    buffers.resolve(true)
-    await expect(accepted).rejects.toThrow('superseded')
-    expect(engine.playing).toBe(false)
-    expect(context.sources).toHaveLength(0)
-  })
+  it('rejects a native refusal without restoring renderer samples', async () => {
+ const {engine,context}=song(); const restore=vi.spyOn(engine,'ensureLaneBuffers'); await expect(engine.playAccepted()).rejects.toThrow(); expect(restore).not.toHaveBeenCalled(); expect(engine.playing).toBe(false); expect(context.sources).toHaveLength(0)
+ })
 })

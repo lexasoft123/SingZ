@@ -86,6 +86,7 @@ const { assertOpenedProject, clickLibrarySong, libraryName } = require('./librar
 const { holdProjects } = require('./project-hold.cjs')
 const { existsSync } = require('node:fs')
 const { join } = require('node:path')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { homedir } = require('node:os')
 
 const ROOT =
@@ -140,7 +141,7 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
     // Silent, hidden, and never touching the real Drive: this opens a project
     // from the singer's own library.
     env: {
-      ...process.env,
+      ...process.env, ...scratchProfileEnv({ projectsRoot: ROOT }),
       SINGZ_MUTE: '1',
       SINGZ_E2E_HIDDEN: '1',
       SINGZ_NO_SYNC: '1',
@@ -306,6 +307,17 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
       fail.push(`opening ${SONG_B} after ${SONG} cost ${switchBuilds} graph builds — one of them is for the wrong song`)
     }
 
+    // The sampled window is the switch itself, and a SHORT incoming song closes it quickly (a 82 s song after a 122 s
+    // one sampled 17-18 beats, under the floor below, while the reverse pair sampled 100+). The floor guards that the
+    // loop was observed long enough to judge, so the window is extended to a minimum rather than the floor lowered:
+    // keep sampling (the song is playing, the build is behind us) until the heartbeat has run for BEAT_MIN_WINDOW_MS.
+    const BEAT_MIN_WINDOW_MS = 2500
+    const beatDeadline = Date.now() + 5000
+    while (Date.now() < beatDeadline) {
+      const t = await app.evaluate(() => globalThis.__beat.ticks)
+      if (t * 50 >= BEAT_MIN_WINDOW_MS) break
+      await sleep(100)
+    }
     const beat = await app.evaluate(() => {
       clearInterval(globalThis.__beatTimer)
       return globalThis.__beat

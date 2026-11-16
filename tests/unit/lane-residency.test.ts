@@ -112,7 +112,7 @@ const goNative = (engine: unknown): void => {
 describe('desktop lane residency', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('keeps every lane while Web Audio is the one playing', async () => {
+  it('keeps samples resident until native owns the lane sources', async () => {
     const { engine } = await loadEngine()
     engine.releaseLaneBuffers()
     expect(engine.lanesResident).toBe(true)
@@ -195,7 +195,7 @@ describe('desktop lane residency', () => {
     expect(engine.getTrackBuffer('vocals')).toBeNull()
   })
 
-  it('refuses to start Web Audio on a mix it could not make whole', async () => {
+  it('refuses an unavailable native graph without starting a browser mix', async () => {
     const { engine, context } = await loadEngine()
     engine.setLaneReader(async () => { throw new Error('gone') })
     goNative(engine)
@@ -204,21 +204,22 @@ describe('desktop lane residency', () => {
     ;(engine as unknown as { nativePlayback: null }).nativePlayback = null
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
-    await expect(engine.play({ countIn: false })).rejects.toThrow(/could not be re-read/)
+    await expect(engine.play({ countIn: false })).rejects.toThrow()
     expect(context.bufferSources).toHaveLength(0)
     expect(engine.playing).toBe(false)
   })
 
-  it('re-reads the lanes before Web Audio plays them', async () => {
+  it('never restores released lanes for a native refusal', async () => {
     const { engine, context } = await loadEngine()
-    engine.setLaneReader(async () => new ArrayBuffer(8))
+    const read = vi.fn(async () => new ArrayBuffer(8))
+    engine.setLaneReader(read)
     goNative(engine)
     engine.releaseLaneBuffers()
     ;(engine as unknown as { nativePlayback: null }).nativePlayback = null
-
-    await engine.play({ countIn: false })
-    expect(engine.lanesResident).toBe(true)
-    expect(context.bufferSources).toHaveLength(2)
-    expect(context.bufferSources.every((s) => s.buffer !== null)).toBe(true)
+    await expect(engine.play({ countIn: false })).rejects.toThrow()
+    expect(engine.lanesResident).toBe(false)
+    expect(read).not.toHaveBeenCalled()
+    expect(context.bufferSources).toHaveLength(0)
+    await engine.teardown()
   })
 })

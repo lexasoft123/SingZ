@@ -69,7 +69,6 @@ export const app: Translation<typeof en> = {
   "app.output.missingDefault": "Thiết bị phát lại lưu không kết nối  sử dụng hệ thống mặc định",
   "app.output.switchDenied": "SingZ không được phép chuyển đổi các thiết bị phát lại  vẫn trên chiếc trước đó",
   "app.output.switchFailed": "Không thể chuyển sang thiết bị đó  vẫn còn trên thiết bị trước đó",
-  "app.monitor.stopped": "Việc giám sát tai nghe đã dừng lại: {message}",
   "app.native.beatNotApplied": "Tái cập nhật lưới beat bản địa không được áp dụng: {error}",
   "app.native.metronomeNotApplied": "Mới thiệu metronome bản địa không được áp dụng: {error}",
   "app.native.transposeNotApplied": "Việc cập nhật bản địa không được áp dụng: {error}",

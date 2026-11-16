@@ -191,8 +191,6 @@ napi_value configure(napi_env env, napi_callback_info info) {
   return result(env, false, "Microphone and song mixing is currently available only with Linux ALSA");
 #else
   std::lock_guard<std::mutex> lock(control);
-  if (ownership && ownership->snapshot().kind == NativeAudioOwnerKind::Monitor)
-    return result(env, false, "Stop exclusive headphone monitoring before mixing microphones with playback");
   if (sharedAudioService().providerId() != "alsa")
     return result(env, false, "Select the ALSA playback provider before mixing microphones");
   if (!session) session = std::make_unique<MicrophoneMixSession>(sharedAudioService());
@@ -264,6 +262,6 @@ void cleanupMicrophoneMix() noexcept {
 bool microphoneMixActive() noexcept {
   std::lock_guard<std::mutex> lock(control);
   try { return session && session->status().active; }
-  catch (...) { return true; } // Retain the exclusive-monitor gate on uncertain teardown.
+  catch (...) { return true; }
 }
 } // namespace singz

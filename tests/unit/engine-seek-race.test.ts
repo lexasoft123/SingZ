@@ -93,7 +93,7 @@ async function reconcileStartupOutput(
   const context = StartupAudioContext.last!
   const enumerateOutputs = vi.fn(async () =>
     savedOutputId && nativeAvailable && context.physicalRoutes.at(-1) === 'none'
-      ? [{ kind: 'audiooutput' as const, deviceId: savedOutputId }]
+      ? [{ kind: 'audiooutput' as const, uid: savedOutputId }]
       : []
   )
   const arbiter = new PlaybackOutputArbiter(savedOutputId, {
@@ -111,30 +111,124 @@ describe('startup output ownership', () => {
     vi.resetModules()
   })
 
+  const REAL_LABELS: readonly [string, string][] = [
+    ['NoMachine Audio Adapter', 'NoMachine Audio Adapter (Virtual)'],
+    ['Zen Quadro SC Playback', 'Zen Quadro SC Playback (23e5:a2f9)'],
+    ['MacBook Pro Speakers', 'MacBook Pro Speakers (Built-in)']
+  ]
+
+  async function engineWith(platform: string, native: { uid: string; label: string; outputChannels: number }[],
+    browser: { kind: string; uid: string; label: string }[], policy: { playback?: boolean } = {}) {
+    vi.stubGlobal('AudioContext', StartupAudioContext)
+    const enumerateDevices = vi.fn(async () => browser)
+    vi.stubGlobal('navigator', { platform, mediaDevices: { enumerateDevices } })
+    vi.stubGlobal('window', { singz: {
+      audioHostDevices: vi.fn(async () => ({ ok: true, devices: native })),
+      configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true }))
+    } })
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    return { engine: new MultitrackEngine(policy), enumerateDevices }
+  }
+
+  it('prepares the open paused song again after selecting the Zen output', async () => {
+    vi.useFakeTimers()
+    const uid = 'AppleUSBAudioEngine:Antelope Audio:Zen Quadro SC:4912524000285:1,2'
+    const { engine } = await engineWith('MacIntel', [{ uid, label: 'Zen', outputChannels: 16 }], [])
+    const client = { active: false, recoveryPending: false, preparedAhead: false, retainedPrepared: false,
+      discardAhead: vi.fn(async () => { client.preparedAhead = false }) }
+    const prepareAhead = vi.fn(async (_client: unknown, _request: { preferredOutputUid?: string }) => { client.preparedAhead = true; return true })
+    const internals = engine as unknown as { nativePlayback: typeof client; ensureNativePlayback(): Promise<unknown> }
+    internals.nativePlayback = client
+    internals.ensureNativePlayback = async () => ({ client, prepareAhead })
+    try {
+      engine.load([{ id: 'vocals', buffer: { duration: 120 } as AudioBuffer, duration: 120, path: '/vocals.flac' }])
+      await vi.advanceTimersByTimeAsync(400)
+      expect(client.preparedAhead).toBe(true)
+      await engine.setOutput(`${uid}`)
+      expect(client.preparedAhead).toBe(false)
+      await vi.advanceTimersByTimeAsync(399)
+      expect(client.preparedAhead).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(client.preparedAhead).toBe(true)
+      expect(prepareAhead).toHaveBeenCalledTimes(2)
+      expect(prepareAhead.mock.calls[1][1].preferredOutputUid).toBe(`${uid}`)
+    } finally { engine.setNativeAheadAllowed(false); vi.useRealTimers() }
+  })
+
+  it('adopts the unchanged native graph when Play arrives during its ahead build on Windows', async () => {
+    vi.useFakeTimers()
+    const { engine } = await engineWith('Win32', [{ uid: 'wasapi:speakers', label: 'Speakers', outputChannels: 2 }], [])
+    let finishPrepare!: () => void
+    const building = new Promise<void>(resolve => { finishPrepare = resolve })
+    const calls: string[] = []
+    const client = { active: false, transportActive: false, recoveryPending: false, retainedPrepared: false, preparedAhead: false,
+      discardAhead: vi.fn(async () => { if (client.preparedAhead) calls.push('unload:1'); client.preparedAhead = false }),
+      prepareRetainedForPlay: vi.fn(async () => {}) }
+    let builds = 0
+    const prepareAhead = vi.fn(async () => { calls.push(`prepare:${++builds}`); await building; client.preparedAhead = true; return true })
+    const tryStart = vi.fn(async () => {
+      if (!client.preparedAhead) calls.push(`prepare:${++builds}`)
+      calls.push(`open:${builds}`, `start:${builds}`)
+      client.preparedAhead = false; client.active = true; client.transportActive = true
+      return true
+    })
+    const internals = engine as unknown as { nativePlayback: typeof client; ensureNativePlayback(): Promise<unknown> }
+    internals.nativePlayback = client
+    internals.ensureNativePlayback = async () => ({ client, prepareAhead, tryStart })
+    try {
+      engine.load([{ id: 'vocals', buffer: { duration: 120 } as AudioBuffer, duration: 120, path: '/vocals.flac' }])
+      await vi.advanceTimersByTimeAsync(400)
+      expect(calls).toEqual(['prepare:1'])
+      const play = engine.play({ countIn: false })
+      expect(engine.starting).toBe(true)
+      finishPrepare()
+      await play
+      expect(engine.nativeActive).toBe(true)
+      expect(engine.playing).toBe(true)
+      expect(calls).toEqual(['prepare:1', 'open:1', 'start:1'])
+      expect(client.discardAhead).not.toHaveBeenCalled()
+    } finally { engine.setNativeAheadAllowed(false); vi.useRealTimers() }
+  })
+
+  it.each(['MacIntel', 'Win32'])('selecting a native output never needs a Chromium sink while native owns playback (%s)', async (platform) => {
+    const all = REAL_LABELS.flatMap(([bare, decorated], i) => [
+      { native: { uid: `uid${i}`, label: bare, outputChannels: 2 }, browser: { kind: 'audiooutput', uid: `b${i}`, label: decorated } }])
+    // Even an ambiguous pair and an unmatched label must select cleanly.
+    const { engine, enumerateDevices } = await engineWith(platform,
+      [...all.map(r => r.native), { uid: 'dup1', label: 'Dup (Built-in)', outputChannels: 2 }, { uid: 'dup2', label: 'Dup (Virtual)', outputChannels: 2 }],
+      all.map(r => r.browser))
+    for (const uid of ['uid0', 'uid1', 'uid2', 'dup1']) {
+      await engine.setOutput(`${uid}`)
+      expect(engine.outputDeviceId).toBe(`${uid}`)
+    }
+    expect(StartupAudioContext.last?.sinkId).toEqual({ type: 'none' })
+    expect(enumerateDevices).not.toHaveBeenCalled()
+  })
+
   it('does not make the initial default sink hide a saved native endpoint from inventory', async () => {
-    const outputId = 'native:alsa:sysfs:/sys/devices/platform/usb/5-1:pcm:0'
+    const outputId = 'alsa:sysfs:/sys/devices/platform/usb/5-1:pcm:0'
 
     const { result, context } = await reconcileStartupOutput(outputId, true)
 
     expect(result).toEqual({ kind: 'applied', outputId })
-    expect(context.physicalRoutes).toEqual(['none', 'none'])
+    expect(context.physicalRoutes).toEqual(['none'])
   })
 
-  it('negative control: restores the ordinary browser default after starting detached', async () => {
+  it('selects the native default while keeping Chromium detached', async () => {
     const { result, context, enumerateOutputs } = await reconcileStartupOutput(undefined, false)
 
     expect(result).toEqual({ kind: 'applied', outputId: undefined })
-    expect(context.physicalRoutes).toEqual(['none', 'default'])
+    expect(context.physicalRoutes).toEqual(['none'])
     expect(enumerateOutputs).not.toHaveBeenCalled()
   })
 
-  it('still falls back to the browser default when the saved native endpoint is really missing', async () => {
-    const outputId = 'native:alsa:disconnected'
+  it('reports a missing native endpoint while keeping Chromium detached', async () => {
+    const outputId = 'alsa:disconnected'
 
     const { result, context } = await reconcileStartupOutput(outputId, false)
 
     expect(result).toEqual({ kind: 'missing', outputId })
-    expect(context.physicalRoutes).toEqual(['none', 'default'])
+    expect(context.physicalRoutes).toEqual(['none'])
   })
 })
 
@@ -321,6 +415,15 @@ describe('late native control receipts across a song switch', () => {
   }
 
   const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+
+  it.each(['retire', 'load'])('ends the native song session on a real %s instead of retaining its buffer lease', async action => {
+    const { engine } = await nativeSong()
+    const unload = engine.nativePlayback.unload
+    if (action === 'retire') engine.retireForSongSwitch()
+    else engine.load([{ id: 'other', buffer: { duration: 120 }, duration: 120, path: '/other.flac' }])
+    await flush()
+    expect(unload).toHaveBeenCalledExactlyOnceWith()
+  })
 
   it('drops a master gain and lane receipt that settle after the song switched', async () => {
     const { engine, gain, lane } = await nativeSong()

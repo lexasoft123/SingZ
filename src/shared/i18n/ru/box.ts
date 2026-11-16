@@ -247,7 +247,6 @@ export const box: Translation<typeof english> = {
   'box.queue.saveError': 'Изменение очереди видно, но не сохранено: {error}',
   'box.details.openGuardFailed': 'SingZ не смог защитить песню от удаления кэша, поэтому она не была открыта. Проверьте хранилище и повторите.',
   'box.account.signOutFailed': 'Не удалось выйти. Повторите попытку.',
-  'box.nativeRequired': 'Нативное воспроизведение недоступно для этой песни или аудиосистемы.',
   'box.retained.restoringTitle': 'Восстанавливаем предыдущую песню',
   'box.retained.restoringBody': 'Восстанавливаем песню и её текст.',
   'box.retained.dialogLabel': 'Предыдущая песня',

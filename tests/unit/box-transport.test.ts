@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { nativeLaneMeasureFixture } from '../shared/native-lane-measure-fixture'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+beforeEach(() => { vi.stubGlobal('navigator', { platform: 'Linux aarch64' }) })
 import type { EngineTrackInput, TrackState } from '../../src/renderer/src/audio/engine'
 import type { ParsedGraphDocument } from '../../src/shared/graph-document'
 import type { DesktopAudioHostDevice, DesktopAudioHostInventoryResult, ProjectInfo, ProjectListItem, ProjectSettings, SingzApi } from '../../src/shared/types'
@@ -124,6 +127,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 function host(registrations: Record<string, () => ReturnType<typeof deferred<unknown>>['promise'] | unknown> = {}) {
   const saves: { songPath: string; settings: ProjectSettings }[] = []
   const api = {
+    ...nativeLaneMeasureFixture(async path => { await api.readAudio(path) }),
     registerSource: vi.fn(async (path: string) => {
       const dir = path.split('/')[1]
       const custom = registrations[dir]
@@ -132,7 +136,7 @@ function host(registrations: Record<string, () => ReturnType<typeof deferred<unk
     }),
     readProjectGraph: vi.fn(async () => ({ ok: true as const, graph: null })),
     getCachedLyrics: vi.fn(async () => lyricResult),
-    readAudio: vi.fn(async () => new ArrayBuffer(8)),
+    readAudio: vi.fn(async (_path: string) => new ArrayBuffer(8)),
     audioHostDevices: vi.fn(async () => alsaInventory('flow', 'hdmi')),
     saveProject: vi.fn(async (songPath: string, _name: string, settings: ProjectSettings) => {
       saves.push({ songPath, settings })
@@ -484,10 +488,10 @@ describe('Box output routing', () => {
 
     const applying = transport.applyOutput(rawUid)
     expect(engine.playing).toBe(false)
-    await vi.waitFor(() => expect(setOutput).toHaveBeenCalledWith(`native:${rawUid}`))
+    await vi.waitFor(() => expect(setOutput).toHaveBeenCalledWith(`${rawUid}`))
     expect(transport.getSnapshot().applyingOutput).toBe(true)
     expect(transport.getSnapshot().appliedOutputUid).toBeNull()
-    expect(engine.outputDeviceId).toBe(`native:${rawUid}`)
+    expect(engine.outputDeviceId).toBe(`${rawUid}`)
     expect(engine.playing).toBe(false)
     transport.toggle()
     expect(engine.playing).toBe(false)
@@ -536,11 +540,11 @@ describe('Box output routing', () => {
     vi.spyOn(engine, 'setOutput').mockImplementation(async deviceId => {
       engine.outputDeviceId = deviceId
       engine.outputCalls.push(deviceId)
-      if (deviceId === 'native:hdmi') throw new Error('HDMI refused')
+      if (deviceId === 'hdmi') throw new Error('HDMI refused')
     })
 
     await expect(transport.applyOutput('hdmi')).rejects.toThrow('HDMI refused')
-    expect(engine.outputCalls).toEqual(['native:hdmi', 'native:flow'])
+    expect(engine.outputCalls).toEqual(['hdmi', 'flow'])
     expect(transport.getSnapshot()).toMatchObject({
       appliedOutputUid: 'flow',
       outputError: 'HDMI refused',
@@ -560,8 +564,8 @@ describe('Box output routing', () => {
     const setOutput = vi.spyOn(engine, 'setOutput').mockImplementation(async deviceId => {
       engine.outputDeviceId = deviceId
       engine.outputCalls.push(deviceId)
-      if (deviceId === 'native:hdmi') throw new Error('HDMI handoff failed')
-      if (deviceId === 'native:flow' && !rollbackFailed) {
+      if (deviceId === 'hdmi') throw new Error('HDMI handoff failed')
+      if (deviceId === 'flow' && !rollbackFailed) {
         rollbackFailed = true
         throw new Error('FLOW rollback failed')
       }
@@ -606,7 +610,7 @@ describe('Box output routing', () => {
     const setOutput = vi.spyOn(engine, 'setOutput').mockImplementation(async deviceId => {
       engine.outputDeviceId = deviceId
       engine.outputCalls.push(deviceId)
-      if (deviceId === 'native:hdmi') {
+      if (deviceId === 'hdmi') {
         throw Object.assign(new Error('ALSA cleanup incomplete'), { code: 'provider-cleanup-incomplete' })
       }
     })
@@ -640,14 +644,14 @@ describe('Box output routing', () => {
     const setOutput = vi.spyOn(engine, 'setOutput').mockImplementation(async deviceId => {
       engine.outputDeviceId = deviceId
       engine.outputCalls.push(deviceId)
-      if (deviceId === 'native:hdmi') throw new Error('HDMI handoff failed')
-      if (deviceId === 'native:flow') {
+      if (deviceId === 'hdmi') throw new Error('HDMI handoff failed')
+      if (deviceId === 'flow') {
         throw Object.assign(new Error('ALSA recovery unavailable'), { code: 'provider-recovery-unavailable' })
       }
     })
 
     await expect(transport.applyOutput('hdmi')).rejects.toThrow('HDMI handoff failed')
-    expect(setOutput.mock.calls.map(([deviceId]) => deviceId)).toEqual(['native:hdmi', 'native:flow'])
+    expect(setOutput.mock.calls.map(([deviceId]) => deviceId)).toEqual(['hdmi', 'flow'])
     expect(transport.getSnapshot()).toMatchObject({
       appliedOutputUid: null,
       outputError: 'HDMI handoff failed',
@@ -670,11 +674,11 @@ describe('Box output routing', () => {
     const setOutput = vi.spyOn(engine, 'setOutput').mockImplementation(async deviceId => {
       engine.outputDeviceId = deviceId
       engine.outputCalls.push(deviceId)
-      if (deviceId === 'native:flow') await receipt.promise
+      if (deviceId === 'flow') await receipt.promise
     })
 
     const applying = transport.applyOutput('flow')
-    await vi.waitFor(() => expect(setOutput).toHaveBeenCalledWith('native:flow'))
+    await vi.waitFor(() => expect(setOutput).toHaveBeenCalledWith('flow'))
     expect(transport.applyOutput('flow')).toBe(applying)
     await expect(transport.applyOutput('hdmi')).rejects.toThrow('Applying output')
     expect(transport.getSnapshot()).toMatchObject({
@@ -689,7 +693,7 @@ describe('Box output routing', () => {
       applyingOutput: false,
       outputError: null
     })
-    expect(setOutput.mock.calls.map(([deviceId]) => deviceId)).toEqual(['native:flow'])
+    expect(setOutput.mock.calls.map(([deviceId]) => deviceId)).toEqual(['flow'])
   })
 
   it('serializes a replacement song commit behind the pending output operation', async () => {
@@ -1137,6 +1141,23 @@ describe('stale open() at every await', () => {
       expectWinner(transport, engine)
     })
   }
+})
+
+it('retains a typed blocking native open failure until an explicit successful retry', async () => {
+  const { api } = host()
+  const capability = await api.desktopPlaybackCapability()
+  const readCapability = vi.fn(async () => ({ ...capability, available: false }))
+  api.desktopPlaybackCapability = readCapability
+  const { transport } = makeTransport(api)
+  expect(await transport.open(item('/a'))).toBe(false)
+  expect(transport.getSnapshot().playbackError?.failure?.code).toBe('addon-unavailable')
+  await transport.retryPlayback()
+  expect(readCapability).toHaveBeenCalledTimes(2)
+  expect(transport.getSnapshot().playbackError?.failure?.code).toBe('addon-unavailable')
+  readCapability.mockResolvedValue(capability)
+  await transport.retryPlayback()
+  expect(transport.getSnapshot().active?.item.dir).toBe('/a')
+  expect(transport.getSnapshot().playbackError).toBeNull()
 })
 
 describe('BoxTransport key change persistence', () => {

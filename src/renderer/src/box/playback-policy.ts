@@ -3,5 +3,5 @@ import { detectedDesktopPlatform, type DesktopNativePlaybackPolicy } from '../au
 export function boxNativePlaybackPolicy(
   platform: ReturnType<typeof detectedDesktopPlatform> = detectedDesktopPlatform()
 ): DesktopNativePlaybackPolicy | undefined {
-  return platform === 'linux' ? { playback: true, streamLanes: true, requireNative: true } : undefined
+  return platform === 'linux' ? { streamLanes: true } : undefined
 }

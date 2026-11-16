@@ -13,6 +13,7 @@
 
 #include "native_playback_graph_document.h"
 #include "playback_cue_plan.h"
+#include "presentation_history.h"
 
 namespace singz {
 
@@ -218,6 +219,9 @@ struct NativePlaybackPrepareConfig {
   uint32_t requestedBufferFrames{0};
   uint32_t maximumFrames{4096};
   float masterGain{1.0F};
+  // Internal host composition flag (not a serialized graph parameter).
+  // Shared service owns app volume; other products retain in-graph control.
+  bool serviceOwnsMasterGain{false};
   // Structural tempo. Sources, transport schedules and reference cues share
   // one prepared Q32 rate; non-unity tempo also inserts the phase-coherent
   // song-bus Signalsmith correction processor. Runtime changes rebuild the
@@ -868,6 +872,8 @@ struct NativePlaybackTestHooks {
   // Seed the monotonic transport domain for accelerated uptime tests. Read
   // only during preparation; production hooks are null and start at zero.
   uint64_t initialContinuousFrame{0};
+  // Deterministic callback progress during off-RT recovery priming.
+  void (*afterReanchorPrime)(void*) noexcept {nullptr};
 };
 
 // Reusable ordinary-thread composition owner. It accepts only already-opened
@@ -1001,6 +1007,10 @@ public:
   // A bounded observation for the mobile UI: never waits behind prepare.
   OutputMeter outputMeter() const noexcept;
   NativePlaybackStatus status() const;
+  // Host time is in the capture/output monotonic nanosecond domain. This is
+  // a raw render-timeline query: callers subtract input/output/graph latency
+  // once (recordPlacement), and retain discontinuitySerial to stop on seek.
+  PlaybackPresentationQuery presentationQuery(uint64_t hostTimeNs) const;
   // Lock-free and wait-free from any thread: see NativePlaybackPositionNow.
   // Safe to call at UI rate while a prepare decodes, while stop waits for
   // quiescence, and from a DecodeCancellation callback.

@@ -1,4 +1,6 @@
 import { reportTrainingTiming } from './training-timing'
+import type { DesktopRouteLatencySnapshot } from '../../../shared/types'
+import { nativeTrainingOutputLatencySec } from '../training-ui-state'
 
 import { type TrainingSound } from '../../../shared/training-sound'
 import { TRAINING_REACHED_TONE } from '../../../shared/training-tone'
@@ -71,18 +73,17 @@ export class DesktopTrainingCueController {
   private nativeGeneration = String(++nextNativeCueGeneration)
   private disposed = false
   private sound: TrainingSound = 'piano'
-  private outputGain = 1
   private referenceVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
   private readonly samples = new Map<string, AudioBuffer>()
   private reachedTargets = new WeakSet<object>()
-  private latencySeconds = 0
+  private nativeRouteLatency: DesktopRouteLatencySnapshot | null = null
 
   constructor(private readonly context: AudioContext, _output: AudioNode,
     private readonly beforeSchedule?: () => void | Promise<void>) {}
 
   get currentTime(): number { return performance.now() / 1000 }
-  get outputLatency(): number { return this.latencySeconds }
-  get baseLatency(): number { return this.latencySeconds }
+  get routeLatency(): DesktopRouteLatencySnapshot | null { return this.nativeRouteLatency }
+  get outputLatency(): number { return nativeTrainingOutputLatencySec(this.nativeRouteLatency) }
   setSound(sound: TrainingSound): void { this.sound = sound }
 
   async schedule(cues: readonly TrainingCue[], overrides?: Partial<TrainingCueTimingOptions>): Promise<TrainingCueTimeline> {
@@ -101,11 +102,11 @@ export class DesktopTrainingCueController {
     const sentAt = this.currentTime
     const result = await window.singz.scheduleDesktopTrainingCue({
       channels: [rendered.getChannelData(0), rendered.getChannelData(1)], sampleRate: rendered.sampleRate,
-      startDelayMs: timing.startDelaySec * 1000, gain: this.outputGain * this.referenceVolume, generation: this.nativeGeneration
+      startDelayMs: timing.startDelaySec * 1000, gain: this.referenceVolume, generation: this.nativeGeneration
     })
     this.assertCurrent(generation)
     if (!result.ok) throw new Error(result.error)
-    this.latencySeconds = result.outputLatencyMs / 1000
+    this.nativeRouteLatency = result.routeLatency
     const receivedAt = this.currentTime
     // PCM preparation in main is already excluded from its remaining delay.
     // Estimate only IPC transit, so an expensive schedule cannot lead the sound.
@@ -134,7 +135,7 @@ export class DesktopTrainingCueController {
       samples[index] = Math.sin(2 * Math.PI * tone.frequency * at) * envelope * tone.peakGain
     }
     reportCueCommand('latch', window.singz.scheduleDesktopTrainingCue({ channels: [samples], sampleRate,
-      startDelayMs: tone.startDelaySeconds * 1000, gain: this.outputGain * Math.min(1, this.referenceVolume), generation: this.nativeGeneration }))
+      startDelayMs: tone.startDelaySeconds * 1000, gain: Math.min(1, this.referenceVolume), generation: this.nativeGeneration }))
   }
   cancel(): void {
     this.reachedTargets = new WeakSet<object>()
@@ -143,9 +144,8 @@ export class DesktopTrainingCueController {
   }
   stop(): void { this.cancel() }
   setReferenceVolume(volume: number): void { this.referenceVolume = clampTrainingReferenceVolume(volume); this.applyGain() }
-  setOutputGain(gain: number): void { this.outputGain = Math.max(0, Math.min(1, gain)); this.applyGain() }
   private applyGain(): void {
-    reportCueCommand('cue gain', window.singz.setDesktopTrainingCueGain(this.nativeGeneration, this.outputGain * this.referenceVolume))
+    reportCueCommand('cue gain', window.singz.setDesktopTrainingCueGain(this.nativeGeneration, this.referenceVolume))
   }
   getReferenceVolume(): number { return this.referenceVolume }
   dispose(): void { if (!this.disposed) { this.cancel(); this.samples.clear(); this.disposed = true } }

@@ -35,13 +35,26 @@ const preload = read('src/preload/index.ts')
 const capture = read('src/main/capture.ts')
 
 describe('desktop playback addon exports', () => {
+  it('keeps desktop app volume in the service without changing serialized graph controls', () => {
+    const parse = functionBody(addon, 'bool parseConfig(')
+    expect(parse).toContain('config.serviceOwnsMasterGain = true')
+    const master = functionBody(addon, 'napi_value setPlaybackMasterGain(')
+    expect(master).toContain('exactU64(env, argv[0], &generation, true)')
+    expect(master).toContain('if (generation == 0)')
+    expect(master).toContain('sharedAudioService().setMasterGain')
+    expect(master).toContain('playback.session.setMasterGain(')
+    const idleMeter = functionBody(functionBody(addon, 'napi_value playbackStatus('), 'if (source.generation == 0)')
+    expect(idleMeter).toContain('sharedAudioService().outputMeter()')
+    expect(idleMeter).toContain('source.outputPeak = meter.peak')
+    expect(idleMeter).toContain('source.outputClippedBlocks = 0;')
+  })
   it('exports exactly the manifest names, in order', () => {
     expect(addonExportNames(addon)).toEqual(manifest.methods.desktopAddon.map(m => m.name))
   })
 
   it('binds each live export to the IPC channel and preload method the manifest names', () => {
     for (const method of manifest.methods.desktopAddon) {
-      if (method.dormant) continue
+      if (method.dormant || ('internal' in method && method.internal)) continue
       expect(method.ipc).not.toBeNull()
       expect(method.preload).not.toBeNull()
       expect(main).toContain(`'${method.ipc}'`)
@@ -56,6 +69,17 @@ describe('desktop playback addon exports', () => {
         )}'`
       )
       expect(preload).toMatch(wiring)
+    }
+  })
+
+  it('keeps the placement query internal to main, with no raw renderer IPC', () => {
+    const internal = manifest.methods.desktopAddon.filter(m => 'internal' in m && m.internal)
+    expect(internal.map(m => m.name)).toEqual(['presentationQuery'])
+    for (const method of internal) {
+      expect(method).toMatchObject({ dormant: false, ipc: null, preload: null, synchronous: true })
+      expect(read('src/main/voice-takes-ipc.ts')).toContain("'binding', 'presentationQuery'")
+      expect(read('src/main/audio-process-rpc.ts')).toContain("'presentationQuery'")
+      expect(preload).not.toContain(method.name)
     }
   })
 

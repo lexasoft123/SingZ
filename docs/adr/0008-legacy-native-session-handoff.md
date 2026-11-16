@@ -1,6 +1,8 @@
 # ADR 0008: Legacy/native session handoff
 
-Status: accepted design; cutover implementation is Phase 4<br>
+Status: accepted design; cutover implementation is Phase 4. On desktop and Box the
+dual-path parts (legacy states, restore-to-legacy on failure) are superseded by
+[ADR 0015](0015-native-only-desktop-playback.md); in force for iOS and Android<br>
 Date: 2026-08-26
 
 ## Decision

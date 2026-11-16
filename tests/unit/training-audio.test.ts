@@ -1,3 +1,4 @@
+import { nativeRouteLatency } from '../shared/native-route-latency'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_PLAYBACK_CAPABILITY,
@@ -158,13 +159,14 @@ class FakeOfflineAudioContext extends FakeAudioContext {
     return { sampleRate: this.sampleRate, getChannelData: () => new Float32Array(this.length) } as unknown as AudioBuffer
   }
 }
-const nativeSchedule = vi.fn(async (_config: unknown) => ({ ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 175, processingMs: 0 }))
+const nativeSchedule = vi.fn(async (_config: unknown) => ({ ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 999, routeLatency: nativeRouteLatency(), processingMs: 0 }))
 const nativeCancel = vi.fn(async () => ({ ok: true }))
 beforeEach(() => {
   nativeSchedule.mockClear(); nativeCancel.mockClear()
   vi.stubGlobal('OfflineAudioContext', FakeOfflineAudioContext)
   vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => ['route-a', 'route-b', 'confirmed-output'].map(id => ({ kind: 'audiooutput', deviceId: id, label: id })) } })
   vi.stubGlobal('window', { singz: { scheduleDesktopTrainingCue: nativeSchedule, cancelDesktopTrainingCues: nativeCancel, setDesktopTrainingCueGain: vi.fn(async () => ({ ok: true })), configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })), audioHostDevices: async () => ({ ok: true, devices: ['route-a', 'route-b', 'confirmed-output'].map(uid => ({ uid, label: uid, outputChannels: 2 })) }) } })
+  window.singz.setDesktopPlaybackMasterGain = vi.fn(async () => ({ ok: true }) as never)
 })
 
 describe('shared native training cues', () => {
@@ -186,7 +188,7 @@ describe('shared native training cues', () => {
       const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
       controller.latch()
       controller.cancel()
-      controller.setOutputGain(0.5)
+      controller.setReferenceVolume(0.5)
       await flushPlaybackRequest()
       const detail = mode === 'refused' ? error.message : error
       expect(report).toHaveBeenCalledWith('Training latch failed:', detail)
@@ -215,6 +217,7 @@ describe('shared native training cues', () => {
     // The native timeline uses the render clock, so physical output latency
     // is applied once by the training countdown.
     expect(controller.outputLatency).toBe(.175)
+    expect(controller.routeLatency).toEqual(nativeRouteLatency())
     controller.dispose()
   })
   it('honors different context and melody note durations', async () => {
@@ -236,7 +239,7 @@ describe('shared native training cues', () => {
     const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
     nativeSchedule.mockImplementationOnce(async () => {
       now = 1400
-      return { ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 175, processingMs: 400 }
+      return { ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 999, routeLatency: nativeRouteLatency(), processingMs: 400 }
     })
     const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
     controller.setSound('organ')
@@ -276,6 +279,23 @@ describe('shared native training cues', () => {
 })
 
 describe('engine-owned training audio', () => {
+  it('publishes idle master volume once and keeps native cue gain relative to the service master', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    engine.setNativeAheadAllowed(false)
+    await engine.setMasterVolumeAccepted(0.25)
+    expect(window.singz.setDesktopPlaybackMasterGain).toHaveBeenLastCalledWith('0', 0.25)
+    const controller = engine.createTrainingCueController()
+    controller.setSound('organ')
+    controller.setReferenceVolume(0.6)
+    await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [60] }])
+    expect(nativeSchedule.mock.calls[0][0]).toMatchObject({ gain: 0.6 })
+    await engine.setMasterVolumeAccepted(0.5)
+    expect(window.singz.setDesktopPlaybackMasterGain).toHaveBeenLastCalledWith('0', 0.5)
+    expect(window.singz.setDesktopTrainingCueGain).toHaveBeenLastCalledWith(expect.any(String), 0.6)
+    controller.dispose()
+  })
   it('keeps a paused native song graph and its output lease for training cues', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext)
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
@@ -296,30 +316,18 @@ describe('engine-owned training audio', () => {
 
   afterEach(() => vi.unstubAllGlobals())
 
-  it('lets a section pause revoke song play while AudioContext.resume is pending', async () => {
-    vi.stubGlobal('AudioContext', FakeAudioContext)
-    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-    const engine = new MultitrackEngine()
-    const context = FakeAudioContext.last!
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
-    const resume = deferred()
-    context.state = 'suspended'
-    context.resumeGate = resume.promise
+  it('lets a section pause revoke a pending native start', async () => {
+ vi.stubGlobal('AudioContext',FakeAudioContext)
+ const {MultitrackEngine}=await import('../../src/renderer/src/audio/engine')
+ const engine=new MultitrackEngine(); engine.setNativeAheadAllowed(false)
+ engine.load([{id:'vocals',buffer:null,duration:2,path:'/song/vocals.flac'}])
+ const receipt=deferred(); const client={active:false}; const tryStart=vi.fn(async()=>{await receipt.promise;return true})
+ Object.assign(engine,{ensureNativePlayback:async()=>({client,tryStart})})
+ const pendingPlay=engine.play({countIn:false}); await vi.waitFor(()=>expect(tryStart).toHaveBeenCalledOnce()); engine.pause(); receipt.resolve(); await pendingPlay
+ expect(engine.playing).toBe(false); expect(FakeAudioContext.last!.resumeCount).toBe(0); expect(FakeAudioContext.last!.bufferSources).toHaveLength(0); await engine.teardown()
+ })
 
-    const pendingPlay = engine.play({ countIn: false })
-    expect(engine.starting).toBe(true)
-    await Promise.resolve()
-    expect(context.resumeCount).toBe(1)
-    engine.pause()
-    resume.resolve()
-    await pendingPlay
-    expect(engine.starting).toBe(false)
-
-    expect(engine.playing).toBe(false)
-    expect(context.bufferSources).toHaveLength(0)
-  })
-
-  it('confirms the Linux browser default without opening an unselected ALSA training route', async () => {
+  it('keeps Chromium detached without opening an unselected ALSA training route', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext)
     const configure = vi.fn(async () => ({ ok: false, error: 'No output device is available' }))
     Object.assign(navigator, { platform: 'Linux x86_64' })
@@ -328,69 +336,13 @@ describe('engine-owned training audio', () => {
     const engine = new MultitrackEngine()
     await expect(engine.setOutput('')).resolves.toBeUndefined()
     expect(configure).not.toHaveBeenCalled()
-    await expect(engine.setOutput('native:alsa:chosen')).rejects.toThrow('No output device is available')
+    await expect(engine.setOutput('alsa:chosen')).rejects.toThrow('No output device is available')
     expect(configure).toHaveBeenCalledWith('alsa:chosen', 'alsa')
   })
 
-  it('releases the physical sink for native monitoring and restores readiness without playback', async () => {
-    vi.stubGlobal('AudioContext', FakeAudioContext)
-    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-    const engine = new MultitrackEngine()
-    const context = FakeAudioContext.last!
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
-    await engine.play({ countIn: false })
-    engine.pause()
 
-    await engine.releaseOutputForNativeMonitor()
-    expect(context.suspendCount).toBe(1)
-    expect(context.sinkCalls).toEqual([{ type: 'none' }])
-    expect(engine.nativeMonitorOwnsOutput).toBe(true)
-    await engine.play({ countIn: false })
-    expect(engine.playing).toBe(false)
 
-    await engine.setOutput('chromium-output-2')
-    expect(context.sinkCalls).toEqual([{ type: 'none' }])
-    await engine.restoreOutputAfterNativeMonitor()
-    expect(context.sinkCalls).toEqual([{ type: 'none' }, 'chromium-output-2'])
-    expect(context.resumeCount).toBe(1)
-    expect(engine.nativeMonitorOwnsOutput).toBe(false)
-    expect(engine.playing).toBe(false)
-  })
 
-  it('publishes every renderer lease transition before Settings can trust unloaded main status', async () => {
-    vi.stubGlobal('AudioContext', FakeAudioContext)
-    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-    const engine = new MultitrackEngine()
-    const context = FakeAudioContext.last!
-    const leaseStates: boolean[] = []
-    engine.subscribe(() => leaseStates.push(engine.nativeMonitorOwnsOutput))
-
-    const silentSink = deferred()
-    const setSinkId = context.setSinkId.bind(context)
-    let rejectRestore = true
-    context.setSinkId = async (sink) => {
-      if (typeof sink !== 'string') await silentSink.promise
-      if (typeof sink === 'string' && rejectRestore) throw new Error('route restore failed')
-      await setSinkId(sink)
-    }
-
-    const releasing = engine.releaseOutputForNativeMonitor()
-    expect(leaseStates).toEqual([true])
-    const unloaded = { state: 'unloaded' } as DesktopPlaybackStatus
-    expect(playbackProviderCanChange(unloaded, leaseStates.at(-1))).toBe(false)
-    silentSink.resolve()
-    await releasing
-
-    await expect(engine.restoreOutputAfterNativeMonitor()).rejects.toThrow('route restore failed')
-    expect(engine.nativeMonitorOwnsOutput).toBe(true)
-    expect(leaseStates).toEqual([true])
-    expect(playbackProviderCanChange(unloaded, leaseStates.at(-1))).toBe(false)
-
-    rejectRestore = false
-    await engine.restoreOutputAfterNativeMonitor()
-    expect(leaseStates).toEqual([true, false])
-    expect(playbackProviderCanChange(unloaded, leaseStates.at(-1))).toBe(true)
-  })
 
   it('observes failed unloads and retries them at later load and teardown boundaries', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext)
@@ -630,7 +582,7 @@ describe('engine-owned training audio', () => {
     expect(engine.playing).toBe(false)
     // Preparing and teardown's pause are visible; the late rejection is silent.
     expect(emissions).toHaveBeenCalledTimes(2)
-    expect(logged).not.toHaveBeenCalledWith('Playback request failed:', expect.anything())
+    expect(logged).not.toHaveBeenCalledWith(expect.stringMatching(/^Playback request failed:/))
   })
 
   it('settles a load-triggered native unload already in flight at teardown', async () => {
@@ -674,7 +626,7 @@ describe('engine-owned training audio', () => {
     context.resumeError = new Error('resume rejected after disposal')
 
     engine.previewClick()
-    expect(context.resumeCount).toBe(1)
+    expect(context.resumeCount).toBe(0)
     const teardown = engine.teardown()
     resume.resolve()
     await teardown
@@ -685,7 +637,7 @@ describe('engine-owned training audio', () => {
     expect(() => engine.createTrainingCueController()).toThrow('Audio engine is disposed.')
     await expect(controller.schedule(cues)).rejects.toThrow('disposed')
     engine.previewClick()
-    expect(context.resumeCount).toBe(1)
+    expect(context.resumeCount).toBe(0)
   })
 
   it('cancels late Signalsmith initialization and its timeout during teardown', async () => {
@@ -773,7 +725,7 @@ describe('engine-owned training audio', () => {
   })
 
   it.each([
-    'none', 'capability-null', 'toggle-off', 'ineligible-graph'
+    'none', 'capability-null', 'legacy-toggle-off', 'ineligible-graph'
   ] as const)('retries exact ASIO without WebAudio fallthrough when recovery blocker is %s', async (blocker) => {
     vi.useFakeTimers()
     try {
@@ -900,19 +852,18 @@ describe('engine-owned training audio', () => {
         code: 'provider-failure', provider: 'asio'
       })
       expect(engine.nativeMonitorOwnsOutput).toBe(true)
-      expect(context.sinkCalls).toEqual([{ type: 'none' }])
+      expect(context.sinkCalls).toEqual([])
       expect(context.bufferSources).toHaveLength(0)
       expect(context.resumeCount).toBe(0)
       if (blocker === 'capability-null') capabilityAvailable = false
-      if (blocker === 'toggle-off') toggleEnabled = false
+      if (blocker === 'legacy-toggle-off') toggleEnabled = false
       if (blocker === 'ineligible-graph') {
         (engine as unknown as { tracks: Array<{ path?: string }> }).tracks[0].path = undefined
       }
-      if (blocker !== 'none') {
+      // The retired stored toggle no longer blocks recovery; it must retry ASIO.
+      if (blocker !== 'none' && blocker !== 'legacy-toggle-off') {
         await expect(engine.play({ countIn: false })).rejects.toMatchObject({
-          name: 'DesktopNativeRecoveryError',
-          code: 'provider-recovery-unavailable',
-          provider: 'asio'
+          failure: { code: blocker === 'capability-null' ? 'addon-unavailable' : 'graph-rejected' }
         })
         expect(engine.playing).toBe(false)
         expect(engine.nativeMonitorOwnsOutput).toBe(true)
@@ -927,7 +878,7 @@ describe('engine-owned training audio', () => {
       await engine.play({ countIn: false })
       expect(engine.nativeMonitorOwnsOutput).toBe(true)
       expect(engine.playing).toBe(true)
-      expect(context.sinkCalls).toEqual([{ type: 'none' }])
+      expect(context.sinkCalls).toEqual([])
       expect(context.resumeCount).toBe(0)
       expect(api.prepareDesktopPlayback).toHaveBeenCalledTimes(2)
 
@@ -935,7 +886,7 @@ describe('engine-owned training audio', () => {
       engine.load([])
       await (engine as unknown as { nativePlaybackUnload: Promise<void> }).nativePlaybackUnload
       expect(engine.nativeMonitorOwnsOutput).toBe(false)
-      expect(context.sinkCalls).toEqual([{ type: 'none' }, ''])
+      expect(context.sinkCalls).toEqual([])
       expect(leaseStates.at(-1)).toBe(false)
       const firstOwned = leaseStates.indexOf(true)
       expect(firstOwned).toBeGreaterThanOrEqual(0)
@@ -991,7 +942,8 @@ describe('engine-owned training audio', () => {
     })
     expect(engine.playing).toBe(false)
     expect(context.bufferSources).toHaveLength(0)
-    expect(logged).toHaveBeenCalledWith('Playback request failed:', engine.playbackError)
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('"code":"provider-failure"'))
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining(engine.playbackError!.message))
 
     engine.toggle()
     await flushPlaybackRequest()
@@ -1167,54 +1119,15 @@ describe('engine-owned training audio', () => {
   })
 
   it('keeps the last confirmed output route when a switch fails', async () => {
-    vi.stubGlobal('AudioContext', FakeAudioContext)
-    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-    const engine = new MultitrackEngine()
-    const context = FakeAudioContext.last!
-    await engine.setOutput('confirmed-output')
-    const setSinkId = context.setSinkId.bind(context)
-    context.setSinkId = async (sink) => {
-      if (sink === 'missing-output') throw new DOMException('gone', 'NotFoundError')
-      await setSinkId(sink)
-    }
+ vi.stubGlobal('AudioContext',FakeAudioContext)
+ const {MultitrackEngine}=await import('../../src/renderer/src/audio/engine'); const engine=new MultitrackEngine()
+ await engine.setOutput('confirmed-output')
+ window.singz.configureDesktopTrainingOutput=vi.fn(async()=>({ok:false,error:'gone'}))
+ await expect(engine.setOutput('missing-output')).rejects.toThrow('gone')
+ expect(engine.outputDeviceId).toBe('confirmed-output'); await engine.teardown()
+ })
 
-    await expect(engine.setOutput('missing-output')).rejects.toThrow('gone')
-    expect(engine.outputDeviceId).toBe('confirmed-output')
-  })
 
-  it('finishes native restore on the newest route when selection changes mid-setSinkId', async () => {
-    vi.stubGlobal('AudioContext', FakeAudioContext)
-    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-    const engine = new MultitrackEngine()
-    const context = FakeAudioContext.last!
-    await engine.setOutput('confirmed-output')
-    await engine.releaseOutputForNativeMonitor()
-    await engine.setOutput('route-a')
-
-    let routeAStarted!: () => void
-    const routeASeen = new Promise<void>((resolve) => { routeAStarted = resolve })
-    let releaseRouteA!: () => void
-    const routeAGate = new Promise<void>((resolve) => { releaseRouteA = resolve })
-    const setSinkId = context.setSinkId.bind(context)
-    context.setSinkId = async (sink) => {
-      if (sink === 'route-a') {
-        routeAStarted()
-        await routeAGate
-      }
-      await setSinkId(sink)
-    }
-
-    const restoring = engine.restoreOutputAfterNativeMonitor()
-    await routeASeen
-    await engine.setOutput('route-b')
-    releaseRouteA()
-    await restoring
-
-    expect(engine.outputDeviceId).toBe('route-b')
-    expect(context.sinkId).toBe('route-b')
-    expect(context.sinkCalls.slice(-2)).toEqual(['route-a', 'route-b'])
-    expect(engine.nativeMonitorOwnsOutput).toBe(false)
-  })
 
   it('cancels native cues when song playback starts and pauses the song before cues', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext)
@@ -1226,6 +1139,7 @@ describe('engine-owned training audio', () => {
     await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [69] }])
     engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
     const before = nativeCancel.mock.calls.length
+    Object.assign(engine, { ensureNativePlayback: async () => ({ client: {}, tryStart: async () => true }) })
     await engine.play({ countIn: false })
     expect(nativeCancel.mock.calls.length).toBeGreaterThan(before)
     await controller.schedule([{ purpose: 'question', articulation: 'together', notes: [60] }])
@@ -1233,46 +1147,6 @@ describe('engine-owned training audio', () => {
     controller.dispose()
   })
 })
-
-describe('song to headphone-monitor handoff', () => {
-  afterEach(() => vi.unstubAllGlobals())
-
-  it.each([false, true])('retires playback before monitor acquisition; cleanup failure=%s', async (failed) => {
-    vi.stubGlobal('AudioContext', FakeAudioContext)
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
-    const engine = new MultitrackEngine()
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
-    engine.setNativeAheadAllowed(false)
-    let active = true
-    const unload = vi.fn(async () => {
-      if (failed) throw new Error('native cleanup retained')
-      active = false
-    })
-    const client = {
-      get active() { return active }, preparedAhead: false, transportParked: true,
-      audibleSeconds: () => 1.5, discardAhead: vi.fn(async () => undefined), unload
-    }
-    ;(engine as unknown as { nativePlayback: typeof client }).nativePlayback = client
-    if (failed) {
-      await expect(engine.releaseOutputForHeadphoneMonitor()).rejects.toThrow('native cleanup retained')
-      expect(active).toBe(true)
-      expect((engine as unknown as { headphoneMonitorLease: boolean }).headphoneMonitorLease).toBe(false)
-      expect(FakeAudioContext.last!.sinkCalls).toHaveLength(0)
-    } else {
-      await engine.releaseOutputForHeadphoneMonitor()
-      expect(unload).toHaveBeenCalledOnce()
-      expect(engine.nativeActive).toBe(false)
-      expect(engine.position).toBe(1.5)
-      expect(engine.nativeMonitorOwnsOutput).toBe(true)
-      expect(FakeAudioContext.last!.sinkCalls.at(-1)).toEqual({ type: 'none' })
-      await engine.restoreOutputAfterHeadphoneMonitor()
-      expect(engine.nativeMonitorOwnsOutput).toBe(false)
-      expect(engine.playing).toBe(false)
-    }
-  })
-})
-
 
 describe('native terminal transport errors', () => {
   afterEach(() => vi.unstubAllGlobals())

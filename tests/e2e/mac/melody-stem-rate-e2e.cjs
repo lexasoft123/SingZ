@@ -47,6 +47,7 @@ const { readFileSync, writeFileSync, rmSync, existsSync, renameSync } = require(
 const { scratchClone } = require('./project-hold.cjs')
 const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')
+const { scratchProfileEnv } = require('../../shared/scratch-profile.cjs')
 const { homedir, tmpdir } = require('node:os')
 
 const ROOT =
@@ -114,7 +115,7 @@ function resampleStem(file, rate) {
     app = await _electron.launch({
       executablePath: require('electron'),
       args: [APP],
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
+      env: { ...process.env, ...scratchProfileEnv({ projectsRoot: ROOT }), SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
     })
     await quietLaunch(app) // measurement runs must not steal the singer's focus
     app.process().stderr?.on('data', (d) => process.stderr.write(`[app] ${d}`))

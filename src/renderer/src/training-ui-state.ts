@@ -824,11 +824,19 @@ export function releasePromptMicrophoneIfFinal(
 
 export function audibleCueEndTimeSec(
   cueEndTimeSec: number,
-  context: Pick<AudioContext, 'outputLatency' | 'baseLatency'>
+  audio: { readonly routeLatency: import('../../shared/types').DesktopRouteLatencySnapshot | null }
 ): number {
-  const output = positiveFinite(context.outputLatency)
-  const base = positiveFinite(context.baseLatency)
-  return cueEndTimeSec + (output ?? base ?? 0)
+  return cueEndTimeSec + nativeTrainingOutputLatencySec(audio.routeLatency)
+}
+
+/** Native has already composed complete automatic latency and signed trim.
+ * Never add the explanatory components again, or consult a Chromium context. */
+export function nativeTrainingOutputLatencySec(
+  snapshot: import('../../shared/types').DesktopRouteLatencySnapshot | null
+): number {
+  if (!snapshot) return 0
+  const ns = Number(snapshot.graphToAudibleNs)
+  return Number.isFinite(ns) ? ns / 1e9 : 0
 }
 
 export type TrainingCaptureDecision = 'interrupt' | 'score' | 'sample'
@@ -987,9 +995,6 @@ function titleCase(value: string): string {
   return value.replace(/^./, (letter) => letter.toUpperCase())
 }
 
-function positiveFinite(value: number | undefined): number | null {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)

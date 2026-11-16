@@ -174,19 +174,9 @@ export const main: Translation<typeof en> = {
   'main.error.nativeAudioHostInvalidInventory': 'Нативный аудиохост вернул неверный список устройств.',
   'main.error.nativeAudioHostInventoryFailed': 'Аудиохост: сбой списка устройств: {message}',
   'main.error.nativeCaptureUnavailable': 'Нативный захват недоступен',
-  'main.error.monitorGenerationExhausted': 'Диапазон поколений мониторинга исчерпан.',
-  'main.error.monitorFailedToStart': 'Не удалось запустить мониторинг наушников: {message}',
-  'main.error.monitorInvalidResponse': 'Мониторинг наушников вернул недействительный ответ.',
-  'main.error.monitorGenerationInactive': 'Это поколение мониторинга наушников неактивно.',
-  'main.error.monitorGainInvalidResponse': 'Громкость наушников вернула недействительный ответ.',
-  'main.error.monitorGainFailed': 'Ошибка громкости наушников: {message}',
-  'main.error.monitorInvalidStopResponse': 'Мониторинг наушников: недействительный ответ на остановку.',
-  'main.error.monitorFailedToStop': 'Не удалось остановить мониторинг наушников: {message}',
   'main.error.nativePlaybackUnavailable': 'Нативный плеер недоступен',
   'main.error.invalidMicOwnershipGeneration': 'Неверное поколение владения микрофоном.',
   'main.error.nativeMicSupportUnavailable': 'Нативная поддержка микрофона недоступна: {message}',
-  'main.error.monitorFailedGeneric': 'Мониторинг наушников не удался.',
-  'main.error.monitorEndActiveFirst': 'Сначала завершите активный мониторинг наушников.',
 
   // ── source registration (drag/drop, file picker) ──
   // {ext} is a file extension (e.g. ".txt") or the fallback "that file"
