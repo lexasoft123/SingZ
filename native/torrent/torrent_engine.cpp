@@ -87,6 +87,11 @@ bool audio(std::string const &name) {
          extension == ".oga" || extension == ".opus" || extension == ".aif" ||
          extension == ".aiff";
 }
+// Only a record that was read fine but is malformed is quarantined; I/O
+// failures (locks, permissions, disk full) stay ordinary errors and retry.
+struct CorruptRecord : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 std::vector<char> read(fs::path const &p, std::size_t max = 16 * 1024 * 1024) {
   std::ifstream file(p, std::ios::binary);
   if (!file)
@@ -412,13 +417,13 @@ private:
   }
   static Job decode(lt::bdecode_node const &e) {
     if (e.type() != lt::bdecode_node::dict_t)
-      throw std::runtime_error("Invalid saved download record");
+      throw CorruptRecord("Invalid saved download record");
     Job j;
     j.release = std::string(e.dict_find_string_value("release"));
     j.name = std::string(e.dict_find_string_value("name"));
     auto index = e.dict_find_int_value("index", -1);
     if (index < 0 || index >= 25000)
-      throw std::runtime_error("Invalid saved download index");
+      throw CorruptRecord("Invalid saved download index");
     j.index = int(index);
     j.size = e.dict_find_int_value("size");
     j.done = std::clamp<std::int64_t>(e.dict_find_int_value("done"), 0,
@@ -428,7 +433,7 @@ private:
     if (!releaseOK(j.release) || !safeName(j.name) || !audio(j.name) ||
         j.index < 0 || j.index >= 25000 || j.size <= 0 ||
         j.size > std::int64_t(5) * 1024 * 1024 * 1024)
-      throw std::runtime_error("Invalid saved download");
+      throw CorruptRecord("Invalid saved download");
     return j;
   }
   void persist() {
@@ -538,7 +543,42 @@ private:
       }
     }
   }
+  // A corrupt record must not make the engine permanently unconstructible:
+  // move the bad file aside and rebuild the ready list from the verified
+  // downloads still on disk. Pending/active items are lost; they are re-queued
+  // by the user, while finished songs are never hidden.
+  void quarantine(fs::path const &file) {
+    pending_.clear();
+    ready_.clear();
+    job_.reset();
+    std::error_code ignored;
+    fs::path aside = file;
+    aside += ".corrupt";
+    fs::remove(aside, ignored);
+    fs::rename(file, aside, ignored);
+    if (fs::exists(file))
+      fs::remove(file);
+  }
   void restore() {
+    bool migrate;
+    try {
+      migrate = restoreSaved();
+    } catch (CorruptRecord const &) {
+      quarantine(root_ / "queue.bencode");
+      quarantine(root_ / "job.bencode");
+      queuePaused_ = false;
+      // Nothing references the old job's payload any more.
+      std::error_code ignored;
+      fs::remove_all(root_ / "partial", ignored);
+      fs::remove(root_ / "resume.bencode", ignored);
+      migrate = true;
+    }
+    if (migrate) {
+      recoverLegacyExports();
+      persist();
+    }
+  }
+  bool restoreSaved() {
     auto file = root_ / "queue.bencode";
     bool migrate = !fs::exists(file);
     if (fs::exists(file)) {
@@ -548,14 +588,14 @@ private:
       lt::bdecode(data.data(), data.data() + data.size(), e, ec);
       if (ec || e.type() != lt::bdecode_node::dict_t ||
           e.dict_find_int_value("format") != 2)
-        throw std::runtime_error("Cannot read the saved download queue");
+        throw CorruptRecord("Cannot read the saved download queue");
       auto pending = e.dict_find_list("pending"),
            ready = e.dict_find_list("ready");
       if (!pending || !ready)
-        throw std::runtime_error("Saved download queue lists are missing");
+        throw CorruptRecord("Saved download queue lists are missing");
       if (pending.list_size() + ready.list_size() +
               (e.dict_find("active") ? 1 : 0) > 200)
-        throw std::runtime_error("Saved download queue is too large");
+        throw CorruptRecord("Saved download queue is too large");
       for (int i = 0; i < pending.list_size(); ++i) {
         auto j = decode(pending.list_at(i));
         j.state = "queued";
@@ -563,8 +603,12 @@ private:
       }
       for (int i = 0; i < ready.list_size(); ++i) {
         auto j = decode(ready.list_at(i));
-        if (!fs::is_regular_file(exportPath(j)) ||
-            fs::file_size(exportPath(j)) != std::uintmax_t(j.size)) {
+        std::error_code ec1, ec2;
+        auto exported = exportPath(j);
+        bool regular = fs::is_regular_file(exported, ec1);
+        std::uintmax_t exportedSize = regular ? fs::file_size(exported, ec2) : 0;
+        if (!regular || ec1 || ec2 ||
+            exportedSize != std::uintmax_t(j.size)) {
           j.state = "error";
           j.error = "The downloaded file is missing or incomplete";
         }
@@ -579,13 +623,17 @@ private:
       lt::error_code ec;
       lt::bdecode(data.data(), data.data() + data.size(), e, ec);
       if (ec || e.type() != lt::bdecode_node::dict_t)
-        throw std::runtime_error("Cannot read the saved download");
+        throw CorruptRecord("Cannot read the saved download");
       job_ = std::make_unique<Job>(decode(e));
     }
     queuePaused_ = bool(job_) || !pending_.empty();
     if (job_) {
-      if (job_->state == "complete" && fs::is_regular_file(exportPath()) &&
-          fs::file_size(exportPath()) == std::uintmax_t(job_->size)) {
+      std::error_code ec1, ec2;
+      auto exported = exportPath();
+      bool regular = fs::is_regular_file(exported, ec1);
+      std::uintmax_t exportedSize = regular ? fs::file_size(exported, ec2) : 0;
+      if (job_->state == "complete" && regular && !ec1 && !ec2 &&
+          exportedSize == std::uintmax_t(job_->size)) {
         job_->done = job_->size;
         ready_.push_back(*job_);
         job_.reset();
@@ -594,10 +642,7 @@ private:
         job_->speed = 0;
       }
     }
-    if (migrate) {
-      recoverLegacyExports();
-      persist();
-    }
+    return migrate;
   }
   std::string inspect(std::string const &id, std::vector<char> const &bytes) {
     if (!releaseOK(id))

@@ -37,8 +37,9 @@ int main() {
            std::chrono::steady_clock::now().time_since_epoch().count()));
   fs::create_directories(root / "seed" / "album");
   try {
-    // Corrupt or incomplete persisted records must return errors, never crash
-    // inside libtorrent's unchecked typed bdecode accessors.
+    // Corrupt or incomplete persisted records must never crash inside
+    // libtorrent's unchecked typed bdecode accessors, and must not leave the
+    // engine permanently unusable: they are quarantined and the queue rebuilt.
     int malformed = 0;
     for (auto const &record : {"d6:formati2ee", "li2ee",
                               "d6:formati2e7:pendingli1ee5:readylee",
@@ -46,15 +47,17 @@ int main() {
       auto broken = root / ("broken-" + std::to_string(malformed++));
       fs::create_directories(broken);
       std::ofstream(broken / "queue.bencode") << record;
-      require(call(broken, "status").find("\"ok\":false") != std::string::npos,
-              "malformed queue was accepted");
+      require(call(broken, "status").find("\"ok\":true") != std::string::npos,
+              "malformed queue made the engine unusable");
+      require(fs::exists(broken / "queue.bencode.corrupt"),
+              "malformed queue was not quarantined");
       singz_torrent_shutdown(broken.string().c_str());
     }
     auto brokenLegacy = root / "broken-legacy";
     fs::create_directories(brokenLegacy);
     std::ofstream(brokenLegacy / "job.bencode") << "li1ee";
-    require(call(brokenLegacy, "status").find("\"ok\":false") != std::string::npos,
-            "malformed legacy job was accepted");
+    require(call(brokenLegacy, "status").find("\"ok\":true") != std::string::npos,
+            "malformed legacy job made the engine unusable");
     singz_torrent_shutdown(brokenLegacy.string().c_str());
     constexpr int size = 512 * 1024;
     std::string first(size, 'A'), second(size, 'B');
@@ -228,6 +231,13 @@ int main() {
     }
     require(call(legacy, "queue").find("first.flac") != std::string::npos,
             "legacy unadded original was not recovered");
+    singz_torrent_shutdown(legacy.string().c_str());
+    // A corrupt queue must not hide the finished song it used to list.
+    {
+      std::ofstream(legacy / "queue.bencode") << "li2ee";
+    }
+    require(call(legacy, "queue").find("first.flac") != std::string::npos,
+            "corrupt queue hid a finished download");
     call(legacy, "remove", 0);
     singz_torrent_shutdown(legacy.string().c_str());
     require(call(legacy, "queue").find("first.flac") == std::string::npos,
