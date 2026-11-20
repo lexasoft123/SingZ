@@ -131,6 +131,12 @@ jobs:
           npm run dist -- --win --x64 --dir
           node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs dist/win-unpacked/resources/engines/singz-capture.node --current-source
 
+      - name: Load-smoke the shipped torrent addon in Electron
+        # A Windows addon that statically imports node.exe loads in plain Node
+        # but kills electron.exe on require(); only a real Electron run shows it.
+        shell: bash
+        run: node_modules/.bin/electron tests/e2e/torrent-addon-smoke.cjs dist/win-unpacked/resources/engines/singz-torrent.node
+
   zdsp-sanitizers:
     runs-on: ubuntu-24.04
     # Three clean native builds and their test suites run sequentially.
