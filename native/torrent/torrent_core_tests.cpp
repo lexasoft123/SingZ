@@ -282,6 +282,30 @@ int main() {
     require(call(legacy, "queue").find("first.flac") == std::string::npos,
             "deleted legacy download resurrected");
     singz_torrent_shutdown(legacy.string().c_str());
+    // Oversized metadata is unusable, not a transient failure: it is skipped
+    // and must not make the engine permanently fail.
+    auto oversized = root / "oversized";
+    fs::create_directories(oversized / "metadata");
+    fs::create_directories(oversized / "imports/12345-0");
+    {
+      std::ofstream out(oversized / "metadata/12345.torrent", std::ios::binary);
+      std::string chunk(1024 * 1024, 'x');
+      for (int i = 0; i < 17; ++i)
+        out.write(chunk.data(), chunk.size());
+    }
+    {
+      std::ofstream out(oversized / "imports/12345-0/first.flac",
+                        std::ios::binary);
+      out.write(first.data(), first.size());
+    }
+    {
+      auto result = call(oversized, "queue");
+      require(result.find("\"ok\":true") != std::string::npos &&
+                  result.find("first.flac") == std::string::npos,
+              "oversized metadata blocked or was mistaken for a song");
+    }
+    singz_torrent_shutdown(oversized.string().c_str());
+    singz_torrent_shutdown(legacy.string().c_str());
     fs::remove_all(root);
     std::cout << "PASS: metadata-only inspection, file validation, local TCP "
                  "transfer, pause, restart/resume, selected-file verification, "

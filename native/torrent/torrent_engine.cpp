@@ -541,13 +541,21 @@ private:
           throw RecoveryIO("Cannot check saved torrent metadata");
         if (!present)
           continue;
-        if (!std::ifstream(metaFile, std::ios::binary))
-          throw RecoveryIO("Cannot read saved torrent metadata");
         std::vector<char> metaBytes;
-        try {
-          metaBytes = read(metaFile);
-        } catch (std::exception const &) {
-          continue; // oversized or truncated metadata is unusable, not transient
+        {
+          std::ifstream in(metaFile, std::ios::binary);
+          if (!in)
+            throw RecoveryIO("Cannot read saved torrent metadata");
+          std::error_code sizeEc;
+          auto metaSize = fs::file_size(metaFile, sizeEc);
+          if (ioFailure(sizeEc))
+            throw RecoveryIO("Cannot read saved torrent metadata");
+          if (sizeEc || metaSize > 16 * 1024 * 1024)
+            continue; // vanished or oversized: unusable, not transient
+          metaBytes.resize(static_cast<std::size_t>(metaSize));
+          if (!metaBytes.empty() &&
+              !in.read(metaBytes.data(), std::streamsize(metaBytes.size())))
+            throw RecoveryIO("Cannot read saved torrent metadata");
         }
         std::shared_ptr<lt::torrent_info> info;
         try {
