@@ -1,0 +1,430 @@
+<style>
+  #singz-torrent-preview { color-scheme: light dark; --sz-bg: light-dark(#f8f6f1,#151411); --sz-panel: light-dark(#fffefa,#1e1c18); --sz-raised: light-dark(#eeebe4,#29261f); --sz-text: light-dark(#29251d,#f6f0e3); --sz-dim: light-dark(#716958,#b8ae9b); --sz-line: light-dark(#dfd9cc,#3a352c); --sz-accent: light-dark(#8c4d0c,#ffc36b); --sz-accent-fill: light-dark(#ffdc9a,#ffc36b); --sz-on-accent: light-dark(#452d0e,#30200c); --sz-soft: light-dark(#fff0d3,#352a1b); --sz-green: light-dark(#356940,#b1c796); --sz-danger: light-dark(#a33e32,#ed9a8d); font: 14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color: var(--sz-text); }
+  #singz-torrent-preview * { box-sizing: border-box; }
+  #singz-torrent-preview [hidden] { display: none !important; }
+  #singz-torrent-preview button, #singz-torrent-preview input { font: inherit; }
+  #singz-torrent-preview button { color: inherit; }
+  #singz-torrent-preview button:disabled { opacity: .43; cursor: default; }
+  #singz-torrent-preview button:not(:disabled), #singz-torrent-preview label { -webkit-tap-highlight-color: transparent; }
+  #singz-torrent-preview button:focus-visible, #singz-torrent-preview input:focus-visible { outline: 2px solid var(--sz-accent); outline-offset: 3px; }
+  #singz-torrent-preview h1, #singz-torrent-preview h2, #singz-torrent-preview h3, #singz-torrent-preview p { margin: 0; }
+  #singz-torrent-preview h1 { font-size: 29px; font-weight: 650; letter-spacing: -1px; line-height: 1.18; }
+  #singz-torrent-preview h2 { font-size: 21px; font-weight: 620; letter-spacing: -.5px; line-height: 1.25; }
+  #singz-torrent-preview h3 { font-size: 16px; font-weight: 600; }
+  #singz-torrent-preview .sz-stage { min-height: 780px; padding: 8px 0 28px; display: flex; flex-direction: column; align-items: center; }
+  #singz-torrent-preview .sz-preview-note { font-size: 12px; color: var(--sz-dim); text-align: center; margin: 0 0 12px; padding: 0 20px; }
+  #singz-torrent-preview .sz-shell { background: var(--sz-bg); border: 1px solid var(--sz-line); width: 100%; overflow: hidden; border-radius: 16px; box-shadow: 0 14px 36px light-dark(#34271912,#00000026); }
+  #singz-torrent-preview .sz-phone { max-width: 394px; border-radius: 30px; border-width: 2px; }
+  #singz-torrent-preview .sz-android { border-radius: 22px; }
+  #singz-torrent-preview .sz-desktop-top { display: flex; align-items: center; gap: 9px; min-height: 48px; border-bottom: 1px solid var(--sz-line); padding: 0 16px; }
+  #singz-torrent-preview .sz-window-dots { letter-spacing: 2px; color: var(--sz-dim); font-size: 12px; }
+  #singz-torrent-preview .sz-desktop-top .sz-wordmark { font-size: 14px; margin-left: 14px; }
+  #singz-torrent-preview .sz-top-caption { color: var(--sz-dim); font-size: 12px; margin-left: auto; }
+  #singz-torrent-preview .sz-wordmark { font-size: 26px; font-weight: 750; letter-spacing: -1.3px; }
+  #singz-torrent-preview .sz-wordmark em { color: var(--sz-accent); font-style: normal; }
+  #singz-torrent-preview .sz-desktop-body { display: grid; grid-template-columns: 154px minmax(0,1fr); min-height: 640px; }
+  #singz-torrent-preview .sz-sidebar { padding: 26px 14px; border-right: 1px solid var(--sz-line); display: flex; flex-direction: column; gap: 24px; }
+  #singz-torrent-preview .sz-sidebar .sz-wordmark { padding-left: 8px; }
+  #singz-torrent-preview .sz-nav { display: grid; gap: 5px; }
+  #singz-torrent-preview .sz-nav button { text-align: left; padding: 10px 12px; background: transparent; border: 0; border-radius: 8px; color: var(--sz-dim); }
+  #singz-torrent-preview .sz-nav button.sz-active { color: var(--sz-accent); background: var(--sz-soft); }
+  #singz-torrent-preview .sz-sidebar-foot { margin-top: auto; font-size: 12px; color: var(--sz-dim); padding: 8px; }
+  #singz-torrent-preview .sz-main { min-width: 0; padding: 25px 28px 24px; }
+  #singz-torrent-preview .sz-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 23px; }
+  #singz-torrent-preview .sz-eyebrow { display: block; color: var(--sz-dim); font-size: 11px; letter-spacing: 1.25px; text-transform: uppercase; margin-bottom: 8px; }
+  #singz-torrent-preview .sz-heading p { color: var(--sz-dim); margin-top: 8px; }
+  #singz-torrent-preview .sz-account { background: var(--sz-panel); border: 1px solid var(--sz-line); border-radius: 20px; padding: 7px 10px; font-size: 12px; white-space: nowrap; }
+  #singz-torrent-preview .sz-dot { display: inline-block; height: 6px; width: 6px; background: var(--sz-green); border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  #singz-torrent-preview .sz-status { display: flex; justify-content: space-between; padding: 14px 23px 4px; font-weight: 650; font-size: 12px; }
+  #singz-torrent-preview .sz-status-right { font-size: 11px; letter-spacing: 1px; }
+  #singz-torrent-preview .sz-phone-nav { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 12px 18px 6px; }
+  #singz-torrent-preview .sz-back { background: transparent; border: 0; padding: 5px 0; color: var(--sz-accent); font-size: 13px; }
+  #singz-torrent-preview .sz-phone-nav strong { font-weight: 600; font-size: 14px; }
+  #singz-torrent-preview .sz-phone-nav .sz-account { border: 0; background: transparent; padding: 5px 0; color: var(--sz-dim); }
+  #singz-torrent-preview .sz-phone .sz-main { padding: 18px 20px 22px; min-height: 650px; }
+  #singz-torrent-preview .sz-phone .sz-heading { margin-bottom: 20px; }
+  #singz-torrent-preview .sz-phone h1 { font-size: 28px; }
+  #singz-torrent-preview .sz-phone .sz-heading p { font-size: 13px; }
+  #singz-torrent-preview .sz-homebar { width: 110px; height: 4px; border-radius: 3px; background: var(--sz-text); opacity: .65; margin: 0 auto 9px; }
+  #singz-torrent-preview .sz-android .sz-homebar { width: 72px; height: 3px; opacity: .4; }
+  #singz-torrent-preview .sz-search { display: flex; align-items: center; gap: 8px; padding: 5px 5px 5px 13px; border: 1px solid var(--sz-line); border-radius: 12px; background: var(--sz-panel); }
+  #singz-torrent-preview .sz-search span { color: var(--sz-dim); font-size: 18px; }
+  #singz-torrent-preview .sz-search input { min-width: 0; width: 100%; background: transparent; color: var(--sz-text); border: 0; outline-offset: 2px; padding: 8px 0; font-size: 16px; }
+  #singz-torrent-preview .sz-search button { border: 0; border-radius: 8px; padding: 9px 13px; background: var(--sz-accent-fill); color: var(--sz-on-accent); font-size: 13px; font-weight: 600; }
+  #singz-torrent-preview .sz-split { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,.94fr); gap: 24px; margin-top: 20px; }
+  #singz-torrent-preview .sz-results { min-width: 0; }
+  #singz-torrent-preview .sz-list-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; align-items: center; color: var(--sz-dim); font-size: 11px; padding-bottom: 9px; }
+  #singz-torrent-preview .sz-list-meta strong { color: var(--sz-accent); font-weight: 500; }
+  #singz-torrent-preview .sz-release { display: grid; grid-template-columns: minmax(0,1fr) 51px; align-items: start; gap: 10px; width: 100%; padding: var(--sz-row-padding,15px) 11px; background: transparent; border: 0; border-top: 1px solid var(--sz-line); text-align: left; border-radius: 0; }
+  #singz-torrent-preview .sz-release.sz-selected { background: var(--sz-soft); box-shadow: inset 3px 0 var(--sz-accent); }
+  #singz-torrent-preview .sz-release-title { display: block; font-size: 14px; font-weight: 550; line-height: 1.4; }
+  #singz-torrent-preview .sz-release-desc { display: block; color: var(--sz-dim); font-size: 12px; margin-top: 5px; }
+  #singz-torrent-preview .sz-release-format { display: inline-block; font-size: 10px; letter-spacing: .6px; margin-right: 6px; color: var(--sz-text); }
+  #singz-torrent-preview .sz-seeders { text-align: right; color: var(--sz-green); font-size: 19px; font-weight: 550; font-variant-numeric: tabular-nums; }
+  #singz-torrent-preview .sz-seeders small { display: block; font-size: 10px; font-weight: 400; color: var(--sz-dim); letter-spacing: 0; }
+  #singz-torrent-preview .sz-zero .sz-seeders { color: var(--sz-dim); }
+  #singz-torrent-preview .sz-results-foot { font-size: 11px; color: var(--sz-dim); margin-top: 12px; }
+  #singz-torrent-preview .sz-detail { min-width: 0; padding: 20px; background: var(--sz-panel); border: 1px solid var(--sz-line); border-radius: 12px; align-self: start; }
+  #singz-torrent-preview .sz-detail-empty { display: flex; flex-direction: column; justify-content: center; min-height: 420px; gap: 12px; }
+  #singz-torrent-preview .sz-detail-empty .sz-empty-symbol { font-size: 34px; font-weight: 300; color: var(--sz-accent); }
+  #singz-torrent-preview .sz-detail-empty p { font-size: 13px; color: var(--sz-dim); max-width: 25ch; }
+  #singz-torrent-preview .sz-detail-head { margin-bottom: 16px; }
+  #singz-torrent-preview .sz-detail-head p { color: var(--sz-dim); margin-top: 6px; font-size: 12px; }
+  #singz-torrent-preview .sz-phone .sz-detail { border: 0; padding: 0; background: transparent; }
+  #singz-torrent-preview .sz-file-search { width: 100%; background: var(--sz-bg); color: var(--sz-text); border: 1px solid var(--sz-line); border-radius: 8px; padding: 9px 11px; margin-bottom: 10px; font-size: 14px; }
+  #singz-torrent-preview .sz-folder { color: var(--sz-dim); font-size: 11px; margin: 12px 0 6px; overflow-wrap: anywhere; }
+  #singz-torrent-preview .sz-track { display: grid; grid-template-columns: 16px minmax(0,1fr) auto; gap: 9px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--sz-line); }
+  #singz-torrent-preview .sz-track input { margin: 0; accent-color: var(--sz-accent); width: 15px; height: 15px; }
+  #singz-torrent-preview .sz-track-title { font-size: 13px; }
+  #singz-torrent-preview .sz-track-title small { display: block; color: var(--sz-dim); font-size: 11px; margin-top: 2px; }
+  #singz-torrent-preview .sz-track-size { font-size: 11px; color: var(--sz-dim); font-variant-numeric: tabular-nums; }
+  #singz-torrent-preview .sz-track.sz-picked .sz-track-title { color: var(--sz-accent); }
+  #singz-torrent-preview .sz-selection { padding-top: 16px; margin-top: 3px; }
+  #singz-torrent-preview .sz-selection-line { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; margin-bottom: 3px; }
+  #singz-torrent-preview .sz-selection p { font-size: 11px; color: var(--sz-dim); margin-bottom: 13px; }
+  #singz-torrent-preview .sz-primary, #singz-torrent-preview .sz-secondary { width: 100%; padding: 12px 14px; border: 0; border-radius: 10px; background: var(--sz-accent-fill); color: var(--sz-on-accent); font-weight: 600; font-size: 14px; }
+  #singz-torrent-preview .sz-secondary { background: var(--sz-raised); color: var(--sz-text); font-weight: 500; }
+  #singz-torrent-preview .sz-link { background: transparent; border: 0; color: var(--sz-accent); padding: 8px 0; font-size: 12px; }
+  #singz-torrent-preview .sz-phone .sz-split { display: block; margin-top: 20px; }
+  #singz-torrent-preview .sz-phone .sz-release { padding: var(--sz-row-padding,15px) 5px; }
+  #singz-torrent-preview .sz-phone .sz-seeders { font-size: 20px; }
+  #singz-torrent-preview .sz-phone .sz-track { padding: 14px 0; }
+  #singz-torrent-preview .sz-route-back { margin-bottom: 17px; }
+  #singz-torrent-preview .sz-current-release { display: flex; flex-wrap: wrap; gap: 8px; margin: 11px 0 22px; font-size: 12px; color: var(--sz-dim); }
+  #singz-torrent-preview .sz-current-release b { color: var(--sz-green); font-weight: 500; }
+  #singz-torrent-preview .sz-download { max-width: 480px; margin: 38px auto 12px; }
+  #singz-torrent-preview .sz-phone .sz-download { margin: 28px 0 10px; }
+  #singz-torrent-preview .sz-art { width: 66px; height: 66px; border-radius: 13px; background: var(--sz-soft); display: grid; place-items: center; font-size: 29px; color: var(--sz-accent); margin-bottom: 20px; }
+  #singz-torrent-preview .sz-download-title { margin-top: 17px; }
+  #singz-torrent-preview .sz-download-title p { margin-top: 5px; color: var(--sz-dim); }
+  #singz-torrent-preview .sz-progress-label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 30px; margin-bottom: 9px; }
+  #singz-torrent-preview .sz-progress-label strong { font-size: 32px; font-weight: 550; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+  #singz-torrent-preview .sz-progress-label span { color: var(--sz-dim); font-size: 12px; }
+  #singz-torrent-preview .sz-meter { width: 100%; height: 6px; border-radius: 8px; overflow: hidden; background: var(--sz-raised); }
+  #singz-torrent-preview .sz-meter-fill { height: 100%; width: 0; background: var(--sz-accent); border-radius: inherit; transition: width .25s ease; }
+  #singz-torrent-preview .sz-download-stats { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; margin-top: 11px; color: var(--sz-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #singz-torrent-preview .sz-notice { background: var(--sz-soft); padding: 13px 14px; border-radius: 9px; font-size: 12px; color: var(--sz-dim); margin: 24px 0; }
+  #singz-torrent-preview .sz-download-actions { display: grid; gap: 8px; margin-top: 30px; }
+  #singz-torrent-preview .sz-download-actions .sz-link { justify-self: center; }
+  #singz-torrent-preview .sz-check { color: var(--sz-green); font-size: 42px; margin-bottom: 20px; font-weight: 300; }
+  #singz-torrent-preview .sz-form { display: grid; gap: 17px; margin: 25px 0; }
+  #singz-torrent-preview .sz-field { display: grid; gap: 7px; font-size: 12px; color: var(--sz-dim); }
+  #singz-torrent-preview .sz-field input { width: 100%; min-width: 0; color: var(--sz-text); background: var(--sz-panel); border: 1px solid var(--sz-line); padding: 12px 13px; border-radius: 9px; font-size: 16px; }
+  #singz-torrent-preview .sz-source-info { display: flex; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--sz-line); border-radius: 10px; margin-top: 23px; }
+  #singz-torrent-preview .sz-source-info strong { display: block; font-size: 13px; font-weight: 550; }
+  #singz-torrent-preview .sz-source-info small { display: block; color: var(--sz-dim); margin-top: 2px; font-size: 11px; }
+  #singz-torrent-preview .sz-library { display: grid; gap: 0; margin-top: 25px; }
+  #singz-torrent-preview .sz-library-row { display: flex; gap: 14px; align-items: center; padding: 15px 0; border-bottom: 1px solid var(--sz-line); }
+  #singz-torrent-preview .sz-library-row .sz-art { width: 48px; height: 48px; margin: 0; font-size: 22px; flex: 0 0 auto; }
+  #singz-torrent-preview .sz-library-row p { font-size: 12px; color: var(--sz-dim); margin-top: 3px; }
+  #singz-torrent-preview .sz-library-row .sz-new { color: var(--sz-green); font-size: 11px; margin-left: auto; }
+  #singz-torrent-preview .sz-inline-cta { width: auto; white-space: nowrap; font-size: 13px; padding: 10px 13px; }
+  #singz-torrent-preview .sz-empty { padding: 28px 7px; color: var(--sz-dim); font-size: 13px; }
+  #singz-torrent-preview .sz-account-card { max-width: 420px; margin: 25px auto; }
+  #singz-torrent-preview .sz-account-card p { color: var(--sz-dim); margin-top: 10px; font-size: 13px; }
+  #singz-torrent-preview .sz-mobile-content { min-width: 0; }
+  @media (max-width: 820px) { #singz-torrent-preview .sz-desktop-body { grid-template-columns: 1fr; } #singz-torrent-preview .sz-sidebar { display: none; } #singz-torrent-preview .sz-main { padding: 22px; } }
+  @media (max-width: 560px) { #singz-torrent-preview .sz-split { grid-template-columns: 1fr; gap: 18px; } #singz-torrent-preview .sz-heading { flex-wrap: wrap; } #singz-torrent-preview .sz-main { padding: 19px 16px; } #singz-torrent-preview .sz-stage { min-height: 800px; } #singz-torrent-preview .sz-desktop .sz-detail-empty { display: none; } #singz-torrent-preview .sz-phone .sz-main { padding: 17px 16px 22px; } #singz-torrent-preview .sz-top-caption { display: none; } }
+  @media (prefers-reduced-motion: reduce) { #singz-torrent-preview .sz-meter-fill { transition: none; } }
+</style>
+<div id="singz-torrent-preview">
+  <div class="viz-carousel" aria-label="SingZ torrent prototype platforms">
+    <section data-variant="Desktop" aria-label="Desktop SingZ prototype">
+      <div class="sz-stage"><p class="sz-preview-note">Interactive prototype · Sample releases and simulated downloads</p><div class="sz-shell sz-desktop" data-platform="Desktop"></div></div>
+    </section>
+    <section data-variant="iOS" aria-label="iOS SingZ prototype" hidden>
+      <div class="sz-stage viz-dotted-background"><p class="sz-preview-note">Interactive prototype · No real sign-in or downloads</p><div class="sz-shell sz-phone sz-ios" data-platform="iOS"></div></div>
+    </section>
+    <section data-variant="Android" aria-label="Android SingZ prototype" hidden>
+      <div class="sz-stage viz-dotted-background"><p class="sz-preview-note">Interactive prototype · No real sign-in or downloads</p><div class="sz-shell sz-phone sz-android" data-platform="Android"></div></div>
+    </section>
+  </div>
+</div>
+<script>
+(() => {
+  const root = document.getElementById('singz-torrent-preview');
+  const releases = [
+    { id: 'discography', artist: 'Кино', title: 'Дискография', year: '1982–1990', format: 'FLAC', quality: 'Lossless · 16-bit / 44.1 kHz', total: '3.2 GB', seeds: 328, album: '1988 · Группа крови', mb: 32.4 },
+    { id: 'album', artist: 'Кино', title: 'Группа крови', year: '1988', format: 'FLAC', quality: 'Lossless · 16-bit / 44.1 kHz', total: '287 MB', seeds: 210, album: 'Группа крови', mb: 31.8 },
+    { id: 'mp3', artist: 'Кино', title: 'Группа крови', year: '1988', format: 'MP3', quality: '320 kbps', total: '103 MB', seeds: 96, album: 'Группа крови', mb: 9.4 },
+    { id: 'live', artist: 'Кино', title: 'Последний концерт', year: '1990', format: 'FLAC', quality: 'Live · 16-bit / 44.1 kHz', total: '436 MB', seeds: 38, album: 'Live · 1990', mb: 35.2 },
+    { id: 'waiting', artist: 'Кино', title: 'Группа крови · Винил', year: '1988', format: 'FLAC', quality: 'Vinyl rip · 24-bit / 96 kHz', total: '921 MB', seeds: 0, album: 'Группа крови · Vinyl', mb: 89.6 }
+  ].sort((a,b) => b.seeds - a.seeds);
+  const songs = [
+    { title: 'Группа крови', duration: '4:45', scale: 1 },
+    { title: 'Закрой за мной дверь, я ухожу', duration: '4:15', scale: .88 },
+    { title: 'Война', duration: '4:05', scale: .86 },
+    { title: 'Спокойная ночь', duration: '6:07', scale: 1.3 },
+    { title: 'Мама, мы все тяжело больны', duration: '3:57', scale: .81 },
+    { title: 'Прохожий', duration: '3:42', scale: .78 }
+  ];
+  const states = {};
+  const timers = new Map();
+  const writerID = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  let saved = window.openai && window.openai.widgetState;
+  const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const icon = text => '<span aria-hidden="true">' + text + '</span>';
+  const releaseOf = s => releases.find(r => r.id === s.release);
+  const fileMB = s => Number((releaseOf(s).mb * songs[s.track].scale).toFixed(1));
+  const searchMatches = (r,q) => {
+    const haystack = (r.artist + ' ' + r.title + ' ' + r.year + ' ' + r.format + ' ' + songs.map(t=>t.title).join(' ')).toLocaleLowerCase();
+    return q.toLocaleLowerCase().split(/\s+/).filter(Boolean).every(word => haystack.includes(word));
+  };
+  function restore(platform) {
+    const raw = saved && saved.privateContent && saved.privateContent.platforms && saved.privateContent.platforms[platform];
+    const s = { route: 'search', connected: true, query: 'Кино Группа крови', release: null, track: null, filter: '', progress: 0, paused: false, added: false, title: '', artist: 'Кино' };
+    if (!raw || typeof raw !== 'object') return s;
+    if (typeof raw.query === 'string') s.query = raw.query.slice(0,120);
+    if (releases.some(r=>r.id === raw.release)) s.release = raw.release;
+    if (Number.isInteger(raw.track) && songs[raw.track]) s.track = raw.track;
+    if (['search','files','download','details','added','library','account'].includes(raw.route)) s.route = raw.route;
+    if (!s.release && ['files','download','details','added'].includes(s.route)) s.route = 'search';
+    if (s.track === null && ['download','details','added'].includes(s.route)) s.route = 'files';
+    s.connected = raw.connected !== false; s.added = raw.added === true;
+    s.progress = Math.max(0,Math.min(100,Number(raw.progress)||0));
+    s.paused = s.route === 'download' && s.progress < 100;
+    s.title = typeof raw.title === 'string' ? raw.title.slice(0,200) : '';
+    s.artist = typeof raw.artist === 'string' ? raw.artist.slice(0,200) : 'Кино';
+    return s;
+  }
+  function save(platform) {
+    if (!window.openai || !window.openai.setWidgetState) return;
+    const s = states[platform];
+    const platforms = Object.fromEntries(Object.entries(states).map(([name,state]) => [name,{
+      route:state.route,query:state.query,release:state.release,track:state.track,progress:state.progress,
+      connected:state.connected,added:state.added,title:state.title,artist:state.artist
+    }]));
+    window.openai.setWidgetState({
+      modelContent: { prototype:'SingZ RuTracker', platform, screen:s.route, order:'seeders descending', release:s.release,
+        song:s.track === null ? null : songs[s.track].title },
+      privateContent: { platforms, writerID }
+    }).catch(()=>{});
+  }
+  function stopTimer(platform) {
+    if (timers.has(platform)) clearInterval(timers.get(platform));
+    timers.delete(platform);
+  }
+  function chrome(platform,s,content) {
+    const desktop = platform === 'Desktop';
+    const account = '<button class="sz-account cursor-interaction" data-action="account" aria-label="RuTracker account">' +
+      (s.connected ? '<span class="sz-dot"></span>Demo account' : 'Sign in') + '</button>';
+    if (desktop) return '<div class="sz-desktop-top"><span class="sz-window-dots" aria-hidden="true">● ● ●</span><span class="sz-wordmark">Sing<em>Z</em></span><span class="sz-top-caption">Your next song is out there.</span></div>' +
+      '<div class="sz-desktop-body"><aside class="sz-sidebar"><div class="sz-wordmark">Sing<em>Z</em></div><nav class="sz-nav" aria-label="SingZ navigation">' +
+      '<button class="cursor-interaction ' + (s.route === 'library' ? 'sz-active' : '') + '" data-action="library">♫ &nbsp; Your library</button>' +
+      '<button class="cursor-interaction ' + (s.route !== 'library' ? 'sz-active' : '') + '" data-action="search">＋ &nbsp; Add song</button></nav>' +
+      '<div class="sz-sidebar-foot">A song. Your voice.<br>A little more practice.</div></aside><main class="sz-main">' + content(account) + '</main></div>';
+    return '<div class="sz-status"><span>9:41</span><span class="sz-status-right" aria-label="Full signal, Wi-Fi, battery 100 percent">▮▮▮ &nbsp; Wi-Fi &nbsp; 100%</span></div>' +
+      '<div class="sz-phone-nav"><button class="sz-back cursor-interaction" data-action="back">' + (platform === 'iOS' ? '‹ ' : '← ') + (s.route === 'search' ? 'Library' : 'Back') + '</button><strong>Add song</strong>' +
+      account + '</div><main class="sz-main">' + content('') + '</main><div class="sz-homebar" aria-hidden="true"></div>';
+  }
+  function heading(eyebrow,title,subtitle,account) {
+    return '<header class="sz-heading"><div><span class="sz-eyebrow">' + eyebrow + '</span><h1>' + title + '</h1>' +
+      (subtitle ? '<p>' + subtitle + '</p>' : '') + '</div>' + account + '</header>';
+  }
+  function resultsHTML(s) {
+    const rows = releases.filter(r=>searchMatches(r,s.query));
+    return '<div class="sz-list-meta"><span>' + rows.length + ' releases</span><strong>↓ Most seeders first</strong></div>' +
+      (rows.length ? rows.map(r => '<button class="sz-release cursor-interaction ' + (s.release === r.id ? 'sz-selected ' : '') + (r.seeds === 0 ? 'sz-zero' : '') +
+      '" data-action="release" data-release="' + r.id + '" aria-pressed="' + (s.release === r.id) + '"><span><span class="sz-release-title">' +
+      esc(r.artist + ' · ' + r.title) + '</span><span class="sz-release-desc">' + esc(r.year) + ' · ' + esc(r.total) +
+      '</span><span class="sz-release-desc"><span class="sz-release-format">' + r.format + '</span>' + esc(r.quality.replace('Lossless · ','')) +
+      '</span></span><span class="sz-seeders">' + r.seeds + '<small>seeders</small></span></button>').join('') :
+      '<div class="sz-empty">No releases found.<br><button class="sz-link cursor-interaction" data-action="reset-query">Try “Кино Группа крови”</button></div>') +
+      '<p class="sz-results-foot">Choose a release, then pick the song inside.</p>';
+  }
+  function tracksHTML(platform,s) {
+    const r = releaseOf(s);
+    const list = songs.map((song,i)=>({song,i})).filter(({song})=>song.title.toLocaleLowerCase().includes(s.filter.toLocaleLowerCase()));
+    return '<div class="sz-detail-head"><span class="sz-eyebrow">Choose one song</span><h2>' + esc(r.artist + ' · ' + r.title) +
+      '</h2><p>' + esc(r.format + ' · ' + r.total + ' release') + ' · <span style="color:var(--sz-green)">' + r.seeds + ' seeders</span></p></div>' +
+      '<label><span class="sz-eyebrow" style="margin-bottom:5px">Find a song in this release</span><input class="sz-file-search" data-input="filter" aria-label="Find a song in this release" placeholder="Song title" value="' + esc(s.filter) + '"></label>' +
+      '<div class="sz-folder">' + icon('↳') + ' ' + esc(r.album) + ' /</div><div class="sz-track-list">' + trackRows(platform,s,list) + '</div>' +
+      selectionHTML(s);
+  }
+  function trackRows(platform,s,list) {
+    const r = releaseOf(s);
+    return list.length ? list.map(({song,i})=>'<label class="sz-track cursor-interaction ' + (s.track === i ? 'sz-picked' : '') + '"><input type="radio" name="song-' + platform +
+      '" value="' + i + '" data-input="track" ' + (s.track === i ? 'checked' : '') + '><span class="sz-track-title">' +
+      esc(song.title) + '<small>' + String(i+1).padStart(2,'0') + ' · ' + song.duration + ' · ' + r.format +
+      '</small></span><span class="sz-track-size">' + (r.mb * song.scale).toFixed(1) + ' MB</span></label>').join('') :
+      '<p class="sz-empty">No songs match this title.</p>';
+  }
+  function selectionHTML(s) {
+    return '<div class="sz-selection"><div class="sz-selection-line"><span>' + (s.track === null ? 'Select one song' : '1 song selected') +
+      '</span><strong>' + (s.track === null ? '—' : fileMB(s) + ' MB') + '</strong></div><p>' +
+      (s.track === null ? 'The rest of the release stays unselected.' : 'Only this song. The full release is ' + releaseOf(s).total + '.') +
+      '</p><button class="sz-primary cursor-interaction" data-action="download" ' + (s.track === null ? 'disabled' : '') + '>Download song' +
+      (s.track === null ? '' : ' · ' + fileMB(s) + ' MB') + '</button></div>';
+  }
+  function searchHTML(platform,s,account) {
+    const desktop = platform === 'Desktop';
+    const detail = s.release ? tracksHTML(platform,s) : '<div class="sz-detail-empty"><span class="sz-empty-symbol" aria-hidden="true">↳</span><h2>An album, just your song.</h2><p>Choose a release on the left. Then select the track you want to sing.</p></div>';
+    return heading('Add song / RuTracker','Find your next song','Search by artist or song title.',account) +
+      '<form class="sz-search" data-form="search"><span aria-hidden="true">⌕</span><input aria-label="Search RuTracker" data-input="query" value="' + esc(s.query) + '" placeholder="Artist or song" autocomplete="off"><button class="cursor-interaction" type="submit" data-action="submit">Search</button></form>' +
+      '<div class="sz-split"><section class="sz-results" aria-label="Releases sorted by seeders descending">' + resultsHTML(s) +
+      '</section>' + (desktop ? '<section class="sz-detail" aria-label="Song selection">' + detail + '</section>' : '') + '</div>';
+  }
+  function downloadHTML(s,account) {
+    const r = releaseOf(s), song = songs[s.track], complete = s.progress >= 100, waiting = r.seeds === 0;
+    const status = complete ? 'Song downloaded' : waiting ? 'Waiting for seeders' : s.paused ? 'Download paused' : 'Downloading your song';
+    return heading('Add song / ' + (complete ? 'Ready' : 'Download'),status,'',account) +
+      '<section class="sz-download">' + (complete ? '<div class="sz-check" aria-hidden="true">✓</div>' : '<div class="sz-art" aria-hidden="true">♫</div>') +
+      '<span class="sz-eyebrow">' + esc(r.format) + ' · ' + fileMB(s) + ' MB</span><div class="sz-download-title"><h2>' + esc(song.title) +
+      '</h2><p>' + esc(r.artist + ' · ' + r.album) + '</p></div>' +
+      '<div class="sz-progress-label"><strong data-progress-number>' + Math.floor(s.progress) + '%</strong><span data-progress-state>' +
+      (complete ? 'Verified and ready' : waiting ? 'No seeders available' : s.paused ? 'Paused' : 'About ' + Math.max(1,Math.ceil((100-s.progress)/12)) + ' seconds left') +
+      '</span></div><div class="sz-meter" role="progressbar" aria-label="Song download" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.floor(s.progress) +
+      '"><div class="sz-meter-fill" style="width:' + s.progress + '%"></div></div><div class="sz-download-stats"><span data-download-bytes>' +
+      (fileMB(s)*s.progress/100).toFixed(1) + ' / ' + fileMB(s) + ' MB</span><span data-download-speed>' + (complete ? 'Complete' : waiting || s.paused ? '0 MB/s' : '3.9 MB/s') +
+      '</span></div><div class="sz-notice">' +
+      (complete ? 'Next, confirm the song details and add it to your library.' : waiting ? 'This release has no seeders right now. You can wait or choose another release.' :
+      'Downloading only this song. The rest of the ' + r.total + ' release is unselected.') + '</div><div class="sz-download-actions">' +
+      (complete ? '<button class="sz-primary cursor-interaction" data-action="details">Continue to Add song →</button>' :
+      '<button class="sz-primary cursor-interaction" data-action="' + (waiting ? 'choose-another' : 'pause') + '">' + (waiting ? 'Choose another release' : s.paused ? 'Resume download' : 'Pause download') + '</button>') +
+      '<button class="sz-link cursor-interaction" data-action="cancel">' + (complete ? 'Back to songs' : 'Cancel download') + '</button></div></section>';
+  }
+  function detailsHTML(s,account) {
+    return heading('Add song / Song details','Make it yours','Confirm the details before adding the song.',account) +
+      '<section class="sz-download"><div class="sz-source-info"><span style="color:var(--sz-green)" aria-hidden="true">✓</span><div><strong>' +
+      esc(songs[s.track].title + '.' + releaseOf(s).format.toLowerCase()) + '</strong><small>Downloaded from RuTracker · ' + fileMB(s) + ' MB</small></div></div>' +
+      '<form class="sz-form" data-form="details"><label class="sz-field">Song title<input data-input="title" aria-label="Song title" value="' +
+      esc(s.title || songs[s.track].title) + '" required maxlength="200"></label><label class="sz-field">Artist<input data-input="artist" aria-label="Artist" value="' +
+      esc(s.artist) + '" required maxlength="200"></label><div class="sz-notice">The song continues through SingZ’s usual Add song flow for lyrics and preparation.</div><button class="sz-primary cursor-interaction" type="submit" data-action="submit">Add song</button></form></section>';
+  }
+  function libraryHTML(s,account) {
+    return heading('Your music','Your library','One more song to make your own.',account) +
+      '<button class="sz-primary sz-inline-cta cursor-interaction" data-action="search">＋ Add song</button><div class="sz-library">' +
+      (s.added ? '<div class="sz-library-row"><div class="sz-art" aria-hidden="true">♫</div><div><h3>' + esc(s.title || songs[s.track].title) +
+      '</h3><p>' + esc(s.artist) + ' · Original audio</p></div><span class="sz-new">Just added</span></div>' : '') +
+      '<div class="sz-library-row"><div class="sz-art" aria-hidden="true">♫</div><div><h3>Sing with me</h3><p>SingZ · Sample song</p></div></div></div>';
+  }
+  function accountHTML(s) {
+    return '<section class="sz-account-card"><button class="sz-back sz-route-back cursor-interaction" data-action="search">← Back to search</button><span class="sz-eyebrow">RuTracker account</span><h1>' +
+      (s.connected ? 'Connected for the demo.' : 'Bring your account.') + '</h1><p>' +
+      (s.connected ? 'You’re exploring with a sample session. No account is connected to RuTracker.' : 'Sign in to search releases and choose the song you want.') +
+      '</p><form class="sz-form" data-form="account"><label class="sz-field">Username<input aria-label="RuTracker username" value="demo_singer" autocomplete="off" maxlength="80"></label><label class="sz-field">Password<input aria-label="Demo password" type="password" placeholder="Demo only — don’t use your real password" autocomplete="off"></label><p class="sz-notice">Prototype only. These fields stay on this screen and are never sent or saved.</p><button class="sz-primary cursor-interaction" type="submit" data-action="submit">Continue with demo account</button>' +
+      (s.connected ? '<button class="sz-link cursor-interaction" type="button" data-action="signout">Sign out of demo</button>' : '') + '</form></section>';
+  }
+  function render(platform) {
+    const shell = root.querySelector('[data-platform="' + platform + '"]'), s = states[platform];
+    shell.innerHTML = chrome(platform,s,account => {
+      if (s.route === 'account') return accountHTML(s);
+      if (s.route === 'library') return libraryHTML(s,account);
+      if (s.route === 'details') return detailsHTML(s,account);
+      if (s.route === 'added') return heading('Your library','Ready for your next rehearsal.','',account) +
+        '<section class="sz-download"><div class="sz-check" aria-hidden="true">✓</div><h2>' + esc(s.title || songs[s.track].title) +
+        '</h2><p style="color:var(--sz-dim);margin-top:9px">Added to your library · ' + esc(s.artist) + '</p><div class="sz-download-actions"><button class="sz-primary cursor-interaction" data-action="library">Go to library</button><button class="sz-link cursor-interaction" data-action="search">Find another song</button></div></section>';
+      if (s.route === 'download') return downloadHTML(s,account);
+      if (s.route === 'files') return '<section class="sz-detail" aria-label="Song selection">' + tracksHTML(platform,s) + '</section>';
+      return searchHTML(platform,s,account);
+    });
+  }
+  function focusHeading(platform) {
+    const shell = root.querySelector('[data-platform="' + platform + '"]');
+    const main = shell.querySelector('main');
+    main.setAttribute('aria-live','polite');
+  }
+  function startTimer(platform) {
+    stopTimer(platform);
+    const s = states[platform];
+    if (s.route !== 'download' || s.paused || s.progress >= 100 || releaseOf(s).seeds === 0) return;
+    timers.set(platform,setInterval(() => {
+      if (!root.isConnected) { stopTimer(platform); return; }
+      if (root.closest('[hidden]') || document.hidden) return;
+      const shell = root.querySelector('[data-platform="' + platform + '"]');
+      if (shell.closest('[hidden]')) return;
+      s.progress = Math.min(100,s.progress+6);
+      if (s.progress >= 100) { stopTimer(platform); render(platform); save(platform); return; }
+      shell.querySelector('[data-progress-number]').textContent = Math.floor(s.progress) + '%';
+      shell.querySelector('[data-progress-state]').textContent = 'About ' + Math.max(1,Math.ceil((100-s.progress)/12)) + ' seconds left';
+      shell.querySelector('.sz-meter').setAttribute('aria-valuenow',Math.floor(s.progress));
+      shell.querySelector('.sz-meter-fill').style.width = s.progress + '%';
+      shell.querySelector('[data-download-bytes]').textContent = (fileMB(s)*s.progress/100).toFixed(1) + ' / ' + fileMB(s) + ' MB';
+    },500));
+  }
+  root.addEventListener('click',event => {
+    const button = event.target.closest('[data-action]');
+    if (!button || button.disabled) return;
+    const shell = button.closest('[data-platform]'), platform = shell.dataset.platform, s = states[platform];
+    const action = button.dataset.action;
+    if (action === 'submit') { event.preventDefault(); submitForm(button.closest('[data-form]')); return; }
+    if (action === 'account') { stopTimer(platform); s.route = 'account'; }
+    if (action === 'signout') { s.connected = false; s.route = 'account'; }
+    if (action === 'search' || action === 'choose-another') { stopTimer(platform); s.route = s.connected ? 'search' : 'account'; if (action === 'choose-another') { s.release = null; s.track = null; } }
+    if (action === 'library') { stopTimer(platform); s.route = 'library'; }
+    if (action === 'back') {
+      stopTimer(platform);
+      s.route = s.route === 'search' ? 'library' : s.route === 'download' || s.route === 'details' ? 'files' : 'search';
+    }
+    if (action === 'release') {
+      if (!s.connected) s.route = 'account';
+      else { s.release = button.dataset.release; s.track = null; s.filter = ''; if (platform !== 'Desktop') s.route = 'files'; }
+    }
+    if (action === 'reset-query') s.query = 'Кино Группа крови';
+    if (action === 'download') {
+      s.progress = 0; s.paused = false; s.route = 'download'; s.title = songs[s.track].title; s.artist = releaseOf(s).artist;
+    }
+    if (action === 'pause') { s.paused = !s.paused; if (s.paused) stopTimer(platform); }
+    if (action === 'cancel') { stopTimer(platform); s.progress = 0; s.paused = false; s.route = platform === 'Desktop' ? 'search' : 'files'; }
+    if (action === 'details') { s.route = 'details'; }
+    render(platform); focusHeading(platform); save(platform); startTimer(platform);
+  });
+  function submitForm(form) {
+    if (!form) return;
+    const platform = form.closest('[data-platform]').dataset.platform, s = states[platform];
+    if (form.dataset.form === 'search') {
+      s.query = form.querySelector('[data-input="query"]').value.trim().slice(0,120);
+      s.release = null; s.track = null;
+    }
+    if (form.dataset.form === 'account') { s.connected = true; s.route = 'search'; }
+    if (form.dataset.form === 'details') {
+      const title = form.querySelector('[data-input="title"]').value.trim();
+      const artist = form.querySelector('[data-input="artist"]').value.trim();
+      if (!title || !artist) return;
+      s.title = title; s.artist = artist; s.added = true; s.route = 'added';
+    }
+    render(platform); focusHeading(platform); save(platform);
+  }
+  root.addEventListener('submit',event => {
+    event.preventDefault();
+    submitForm(event.target.closest('[data-form]'));
+  });
+  root.addEventListener('keydown',event => {
+    if (event.key !== 'Enter' || event.isComposing || event.target.tagName !== 'INPUT') return;
+    const form = event.target.closest('[data-form]');
+    if (!form) return;
+    event.preventDefault();
+    submitForm(form);
+  });
+  root.addEventListener('input',event => {
+    if (event.target.dataset.input !== 'filter') return;
+    const platform = event.target.closest('[data-platform]').dataset.platform, s = states[platform];
+    s.filter = event.target.value;
+    const list = songs.map((song,i)=>({song,i})).filter(({song})=>song.title.toLocaleLowerCase().includes(s.filter.toLocaleLowerCase()));
+    event.target.closest('.sz-detail').querySelector('.sz-track-list').innerHTML = trackRows(platform,s,list);
+  });
+  root.addEventListener('change',event => {
+    if (event.target.dataset.input !== 'track') return;
+    const platform = event.target.closest('[data-platform]').dataset.platform, s = states[platform];
+    s.track = Number(event.target.value);
+    const detail = event.target.closest('.sz-detail');
+    detail.querySelectorAll('.sz-track').forEach(row=>row.classList.toggle('sz-picked',row.querySelector('input').checked));
+    detail.querySelector('.sz-selection').outerHTML = selectionHTML(s);
+    save(platform);
+  });
+  ['Desktop','iOS','Android'].forEach(platform => { states[platform] = restore(platform); render(platform); });
+  window.addEventListener('openai:set_globals',event => {
+    if (!event.detail || !event.detail.globals || !event.detail.globals.widgetState) return;
+    if (event.detail.globals.widgetState.privateContent && event.detail.globals.widgetState.privateContent.writerID === writerID) return;
+    saved = event.detail.globals.widgetState;
+    ['Desktop','iOS','Android'].forEach(platform=>{ stopTimer(platform); states[platform] = restore(platform); render(platform); });
+  });
+  if (globalThis.Tweak) {
+    root.querySelectorAll('[data-platform]').forEach(shell=>{
+      const design = { compact: false };
+      const tweak = new Tweak({ container:shell, onChange:()=>{ shell.style.setProperty('--sz-row-padding',design.compact?'11px':'15px'); } });
+      tweak.addToggle(design,'compact',{label:'Compact release rows'});
+    });
+  }
+})();
+</script>

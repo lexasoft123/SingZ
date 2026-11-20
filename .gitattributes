@@ -3,3 +3,6 @@
 
 # Compiler/bootstrap shell launchers must also execute in CRLF-configured checkouts.
 *.sh text eol=lf
+
+# This security asset is checksum-pinned; preserve its exact bytes on every host.
+third_party/torrent/cacert.pem -text

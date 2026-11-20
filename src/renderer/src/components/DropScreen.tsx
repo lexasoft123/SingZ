@@ -57,6 +57,7 @@ interface Props {
   /** Song still open behind this page (Catalog view) — softens the hero copy. */
   openName?: string
   onBrowse: () => void
+  onTorrent: () => void
   onOpenProject: (songPath: string) => void
   onManageStorage: () => void
   /** Opens the app's one Log dialog — the sync writes into it like everything
@@ -73,6 +74,7 @@ export default function DropScreen({
   songName,
   openName,
   onBrowse,
+  onTorrent,
   onOpenProject,
   onManageStorage,
   onShowLog,
@@ -287,6 +289,7 @@ export default function DropScreen({
             <button type="button" className="pill ghost browse" onClick={onBrowse}>
               {t('library.common.browseFiles')}
             </button>
+            <button type="button" className="pill ghost browse" onClick={onTorrent}>Search RuTracker</button>
             <span className="drop-hint">{t('library.dropScreen.escHint')}</span>
           </>
         ) : (
@@ -296,6 +299,7 @@ export default function DropScreen({
             <button type="button" className="pill ghost browse" onClick={onBrowse}>
               {t('library.common.browseFiles')}
             </button>
+            <button type="button" className="pill ghost browse" onClick={onTorrent}>Search RuTracker</button>
             <span className="drop-hint">{t('library.dropScreen.dragHint')}</span>
           </>
         )}

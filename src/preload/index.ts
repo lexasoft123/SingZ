@@ -100,6 +100,7 @@ const api: SingzApi & { voiceTakes: VoiceTakeApi } = {
   boxAudioPersistent: boxAudioPersistentLifetime(process.env),
   box,
   voiceTakes,
+  torrentRequest: request => ipcRenderer.invoke('torrent:request', request),
   pathForFile: (file) => webUtils.getPathForFile(file),
 
   getSplitterMode: () => ipcRenderer.invoke('splitter:mode'),

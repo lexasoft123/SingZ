@@ -16,6 +16,8 @@ import {
 } from '../playback/metronome-durability'
 import { releaseProject, type LoadedProject } from '../projects'
 import AddSongSheet, { type AddSongRequest } from './AddSongSheet'
+import { TorrentScreen, torrentsEnabled } from '../features/torrent-feature'
+import type { PickedFile } from '../writer'
 import CatalogScreen from './CatalogScreen'
 import LogPanel from './LogPanel'
 import PlayerScreen from './PlayerScreen'
@@ -32,6 +34,7 @@ type RootStackParamList = {
   Catalog: undefined
   Player: undefined
   AddSong: undefined
+  Torrent: undefined
   Log: undefined
   Settings: undefined
   Diagnostics: undefined
@@ -125,7 +128,11 @@ export function closePlayerProject(engine: MultitrackEngine, project: LoadedProj
   void project.nativePlayback
     .unload('player route closed')
     .catch(error =>
-      log('native-playback', `player route cleanup could not prove native unload · ${String(error)}`, 'error')
+      log(
+        'native-playback',
+        `player route cleanup could not prove native unload · ${String(error)}`,
+        'error'
+      )
     )
     .finally(releaseLegacyOwnership)
 }
@@ -224,14 +231,29 @@ export default function RootNavigator({
   const [newsPrevious, setNewsPrevious] = useState<string | undefined>(undefined)
   const [newsReady, setNewsReady] = useState<boolean | null>(null)
   useEffect(() => {
-    void getStoredText(NEWS_SEEN_KEY).then(previous => { setNewsPrevious(previous ?? undefined); setNewsReady(!!releaseHighlights(
-      RELEASE_VERSION, previous ?? undefined, getLocale(), Platform.OS === 'ios' ? 'ios' : 'android'
-    )) }).catch(error => { log('whats-new', String(error), 'error'); setNewsReady(false) })
+    void getStoredText(NEWS_SEEN_KEY)
+      .then(previous => {
+        setNewsPrevious(previous ?? undefined)
+        setNewsReady(
+          !!releaseHighlights(
+            RELEASE_VERSION,
+            previous ?? undefined,
+            getLocale(),
+            Platform.OS === 'ios' ? 'ios' : 'android'
+          )
+        )
+      })
+      .catch(error => {
+        log('whats-new', String(error), 'error')
+        setNewsReady(false)
+      })
   }, [])
   const guide = useQuickStart()
   const pendingGuide = useRef(false)
   const [project, setProject] = useState<LoadedProject | null>(null)
   const [addSong, setAddSong] = useState<AddSongRequest | null>(null)
+  const torrentDone = useRef<((file: PickedFile) => void) | null>(null)
+  const preparingTorrentImport = useRef(false)
   const mounted = useRef(true)
   const backgroundFailureDelivery = useRef<MetronomeBackgroundFailureDelivery | null>(null)
   if (backgroundFailureDelivery.current === null)
@@ -280,7 +302,7 @@ export default function RootNavigator({
   return (
     <View style={styles.root}>
       <Stack.Navigator
-        initialRouteName={newsReady ? "WhatsNew" : "Catalog"}
+        initialRouteName={newsReady ? 'WhatsNew' : 'Catalog'}
         screenOptions={{
           headerShown: false,
           contentStyle: styles.root
@@ -302,10 +324,14 @@ export default function RootNavigator({
           // which follows the loaded project, not the stack).
           state: event => {
             if (!TEST) return
-            const routes = (event.data as { state: { routes: { name: string }[] } }).state.routes.map(r => r.name)
-            const history = (TEST.stackHistory as { t: number; routes: string[] }[] | undefined) ?? []
+            const routes = (
+              event.data as { state: { routes: { name: string }[] } }
+            ).state.routes.map(r => r.name)
+            const history =
+              (TEST.stackHistory as { t: number; routes: string[] }[] | undefined) ?? []
             const last = history[history.length - 1]
-            if (!last || last.routes.join('>') !== routes.join('>')) history.push({ t: Date.now(), routes })
+            if (!last || last.routes.join('>') !== routes.join('>'))
+              history.push({ t: Date.now(), routes })
             TEST.stackHistory = history.slice(-40)
           }
         }}
@@ -321,9 +347,13 @@ export default function RootNavigator({
               onOpenLog={() => navigation.navigate('Log')}
               onOpenAddSong={request => {
                 setAddSong(request)
-                navigation.navigate('AddSong')
+                if (!preparingTorrentImport.current) navigation.navigate('AddSong')
               }}
               onCloseAddSong={() => navigation.goBack()}
+              onOpenTorrent={onDownloaded => {
+                torrentDone.current = onDownloaded
+                navigation.navigate('Torrent')
+              }}
               onLoaded={loaded => {
                 setProject(loaded)
                 onProjectLoaded(loaded)
@@ -332,10 +362,31 @@ export default function RootNavigator({
             />
           )}
         </Stack.Screen>
-        <Stack.Screen
-          name="Player"
-          options={playerScreenOptions()}
-        >
+        {torrentsEnabled && <Stack.Screen name="Torrent" options={{ contentStyle: styles.root }}>
+          {({ navigation }) => (
+            <TorrentScreen
+              onClose={() => {
+                torrentDone.current = null
+                navigation.goBack()
+              }}
+              onImport={file => {
+                const prepare = torrentDone.current
+                if (!prepare || !mounted.current) return
+                torrentDone.current = null
+                // Catalog prepares its normal Add song request and close callback;
+                // this active route owns the single native navigation action.
+                preparingTorrentImport.current = true
+                try {
+                  prepare(file)
+                } finally {
+                  preparingTorrentImport.current = false
+                }
+                navigation.replace('AddSong')
+              }}
+            />
+          )}
+        </Stack.Screen>}
+        <Stack.Screen name="Player" options={playerScreenOptions()}>
           {({ navigation }) =>
             project == null ? (
               <View style={styles.root} />
@@ -377,7 +428,11 @@ export default function RootNavigator({
             addSong == null ? (
               <View style={styles.sheet} />
             ) : (
-              <AddSongRoute request={addSong} onFinished={finishAddSong} onBack={() => navigation.goBack()} />
+              <AddSongRoute
+                request={addSong}
+                onFinished={finishAddSong}
+                onBack={() => navigation.goBack()}
+              />
             )
           }
         </Stack.Screen>
@@ -397,28 +452,57 @@ export default function RootNavigator({
             contentStyle: styles.root
           }}
         >
-          {({ navigation }) => <SettingsScreen onQuickStart={() => { pendingGuide.current = true; navigation.goBack() }} onClose={() => navigation.goBack()} onWhatsNew={() => navigation.navigate("WhatsNew")} onDiagnostics={() => {
-            void (async () => {
-              if (!await nativePlayback.stopForOwnership('audio diagnostics requested audio ownership')) return
-              engine.pause()
-              engine.cancelTrainingCues()
-              navigation.navigate('Diagnostics')
-            })().catch(error => log('audio-debug', String(error), 'error'))
-          }} />}
+          {({ navigation }) => (
+            <SettingsScreen
+              onQuickStart={() => {
+                pendingGuide.current = true
+                navigation.goBack()
+              }}
+              onClose={() => navigation.goBack()}
+              onWhatsNew={() => navigation.navigate('WhatsNew')}
+              onDiagnostics={() => {
+                void (async () => {
+                  if (
+                    !(await nativePlayback.stopForOwnership(
+                      'audio diagnostics requested audio ownership'
+                    ))
+                  )
+                    return
+                  engine.pause()
+                  engine.cancelTrainingCues()
+                  navigation.navigate('Diagnostics')
+                })().catch(error => log('audio-debug', String(error), 'error'))
+              }}
+            />
+          )}
         </Stack.Screen>
-        <Stack.Screen name="Diagnostics" options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}>
-          {({ navigation }) => <AudioDiagnosticsScreen engine={engine} active={active} onBack={() => navigation.goBack()} />}
+        <Stack.Screen
+          name="Diagnostics"
+          options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}
+        >
+          {({ navigation }) => (
+            <AudioDiagnosticsScreen
+              engine={engine}
+              active={active}
+              onBack={() => navigation.goBack()}
+            />
+          )}
         </Stack.Screen>
-        <Stack.Screen name="WhatsNew" options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}>
-          {({ navigation }) => <WhatsNewScreen
-            previous={navigation.getState().index > 0 ? undefined : newsPrevious}
-            onClose={() => {
-              // canGoBack also checks the parent tabs. At startup that can
-              // switch to Training while leaving this root route open.
-              if (navigation.getState().index > 0) navigation.goBack()
-              else navigation.replace('Catalog')
-            }}
-          />}
+        <Stack.Screen
+          name="WhatsNew"
+          options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}
+        >
+          {({ navigation }) => (
+            <WhatsNewScreen
+              previous={navigation.getState().index > 0 ? undefined : newsPrevious}
+              onClose={() => {
+                // canGoBack also checks the parent tabs. At startup that can
+                // switch to Training while leaving this root route open.
+                if (navigation.getState().index > 0) navigation.goBack()
+                else navigation.replace('Catalog')
+              }}
+            />
+          )}
         </Stack.Screen>
       </Stack.Navigator>
     </View>

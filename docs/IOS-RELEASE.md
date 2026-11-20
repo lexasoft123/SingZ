@@ -623,3 +623,29 @@ After that review closes, dispatch `submit` on the release tag with the uploaded
 build number to submit the same binary without rebuilding. Manual `beta` dispatches
 are always TestFlight-only. Explicit `submit` and `release` still refuse an open
 App Store submission.
+
+## Internal download feature
+
+Torrent downloads are an internal iOS build feature. The Xcode build flag
+`SINGZ_ENABLE_TORRENTS` is `1` in **Debug** and **AdHoc**, and `0` in the
+ordinary **Release** configuration used by App Store and TestFlight lanes.
+The `adhoc` lane selects AdHoc automatically; store lanes always select Release.
+Use the ad-hoc lane for internal IPAs, rather than re-exporting a store archive.
+
+CocoaPods links `SingzTorrent` and its static libtorrent closure only for Debug
+and AdHoc. Metro resolves the optional feature to a dependency-free disabled
+module for store builds, omitting its screens, provider scripts, and request
+implementation. A direct import bypassing that boundary fails bundling. Normal
+`npm start` development bundles keep the feature; standalone optimized internal
+bundles need `CONFIGURATION=AdHoc SINGZ_ENABLE_TORRENTS=1`.
+
+Archive cache keys include the configuration. Both rebuilt and reused archives,
+and the exported IPA, are checked by `mobile/scripts/verify-torrent-build.cjs`:
+store output must have flag `0` and no native module, provider/UI strings, or
+feature resources; internal output must contain its native module and UI.
+The verifier checks ASCII and UTF-16 strings in Hermes bundles. Run it manually:
+
+```bash
+node mobile/scripts/verify-torrent-build.cjs path/to/SingZ.ipa 0 # store
+node mobile/scripts/verify-torrent-build.cjs path/to/SingZ.ipa 1 # ad-hoc
+```

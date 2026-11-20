@@ -144,6 +144,10 @@ if linkage != nil
   use_frameworks! :linkage => linkage.to_sym
 end
 
+# Store Release never links the internal download engine. AdHoc is optimized
+# like Release, but has its own pod closure and archive-cache identity.
+project 'SingZPlayer', 'Debug' => :debug, 'Release' => :release, 'AdHoc' => :release
+
 target 'SingZPlayer' do
   config = use_native_modules!
 
@@ -154,6 +158,7 @@ target 'SingZPlayer' do
   # Project-folder access (document picker, iCloud downloads) — local pod so
   # no pbxproj surgery is needed.
   pod 'FolderAccess', :path => './FolderAccess'
+  pod 'SingzTorrent', :path => './SingzTorrent', :configurations => ['Debug', 'AdHoc']
 
   # Shared C++ zcore package: on-device stem split + beat
   # inference over ONNX Runtime (docs/PHONE-STANDALONE.md).
@@ -190,6 +195,14 @@ target 'SingZPlayer' do
     # first left the app target compiling against the absolute path again.
     singz_relativize_hermes_cli_path(installer)
     singz_optimize_core_pods_in_debug(installer)
+    # Xcode aggregate dependencies are not configuration-specific. Even though
+    # Release does not link this pod, avoid compiling its bridge (and requiring
+    # the internal SDK headers) when the aggregate builds its dependencies.
+    installer.pods_project.targets.select { |t| t.name == 'SingzTorrent' }.each do |target|
+      target.build_configurations.select { |c| c.name == 'Release' }.each do |config|
+        config.build_settings['EXCLUDED_SOURCE_FILE_NAMES'] = '$(inherited) TorrentModule.mm'
+      end
+    end
   end
 end
 

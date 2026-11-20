@@ -412,3 +412,13 @@ dependencies {
         implementation jscFlavor
     }
 }
+
+
+// Ship the upstream notices for the statically linked torrent core.
+def torrentNoticeAssets = layout.buildDirectory.dir("generated/torrent-notice-assets")
+tasks.register("prepareTorrentNoticeAssets", Copy) {
+    from(file("../../../vendor/torrent/android-${singzShippingCodecAbis[0]}/notices"))
+    into(torrentNoticeAssets.map { it.dir("third_party/torrent") })
+}
+android.sourceSets.main.assets.srcDir(torrentNoticeAssets)
+preBuild.dependsOn("prepareTorrentNoticeAssets")

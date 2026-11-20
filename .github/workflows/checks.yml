@@ -44,7 +44,8 @@ concurrency:
 jobs:
   capture-macos:
     runs-on: macos-latest
-    timeout-minutes: 15
+    # Universal packaging builds the pinned torrent SDK for both architectures.
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -99,7 +100,8 @@ jobs:
 
   capture-windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    # A cold package builds pinned OpenSSL and libtorrent before the load smoke.
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:
@@ -128,6 +130,12 @@ jobs:
           printf 'capture-package-check\n' > vendor/win32-x64/singz-analyze.source-hash
           npm run dist -- --win --x64 --dir
           node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs dist/win-unpacked/resources/engines/singz-capture.node --current-source
+
+      - name: Load-smoke the shipped torrent addon in Electron
+        # A Windows addon that statically imports node.exe loads in plain Node
+        # but kills electron.exe on require(); only a real Electron run shows it.
+        shell: bash
+        run: node_modules/.bin/electron tests/e2e/torrent-addon-smoke.cjs dist/win-unpacked/resources/engines/singz-torrent.node
 
   zdsp-sanitizers:
     runs-on: ubuntu-24.04
