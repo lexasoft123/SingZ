@@ -92,6 +92,18 @@ bool audio(std::string const &name) {
 struct CorruptRecord : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
+// A missing path is an answer, not a failure; some standard libraries report it
+// through the error code as well. Everything else (permissions, locks, device
+// errors) is a transient condition that must not be recorded as state.
+bool ioFailure(std::error_code const &ec) {
+  return ec && ec != std::errc::no_such_file_or_directory &&
+         ec != std::errc::not_a_directory;
+}
+// A transient I/O failure while rebuilding the collection: never swallowed, so
+// the next request retries instead of committing an incomplete collection.
+struct RecoveryIO : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 std::vector<char> read(fs::path const &p, std::size_t max = 16 * 1024 * 1024) {
   std::ifstream file(p, std::ios::binary);
   if (!file)
@@ -522,7 +534,27 @@ private:
             });
         if (known || ready_.size() + pending_.size() + (job_ ? 1 : 0) >= 200)
           continue;
-        auto info = metadata(read(metaPath(release)));
+        auto metaFile = metaPath(release);
+        std::error_code metaEc;
+        bool present = fs::is_regular_file(metaFile, metaEc);
+        if (ioFailure(metaEc))
+          throw RecoveryIO("Cannot check saved torrent metadata");
+        if (!present)
+          continue;
+        if (!std::ifstream(metaFile, std::ios::binary))
+          throw RecoveryIO("Cannot read saved torrent metadata");
+        std::vector<char> metaBytes;
+        try {
+          metaBytes = read(metaFile);
+        } catch (std::exception const &) {
+          continue; // oversized or truncated metadata is unusable, not transient
+        }
+        std::shared_ptr<lt::torrent_info> info;
+        try {
+          info = metadata(metaBytes);
+        } catch (std::exception const &) {
+          continue;
+        }
         if (selected >= info->num_files())
           continue;
         auto index = lt::file_index_t(int(selected));
@@ -532,13 +564,22 @@ private:
         j.name = std::string(info->files().file_name(index));
         j.size = info->files().file_size(index);
         auto path = exportPath(j);
-        if (!audio(j.name) || j.size <= 0 || fs::is_symlink(path) ||
-            !fs::is_regular_file(path) ||
-            fs::file_size(path) != std::uintmax_t(j.size))
+        std::error_code e1, e2, e3;
+        bool link = fs::is_symlink(path, e1);
+        bool regular = fs::is_regular_file(path, e2);
+        std::uintmax_t exportSize = regular ? fs::file_size(path, e3) : 0;
+        if (ioFailure(e1) || ioFailure(e2) || ioFailure(e3))
+          throw RecoveryIO("Cannot check a saved download");
+        if (!audio(j.name) || j.size <= 0 || link || !regular ||
+            exportSize != std::uintmax_t(j.size))
           continue;
         j.state = "complete";
         j.done = j.size;
         ready_.push_back(j);
+      } catch (RecoveryIO const &) {
+        throw;
+      } catch (fs::filesystem_error const &error) {
+        throw RecoveryIO(error.what());
       } catch (...) { /* A malformed orphan must not hide other downloads. */
       }
     }
@@ -547,17 +588,31 @@ private:
   // move the bad file aside and rebuild the ready list from the verified
   // downloads still on disk. Pending/active items are lost; they are re-queued
   // by the user, while finished songs are never hidden.
+  // Never overwrite an earlier backup and never delete the source unless it was
+  // moved: a failed rename surfaces as an error and the file stays in place.
   void quarantine(fs::path const &file) {
     pending_.clear();
     ready_.clear();
     job_.reset();
-    std::error_code ignored;
-    fs::path aside = file;
-    aside += ".corrupt";
-    fs::remove(aside, ignored);
-    fs::rename(file, aside, ignored);
-    if (fs::exists(file))
-      fs::remove(file);
+    std::error_code ec;
+    bool exists = fs::exists(file, ec);
+    if (ioFailure(ec))
+      throw std::runtime_error("Cannot check the saved download queue");
+    if (!exists)
+      return;
+    fs::path aside;
+    for (int n = 0; n < 1000 && aside.empty(); ++n) {
+      fs::path candidate = file;
+      candidate += n ? ".corrupt-" + std::to_string(n) : std::string(".corrupt");
+      bool taken = fs::exists(candidate, ec);
+      if (ioFailure(ec))
+        throw std::runtime_error("Cannot check the quarantined queue");
+      if (!taken)
+        aside = candidate;
+    }
+    if (aside.empty())
+      throw std::runtime_error("Too many quarantined queue files");
+    fs::rename(file, aside);
   }
   void restore() {
     bool migrate;
@@ -607,8 +662,9 @@ private:
         auto exported = exportPath(j);
         bool regular = fs::is_regular_file(exported, ec1);
         std::uintmax_t exportedSize = regular ? fs::file_size(exported, ec2) : 0;
-        if (!regular || ec1 || ec2 ||
-            exportedSize != std::uintmax_t(j.size)) {
+        if (ioFailure(ec1) || ioFailure(ec2))
+          throw std::runtime_error("Cannot check a saved download");
+        if (!regular || exportedSize != std::uintmax_t(j.size)) {
           j.state = "error";
           j.error = "The downloaded file is missing or incomplete";
         }
@@ -632,7 +688,9 @@ private:
       auto exported = exportPath();
       bool regular = fs::is_regular_file(exported, ec1);
       std::uintmax_t exportedSize = regular ? fs::file_size(exported, ec2) : 0;
-      if (job_->state == "complete" && regular && !ec1 && !ec2 &&
+      if (ioFailure(ec1) || ioFailure(ec2))
+        throw std::runtime_error("Cannot check the saved download");
+      if (job_->state == "complete" && regular &&
           exportedSize == std::uintmax_t(job_->size)) {
         job_->done = job_->size;
         ready_.push_back(*job_);

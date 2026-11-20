@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, session } from 'electron'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { mkdir, copyFile, stat, rm, readdir } from 'node:fs/promises'
+import { mkdir, copyFile, stat, rm } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   RUTRACKER_ACCOUNT_SCRIPT,
@@ -210,9 +210,7 @@ async function request(input: TorrentRequest, parent?: BrowserWindow): Promise<T
     ) as TorrentResult
     if (result.ok && input.op === 'consume') {
       const file = result.data as { path: string; name: string; size: number }
-      const imports = join(app.getPath('userData'), 'torrent-imports')
-      await pruneImportCopies(imports)
-      const directory = join(imports, randomUUID())
+      const directory = join(app.getPath('userData'), 'torrent-imports', randomUUID())
       try {
         await mkdir(directory, { recursive: true })
         const path = join(directory, file.name)
@@ -234,19 +232,6 @@ async function request(input: TorrentRequest, parent?: BrowserWindow): Promise<T
     return result
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : 'Torrent operation failed' }
-  }
-}
-// Each hand-off copies a whole song; drop copies older than a day so a long
-// session cannot accumulate them (quit also clears the folder).
-export async function pruneImportCopies(imports: string): Promise<void> {
-  try {
-    for (const name of await readdir(imports)) {
-      const path = join(imports, name)
-      if (Date.now() - (await stat(path)).mtimeMs > 24 * 3600 * 1000)
-        await rm(path, { recursive: true, force: true })
-    }
-  } catch {
-    // Missing folder or a concurrent removal: nothing to prune.
   }
 }
 export function registerTorrent(): void {

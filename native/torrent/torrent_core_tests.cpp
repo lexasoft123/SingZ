@@ -8,6 +8,9 @@
 #include <libtorrent/torrent_status.hpp>
 #include <stdexcept>
 #include <thread>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 namespace fs = std::filesystem;
 namespace lt = libtorrent;
 extern "C" void singz_torrent_test_connect(const char *, int);
@@ -232,12 +235,48 @@ int main() {
     require(call(legacy, "queue").find("first.flac") != std::string::npos,
             "legacy unadded original was not recovered");
     singz_torrent_shutdown(legacy.string().c_str());
+#ifndef _WIN32
+    if (geteuid() != 0) {
+      // A transient I/O failure must neither be mistaken for an empty or
+      // damaged collection nor be persisted as one.
+      fs::permissions(legacy / "imports", fs::perms::none);
+      require(call(legacy, "queue").find("\"ok\":false") != std::string::npos,
+              "unreadable imports were treated as an empty collection");
+      fs::permissions(legacy / "imports", fs::perms::owner_all);
+      singz_torrent_shutdown(legacy.string().c_str());
+      auto retried = call(legacy, "queue");
+      require(retried.find("first.flac") != std::string::npos &&
+                  retried.find("missing or incomplete") == std::string::npos,
+              "a transient stat failure became a permanent error state");
+      singz_torrent_shutdown(legacy.string().c_str());
+    }
+#endif
     // A corrupt queue must not hide the finished song it used to list.
     {
       std::ofstream(legacy / "queue.bencode") << "li2ee";
+      std::ofstream(legacy / "queue.bencode.corrupt") << "EARLIER BACKUP";
     }
+#ifndef _WIN32
+    if (geteuid() != 0) {
+      // Unreadable metadata during recovery must not commit a collection that
+      // silently lacks the song; the next request retries the recovery.
+      fs::permissions(legacy / "metadata/12345.torrent", fs::perms::none);
+      require(call(legacy, "queue").find("\"ok\":false") != std::string::npos,
+              "unreadable metadata silently dropped a finished download");
+      fs::permissions(legacy / "metadata/12345.torrent",
+                      fs::perms::owner_read | fs::perms::owner_write);
+      singz_torrent_shutdown(legacy.string().c_str());
+    }
+#endif
     require(call(legacy, "queue").find("first.flac") != std::string::npos,
             "corrupt queue hid a finished download");
+    {
+      std::ifstream earlier(legacy / "queue.bencode.corrupt");
+      std::string kept((std::istreambuf_iterator<char>(earlier)), {});
+      require(kept == "EARLIER BACKUP", "an earlier quarantine was overwritten");
+      require(fs::exists(legacy / "queue.bencode.corrupt-1"),
+              "the new corrupt queue was not kept under a fresh name");
+    }
     call(legacy, "remove", 0);
     singz_torrent_shutdown(legacy.string().c_str());
     require(call(legacy, "queue").find("first.flac") == std::string::npos,

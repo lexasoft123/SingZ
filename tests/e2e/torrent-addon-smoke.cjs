@@ -26,7 +26,8 @@ const call = async (addon, dir, op, release = '', index = 0, bytes) =>
   JSON.parse(await addon.request(dir, op, release, index, bytes))
 
 async function run() {
-  assert.ok(process.argv[2] && existsSync(addonPath), 'usage: torrent-addon-smoke.cjs <singz-torrent.node>')
+  assert.ok(process.argv[2], 'usage: torrent-addon-smoke.cjs <singz-torrent.node>')
+  assert.ok(existsSync(addonPath), 'addon not found: ' + addonPath)
   const addon = require(addonPath)
   const expected = createHash('sha256')
     .update(readFileSync(resolve(__dirname, '../../native/torrent/torrent_engine.cpp')))
@@ -59,8 +60,15 @@ async function main() {
     console.error(error && error.stack ? error.stack : error)
     code = 1
   }
-  // Remove temp roots before exiting: app.exit() may not return.
-  for (const dir of roots) rmSync(dir, { recursive: true, force: true })
+  // Remove temp roots before exiting (app.exit() may not return), but never let
+  // a transient Windows file lock decide the result.
+  for (const dir of roots) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    } catch (error) {
+      console.warn('could not remove ' + dir + ': ' + (error && error.message))
+    }
+  }
   finish(code)
 }
 main()
