@@ -199,3 +199,29 @@ test('macOS bootstrap finds node via the Darwin PATH fallbacks (nvm fixture) whe
   const result = f.run(['--desktop-only'], env)
   assert.equal(result.status, 0, result.stderr + result.stdout)
 })
+
+// The setup's iOS mirror check must skip every zCore source the sync leaves out
+// on purpose, or a fresh checkout fails setup on a file that is correctly absent.
+function syncSourceExclusions(text) {
+  const filter = text.match(/copyTree\(join\(src, 'src'\)[\s\S]*?\n\s*!callbackDefinitions/)
+  assert.ok(filter, 'sync-singzcore.js src filter must remain present')
+  return [...filter[0].matchAll(/relative !== '([^']+)'/g)].map(match => `src/${match[1]}`)
+}
+
+function setupSourceExclusions(text) {
+  const filter = text.match(/const sourceFile = [\s\S]*?!callbackDefinitions/)
+  assert.ok(filter, 'worktree-setup.sh sourceFile filter must remain present')
+  return new Set([...filter[0].matchAll(/relative !== "([^"]+)"/g)].map(match => match[1]))
+}
+
+test('setup iOS mirror check skips every zCore source the sync deliberately leaves out', () => {
+  const sync = fs.readFileSync(path.join(source, 'mobile/scripts/sync-singzcore.js'), 'utf8').replace(/\r\n/g, '\n')
+  const setup = fs.readFileSync(setupSource, 'utf8').replace(/\r\n/g, '\n')
+  const excluded = syncSourceExclusions(sync)
+  assert.ok(excluded.includes('src/device/audio_buffer_ledger.cpp'))
+  const checked = setupSourceExclusions(setup)
+  for (const relative of excluded) assert.ok(checked.has(relative), `setup must skip ${relative}`)
+  // Negative control: the setup filter as it was before the ledger exclusion.
+  const old = setupSourceExclusions(setup.replace('relative !== "src/device/audio_buffer_ledger.cpp" &&', ''))
+  assert.ok(excluded.some(relative => !old.has(relative)))
+})

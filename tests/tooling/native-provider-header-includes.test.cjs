@@ -23,7 +23,11 @@ function compileHeader(header, includeRoots, directory, compiler) {
   writeFileSync(source, `#include <${header}>\nint main() { return 0; }\n`)
   const isMsvc = /^(?:clang-cl|cl)(?:\.exe)?$/i.test(basename(compiler))
   const args = isMsvc
-    ? ['/nologo', '/std:c++20', '/Zs', source, ...includeRoots.map((root) => `/I${root}`)]
+    // A runner image can pair an older clang-cl with a newer MSVC STL, whose
+    // version gate (STL1000) would fail every header; this is a syntax check
+    // of our include paths, not of the toolchain pairing.
+    ? ['/nologo', '/std:c++20', '/Zs', '/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH', source,
+      ...includeRoots.map((root) => `/I${root}`)]
     : ['-std=c++20', '-fsyntax-only', source,
       ...includeRoots.flatMap((root) => ['-I', root])]
   return spawnSync(compiler, args, { encoding: 'utf8' })

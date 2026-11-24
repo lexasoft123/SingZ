@@ -5,8 +5,9 @@ import { describe, expect, it } from 'vitest'
 // (7 split lanes + Voice at 1240x820: ~596px against ~510px). It must never paint outside
 // its box: it scrolls, the ruler row stays pinned, and many lanes use a lower row minimum.
 const root = new URL('../../src/renderer/src/', import.meta.url)
-const css = readFileSync(new URL('styles.css', root), 'utf8')
-const tsx = readFileSync(new URL('components/TrackStack.tsx', root), 'utf8')
+// A Windows checkout has CRLF line endings; the patterns below are written for LF.
+const css = readFileSync(new URL('styles.css', root), 'utf8').replace(/\r\n/g, '\n')
+const tsx = readFileSync(new URL('components/TrackStack.tsx', root), 'utf8').replace(/\r\n/g, '\n')
 const rule = (sel: string): string =>
   new RegExp(`(?:^|\\n)${sel.replace(/[.[\]=]/g, '\\$&')}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? ''
 

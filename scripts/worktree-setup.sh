@@ -307,6 +307,9 @@ if [ "$MODE" != "--desktop-only" ]; then
     }
     const sourceFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
       relative !== "src/media/audio_export.cpp" &&
+      // Mirrors mobile/scripts/sync-singzcore.js: the macOS-only buffer ledger
+      // is deliberately absent from the iOS pod.
+      relative !== "src/device/audio_buffer_ledger.cpp" &&
       !callbackDefinitions.has(relative)
     const iosFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
       !callbackDefinitions.has(relative)

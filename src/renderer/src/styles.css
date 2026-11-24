@@ -2188,11 +2188,6 @@ body.win:not(.glass) .drop-overlay {
   .persistent-monitor.active .persistent-monitor-dot {
     animation: none;
   }
-
-  .mic-meter-fill,
-.mic-meter-peak {
-    transition: none;
-  }
 }
 
 /* ---------- project picker ---------- */

@@ -25,6 +25,12 @@ const posixOnly = {
     : !resolvedBash ? 'Bash 4+ is required for the Linux packaging mapfile harness' : false
 }
 
+// The Box launch smoke runs only on Linux and its fixture builds POSIX /tmp roots.
+const posixLaunch = {
+  skip: process.platform === 'win32' ? 'the Box launch smoke fixture uses POSIX /tmp paths' : false
+}
+const readLaunchSmoke = () => fs.readFileSync(launchSmokePath, 'utf8').replace(/\r\n/g, '\n')
+
 function bash() {
   return resolvedBash
 }
@@ -413,7 +419,7 @@ test('workflow uploads both package sets without inventing Box update metadata',
   assert.match(workflow, /SINGZ_E2E_PACKAGED: \/opt\/SingZ\/singz/)
 })
 
-function loadLaunchFixture(t, text = fs.readFileSync(launchSmokePath, 'utf8')) {
+function loadLaunchFixture(t, text = readLaunchSmoke()) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join('/tmp/', 'sz-box-launch-')))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   fs.mkdirSync(path.join(root, 'tmp'))
@@ -527,12 +533,12 @@ async function assertVisibilityGuard(text, visible) {
   }
 }
 
-test('Box launch executes with sanitized hidden mode, private roots and no arguments', async t => {
+test('Box launch executes with sanitized hidden mode, private roots and no arguments', posixLaunch, async t => {
   await assertLaunchEnvironment(loadLaunchFixture(t))
 })
 
-test('Box launch negative control rejects in-memory restored forced HIDDEN', async t => {
-  const source = fs.readFileSync(launchSmokePath, 'utf8')
+test('Box launch negative control rejects in-memory restored forced HIDDEN', posixLaunch, async t => {
+  const source = readLaunchSmoke()
   const withoutHiddenOverride = source.replace(
     "  'E2E_PACKAGED', 'SINGZ_E2E_PACKAGED', 'SINGZ_E2E_HIDDEN'\n]",
     "  'E2E_PACKAGED', 'SINGZ_E2E_PACKAGED'\n]"
