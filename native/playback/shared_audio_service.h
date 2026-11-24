@@ -135,7 +135,17 @@ class SharedAudioService final {
   uint32_t requestedBufferFrames(const std::string& uid) const;
   AudioInputConfig inputBufferConfig(AudioInputConfig config) const;
   SharedAudioService();
-  explicit SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider = {});
+  // An injected observer uses the same coalesced control-thread notifications
+  // as the platform listeners. Retain the signals for any queued callbacks.
+  struct InventoryObserver {
+    virtual ~InventoryObserver() = default;
+    virtual void watch(const AudioHostInventory&,
+        std::shared_ptr<std::atomic<bool>> inventoryChanged,
+        std::shared_ptr<std::atomic<bool>> bufferChanged) = 0;
+    virtual std::optional<uint32_t> bufferFrames(const std::string& uid) const = 0;
+  };
+  explicit SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider = {},
+                              std::unique_ptr<InventoryObserver> observer = {});
   ~SharedAudioService();
   SharedAudioService(const SharedAudioService&) = delete;
   SharedAudioService& operator=(const SharedAudioService&) = delete;
