@@ -59,7 +59,9 @@ function loopzBuildInputs(root) {
     return result.stdout
   }
   const top = git(['rev-parse', '--show-toplevel']).trim()
-  if (realpathSync(top) !== realpathSync(child)) {
+  // The native realpath expands Windows 8.3 short names (RUNNER~1) and case, so
+  // git's long top-level path compares equal to a short-path child.
+  if (realpathSync.native(top) !== realpathSync.native(child)) {
     throw new Error('LoopZ sources are not an initialized submodule checkout')
   }
   if (git(['rev-parse', '--verify', 'HEAD^{commit}']).trim() !== revision) {

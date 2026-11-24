@@ -366,7 +366,7 @@ describe('playback output latest-intent arbitration', () => {
   })
 
   it('wires the app shell to refuse song starts while the route is unconfirmed', () => {
-    const appSource = readFileSync('src/renderer/src/App.tsx', 'utf8')
+    const appSource = readFileSync('src/renderer/src/App.tsx', 'utf8').replace(/\r\n/g, '\n')
     expect(appSource).toMatch(
       /if \(result\.kind === 'stale'\) \{[\s\S]*if \(retry\) throw[\s\S]*return[\s\S]*\}\s+outputRouteSafety\.confirmCurrentRoute\(\)/
     )
