@@ -120,6 +120,8 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
   bool enumerated{false};
   bool watchDevices{true};
   std::shared_ptr<std::atomic<bool>> dirty = std::make_shared<std::atomic<bool>>(false);
+  std::shared_ptr<std::atomic<bool>> bufferDirty = std::make_shared<std::atomic<bool>>(false);
+  std::unique_ptr<InventoryObserver> observer;
   std::atomic<bool> quitting{false};
   std::thread watcher;
   std::atomic<uint64_t> frames{0};
@@ -139,7 +141,7 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
     const AudioObjectPropertyAddress address{selector, scope,
                                              kAudioObjectPropertyElementMain};
     if (!AudioObjectHasProperty(object, &address)) return;
-    auto pending = dirty;
+    auto pending = selector == kAudioDevicePropertyBufferFrameSize ? bufferDirty : dirty;
     auto* raw = pending.get();
     dispatch_queue_t queue = dispatch_queue_create("singz.inventory", DISPATCH_QUEUE_SERIAL);
     auto block = static_cast<AudioObjectPropertyListenerBlock>(Block_copy(
@@ -230,6 +232,53 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
   void installListeners() {}
 #endif
 
+  std::optional<uint32_t> readBufferFrames(const std::string& uid) const {
+    if (observer) return observer->bufferFrames(uid);
+#if defined(__APPLE__) && TARGET_OS_OSX
+    CFStringRef value = CFStringCreateWithCString(nullptr, uid.c_str(), kCFStringEncodingUTF8);
+    if (!value) return std::nullopt;
+    AudioDeviceID device = kAudioObjectUnknown;
+    AudioObjectPropertyAddress address{kAudioHardwarePropertyTranslateUIDToDevice,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    UInt32 size = sizeof(device);
+    const auto result = AudioObjectGetPropertyData(kAudioObjectSystemObject,
+        &address, sizeof(value), &value, &size, &device);
+    CFRelease(value);
+    if (result != noErr || device == kAudioObjectUnknown) return std::nullopt;
+    address.mSelector = kAudioDevicePropertyBufferFrameSize;
+    // Endpoints without this property publish an unknown (zero) inventory
+    // period and have no buffer listener. They must not turn another
+    // endpoint's self-notification into a full rescan.
+    if (!AudioObjectHasProperty(device, &address)) return 0;
+    UInt32 frames = 0; size = sizeof(frames);
+    if (AudioObjectGetPropertyData(device, &address, 0, nullptr, &size, &frames) == noErr && frames)
+      return frames;
+#else
+    (void)uid;
+#endif
+    return std::nullopt;
+  }
+  bool buffersChangedLocked() const {
+    for (const auto& device : cached.devices) {
+      const auto frames = readBufferFrames(device.uid);
+      // Unreadable/disappeared devices still need the ordinary inventory path.
+      if (!frames || *frames != device.bufferFrames.preferredFrames) return true;
+    }
+    return false;
+  }
+  void rememberOpenedBufferLocked(const AudioHostConfig& config, const AudioHostResult& result) {
+    if (provider != "coreaudio" || !result.ok || !result.format.nominalBufferFrames) return;
+    for (auto& device : cached.devices) {
+      if (device.uid == config.outputDeviceUid &&
+          device.bufferFrames.preferredFrames != result.format.nominalBufferFrames) {
+        // The backend already read back our ledger request. Publish that fact
+        // without enumerating every endpoint/channel label. Its delayed HAL
+        // notification is a no-op only if a fresh property read still agrees.
+        device.bufferFrames.preferredFrames = result.format.nominalBufferFrames;
+        revisions.fetch_add(1, std::memory_order_release);
+      }
+    }
+  }
   void refreshLocked() {
     auto inventory = backend->enumerate();
     // Empty is a valid inventory when every endpoint has been disabled. The
@@ -238,13 +287,14 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
     enumerations.fetch_add(1, std::memory_order_relaxed);
     revisions.fetch_add(1, std::memory_order_release);
     enumerated = true;
-    if (watchDevices) installListeners();
+    if (observer) observer->watch(cached, dirty, bufferDirty);
+    else if (watchDevices) installListeners();
   }
   void startWatcherLocked() {
-    if (!watchDevices || watcher.joinable()) return;
+    if ((!watchDevices && !observer) || watcher.joinable()) return;
     watcher = std::thread([this] {
 #if defined(__linux__) && !defined(__ANDROID__)
-      udev* deviceContext = udev_new();
+      udev* deviceContext = !observer ? udev_new() : nullptr;
       udev_monitor* monitor = deviceContext ?
           udev_monitor_new_from_netlink(deviceContext, "udev") : nullptr;
       int monitorFd = -1;
@@ -262,7 +312,7 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
       const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       IMMDeviceEnumerator* enumerator = nullptr;
       auto* notifications = new Notifications(dirty);
-      if (SUCCEEDED(apartment) && SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator),
+      if (!observer && SUCCEEDED(apartment) && SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator),
           nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator))))
         enumerator->RegisterEndpointNotificationCallback(notifications);
 #endif
@@ -280,9 +330,12 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
           }
         }
 #endif
-        if (!dirty->exchange(false, std::memory_order_acq_rel)) continue;
+        const bool inventoryChanged = dirty->exchange(false, std::memory_order_acq_rel);
+        const bool bufferChanged = bufferDirty->exchange(false, std::memory_order_acq_rel);
+        if (!inventoryChanged && !bufferChanged) continue;
         std::lock_guard<std::mutex> lock(mutex);
         try {
+          if (!inventoryChanged && !buffersChangedLocked()) continue;
           refreshLocked();
           const auto state = backend->status().state;
           if (!parked && (state == AudioHostState::Running || state == AudioHostState::DeviceLost))
@@ -417,6 +470,7 @@ struct SINGZ_SERVICE_LOCAL SharedAudioService::Impl {
     clientClock = {}; // Ordinary route changes retain their real discontinuity.
     auto result = backend->open(config, render, this);
     if (result.ok) {
+      rememberOpenedBufferLocked(config, result);
       route = std::move(config);
       rate.store(result.format.sampleRate, std::memory_order_release);
       // Capture/history belongs to the monitor, not the song generation. Admit
@@ -617,8 +671,11 @@ SharedAudioService::SharedAudioService()
   impl_->provider = "alsa";
 #endif
 }
-SharedAudioService::SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider)
-    : impl_(std::make_unique<Impl>(std::move(backend), false)) { impl_->provider = std::move(provider); }
+SharedAudioService::SharedAudioService(std::unique_ptr<AudioHostBackend> backend, std::string provider,
+                                     std::unique_ptr<InventoryObserver> observer)
+    : impl_(std::make_unique<Impl>(std::move(backend), false)) {
+  impl_->provider = std::move(provider); impl_->observer = std::move(observer);
+}
 SharedAudioService::~SharedAudioService() { shutdown(); }
 AudioHostResult SharedAudioService::applyBufferPreferences(const BufferPreferences& preferences,
     const BufferChangeHooks& hooks) {
@@ -654,6 +711,7 @@ AudioHostResult SharedAudioService::applyBufferPreferences(const BufferPreferenc
     auto result = output ? self.backend->open(config, Impl::render, &self)
                          : AudioHostResult{true, AudioHostError::None, before.state, before.format, before.latency, {}};
     if (!result.ok) return result;
+    if (output) self.rememberOpenedBufferLocked(config, result);
     if (output && (result.format.sampleRate != before.format.sampleRate ||
         result.format.outputChannels != before.format.outputChannels ||
         result.format.maximumFrames > before.format.maximumFrames))

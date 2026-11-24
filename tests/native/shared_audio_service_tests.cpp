@@ -3,6 +3,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <chrono>
+#include <mutex>
+#include <thread>
 
 #define CHECK(value) do { if (!(value)) { std::fprintf(stderr, "failed line %d: %s\n", __LINE__, #value); std::abort(); } } while (false)
 using namespace singz;
@@ -96,7 +99,134 @@ bool cue(void*, const AudioHostRenderBlock& block) noexcept {
     for (unsigned frame = 0; frame < block.frames; ++frame) block.output[ch][frame] += 0.5F;
   return true;
 }
+
+// HAL delivers buffer notifications asynchronously, often after initialize()
+// has returned and several cue activations have already reused the host.
+struct ObservedDevice {
+  std::atomic<uint32_t> frames{512};
+  std::atomic<double> sampleRate{48000};
+  std::atomic<bool> present{true}, readable{true};
+  std::atomic<unsigned> opens{0}, bufferReads{0};
+};
+class TestObserver final : public SharedAudioService::InventoryObserver {
+ public:
+  explicit TestObserver(ObservedDevice& device) : device(device) {}
+  void watch(const AudioHostInventory&, std::shared_ptr<std::atomic<bool>> inventory,
+             std::shared_ptr<std::atomic<bool>> buffer) override {
+    std::lock_guard lock(mutex);
+    inventorySignal = std::move(inventory); bufferSignal = std::move(buffer);
+  }
+  std::optional<uint32_t> bufferFrames(const std::string& uid) const override {
+    device.bufferReads.fetch_add(1);
+    if (!device.readable.load()) return std::nullopt;
+    return uid == "selected" ? device.frames.load() : 512;
+  }
+  void changed(bool bufferOnly) {
+    std::lock_guard lock(mutex);
+    (bufferOnly ? bufferSignal : inventorySignal)->store(true, std::memory_order_release);
+  }
+ private:
+  ObservedDevice& device;
+  std::mutex mutex;
+  std::shared_ptr<std::atomic<bool>> inventorySignal, bufferSignal;
+};
+class ObservedBackend final : public AudioHostBackend {
+ public:
+  ObservedBackend(ObservedDevice& device, TestObserver& observer) : device(device), observer(observer) {}
+  AudioHostInventory enumerate() const override {
+    AudioHostDeviceInfo selected;
+    selected.uid = "selected"; selected.outputChannels = 2;
+    selected.nominalSampleRate = device.sampleRate.load();
+    selected.bufferFrames = {16, 4096, device.frames.load(), 1};
+    auto alternate = selected; alternate.uid = "alternate";
+    alternate.bufferFrames.preferredFrames = 512;
+    AudioHostInventory inventory;
+    inventory.devices.push_back(alternate);
+    if (device.present.load()) inventory.devices.push_back(selected);
+    inventory.defaultOutputUid = device.present.load() ? selected.uid : alternate.uid;
+    return inventory;
+  }
+  AudioHostResult open(const AudioHostConfig& config, AudioHostRender, void*) override {
+    device.opens.fetch_add(1);
+    uint32_t frames = 512;
+    if (config.outputDeviceUid == "selected") {
+      frames = config.requestedBufferFrames;
+      if (device.frames.exchange(frames) != frames) observer.changed(true);
+    }
+    current.state = AudioHostState::Open;
+    current.format = {config.requestedSampleRate, config.maximumFrames, frames, 0, 2};
+    return {true, AudioHostError::None, current.state, current.format, {}, {}};
+  }
+  AudioHostResult start() override {
+    current.state = AudioHostState::Running;
+    return {true, AudioHostError::None, current.state, current.format, {}, {}};
+  }
+  void stop() noexcept override { current.state = AudioHostState::Stopped; }
+  AudioHostStatus status() const noexcept override { return current; }
+ private:
+  ObservedDevice& device;
+  TestObserver& observer;
+  AudioHostStatus current;
+};
+template<class Predicate> void awaitObservation(Predicate predicate) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (!predicate() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  CHECK(predicate());
+}
+void inventoryNotificationRegression() {
+  ObservedDevice device;
+  auto observer = std::make_unique<TestObserver>(device); auto* listener = observer.get();
+  auto backend = std::make_unique<ObservedBackend>(device, *listener);
+  SharedAudioService service(std::move(backend), "coreaudio", std::move(observer));
+  CHECK(service.initialize().ok);
+  service.setTrainingRenderer(cue, nullptr);
+  CHECK(device.frames.load() == 128);
+  CHECK(service.inventory().devices.back().bufferFrames.preferredFrames == 128);
+  const auto before = service.enumerationCount();
+  const auto revision = service.inventoryRevision();
+  for (unsigned activation = 0; activation < 40; ++activation) {
+    CHECK(service.ensureOutput().ok);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    if (service.enumerationCount() != before)
+      std::fprintf(stderr, "activation %u: inventory %llu -> %llu, opens %u\n", activation,
+          static_cast<unsigned long long>(before),
+          static_cast<unsigned long long>(service.enumerationCount()), device.opens.load());
+    CHECK(service.enumerationCount() == before);
+  }
+  CHECK(device.bufferReads.load() > 0); // The actual watcher consumed the fake HAL event.
+  CHECK(device.opens.load() == 1); // No reopen or ledger request on activation.
+  CHECK(service.inventoryRevision() == revision);
+
+  const auto readsBeforeApply = device.bufferReads.load();
+  CHECK(service.applyBufferPreferences({{"selected", 64}}).ok);
+  CHECK(service.inventory().devices.back().bufferFrames.preferredFrames == 64);
+  CHECK(device.opens.load() == 2);
+  awaitObservation([&] { return device.bufferReads.load() > readsBeforeApply; });
+  // Join the poller's control lock after it has read the property.
+  CHECK(service.inventory().devices.back().bufferFrames.preferredFrames == 64);
+  CHECK(service.enumerationCount() == before);
+
+  device.frames.store(256); listener->changed(true);
+  awaitObservation([&] { return service.enumerationCount() == before + 1; });
+  CHECK(service.inventory().devices.back().bufferFrames.preferredFrames == 256);
+  CHECK(device.opens.load() == 2); // External period updates do not force a reopen.
+  device.sampleRate.store(44100); listener->changed(false);
+  awaitObservation([&] { return service.enumerationCount() == before + 2; });
+  CHECK(service.inventory().devices.back().nominalSampleRate == 44100);
+  CHECK(service.status().format.sampleRate == 44100);
+  // A coalesced self buffer event cannot hide a device/default change.
+  device.present.store(false); listener->changed(true); listener->changed(false);
+  awaitObservation([&] { return service.enumerationCount() == before + 3; });
+  CHECK(service.activeOutputUid() == "alternate");
+  CHECK(service.inventory().devices.size() == 1);
+  // Failed property reads are conservative, rather than suppressing a change.
+  device.readable.store(false); listener->changed(true);
+  awaitObservation([&] { return service.enumerationCount() == before + 4; });
+  service.shutdown();
+}
 int main() {
+  inventoryNotificationRegression();
   {
     auto owned = std::make_unique<TestBackend>(); auto* backend = owned.get();
     backend->useLedger = true;
